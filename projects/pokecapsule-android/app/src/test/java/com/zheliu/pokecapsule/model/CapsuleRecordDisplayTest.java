@@ -51,7 +51,7 @@ public final class CapsuleRecordDisplayTest {
                 "Inbox",
                 "",
                 "");
-        assertTrue(record.displayLine().contains("等待插电和 Wi‑Fi 转写"));
+        assertTrue(record.displayLine().contains("等待 Wi‑Fi 和足够电量转写"));
     }
 
     @Test public void rejectsOldHallucinatedCorrectionAndShortTranscript() {

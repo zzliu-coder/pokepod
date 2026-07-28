@@ -580,7 +580,7 @@ public final class MainActivity extends Activity {
                             break;
                         default:
                             toast(cloudConfigured
-                                    ? "腾讯转写已配置；插电并连接 Wi‑Fi 后自动处理"
+                                    ? "腾讯转写已配置；Wi‑Fi 且电量不低于 15% 时自动处理"
                                     : "尚未配置腾讯语音识别");
                     }
                 })

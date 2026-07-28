@@ -149,7 +149,7 @@ public struct CapsuleRecord: Identifiable, Hashable {
         }
         switch processing?.status {
         case .recording: return "正在录音…"
-        case .recorded, .queued: return "等待插电和 Wi‑Fi 转写"
+        case .recorded, .queued: return "等待 Wi‑Fi 和 15% 以上电量转写"
         case .transcribing: return "正在转写…"
         case .failed: return "转写失败，可稍后重试"
         default: return displayTitle

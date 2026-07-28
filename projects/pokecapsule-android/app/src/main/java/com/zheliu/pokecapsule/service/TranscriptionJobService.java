@@ -2,6 +2,7 @@ package com.zheliu.pokecapsule.service;
 
 import android.app.job.JobParameters;
 import android.app.job.JobService;
+import android.os.BatteryManager;
 import com.zheliu.pokecapsule.core.ProcessingState;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.storage.AtomicFiles;
@@ -47,6 +48,11 @@ public final class TranscriptionJobService extends JobService {
             PokePaths paths = new PokePaths();
             CapsuleStore store = new CapsuleStore(paths);
             paths.ensureBase();
+            boolean manual = parameters.getExtras().getBoolean("manual", false);
+            if (!manual && !BatteryPolicy.allowsAutomatic(batteryPercent())) {
+                reschedule = true;
+                return;
+            }
             if (!TencentAsrConfig.isConfigured(this)) {
                 reschedule = true;
                 return;
@@ -114,6 +120,13 @@ public final class TranscriptionJobService extends JobService {
             if (record.status == ProcessingState.QUEUED) return record;
         }
         return null;
+    }
+
+    private int batteryPercent() {
+        BatteryManager manager = (BatteryManager) getSystemService(BATTERY_SERVICE);
+        return manager == null
+                ? -1
+                : manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
     }
 
     private static String safeMessage(Throwable error) {
