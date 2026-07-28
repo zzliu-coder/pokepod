@@ -326,15 +326,15 @@ struct CapsuleDetailView: View {
                             ForEach(record.warnings, id: \.self) { Text($0) }
                         }
                     }
+                    GroupBox("原始转写") {
+                        Text(record.rawText ?? "尚未生成").textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     GroupBox("校对文字") {
                         Text(record.polishedText ?? "尚未生成").textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     FinalTextEditor(record: record)
-                    GroupBox("原始转写") {
-                        Text(record.rawText ?? "尚未生成").textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
                 }
                 .padding()
             }

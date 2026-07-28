@@ -86,19 +86,20 @@ public final class CapsuleDetailActivity extends Activity {
         third.addView(ViewKit.button(this, "复制最终文字", v -> copyFinalText()), weight());
         page.addView(third, lp(-1, dp(52)));
 
-        page.addView(ViewKit.text(this, "最终文字", 20, Typeface.BOLD), lp(-1, dp(44)));
-        finalText = ViewKit.text(this, "尚未编辑", 17, Typeface.NORMAL);
-        finalText.setTextIsSelectable(true);
-        page.addView(finalText);
-
         page.addView(ViewKit.text(this, "原始转写", 20, Typeface.BOLD), lp(-1, dp(44)));
         raw = ViewKit.text(this, "尚未生成", 17, Typeface.NORMAL);
         raw.setTextIsSelectable(true);
         page.addView(raw);
+
         page.addView(ViewKit.text(this, "校对文字", 20, Typeface.BOLD), lp(-1, dp(44)));
         polished = ViewKit.text(this, "尚未生成", 17, Typeface.NORMAL);
         polished.setTextIsSelectable(true);
         page.addView(polished);
+
+        page.addView(ViewKit.text(this, "最终文字", 20, Typeface.BOLD), lp(-1, dp(44)));
+        finalText = ViewKit.text(this, "尚未编辑", 17, Typeface.NORMAL);
+        finalText.setTextIsSelectable(true);
+        page.addView(finalText);
         return scroll;
     }
 
