@@ -1,0 +1,660 @@
+{
+  "project": "PokeCapsule 一二阶段完整管理与可靠同步",
+  "date": "2026-07-28",
+  "status": "可以开始实现",
+  "system_type": [
+    "本地优先语音胶囊管理",
+    "双端设备同步"
+  ],
+  "positioning": {
+    "main_purpose": "让使用者在 Poke3 上低功耗录音，在 Poke3 与 Mac 上安全整理、检索、编辑、恢复和复制胶囊。",
+    "main_relationship": "Poke3 保存胶囊事实数据，Mac 保存镜像、离线操作队列和备份，并在重新连接后按版本安全回写。",
+    "system_direction": "录音事实保全为主，双端整理和检索为辅。",
+    "core_flow": [
+      "在 Poke3 上录音并生成 Inbox 胶囊",
+      "插电且连接 Wi-Fi 时按配置异步转写",
+      "在 Poke3 或 Mac 上搜索、查看、编辑最终文字、移动、加标签和收藏",
+      "Mac 未连接设备时记录操作，重新连接后自动校验版本并同步",
+      "删除进入回收站，支持恢复或明确永久删除",
+      "同步成功后在 Mac 留存可恢复备份"
+    ],
+    "v1_boundary": "本轮实现单用户、单台 Poke3、ADB 有线连接、本地文件协议、30 天回收站、离线队列、冲突提示、自动备份、全文搜索、最终文字编辑、批量复制和智能视图。",
+    "protection_focus": [
+      "audio.m4a 原始录音不可被编辑操作覆盖",
+      "raw.txt 和 polished.md 保持来源分层，用户编辑只写 final.md",
+      "离线队列遇到版本变化时暂停冲突项，不能静默覆盖",
+      "删除可恢复，永久删除必须再次确认",
+      "同步失败时保留旧镜像、待处理队列和最近备份"
+    ]
+  },
+  "problem": "现有系统只能在线操作，删除后没有可见恢复入口，Mac 离线修改无法回写，文本缺少用户最终编辑层，也缺少搜索、智能筛选、批量复制和自动备份。",
+  "success_criteria": [
+    {
+      "text": "Poke3 和 Mac 都能查看回收站、恢复胶囊和确认后永久删除",
+      "done": false
+    },
+    {
+      "text": "Mac 离线执行移动、标签、收藏、编辑和删除后会形成持久队列，重连后安全同步",
+      "done": false
+    },
+    {
+      "text": "设备端数据版本与离线操作预期版本不一致时，冲突项暂停并显示原因",
+      "done": false
+    },
+    {
+      "text": "每次成功同步后 Mac 自动创建有保留策略的本地备份",
+      "done": false
+    },
+    {
+      "text": "Poke3 和 Mac 都能按转写文字、最终文字、标签和目录搜索",
+      "done": false
+    },
+    {
+      "text": "用户可以编辑 final.md，原始转写与校对文本保持不变",
+      "done": false
+    },
+    {
+      "text": "Poke3 和 Mac 都能查看待转写、失败、最近删除等智能视图",
+      "done": false
+    },
+    {
+      "text": "Mac 可以批量复制纯文本或 Markdown，Poke3 可以批量复制可导出的胶囊内容",
+      "done": false
+    }
+  ],
+  "delivery_contract": {
+    "target_level": "real_smoke",
+    "truth_requirements": [
+      {
+        "capability": "回收站与恢复",
+        "required_evidence": "真实 Poke3 上删除一条胶囊、双端看到回收站、恢复后回到原目录；原目录缺失时进入 Inbox",
+        "accepted_simulation": "单元测试可以使用临时文件树",
+        "claim_limit": "unverified"
+      },
+      {
+        "capability": "Mac 离线队列",
+        "required_evidence": "断开 ADB 后在 Mac 执行至少两项操作，重连后真实 Poke3 数据按顺序更新且队列清空",
+        "accepted_simulation": "单元测试可以使用假传输层",
+        "claim_limit": "unverified"
+      },
+      {
+        "capability": "版本冲突保护",
+        "required_evidence": "离线期间修改设备端同一胶囊，重连后队列停止该项并显示冲突，设备内容未被覆盖",
+        "accepted_simulation": "文件级集成测试可构造不同 revision",
+        "claim_limit": "unverified"
+      },
+      {
+        "capability": "全文搜索与最终文字编辑",
+        "required_evidence": "在两端搜索同一关键词命中胶囊，编辑 final.md 后两端显示最终文字，同时 raw.txt 与 polished.md 校验未变",
+        "accepted_simulation": "UI 预览可使用示例数据",
+        "claim_limit": "unverified"
+      },
+      {
+        "capability": "自动备份与恢复材料",
+        "required_evidence": "完成真实同步后生成带清单的时间戳备份，备份含音频、元数据与文本层",
+        "accepted_simulation": "临时目录测试可以验证保留策略",
+        "claim_limit": "unverified"
+      }
+    ],
+    "deferred_truths": [
+      "无线同步、云同步和多设备合并不在本轮验证范围",
+      "Poke3 本地大模型转写不在本轮实现范围",
+      "跨用户权限和加密数据库不在本轮实现范围"
+    ],
+    "scope_update_triggers": [
+      "需要同时连接第二台 Poke3",
+      "需要在局域网或互联网同步",
+      "需要多用户账户或共享胶囊",
+      "胶囊数量超过一万且搜索性能不足",
+      "需要从备份一键整库恢复"
+    ]
+  },
+  "out_of_scope": [
+    "刷写 Poke3 系统或替换文石底层",
+    "云账号、多用户权限和团队协作",
+    "无线同步和公网服务",
+    "Poke3 本地 Whisper 常驻转写",
+    "语义搜索、RAG 和对话式知识库",
+    "SQLite 数据迁移",
+    "自动永久清空回收站"
+  ],
+  "user_roles": [
+    {
+      "role": "设备使用者",
+      "permissions": "录音、查看、搜索、编辑最终文字、移动、标签、收藏、删除、恢复、批量复制和配置转写",
+      "notes": "当前为单用户本地设备，无登录"
+    }
+  ],
+  "core_entities": [
+    {
+      "name": "胶囊",
+      "desc": "一段原始录音及其元数据和多层文字",
+      "attrs": [
+        "id",
+        "revision",
+        "createdAt",
+        "durationSeconds",
+        "folder",
+        "tags",
+        "favorite",
+        "processingStatus",
+        "audio.m4a",
+        "raw.txt",
+        "polished.md",
+        "final.md"
+      ]
+    },
+    {
+      "name": "回收站记录",
+      "desc": "删除胶囊的可恢复元数据",
+      "attrs": [
+        "capsuleId",
+        "trashedAt",
+        "originalFolder",
+        "trashDirectory",
+        "revision"
+      ]
+    },
+    {
+      "name": "待同步操作",
+      "desc": "Mac 离线期间记录的可重放命令",
+      "attrs": [
+        "commandId",
+        "operation",
+        "capsuleIds",
+        "payload",
+        "expectedRevisions",
+        "createdAt",
+        "state",
+        "error"
+      ]
+    },
+    {
+      "name": "同步冲突",
+      "desc": "待同步操作预期版本与设备现状不一致的可处理记录",
+      "attrs": [
+        "commandId",
+        "capsuleId",
+        "expectedRevision",
+        "actualRevision",
+        "reason"
+      ]
+    },
+    {
+      "name": "备份快照",
+      "desc": "Mac 在成功同步后保存的可核验文件快照",
+      "attrs": [
+        "createdAt",
+        "deviceSerial",
+        "manifest",
+        "capsuleCount",
+        "sourceRevisionDigest"
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "from": "胶囊",
+      "to": "回收站记录",
+      "type": "零或一",
+      "desc": "胶囊被软删除后对应一条回收站记录"
+    },
+    {
+      "from": "待同步操作",
+      "to": "胶囊",
+      "type": "多对多",
+      "desc": "一个批量操作可以影响多条胶囊，同一胶囊也可以按顺序累计多个离线操作"
+    },
+    {
+      "from": "待同步操作",
+      "to": "同步冲突",
+      "type": "一对多",
+      "desc": "一个批量离线操作可能因多条胶囊版本变化产生冲突"
+    },
+    {
+      "from": "备份快照",
+      "to": "胶囊",
+      "type": "一对多",
+      "desc": "每个备份快照保存一次同步后可见的全部胶囊文件"
+    }
+  ],
+  "state_actions": [
+    {
+      "entity": "胶囊",
+      "states": [
+        "raw_ready",
+        "transcribing",
+        "ready",
+        "failed",
+        "trashed"
+      ],
+      "actions": [
+        "录音",
+        "转写",
+        "编辑最终文字",
+        "移动",
+        "加标签",
+        "收藏",
+        "删除",
+        "恢复",
+        "永久删除"
+      ],
+      "rules": "原始录音不可覆盖；编辑最终文字增加 revision；删除写 trash.json；恢复优先原目录，原目录不存在时进入 Inbox。"
+    },
+    {
+      "entity": "待同步操作",
+      "states": [
+        "queued",
+        "applying",
+        "conflict",
+        "failed",
+        "completed"
+      ],
+      "actions": [
+        "入队",
+        "版本校验",
+        "应用",
+        "重试",
+        "丢弃冲突项"
+      ],
+      "rules": "队列持久化并按创建顺序执行；任一胶囊 revision 不符时该命令进入 conflict，不覆盖设备。"
+    }
+  ],
+  "audit_events": [
+    {
+      "event": "离线操作入队",
+      "actor": "Mac 使用者",
+      "when": "设备未连接且执行可离线操作时",
+      "record": "记录命令、目标胶囊、预期 revision、时间和 payload"
+    },
+    {
+      "event": "同步冲突",
+      "actor": "同步协调器",
+      "when": "设备 revision 与预期不一致时",
+      "record": "记录命令、胶囊、预期与实际 revision 和原因"
+    },
+    {
+      "event": "删除与恢复",
+      "actor": "设备使用者",
+      "when": "胶囊进入或离开回收站时",
+      "record": "记录原目录、删除时间、恢复目录和 revision"
+    },
+    {
+      "event": "创建备份",
+      "actor": "Mac 同步协调器",
+      "when": "一次设备同步完整成功后",
+      "record": "记录设备序列号、时间、胶囊数和清单摘要"
+    }
+  ],
+  "derived_data": [
+    {
+      "name": "展示文字",
+      "source": "按 final.md、polished.md、raw.txt、录音标题的优先级选择",
+      "persistence": "实时计算，不单独保存"
+    },
+    {
+      "name": "全文搜索结果",
+      "source": "最终文字、校对文字、原始转写、标签、目录和时间",
+      "persistence": "内存索引，启动或同步后重建"
+    },
+    {
+      "name": "智能视图",
+      "source": "processingStatus、trashedAt、favorite、createdAt",
+      "persistence": "实时筛选，不单独保存"
+    },
+    {
+      "name": "同步摘要",
+      "source": "待同步操作、冲突和最近同步时间",
+      "persistence": "Mac 本地状态持久化"
+    }
+  ],
+  "modules": [
+    {
+      "name": "共享文件协议 v2",
+      "type": "infrastructure",
+      "status": "must",
+      "responsibility": "定义 final.md、trash.json、批量 expectedRevisions、恢复、永久删除和编辑最终文字命令",
+      "location": "projects/pokecapsule-protocol",
+      "must_not": "不改变 audio.m4a、raw.txt、polished.md 的既有语义",
+      "why_priority": "双端实现必须先共享同一事实结构",
+      "when_advice": "第一施工包"
+    },
+    {
+      "name": "Android 胶囊与回收站核心",
+      "type": "infrastructure",
+      "status": "must",
+      "responsibility": "拆分存储职责，实现软删除、恢复、永久删除、最终文字和搜索索引",
+      "location": "projects/pokecapsule-android/app/src/main/java/com/pokecapsule",
+      "must_not": "不删除或重写原始录音和原始转写",
+      "why_priority": "Poke3 是事实源",
+      "when_advice": "共享协议之后"
+    },
+    {
+      "name": "Mac 离线队列与同步协调器",
+      "type": "infrastructure",
+      "status": "must",
+      "responsibility": "加载最近镜像、持久化离线命令、校验 revision、回放队列、显示冲突并维护同步状态",
+      "location": "projects/pokecapsule-mac/Sources/PokeCapsuleCore",
+      "must_not": "不在冲突时自动覆盖设备版本",
+      "why_priority": "解决断连后不可操作和重新连接数据安全",
+      "when_advice": "共享协议之后"
+    },
+    {
+      "name": "Mac 自动备份",
+      "type": "infrastructure",
+      "status": "must",
+      "responsibility": "成功同步后创建清单化快照并按数量和时间清理旧备份",
+      "location": "projects/pokecapsule-mac/Sources/PokeCapsuleCore",
+      "must_not": "不把不完整同步结果标记为有效备份",
+      "why_priority": "为误删、协议错误和设备故障提供恢复材料",
+      "when_advice": "同步协调器可稳定产出镜像后"
+    },
+    {
+      "name": "Poke3 管理界面",
+      "type": "optional",
+      "status": "must",
+      "responsibility": "提供搜索、智能视图、回收站、恢复、最终文字编辑和批量复制入口",
+      "location": "projects/pokecapsule-android/app/src/main/java/com/pokecapsule/MainActivity.java",
+      "must_not": "不加入高频动画或持续后台刷新",
+      "why_priority": "用户需要在设备上独立完成基础管理",
+      "when_advice": "Android 核心完成后"
+    },
+    {
+      "name": "Mac 管理界面",
+      "type": "optional",
+      "status": "must",
+      "responsibility": "提供同步状态、队列、冲突、搜索、智能视图、回收站、批量操作、最终文字编辑和复制格式",
+      "location": "projects/pokecapsule-mac/Sources/PokeCapsuleApp",
+      "must_not": "不把传输和文件操作逻辑写进 SwiftUI 视图",
+      "why_priority": "Mac 是主要整理端",
+      "when_advice": "Mac 核心完成后"
+    }
+  ],
+  "testing_strategy": {
+    "principles": [
+      "原始音频和原始转写不可变要有回归测试",
+      "每个有 revision 的写操作都覆盖成功与冲突路径",
+      "文件操作使用临时目录做真实读写测试",
+      "双端完成后必须用真实 Poke3 和 ADB 做端到端验收"
+    ],
+    "module_tests": [
+      {
+        "module": "共享协议 v2",
+        "behavior": "新旧胶囊都可解析，新命令缺少预期版本时被拒绝",
+        "prior_art": "扩展现有 JSON schema 校验测试"
+      },
+      {
+        "module": "Android 回收站核心",
+        "behavior": "删除生成 trash.json，恢复回原目录，永久删除只作用于回收站目录",
+        "prior_art": "新增临时文件树单元测试"
+      },
+      {
+        "module": "Mac 离线队列",
+        "behavior": "应用重启后队列仍存在，按序回放，冲突项保持可见",
+        "prior_art": "新增持久化和假传输层测试"
+      },
+      {
+        "module": "Mac 自动备份",
+        "behavior": "成功同步创建完整清单，失败同步不创建备份，保留策略可预测",
+        "prior_art": "新增临时目录测试"
+      },
+      {
+        "module": "搜索与展示文字",
+        "behavior": "final 优先级最高，中文关键词可命中多层文字、标签和目录",
+        "prior_art": "扩展现有扫描器测试"
+      }
+    ],
+    "integration_tests": [
+      "Mac 镜像扫描、离线操作入队、模拟重连、命令执行和镜像刷新形成闭环",
+      "胶囊删除后扫描到回收站，恢复后重新出现在原目录",
+      "编辑 final.md 后展示文字更新，raw.txt 与 polished.md 内容和校验值不变",
+      "批量复制按当前筛选顺序输出纯文本和 Markdown"
+    ],
+    "e2e_tests": [
+      "真实 Poke3：录制或选择胶囊，在 Mac 断连时移动和加标签，重连后两端一致",
+      "真实 Poke3：删除胶囊，在两端查看回收站并恢复",
+      "真实 Poke3：编辑最终文字，搜索关键词命中，验证原始文本和录音仍可播放",
+      "真实 Poke3：制造 revision 冲突，确认设备数据未被静默覆盖"
+    ],
+    "out_of_scope": [
+      "多设备并发合并测试",
+      "公网断网重试测试",
+      "超过一万条胶囊的性能压力测试"
+    ]
+  },
+  "data_flow": [
+    {
+      "label": "Poke3 录音与文件树",
+      "role": "producer",
+      "description": "产生 audio.m4a、capsule.json、processing.json 和各层文字"
+    },
+    {
+      "label": "Android 存储与命令处理",
+      "role": "process",
+      "description": "校验 revision 后执行编辑、移动、标签、收藏、删除、恢复和永久删除"
+    },
+    {
+      "label": "Mac 镜像与扫描器",
+      "role": "process",
+      "description": "拉取设备文件树并生成双端管理模型"
+    },
+    {
+      "label": "Mac 离线队列与同步协调器",
+      "role": "process",
+      "description": "记录离线操作，重连后校验并按序回放，产出冲突和同步状态"
+    },
+    {
+      "label": "Poke3 与 Mac 管理界面",
+      "role": "consumer",
+      "description": "展示搜索、智能视图、回收站、详情、批量操作和同步反馈"
+    },
+    {
+      "label": "Mac 备份快照",
+      "role": "consumer",
+      "description": "保存每次成功同步后的完整恢复材料和清单"
+    }
+  ],
+  "decisions": [
+    {
+      "tag": "ARCHITECTURE",
+      "title": "继续使用本地文件事实源",
+      "chosen": "Poke3 文件树继续作为事实源，Mac 保持镜像、队列和备份",
+      "alternatives": "迁移到 SQLite 或让 Mac 成为主库",
+      "rationale": "现有录音与转写流程已经围绕文件工作，文件可直接备份、播放和恢复，当前规模无需数据库迁移成本",
+      "constraints": "写操作必须通过 revision 检查，Mac 镜像不能直接宣称为设备事实",
+      "reversibility": "MEDIUM",
+      "reversible_label": "中"
+    },
+    {
+      "tag": "DATA",
+      "title": "增加 final.md 作为用户最终文字",
+      "chosen": "展示优先级为 final.md、polished.md、raw.txt、默认标题",
+      "alternatives": "直接覆盖 polished.md",
+      "rationale": "用户编辑和模型校对来源不同，分层后可以追溯并防止误覆盖",
+      "constraints": "编辑 final.md 不得修改 raw.txt 和 polished.md",
+      "reversibility": "HIGH",
+      "reversible_label": "高"
+    },
+    {
+      "tag": "SYNC",
+      "title": "离线操作以命令队列回放",
+      "chosen": "Mac 持久化命令和 expectedRevisions，重连后按序应用",
+      "alternatives": "直接比较并覆盖整份镜像",
+      "rationale": "命令粒度更容易审计和发现冲突，也能沿用现有设备命令入口",
+      "constraints": "冲突项暂停，后续依赖同一胶囊的命令不能越过执行",
+      "reversibility": "MEDIUM",
+      "reversible_label": "中"
+    },
+    {
+      "tag": "RETENTION",
+      "title": "回收站默认保留 30 天且不自动永久删除",
+      "chosen": "显示 30 天保留提示，永久删除必须由用户确认",
+      "alternatives": "删除即永久删除或后台自动清空",
+      "rationale": "语音胶囊难以重建，设备容量压力目前低于误删风险",
+      "constraints": "回收站内容仍计入设备空间，界面要显示数量和空间提示",
+      "reversibility": "HIGH",
+      "reversible_label": "高"
+    },
+    {
+      "tag": "SEARCH",
+      "title": "首版采用内存全文索引",
+      "chosen": "启动和同步后从文件扫描结果重建小型索引",
+      "alternatives": "SQLite FTS 或嵌入式搜索引擎",
+      "rationale": "当前数据量小，减少常驻写入、迁移和 Poke3 耗电",
+      "constraints": "数量超过一万或搜索明显变慢时重新评估",
+      "reversibility": "HIGH",
+      "reversible_label": "高"
+    },
+    {
+      "tag": "BACKUP",
+      "title": "同步成功后自动创建 Mac 备份",
+      "chosen": "备份真实镜像并生成 manifest，默认保留最近 10 份和 30 天内快照",
+      "alternatives": "只保留最新镜像",
+      "rationale": "镜像会随同步覆盖，独立快照才能应对延迟发现的误删和协议错误",
+      "constraints": "备份失败要提示，但不能破坏当前镜像和设备数据",
+      "reversibility": "HIGH",
+      "reversible_label": "高"
+    }
+  ],
+  "worktrees": [
+    {
+      "id": "WT1",
+      "name": "共享协议 v2",
+      "branch": "feature/pokecapsule-protocol-v2",
+      "size": "M",
+      "depends_on": "无",
+      "parallel_with": "无",
+      "scope": "扩展 schema、协议说明和兼容解析规则",
+      "deliverables": [
+        "final.md 语义",
+        "trash.json schema",
+        "新设备命令",
+        "expectedRevisions"
+      ],
+      "may_modify": "projects/pokecapsule-protocol",
+      "must_not": "不改变既有文件的含义",
+      "notes": "旧胶囊没有 final.md 和 trash.json 时仍可读取",
+      "acceptance_tests": [
+        "schema 可校验新命令",
+        "旧胶囊兼容测试通过"
+      ]
+    },
+    {
+      "id": "WT2",
+      "name": "Android 核心重构与功能",
+      "branch": "feature/pokecapsule-android-core",
+      "size": "L",
+      "depends_on": "WT1",
+      "parallel_with": "WT3",
+      "scope": "拆分存储职责，实现回收站、最终文字、搜索和新命令",
+      "deliverables": [
+        "TrashStore",
+        "SearchIndex",
+        "final.md 读写",
+        "restore 和 purge 命令"
+      ],
+      "may_modify": "projects/pokecapsule-android/app/src/main",
+      "must_not": "不修改文石系统组件，不覆盖原始录音",
+      "notes": "保持 Android 8/target 28 兼容和低功耗",
+      "acceptance_tests": [
+        "文件级测试通过",
+        "APK 可安装",
+        "真实设备命令 smoke test 通过"
+      ]
+    },
+    {
+      "id": "WT3",
+      "name": "Mac 同步核心与备份",
+      "branch": "feature/pokecapsule-mac-sync",
+      "size": "L",
+      "depends_on": "WT1",
+      "parallel_with": "WT2",
+      "scope": "实现最近镜像加载、持久队列、冲突、同步状态和备份",
+      "deliverables": [
+        "OfflineQueue",
+        "SyncCoordinator",
+        "BackupManager",
+        "冲突模型"
+      ],
+      "may_modify": "projects/pokecapsule-mac/Sources/PokeCapsuleCore, projects/pokecapsule-mac/Tests",
+      "must_not": "不在冲突时覆盖设备",
+      "notes": "先用现有 ADBTransport，保持可注入测试",
+      "acceptance_tests": [
+        "离线重启队列仍存在",
+        "按序回放",
+        "冲突暂停",
+        "备份清单有效"
+      ]
+    },
+    {
+      "id": "WT4",
+      "name": "双端管理界面",
+      "branch": "feature/pokecapsule-management-ui",
+      "size": "L",
+      "depends_on": "WT2, WT3",
+      "parallel_with": "无",
+      "scope": "实现搜索、智能视图、回收站、编辑、批量复制、队列和冲突界面",
+      "deliverables": [
+        "Poke3 管理界面",
+        "Mac 管理界面",
+        "同步状态入口",
+        "回收站入口"
+      ],
+      "may_modify": "projects/pokecapsule-android/app/src/main, projects/pokecapsule-mac/Sources/PokeCapsuleApp",
+      "must_not": "不引入持续动画和高频刷新，不把核心逻辑塞进视图",
+      "notes": "Poke3 保持一屏可读、点击区域大、刷新克制",
+      "acceptance_tests": [
+        "双端主要流程可操作",
+        "Mac 批量选择有效",
+        "Poke3 列表仍保持紧凑"
+      ]
+    },
+    {
+      "id": "WT5",
+      "name": "真实设备联调",
+      "branch": "feature/pokecapsule-phase12-integration",
+      "size": "M",
+      "depends_on": "WT4",
+      "parallel_with": "无",
+      "scope": "构建双端并在真实 Poke3 上验证完整闭环",
+      "deliverables": [
+        "安装 APK",
+        "Mac App 构建",
+        "端到端验收记录",
+        "回滚材料"
+      ],
+      "may_modify": "测试脚本、README、构建产物",
+      "must_not": "不永久删除用户现有胶囊，不执行系统刷写",
+      "notes": "使用测试胶囊完成删除恢复和冲突验证",
+      "acceptance_tests": [
+        "全部 real smoke 场景完成",
+        "原始录音可播放",
+        "旧胶囊仍可读取"
+      ]
+    }
+  ],
+  "triggers": [
+    "需要支持第二台设备",
+    "需要无线或云同步",
+    "需要多人访问或权限隔离",
+    "胶囊数据量超过一万",
+    "需要全库一键恢复",
+    "转写服务的数据格式发生不兼容变化",
+    "需要对原始音频做编辑或降噪"
+  ],
+  "anti_patterns": [
+    "Mac 断连时直接修改镜像并假设它会自动成为设备事实",
+    "用更新时间覆盖 revision 冲突判断",
+    "用户编辑时覆盖 raw.txt 或 polished.md",
+    "删除时只移动目录却不记录原目录和删除时间",
+    "把 ADB、文件操作和冲突判断写进 SwiftUI 视图",
+    "把回收站、搜索和命令处理继续塞进单个巨大类",
+    "为了未来规模提前引入数据库、服务端和账号系统",
+    "用模拟测试代替真实 Poke3 联调结论"
+  ],
+  "completeness": {
+    "done": 0,
+    "partial": 0,
+    "missing": 8
+  }
+}
