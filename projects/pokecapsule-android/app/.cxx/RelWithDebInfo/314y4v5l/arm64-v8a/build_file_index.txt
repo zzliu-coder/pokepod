@@ -1,6 +1,0 @@
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/src/main/cpp/CMakeLists.txt
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/CMakeLists.txt
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/ggml/CMakeLists.txt
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/ggml/src/CMakeLists.txt
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/src/CMakeLists.txt

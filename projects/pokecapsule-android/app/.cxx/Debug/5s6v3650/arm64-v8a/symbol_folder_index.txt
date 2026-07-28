@@ -1,1 +1,0 @@
-/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/build/intermediates/cxx/Debug/5s6v3650/obj/arm64-v8a
