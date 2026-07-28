@@ -1,0 +1,62 @@
+{
+  "buildFiles": [
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/src/main/cpp/CMakeLists.txt",
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/CMakeLists.txt",
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/ggml/CMakeLists.txt",
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/ggml/src/CMakeLists.txt",
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt",
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/vendor/whisper.cpp/src/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/opt/homebrew/share/android-commandlinetools/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/opt/homebrew/share/android-commandlinetools/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "pokecapsule_whisper::@6890427a1f51a3e7e1df": {
+      "artifactName": "pokecapsule_whisper",
+      "abi": "arm64-v8a",
+      "output": "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/build/intermediates/cxx/RelWithDebInfo/314y4v5l/obj/arm64-v8a/libpokecapsule_whisper.so",
+      "runtimeFiles": []
+    },
+    "ggml::@8dc812d35f23b3704781": {
+      "artifactName": "ggml",
+      "abi": "arm64-v8a",
+      "output": "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a/_deps/whispercpp-build/ggml/src/libggml.a",
+      "runtimeFiles": []
+    },
+    "whisper::@1c8dd6753170a826aa63": {
+      "artifactName": "whisper",
+      "abi": "arm64-v8a",
+      "output": "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a/_deps/whispercpp-build/src/libwhisper.a",
+      "runtimeFiles": []
+    },
+    "parakeet::@1c8dd6753170a826aa63": {
+      "artifactName": "parakeet",
+      "abi": "arm64-v8a",
+      "output": "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a/_deps/whispercpp-build/src/libparakeet.a",
+      "runtimeFiles": []
+    },
+    "ggml-cpu::@8dc812d35f23b3704781": {
+      "artifactName": "ggml-cpu",
+      "abi": "arm64-v8a",
+      "output": "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a/_deps/whispercpp-build/ggml/src/libggml-cpu.a",
+      "runtimeFiles": []
+    },
+    "ggml-base::@8dc812d35f23b3704781": {
+      "artifactName": "ggml-base",
+      "abi": "arm64-v8a",
+      "output": "/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/RelWithDebInfo/314y4v5l/arm64-v8a/_deps/whispercpp-build/ggml/src/libggml-base.a",
+      "runtimeFiles": []
+    }
+  }
+}

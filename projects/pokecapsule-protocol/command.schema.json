@@ -12,40 +12,120 @@
   "properties": {
     "schemaVersion": { "const": 1 },
     "transactionId": { "type": "string", "format": "uuid" },
+    "maintenanceId": { "type": "string", "format": "uuid" },
+    "createdAt": { "type": "string", "format": "date-time" },
     "operation": {
       "enum": [
+        "beginMaintenance",
+        "endMaintenance",
         "createFolder",
         "renameFolder",
-        "deleteFolder",
+        "deleteFolderToInbox",
         "moveCapsules",
         "copyCapsules",
         "deleteCapsules",
-        "updateTags",
-        "updateFavorite",
+        "setFavorite",
+        "addTags",
+        "removeTags",
+        "renameTag",
+        "mergeTag",
+        "deleteTag",
+        "commitImport",
+        "commitCorrection",
         "rescan"
       ]
     },
-    "sourceFolder": { "$ref": "#/$defs/folder" },
-    "destinationFolder": { "$ref": "#/$defs/folder" },
-    "newName": { "$ref": "#/$defs/name" },
     "capsuleIds": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 500,
       "uniqueItems": true,
       "items": { "type": "string", "format": "uuid" }
     },
-    "addTags": {
+    "destination": { "$ref": "#/$defs/folder" },
+    "folderPath": { "$ref": "#/$defs/userFolder" },
+    "newFolderPath": { "$ref": "#/$defs/userFolder" },
+    "tags": {
       "type": "array",
+      "minItems": 1,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/tag" }
     },
-    "removeTags": {
-      "type": "array",
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/tag" }
+    "favorite": { "type": "boolean" },
+    "stagedPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^\\.staging/[0-9a-fA-F-]{36}/[0-9a-fA-F-]{36}$"
     },
-    "favorite": { "type": "boolean" }
+    "expectedRevision": { "type": "integer", "minimum": 0 }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": { "not": { "const": "rescan" } }
+        }
+      },
+      "then": { "required": ["maintenanceId"] }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "createFolder" } } },
+      "then": { "required": ["folderPath"] }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "renameFolder" } } },
+      "then": { "required": ["folderPath", "newFolderPath"] }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "deleteFolderToInbox" } } },
+      "then": { "required": ["folderPath"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": { "enum": ["moveCapsules", "copyCapsules"] }
+        }
+      },
+      "then": { "required": ["capsuleIds", "destination"] }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "deleteCapsules" } } },
+      "then": { "required": ["capsuleIds"] }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "setFavorite" } } },
+      "then": { "required": ["capsuleIds", "favorite"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": { "enum": ["addTags", "removeTags"] }
+        }
+      },
+      "then": { "required": ["capsuleIds", "tags"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": { "enum": ["renameTag", "mergeTag", "deleteTag"] }
+        }
+      },
+      "then": { "required": ["tags"] }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "commitImport" } } },
+      "then": {
+        "required": ["capsuleIds", "destination", "stagedPath"]
+      }
+    },
+    {
+      "if": { "properties": { "operation": { "const": "commitCorrection" } } },
+      "then": {
+        "required": ["capsuleIds", "stagedPath", "expectedRevision"]
+      }
+    }
+  ],
   "$defs": {
     "name": {
       "type": "string",
@@ -59,11 +139,17 @@
       "maxLength": 50,
       "pattern": "^(?!#)(?!.*[\\u0000-\\u001f]).+$"
     },
+    "userFolder": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 161,
+      "pattern": "^(?!\\.)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*[\\\\\\u0000-\\u001f])[^/]+(?:/[^/]+)?$"
+    },
     "folder": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 2,
-      "items": { "$ref": "#/$defs/name" }
+      "oneOf": [
+        { "enum": ["Inbox", "Archive"] },
+        { "$ref": "#/$defs/userFolder" }
+      ]
     }
   }
 }

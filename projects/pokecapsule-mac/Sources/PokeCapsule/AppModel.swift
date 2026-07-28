@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshDevices() {
+        guard !isBusy else { return }
         guard let adb = ADBLocator.locate() else {
             adbURL = nil
             transport = nil
@@ -78,14 +79,17 @@ final class AppModel: ObservableObject {
     }
 
     func choose(_ device: ADBDevice) {
+        guard !isBusy else { return }
         guard let adbURL else { return }
         selectedSerial = device.serial
         transport = ADBTransport(executable: adbURL, serial: device.serial)
         connection = .connected(device)
         status = connection.localizedDescription
+        if !isBusy { sync() }
     }
 
     func sync() {
+        guard !isBusy else { return }
         guard let transport else {
             status = "先连接并选择 Poke3"
             return
@@ -101,14 +105,26 @@ final class AppModel: ObservableObject {
                 self.index = newIndex
                 self.selection = self.selection.intersection(Set(newIndex.records.map(\.id)))
                 self.status = "已同步 \(newIndex.records.count) 个胶囊"
+                self.isBusy = false
+                let defaults = UserDefaults.standard
+                let autoCorrect = defaults.object(forKey: "AutoCorrection") == nil
+                    || defaults.bool(forKey: "AutoCorrection")
+                if autoCorrect,
+                   CorrectionAdapter().hasAPIKey(),
+                   let pending = newIndex.records.first(where: {
+                       $0.processing?.status == .rawReady && $0.rawText?.isEmpty == false
+                   }) {
+                    self.correct(pending)
+                }
             } catch {
                 self.status = error.localizedDescription
+                self.isBusy = false
             }
-            self.isBusy = false
         }
     }
 
     func perform(_ command: DeviceCommand) {
+        guard !isBusy else { return }
         guard let transport else {
             status = "设备未连接"
             return
@@ -127,11 +143,12 @@ final class AppModel: ObservableObject {
                 }.value
                 self.status = "操作已完成，正在重新同步"
                 self.selection.removeAll()
+                self.isBusy = false
                 self.sync()
             } catch {
                 self.status = error.localizedDescription
+                self.isBusy = false
             }
-            self.isBusy = false
         }
     }
 
@@ -215,6 +232,7 @@ final class AppModel: ObservableObject {
     }
 
     func importCapsules(_ directories: [URL], destination: String) {
+        guard !isBusy else { return }
         guard let transport else {
             status = "设备未连接"
             return
@@ -240,15 +258,17 @@ final class AppModel: ObservableObject {
                     return imported
                 }.value
                 status = "已导入 \(count) 个胶囊；内容相同的 UUID 已跳过"
+                isBusy = false
                 sync()
             } catch {
                 status = error.localizedDescription
+                isBusy = false
             }
-            isBusy = false
         }
     }
 
     func exportSelected(to destination: URL) {
+        guard !isBusy else { return }
         let records = selectedRecords
         guard !records.isEmpty else { return }
         isBusy = true
@@ -274,5 +294,94 @@ final class AppModel: ObservableObject {
         } catch {
             status = "无法播放音频：\(error.localizedDescription)"
         }
+    }
+
+    func correct(_ record: CapsuleRecord) {
+        guard !isBusy else { return }
+        guard let transport else {
+            status = "设备未连接"
+            return
+        }
+        guard let deviceSerial = selectedSerial else {
+            status = "设备身份不可用，请重新连接"
+            return
+        }
+        guard let raw = record.rawText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              let revision = record.processing?.revision else {
+            status = "这条胶囊还没有可校对的原始转写"
+            return
+        }
+        let defaults = UserDefaults.standard
+        let endpointText = defaults.string(forKey: "CorrectionEndpoint")
+            ?? "https://api.deepseek.com/chat/completions"
+        let modelName = defaults.string(forKey: "CorrectionModel")
+            ?? "deepseek-v4-flash"
+        let prompt = defaults.string(forKey: "CorrectionPrompt")
+            ?? "只校正识别错误和标点；不解释、不增删原意；无法判断时原样输出。只输出正文。"
+        guard let endpoint = URL(string: endpointText),
+              !modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            status = "校对 API 地址或模型配置无效"
+            return
+        }
+
+        isBusy = true
+        status = "正在用 \(modelName) 快速校对…"
+        Task {
+            do {
+                let cache = pendingCorrectionURL(
+                    for: record.id,
+                    revision: revision,
+                    deviceSerial: deviceSerial,
+                    rawText: raw)
+                let polished: String
+                if let saved = try? String(contentsOf: cache, encoding: .utf8),
+                   !saved.isEmpty {
+                    polished = saved
+                    self.status = "正在重试写回已完成的校对结果…"
+                } else {
+                    let configuration = CorrectionConfiguration(
+                        endpoint: endpoint,
+                        model: modelName,
+                        systemPrompt: prompt)
+                    polished = try await CorrectionAdapter().correct(
+                        text: raw,
+                        configuration: configuration)
+                    try FileManager.default.createDirectory(
+                        at: cache.deletingLastPathComponent(),
+                        withIntermediateDirectories: true)
+                    try Data(polished.utf8).write(to: cache, options: .atomic)
+                }
+                try await Task.detached(priority: .userInitiated) {
+                    let client = DeviceCommandClient(transport: transport)
+                    try client.commitCorrection(
+                        text: polished,
+                        capsuleID: record.id,
+                        expectedRevision: revision)
+                }.value
+                try? FileManager.default.removeItem(at: cache)
+                self.status = "校对完成，已写回 Poke3"
+                self.isBusy = false
+                self.sync()
+            } catch {
+                self.status = error.localizedDescription
+                self.isBusy = false
+            }
+        }
+    }
+
+    private func pendingCorrectionURL(
+        for id: UUID,
+        revision: Int,
+        deviceSerial: String,
+        rawText: String
+    ) -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PokeCapsule/PendingCorrections", isDirectory: true)
+            .appendingPathComponent(CorrectionCacheKey.fileName(
+                capsuleID: id,
+                revision: revision,
+                deviceSerial: deviceSerial,
+                rawText: rawText))
     }
 }

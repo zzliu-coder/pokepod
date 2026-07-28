@@ -145,6 +145,45 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertFalse(text.contains("shell"))
     }
 
+    func testAPIKeyImportUsesOnlyFirstNonEmptyLine() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("api.txt")
+        try Data("\nsk-test-secret\n网页说明\n".utf8).write(to: file)
+        let secrets = MemorySecrets()
+        let localKey = root.appendingPathComponent("local-key")
+        let adapter = CorrectionAdapter(secrets: secrets, localKeyURL: localKey)
+        try adapter.importAPIKey(from: file)
+        XCTAssertEqual(
+            try String(contentsOf: localKey, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "sk-test-secret")
+    }
+
+    func testAPIKeyImportRejectsPastedDocumentation() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("api.txt")
+        try Data("DeepSeek API Docs\n".utf8).write(to: file)
+        XCTAssertThrowsError(try CorrectionAdapter(
+            secrets: MemorySecrets(),
+            localKeyURL: root.appendingPathComponent("local-key")
+        ).importAPIKey(from: file))
+    }
+
+    func testCorrectionCacheKeyBindsDeviceAndRawText() {
+        let id = UUID(uuidString: "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f")!
+        let first = CorrectionCacheKey.fileName(
+            capsuleID: id, revision: 7, deviceSerial: "POKE-A", rawText: "今天下雨")
+        let otherDevice = CorrectionCacheKey.fileName(
+            capsuleID: id, revision: 7, deviceSerial: "POKE-B", rawText: "今天下雨")
+        let otherText = CorrectionCacheKey.fileName(
+            capsuleID: id, revision: 7, deviceSerial: "POKE-A", rawText: "今天晴天")
+        XCTAssertNotEqual(first, otherDevice)
+        XCTAssertNotEqual(first, otherText)
+        XCTAssertTrue(first.hasPrefix(id.uuidString.lowercased() + "-r7-"))
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PokeCapsuleTests-\(UUID().uuidString)", isDirectory: true)
@@ -168,6 +207,22 @@ final class PokeCapsuleCoreTests: XCTestCase {
         """
         try Data(processing.utf8).write(to: directory.appendingPathComponent("processing.json"))
         try Data("audio".utf8).write(to: directory.appendingPathComponent("audio.m4a"))
+    }
+}
+
+private final class MemorySecrets: SecretStoring {
+    var values: [String: String] = [:]
+
+    func set(_ value: String, account: String) throws {
+        values[account] = value
+    }
+
+    func get(account: String) throws -> String? {
+        values[account]
+    }
+
+    func delete(account: String) throws {
+        values.removeValue(forKey: account)
     }
 }
 

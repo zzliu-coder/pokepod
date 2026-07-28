@@ -172,9 +172,22 @@ public final class ADBTransport {
 
     @discardableResult
     public func pushCommand(local: URL, transactionID: UUID) throws -> ProcessResult {
-        let remote = "\(ProtocolConstants.remoteRoot)/.commands/inbox/\(transactionID.uuidString.lowercased()).json"
+        let fileName = "\(transactionID.uuidString.lowercased()).json"
+        let remote = "\(ProtocolConstants.remoteRoot)/.commands/\(fileName)"
         let result = runner.run(executable: executable, arguments: ["-s", serial, "push", local.path, remote])
         guard result.status == 0 else { throw PokeCapsuleError.adbFailure(result.combinedOutput) }
+        let broadcast = runner.run(
+            executable: executable,
+            arguments: [
+                "-s", serial, "shell", "am", "broadcast",
+                "-a", "com.zheliu.pokecapsule.PROCESS_COMMAND",
+                "-n", "com.zheliu.pokecapsule/.command.CommandReceiver",
+                "--es", "commandFile", fileName
+            ]
+        )
+        guard broadcast.status == 0 else {
+            throw PokeCapsuleError.adbFailure(broadcast.combinedOutput)
+        }
         return result
     }
 
@@ -187,7 +200,7 @@ public final class ADBTransport {
     }
 
     public func pullResponse(transactionID: UUID, to local: URL) -> Bool {
-        let remote = "\(ProtocolConstants.remoteRoot)/.commands/responses/\(transactionID.uuidString.lowercased()).json"
+        let remote = "\(ProtocolConstants.remoteRoot)/.commands/results/\(transactionID.uuidString.lowercased()).json"
         let result = runner.run(executable: executable, arguments: ["-s", serial, "pull", remote, local.path])
         return result.status == 0
     }
@@ -270,17 +283,25 @@ public final class DeviceCommandClient {
     }
 
     public func performMaintenance(_ commands: [DeviceCommand]) throws {
+        let maintenanceID = UUID()
         let stayAwake = StayAwakeSession(transport: transport)
         try stayAwake.begin()
         var firstError: Error?
         do {
-            _ = try submit(DeviceCommand(operation: "beginMaintenance"))
-            for command in commands { _ = try submit(command) }
+            _ = try submit(DeviceCommand(
+                operation: "beginMaintenance",
+                maintenanceId: maintenanceID))
+            for var command in commands {
+                command.maintenanceId = maintenanceID
+                _ = try submit(command)
+            }
         } catch {
             firstError = error
         }
         do {
-            _ = try submit(DeviceCommand(operation: "endMaintenance"))
+            _ = try submit(DeviceCommand(
+                operation: "endMaintenance",
+                maintenanceId: maintenanceID))
         } catch {
             if firstError == nil { firstError = error }
         }
@@ -305,12 +326,15 @@ public final class DeviceCommandClient {
         }
 
         let transactionID = UUID()
+        let maintenanceID = UUID()
         let stagedPath = ".staging/\(transactionID.uuidString.lowercased())/\(package.metadata.id.uuidString.lowercased())"
         let stayAwake = StayAwakeSession(transport: transport)
         try stayAwake.begin()
         var firstError: Error?
         do {
-            _ = try submit(DeviceCommand(operation: "beginMaintenance"))
+            _ = try submit(DeviceCommand(
+                operation: "beginMaintenance",
+                maintenanceId: maintenanceID))
             try transport.pushImport(
                 local: package.directory,
                 transactionID: transactionID,
@@ -319,6 +343,7 @@ public final class DeviceCommandClient {
             _ = try submit(DeviceCommand(
                 transactionId: transactionID,
                 operation: "commitImport",
+                maintenanceId: maintenanceID,
                 capsuleIds: [package.metadata.id],
                 destination: destination,
                 stagedPath: stagedPath
@@ -327,7 +352,9 @@ public final class DeviceCommandClient {
             firstError = error
         }
         do {
-            _ = try submit(DeviceCommand(operation: "endMaintenance"))
+            _ = try submit(DeviceCommand(
+                operation: "endMaintenance",
+                maintenanceId: maintenanceID))
         } catch {
             if firstError == nil { firstError = error }
         }
@@ -338,6 +365,60 @@ public final class DeviceCommandClient {
         }
         if let firstError { throw firstError }
         return true
+    }
+
+    public func commitCorrection(
+        text: String,
+        capsuleID: UUID,
+        expectedRevision: Int
+    ) throws {
+        let transactionID = UUID()
+        let maintenanceID = UUID()
+        let temporary = fileManager.temporaryDirectory
+            .appendingPathComponent("PokeCapsuleCorrection-\(transactionID.uuidString)", isDirectory: true)
+        let capsuleDirectory = temporary.appendingPathComponent(
+            capsuleID.uuidString.lowercased(), isDirectory: true)
+        try fileManager.createDirectory(at: capsuleDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: temporary) }
+        try Data(text.utf8).write(
+            to: capsuleDirectory.appendingPathComponent("polished.md"),
+            options: .atomic)
+
+        let stagedPath = ".staging/\(transactionID.uuidString.lowercased())/\(capsuleID.uuidString.lowercased())"
+        let stayAwake = StayAwakeSession(transport: transport)
+        try stayAwake.begin()
+        var firstError: Error?
+        do {
+            _ = try submit(DeviceCommand(
+                operation: "beginMaintenance",
+                maintenanceId: maintenanceID))
+            try transport.pushImport(
+                local: capsuleDirectory,
+                transactionID: transactionID,
+                capsuleID: capsuleID)
+            _ = try submit(DeviceCommand(
+                transactionId: transactionID,
+                operation: "commitCorrection",
+                maintenanceId: maintenanceID,
+                capsuleIds: [capsuleID],
+                stagedPath: stagedPath,
+                expectedRevision: expectedRevision))
+        } catch {
+            firstError = error
+        }
+        do {
+            _ = try submit(DeviceCommand(
+                operation: "endMaintenance",
+                maintenanceId: maintenanceID))
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+        do {
+            try stayAwake.restore()
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+        if let firstError { throw firstError }
     }
 }
 

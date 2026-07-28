@@ -1,0 +1,21 @@
+# ninja log v5
+0	94	1785218145194410157	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-mkdir	e6b8315373440609
+0	94	1785218145194410157	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-mkdir	e6b8315373440609
+95	19857	1785218164957431044	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-download	3572fe8708ba3864
+95	19857	1785218164957431044	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-download	3572fe8708ba3864
+19858	19943	0	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-update	5ac59a94d09dd98e
+19858	19943	0	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-update	5ac59a94d09dd98e
+19943	19973	1785218165072503969	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-patch	4eef9a327f46116f
+19943	19973	1785218165072503969	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-patch	4eef9a327f46116f
+19973	20010	1785218165109629616	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-configure	5964ed682960531a
+19973	20010	1785218165109629616	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-configure	5964ed682960531a
+20010	20052	1785218165151124711	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-build	c1681856f7c06fa4
+20010	20052	1785218165151124711	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-build	c1681856f7c06fa4
+20052	20083	1785218165183137279	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-install	81cbe665a9b36b4f
+20052	20083	1785218165183137279	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-install	81cbe665a9b36b4f
+20083	20111	1785218165210452229	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-test	f1216159a11f1f42
+20083	20111	1785218165210452229	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-test	f1216159a11f1f42
+20111	20150	1785218165249980560	CMakeFiles/whispercpp-populate-complete	1b92f90e604e2cde
+20111	20150	1785218165249980560	whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-done	1b92f90e604e2cde
+20111	20150	1785218165249980560	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/CMakeFiles/whispercpp-populate-complete	1b92f90e604e2cde
+20111	20150	1785218165249980560	/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/projects/pokecapsule-android/app/.cxx/Debug/5s6v3650/arm64-v8a/_deps/whispercpp-subbuild/whispercpp-populate-prefix/src/whispercpp-populate-stamp/whispercpp-populate-done	1b92f90e604e2cde

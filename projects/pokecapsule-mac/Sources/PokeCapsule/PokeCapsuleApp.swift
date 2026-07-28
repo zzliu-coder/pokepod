@@ -227,6 +227,8 @@ struct CapsuleDetailView: View {
                     HStack {
                         Text(record.displayTitle).font(.title2.bold())
                         Spacer()
+                        Button("DeepSeek 校对") { model.correct(record) }
+                            .disabled(record.rawText == nil || model.isBusy)
                         Button("播放录音") { model.play(record) }
                     }
                     LabeledContent("位置", value: record.relativeFolder)
@@ -354,8 +356,10 @@ struct ActionSheetView: View {
 }
 
 struct SettingsView: View {
-    @AppStorage("CorrectionEndpoint") private var endpoint = "https://api.openai.com/v1/chat/completions"
-    @AppStorage("CorrectionModel") private var model = ""
+    @AppStorage("CorrectionEndpoint") private var endpoint = "https://api.deepseek.com/chat/completions"
+    @AppStorage("CorrectionModel") private var model = "deepseek-v4-flash"
+    @AppStorage("CorrectionPrompt") private var prompt = "只校正识别错误和标点；不解释、不增删原意；无法判断时原样输出。只输出正文。"
+    @AppStorage("AutoCorrection") private var autoCorrection = true
     @AppStorage("ADBPath") private var adbPath = ""
     @State private var apiKey = ""
     @State private var message = ""
@@ -365,6 +369,8 @@ struct SettingsView: View {
             TextField("ADB 路径", text: $adbPath)
             TextField("校对 API 地址", text: $endpoint)
             TextField("模型", text: $model)
+            TextField("校对提示词", text: $prompt)
+            Toggle("同步后自动校对待处理胶囊", isOn: $autoCorrection)
             SecureField("API 密钥", text: $apiKey)
             HStack {
                 Button("保存密钥") {
@@ -374,9 +380,18 @@ struct SettingsView: View {
                         message = "密钥已保存到 macOS 钥匙串"
                     } catch { message = error.localizedDescription }
                 }
+                Button("从桌面 api.txt 导入") {
+                    do {
+                        let file = FileManager.default.homeDirectoryForCurrentUser
+                            .appendingPathComponent("Desktop/api.txt")
+                        try CorrectionAdapter().importAPIKey(from: file)
+                        apiKey = ""
+                        message = "已读取第一行并保存到 macOS 钥匙串"
+                    } catch { message = error.localizedDescription }
+                }
                 Text(message).foregroundStyle(.secondary)
             }
-            Text("未配置密钥时不会发送文本，也不会伪造校对结果。")
+            Text("默认使用 DeepSeek V4 Flash，并显式关闭思考。地址、模型和提示词都可以修改。密钥只保存在 macOS 钥匙串。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

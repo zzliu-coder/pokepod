@@ -12,8 +12,8 @@ find_adb() {
   for candidate in \
     "$ROOT_DIR/tools/adb" \
     "/opt/homebrew/bin/adb" \
-    "$ANDROID_HOME/platform-tools/adb" \
-    "$ANDROID_SDK_ROOT/platform-tools/adb"; do
+    "${ANDROID_HOME:-}/platform-tools/adb" \
+    "${ANDROID_SDK_ROOT:-}/platform-tools/adb"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
       print -r -- "$candidate"
       return 0
@@ -50,7 +50,10 @@ fi
 
 SERIAL="${devices[1]}"
 MODEL_PATH="$ROOT_DIR/artifacts/models/$MODEL_NAME"
-APK_PATH="$(find "$ROOT_DIR/projects/pokecapsule-android/app/build/outputs/apk" -type f -name '*release*.apk' -o -name '*debug*.apk' 2>/dev/null | head -1)"
+APK_PATH="$ROOT_DIR/projects/pokecapsule-android/app/build/outputs/apk/release/app-release.apk"
+if [[ ! -f "$APK_PATH" ]]; then
+  APK_PATH="$ROOT_DIR/projects/pokecapsule-android/app/build/outputs/apk/debug/app-debug.apk"
+fi
 
 if [[ -z "$APK_PATH" || ! -f "$APK_PATH" ]]; then
   print "没有找到 PokeCapsule APK，请先完成构建。"
@@ -117,4 +120,3 @@ print "PokeCapsule 已安装并启动。"
 print "模型 SHA-256 校验通过。"
 print "如果悬浮按钮没有出现，请在 PokeCapsule 的“设置”里点一次“允许悬浮按钮”。"
 read "?按回车关闭此窗口。"
-

@@ -162,6 +162,7 @@ public struct DeviceCommand: Codable, Equatable {
     public let transactionId: UUID
     public let operation: String
     public let createdAt: Date
+    public var maintenanceId: UUID?
     public var capsuleIds: [UUID]?
     public var destination: String?
     public var folderPath: String?
@@ -174,6 +175,7 @@ public struct DeviceCommand: Codable, Equatable {
     public init(
         transactionId: UUID = UUID(),
         operation: String,
+        maintenanceId: UUID? = nil,
         capsuleIds: [UUID]? = nil,
         destination: String? = nil,
         folderPath: String? = nil,
@@ -187,6 +189,7 @@ public struct DeviceCommand: Codable, Equatable {
         self.transactionId = transactionId
         self.operation = operation
         self.createdAt = Date()
+        self.maintenanceId = maintenanceId
         self.capsuleIds = capsuleIds
         self.destination = destination
         self.folderPath = folderPath
@@ -220,6 +223,7 @@ public enum PokeCapsuleError: LocalizedError, Equatable {
     case hashMismatch(String)
     case missingAPIKey
     case invalidCorrectionResponse
+    case invalidAPIKeyFile
 
     public var errorDescription: String? {
         switch self {
@@ -236,6 +240,7 @@ public enum PokeCapsuleError: LocalizedError, Equatable {
         case .hashMismatch(let path): return "文件校验失败：\(path)"
         case .missingAPIKey: return "尚未配置 API 密钥"
         case .invalidCorrectionResponse: return "校对 API 返回了无法识别的内容"
+        case .invalidAPIKeyFile: return "api.txt 第一行不是有效的 API 密钥"
         }
     }
 }

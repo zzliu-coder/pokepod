@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -67,7 +68,7 @@ public struct CorrectionConfiguration: Equatable {
     public init(
         endpoint: URL,
         model: String,
-        systemPrompt: String = "你是中文口述校对助手。保留原意和事实，只修正明显的语音识别错误、标点和分段。仅返回校对后的正文。"
+        systemPrompt: String = "只校正识别错误和标点；不解释、不增删原意；无法判断时原样输出。只输出正文。"
     ) {
         self.endpoint = endpoint
         self.model = model
@@ -75,18 +76,47 @@ public struct CorrectionConfiguration: Equatable {
     }
 }
 
+public enum CorrectionCacheKey {
+    public static func fileName(
+        capsuleID: UUID,
+        revision: Int,
+        deviceSerial: String,
+        rawText: String
+    ) -> String {
+        let input = Data((deviceSerial + "\u{0}" + rawText).utf8)
+        let digest = SHA256.hash(data: input)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(capsuleID.uuidString.lowercased())-r\(revision)-\(digest).md"
+    }
+}
+
 public final class CorrectionAdapter {
     private let session: URLSession
     private let secrets: SecretStoring
+    private let localKeyURL: URL?
     private let keyAccount = "correction-api-key"
 
-    public init(session: URLSession = .shared, secrets: SecretStoring = KeychainStore()) {
+    public init(
+        session: URLSession = .shared,
+        secrets: SecretStoring = KeychainStore(),
+        localKeyURL: URL? = CorrectionAdapter.defaultLocalKeyURL()
+    ) {
         self.session = session
         self.secrets = secrets
+        self.localKeyURL = localKeyURL
     }
 
     public func saveAPIKey(_ key: String) throws {
         let clean = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let localKeyURL {
+            if clean.isEmpty {
+                try? FileManager.default.removeItem(at: localKeyURL)
+            } else {
+                try persistLocalKey(clean, to: localKeyURL)
+            }
+            return
+        }
         if clean.isEmpty {
             try secrets.delete(account: keyAccount)
         } else {
@@ -94,12 +124,23 @@ public final class CorrectionAdapter {
         }
     }
 
+    public func importAPIKey(from file: URL) throws {
+        let contents = try String(contentsOf: file, encoding: .utf8)
+        guard let first = contents.split(whereSeparator: \.isNewline)
+            .map({ String($0).trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty }),
+              first.hasPrefix("sk-") else {
+            throw PokeCapsuleError.invalidAPIKeyFile
+        }
+        try saveAPIKey(first)
+    }
+
     public func hasAPIKey() -> Bool {
-        ((try? secrets.get(account: keyAccount)) ?? nil)?.isEmpty == false
+        (try? loadAPIKey()) != nil
     }
 
     public func correct(text: String, configuration: CorrectionConfiguration) async throws -> String {
-        guard let key = try secrets.get(account: keyAccount), !key.isEmpty else {
+        guard let key = try loadAPIKey() else {
             throw PokeCapsuleError.missingAPIKey
         }
         var request = URLRequest(url: configuration.endpoint)
@@ -113,7 +154,9 @@ public final class CorrectionAdapter {
                 .init(role: "system", content: configuration.systemPrompt),
                 .init(role: "user", content: text)
             ],
-            temperature: 0
+            temperature: 0,
+            maxTokens: max(128, min(2048, text.count * 2)),
+            thinking: .init(type: "disabled")
         )
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await session.data(for: request)
@@ -129,6 +172,47 @@ public final class CorrectionAdapter {
         }
         return output
     }
+
+    private func loadAPIKey() throws -> String? {
+        if let localKeyURL,
+           let saved = try? String(contentsOf: localKeyURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           saved.hasPrefix("sk-") {
+            return saved
+        }
+        let fallback = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Desktop/api.txt")
+        if let contents = try? String(contentsOf: fallback, encoding: .utf8),
+           let first = contents.split(whereSeparator: \.isNewline)
+                .map({ String($0).trimmingCharacters(in: .whitespacesAndNewlines) })
+                .first(where: { !$0.isEmpty }),
+           first.hasPrefix("sk-") {
+            if let localKeyURL {
+                try? persistLocalKey(first, to: localKeyURL)
+            }
+            return first
+        }
+        if let saved = try? secrets.get(account: keyAccount),
+           !saved.isEmpty {
+            return saved
+        }
+        return nil
+    }
+
+    public static func defaultLocalKeyURL() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PokeCapsule/Secrets/correction-api-key")
+    }
+
+    private func persistLocalKey(_ key: String, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data((key + "\n").utf8).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path)
+    }
 }
 
 private struct ChatRequest: Encodable {
@@ -139,6 +223,17 @@ private struct ChatRequest: Encodable {
     let model: String
     let messages: [Message]
     let temperature: Double
+    let maxTokens: Int
+    let thinking: Thinking
+
+    struct Thinking: Encodable {
+        let type: String
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, temperature, thinking
+        case maxTokens = "max_tokens"
+    }
 }
 
 private struct ChatResponse: Decodable {
