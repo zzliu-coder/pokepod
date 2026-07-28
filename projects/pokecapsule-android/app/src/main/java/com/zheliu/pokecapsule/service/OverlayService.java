@@ -8,9 +8,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.graphics.Color;
 import android.graphics.PixelFormat;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
@@ -18,8 +16,8 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.TextView;
 
+import com.zheliu.pokecapsule.ui.CapsuleRecordButtonView;
 import com.zheliu.pokecapsule.ui.MainActivity;
 
 public final class OverlayService extends Service {
@@ -29,7 +27,7 @@ public final class OverlayService extends Service {
 
     private WindowManager windowManager;
     private WindowManager.LayoutParams layout;
-    private TextView button;
+    private CapsuleRecordButtonView button;
     private boolean recording;
     private float downX;
     private float downY;
@@ -41,10 +39,12 @@ public final class OverlayService extends Service {
         @Override public void onReceive(Context context, Intent intent) {
             recording = intent.getBooleanExtra(RecordingService.EXTRA_RECORDING, false);
             int seconds = intent.getIntExtra(RecordingService.EXTRA_SECONDS_LEFT, 0);
+            int audioLevel = intent.getIntExtra(RecordingService.EXTRA_AUDIO_LEVEL, 0);
+            boolean silent = intent.getBooleanExtra(RecordingService.EXTRA_SILENT, false);
             String message = intent.getStringExtra(RecordingService.EXTRA_MESSAGE);
-            if (button != null) button.setText(recording ? String.valueOf(seconds) : "录");
-            if (message != null && !message.isEmpty() && button != null) {
-                button.setContentDescription(message);
+            if (button != null) {
+                if (recording) button.showRecording(seconds, audioLevel, silent);
+                else button.showIdle(message);
             }
         }
     };
@@ -96,23 +96,13 @@ public final class OverlayService extends Service {
     private void showButton() {
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         if (windowManager == null) return;
-        button = new TextView(this);
-        button.setText("录");
-        button.setTextSize(20);
-        button.setTextColor(Color.WHITE);
-        button.setGravity(Gravity.CENTER);
-        button.setContentDescription("开始录音");
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(Color.BLACK);
-        background.setShape(GradientDrawable.OVAL);
-        background.setStroke(dp(2), Color.WHITE);
-        button.setBackground(background);
+        button = new CapsuleRecordButtonView(this);
 
         int type = Build.VERSION.SDK_INT >= 26
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
         layout = new WindowManager.LayoutParams(
-                dp(56), dp(56), type,
+                dp(64), dp(64), type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);

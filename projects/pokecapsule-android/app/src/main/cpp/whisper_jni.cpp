@@ -68,6 +68,9 @@ Java_com_zheliu_pokecapsule_transcription_WhisperNative_transcribe(
     params.print_realtime = false;
     params.print_timestamps = false;
     params.single_segment = false;
+    params.suppress_blank = true;
+    params.suppress_nst = true;
+    params.no_context = true;
     params.abort_callback = should_abort;
     params.abort_callback_user_data = nullptr;
 

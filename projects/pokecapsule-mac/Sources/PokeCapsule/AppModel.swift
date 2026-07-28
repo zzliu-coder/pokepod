@@ -112,7 +112,11 @@ final class AppModel: ObservableObject {
                 if autoCorrect,
                    CorrectionAdapter().hasAPIKey(),
                    let pending = newIndex.records.first(where: {
-                       $0.processing?.status == .rawReady && $0.rawText?.isEmpty == false
+                       guard $0.processing?.status == .rawReady,
+                             let raw = $0.rawText,
+                             let durationMs = $0.processing?.durationMs else { return false }
+                       return !raw.isEmpty
+                           && TranscriptionSanity.isPlausible(text: raw, durationMs: durationMs)
                    }) {
                     self.correct(pending)
                 }
@@ -308,8 +312,13 @@ final class AppModel: ObservableObject {
         }
         guard let raw = record.rawText?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty,
-              let revision = record.processing?.revision else {
+              let revision = record.processing?.revision,
+              let durationMs = record.processing?.durationMs else {
             status = "这条胶囊还没有可校对的原始转写"
+            return
+        }
+        if let issue = TranscriptionSanity.issue(text: raw, durationMs: durationMs) {
+            status = "\(issue)，已阻止 DeepSeek 扩写"
             return
         }
         let defaults = UserDefaults.standard

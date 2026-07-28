@@ -17,6 +17,7 @@ import android.os.StatFs;
 import android.os.SystemClock;
 
 import com.zheliu.pokecapsule.core.Ids;
+import com.zheliu.pokecapsule.core.AudioLevel;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
 import com.zheliu.pokecapsule.ui.MainActivity;
@@ -30,6 +31,8 @@ public final class RecordingService extends Service {
     public static final String EXTRA_RECORDING = "recording";
     public static final String EXTRA_SECONDS_LEFT = "secondsLeft";
     public static final String EXTRA_MESSAGE = "message";
+    public static final String EXTRA_AUDIO_LEVEL = "audioLevel";
+    public static final String EXTRA_SILENT = "silent";
 
     private static final int NOTIFICATION_ID = 4202;
     private static final long MAX_DURATION_MS = 60_000;
@@ -40,6 +43,7 @@ public final class RecordingService extends Service {
     private File stagingDirectory;
     private long startedAt;
     private boolean recording;
+    private int silentTicks;
     private PowerManager.WakeLock wakeLock;
 
     private final Runnable tick = new Runnable() {
@@ -47,9 +51,17 @@ public final class RecordingService extends Service {
             if (!recording) return;
             long elapsed = SystemClock.elapsedRealtime() - startedAt;
             int secondsLeft = (int) Math.max(0, (MAX_DURATION_MS - elapsed + 999) / 1000);
-            broadcast(true, secondsLeft, "");
+            int amplitude = 0;
+            try {
+                if (recorder != null) amplitude = recorder.getMaxAmplitude();
+            } catch (RuntimeException ignored) {
+                amplitude = 0;
+            }
+            int level = AudioLevel.fromAmplitude(amplitude);
+            silentTicks = level == 0 ? silentTicks + 1 : 0;
+            broadcast(true, secondsLeft, level, silentTicks >= 4, "");
             if (elapsed >= MAX_DURATION_MS) finishRecording();
-            else handler.postDelayed(this, 1000);
+            else handler.postDelayed(this, 500);
         }
     };
 
@@ -114,11 +126,12 @@ public final class RecordingService extends Service {
             recorder.prepare();
             recorder.start();
             recording = true;
+            silentTicks = 0;
             startedAt = SystemClock.elapsedRealtime();
             acquireWakeLock();
             handler.post(tick);
             startForeground(NOTIFICATION_ID, notification("录音中 · 最长 60 秒"));
-            broadcast(true, 60, "");
+            broadcast(true, 60, 0, false, "");
         } catch (Exception error) {
             releaseRecorder(false);
             fail("无法开始录音: " + safeMessage(error));
@@ -144,9 +157,10 @@ public final class RecordingService extends Service {
             CapsuleStore store = new CapsuleStore(new PokePaths());
             store.commitRecording(stagingDirectory, duration);
             TranscriptionScheduler.scheduleAutomatic(this);
-            broadcast(false, 0, "已保存到 Inbox");
+            broadcast(false, 0, 0, false, "已保存到 Inbox");
         } catch (Exception error) {
-            broadcast(false, 0, "保存失败，音频仍在暂存区: " + safeMessage(error));
+            broadcast(false, 0, 0, false,
+                    "保存失败，音频仍在暂存区: " + safeMessage(error));
         }
         stopForeground(true);
         stopSelf();
@@ -202,16 +216,23 @@ public final class RecordingService extends Service {
     }
 
     private void fail(String message) {
-        broadcast(false, 0, message);
+        broadcast(false, 0, 0, false, message);
         stopForeground(true);
         stopSelf();
     }
 
-    private void broadcast(boolean active, int secondsLeft, String message) {
+    private void broadcast(
+            boolean active,
+            int secondsLeft,
+            int audioLevel,
+            boolean silent,
+            String message) {
         Intent state = new Intent(ACTION_STATE);
         state.setPackage(getPackageName());
         state.putExtra(EXTRA_RECORDING, active);
         state.putExtra(EXTRA_SECONDS_LEFT, secondsLeft);
+        state.putExtra(EXTRA_AUDIO_LEVEL, audioLevel);
+        state.putExtra(EXTRA_SILENT, silent);
         state.putExtra(EXTRA_MESSAGE, message);
         sendBroadcast(state);
     }

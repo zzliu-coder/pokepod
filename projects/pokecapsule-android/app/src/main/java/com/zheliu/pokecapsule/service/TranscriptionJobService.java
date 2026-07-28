@@ -11,6 +11,7 @@ import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
 import com.zheliu.pokecapsule.storage.RootWriteLock;
 import com.zheliu.pokecapsule.transcription.ModelVerifier;
+import com.zheliu.pokecapsule.transcription.TranscriptionGuard;
 import com.zheliu.pokecapsule.transcription.WhisperAdapter;
 import com.zheliu.pokecapsule.transcription.WhisperCppAdapter;
 import com.zheliu.pokecapsule.transcription.WhisperNative;
@@ -77,6 +78,13 @@ public final class TranscriptionJobService extends JobService {
     }
 
     private void process(CapsuleStore store, File model, CapsuleRecord record) throws IOException {
+        try {
+            TranscriptionGuard.requireTranscribableDuration(record.durationMs);
+        } catch (IOException error) {
+            store.updateProcessing(record.directory, ProcessingState.FAILED,
+                    "audio", error.getMessage(), false);
+            return;
+        }
         store.updateProcessing(record.directory, ProcessingState.TRANSCRIBING,
                 null, null, true);
         try {
@@ -91,6 +99,7 @@ public final class TranscriptionJobService extends JobService {
             }
             WhisperAdapter adapter = new WhisperCppAdapter();
             String text = adapter.transcribe(model, new File(record.directory, "audio.m4a"));
+            TranscriptionGuard.requirePlausibleOutput(text, record.durationMs);
             if (stopped) {
                 store.updateProcessing(record.directory, ProcessingState.QUEUED,
                         "transcription", "任务被系统暂停", false);
