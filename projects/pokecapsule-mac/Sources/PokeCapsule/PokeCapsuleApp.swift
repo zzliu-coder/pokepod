@@ -209,7 +209,15 @@ struct CapsuleListView: View {
             .padding(.vertical, 4)
             .tag(record.id)
             .contentShape(Rectangle())
-            .onTapGesture { selectedRecord = record }
+        }
+        .onChange(of: model.selection) { selection in
+            if selection.isEmpty {
+                selectedRecord = nil
+            } else if selectedRecord.map({ selection.contains($0.id) }) != true {
+                selectedRecord = model.filteredRecords.first {
+                    selection.contains($0.id)
+                }
+            }
         }
         .navigationTitle("胶囊 \(model.filteredRecords.count)")
         .overlay {
