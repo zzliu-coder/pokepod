@@ -6,7 +6,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
@@ -39,7 +38,7 @@ public final class RecordingService extends Service {
     private static final long MIN_FREE_BYTES = 5L * 1024 * 1024;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private MediaRecorder recorder;
+    private EnhancedAudioRecorder recorder;
     private File stagingDirectory;
     private long startedAt;
     private boolean recording;
@@ -111,19 +110,8 @@ public final class RecordingService extends Service {
         try {
             stagingDirectory = store.beginRecording(id);
             File output = new File(stagingDirectory, "audio.m4a");
-            recorder = new MediaRecorder();
-            recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
-            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
-            recorder.setAudioChannels(1);
-            recorder.setAudioSamplingRate(16000);
-            recorder.setAudioEncodingBitRate(32000);
-            recorder.setMaxDuration((int) MAX_DURATION_MS);
-            recorder.setOutputFile(output.getAbsolutePath());
-            recorder.setOnInfoListener((ignored, what, extra) -> {
-                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) finishRecording();
-            });
-            recorder.prepare();
+            File original = new File(stagingDirectory, "audio.original.wav");
+            recorder = new EnhancedAudioRecorder(output, original);
             recorder.start();
             recording = true;
             silentTicks = 0;
@@ -169,17 +157,10 @@ public final class RecordingService extends Service {
     private boolean releaseRecorder(boolean stopFirst) {
         boolean clean = true;
         if (recorder != null) {
-            if (stopFirst) {
-                try {
-                    recorder.stop();
-                } catch (RuntimeException error) {
-                    clean = false;
-                }
-            }
             try {
-                recorder.reset();
-                recorder.release();
-            } catch (RuntimeException ignored) {
+                if (stopFirst) recorder.stop();
+                else recorder.abort();
+            } catch (Exception ignored) {
                 clean = false;
             }
             recorder = null;

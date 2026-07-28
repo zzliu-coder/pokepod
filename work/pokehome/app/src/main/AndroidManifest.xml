@@ -3,6 +3,7 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_pokehome"
         android:label="PokeHome"
         android:theme="@style/AppTheme">
         <activity
