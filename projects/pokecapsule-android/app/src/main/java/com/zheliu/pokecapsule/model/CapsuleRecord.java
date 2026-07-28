@@ -1,6 +1,7 @@
 package com.zheliu.pokecapsule.model;
 
 import com.zheliu.pokecapsule.core.ProcessingState;
+import com.zheliu.pokecapsule.core.TimeFormat;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -22,6 +23,9 @@ public final class CapsuleRecord {
     public final long durationMs;
     public final String error;
     public final boolean readOnly;
+    public final String relativeFolder;
+    public final String rawText;
+    public final String polishedText;
 
     public CapsuleRecord(
             File directory,
@@ -34,7 +38,10 @@ public final class CapsuleRecord {
             ProcessingState status,
             long durationMs,
             String error,
-            boolean readOnly) {
+            boolean readOnly,
+            String relativeFolder,
+            String rawText,
+            String polishedText) {
         this.directory = directory;
         this.id = id;
         this.title = title;
@@ -46,9 +53,18 @@ public final class CapsuleRecord {
         this.durationMs = durationMs;
         this.error = error;
         this.readOnly = readOnly;
+        this.relativeFolder = relativeFolder;
+        this.rawText = rawText;
+        this.polishedText = polishedText;
     }
 
-    public static CapsuleRecord fromJson(File directory, JSONObject capsule, JSONObject processing) {
+    public static CapsuleRecord fromJson(
+            File directory,
+            JSONObject capsule,
+            JSONObject processing,
+            String relativeFolder,
+            String rawText,
+            String polishedText) {
         ArrayList<String> tags = new ArrayList<>();
         JSONArray values = capsule.optJSONArray("tags");
         if (values != null) {
@@ -76,13 +92,60 @@ public final class CapsuleRecord {
                 state,
                 processing.optLong("durationMs", 0),
                 processing.optString("error", ""),
-                capsuleVersion != 1 || processingVersion != 1);
+                capsuleVersion != 1 || processingVersion != 1,
+                relativeFolder,
+                rawText,
+                polishedText);
     }
 
     public String displayLine() {
         long seconds = Math.max(0, durationMs / 1000);
-        String mark = favorite ? "★ " : "";
-        String suffix = readOnly ? " · 新协议只读" : "";
-        return mark + title + "\n" + createdAt + " · " + seconds + "秒 · " + status.wireValue() + suffix;
+        StringBuilder output = new StringBuilder();
+        if (favorite) output.append("★ ");
+        output.append(previewText());
+        output.append("\n").append(TimeFormat.localDisplay(createdAt))
+                .append(" · ").append(relativeFolder)
+                .append(" · ").append(seconds).append("秒");
+        String state = visibleState();
+        if (!state.isEmpty()) output.append(" · ").append(state);
+        if (readOnly) output.append(" · 只读");
+        if (!tags.isEmpty()) {
+            output.append("\n");
+            for (int index = 0; index < tags.size(); index++) {
+                if (index > 0) output.append("  ");
+                output.append("#").append(tags.get(index));
+            }
+        }
+        return output.toString();
+    }
+
+    public String previewText() {
+        String preferred = clean(polishedText);
+        if (preferred.isEmpty()) preferred = clean(rawText);
+        if (!preferred.isEmpty()) return preferred;
+        switch (status) {
+            case RECORDING: return "正在录音…";
+            case RECORDED:
+            case QUEUED: return "等待插电和 Wi‑Fi 转写";
+            case TRANSCRIBING: return "正在转写…";
+            case FAILED: return error == null || error.isEmpty() ? "转写失败" : "转写失败，可稍后重试";
+            default: return title == null || title.isEmpty() ? "语音胶囊" : title;
+        }
+    }
+
+    private String visibleState() {
+        switch (status) {
+            case RECORDING: return "录音中";
+            case RECORDED:
+            case QUEUED: return "等待转写";
+            case TRANSCRIBING: return "转写中";
+            case FAILED: return "转写失败";
+            default: return "";
+        }
+    }
+
+    private static String clean(String value) {
+        if (value == null) return "";
+        return value.trim().replaceAll("\\s+", " ");
     }
 }

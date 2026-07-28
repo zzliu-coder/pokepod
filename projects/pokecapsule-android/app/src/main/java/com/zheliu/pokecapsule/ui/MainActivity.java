@@ -11,8 +11,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -89,7 +91,21 @@ public final class MainActivity extends Activity {
 
         ListView list = new ListView(this);
         list.setDividerHeight(dp(1));
-        adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
+        adapter = new ArrayAdapter<String>(
+                this, android.R.layout.simple_list_item_1, new ArrayList<>()) {
+            @Override public View getView(int position, View convertView, ViewGroup parent) {
+                TextView text = (TextView) super.getView(position, convertView, parent);
+                text.setTextSize(17);
+                text.setTextColor(Color.BLACK);
+                text.setGravity(Gravity.CENTER_VERTICAL);
+                text.setMaxLines(4);
+                text.setEllipsize(TextUtils.TruncateAt.END);
+                text.setLineSpacing(dp(2), 1f);
+                text.setPadding(dp(10), dp(8), dp(10), dp(8));
+                text.setMinHeight(dp(64));
+                return text;
+            }
+        };
         list.setAdapter(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> {
             CapsuleRecord record = visible.get(position);

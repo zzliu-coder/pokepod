@@ -60,7 +60,19 @@ public final class CapsuleStore {
                 || !directory.getName().equalsIgnoreCase(processing.optString("capsuleId"))) {
             throw new IOException("胶囊 UUID 与目录不一致");
         }
-        return CapsuleRecord.fromJson(directory, capsule, processing);
+        File parent = directory.getParentFile();
+        String relativeFolder = parent == null ? "" :
+                paths.root().toURI().relativize(parent.toURI()).getPath();
+        if (relativeFolder.endsWith("/")) {
+            relativeFolder = relativeFolder.substring(0, relativeFolder.length() - 1);
+        }
+        return CapsuleRecord.fromJson(
+                directory,
+                capsule,
+                processing,
+                relativeFolder,
+                readOptionalText(new File(directory, "raw.txt")),
+                readOptionalText(new File(directory, "polished.md")));
     }
 
     public synchronized File beginRecording(String id) throws IOException {
@@ -525,6 +537,15 @@ public final class CapsuleStore {
             int count;
             while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
             return output.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    private static String readOptionalText(File file) {
+        if (!file.isFile()) return "";
+        try {
+            return readUtf8(file);
+        } catch (IOException ignored) {
+            return "";
         }
     }
 

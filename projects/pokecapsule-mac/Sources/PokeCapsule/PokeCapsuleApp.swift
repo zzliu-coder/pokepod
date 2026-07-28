@@ -176,19 +176,28 @@ struct CapsuleListView: View {
 
     var body: some View {
         List(model.filteredRecords, selection: $model.selection) { record in
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 7) {
                 HStack {
-                    Text(record.displayTitle).font(.headline)
-                    if record.capsule.favorite { Image(systemName: "star.fill") }
+                    Text(record.displayPreview)
+                        .font(.body.weight(.medium))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
                     Spacer()
-                    Text(record.processing?.status.localizedName ?? "状态未知")
-                        .foregroundStyle(.secondary)
+                    if record.capsule.favorite {
+                        Image(systemName: "star.fill")
+                            .foregroundStyle(.primary)
+                            .accessibilityLabel("已收藏")
+                    }
                 }
                 HStack {
                     Text(record.capsule.createdAt, style: .date)
                     Text(record.capsule.createdAt, style: .time)
-                    Text(duration(record.processing?.durationMs))
                     Text(record.relativeFolder)
+                    Text(duration(record.processing?.durationMs))
+                    if let status = record.visibleProcessingStatus {
+                        Text(status)
+                            .foregroundStyle(record.processing?.status == .failed ? .red : .secondary)
+                    }
                     if record.readOnly { Text("只读").foregroundStyle(.orange) }
                 }
                 .font(.caption)
@@ -196,8 +205,10 @@ struct CapsuleListView: View {
                 if !record.capsule.tags.isEmpty {
                     Text(record.capsule.tags.map { "#\($0)" }.joined(separator: "  "))
                         .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
+            .padding(.vertical, 4)
             .tag(record.id)
             .contentShape(Rectangle())
             .onTapGesture { selectedRecord = record }

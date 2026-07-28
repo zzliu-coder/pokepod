@@ -102,6 +102,40 @@ public struct CapsuleRecord: Identifiable, Hashable {
         let value = capsule.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? "未命名胶囊" : value
     }
+
+    public var displayPreview: String {
+        if let polished = normalizedPreview(polishedText), !polished.isEmpty {
+            return polished
+        }
+        if let raw = normalizedPreview(rawText), !raw.isEmpty {
+            return raw
+        }
+        switch processing?.status {
+        case .recording: return "正在录音…"
+        case .recorded, .queued: return "等待插电和 Wi‑Fi 转写"
+        case .transcribing: return "正在转写…"
+        case .failed: return "转写失败，可稍后重试"
+        default: return displayTitle
+        }
+    }
+
+    public var visibleProcessingStatus: String? {
+        switch processing?.status {
+        case .recording: return "录音中"
+        case .recorded, .queued: return "等待转写"
+        case .transcribing: return "转写中"
+        case .correcting: return "校对中"
+        case .failed: return "转写失败"
+        default: return nil
+        }
+    }
+
+    private func normalizedPreview(_ value: String?) -> String? {
+        value?
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 public struct CapsuleIndex: Equatable {
