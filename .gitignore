@@ -47,4 +47,6 @@ work/AndroidFileSync/
 *.aab
 DerivedData/
 .gradle/
+.gradle-local/
 local.properties
+*.app/
