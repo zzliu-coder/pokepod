@@ -35,6 +35,7 @@ public final class CapsuleDetailActivity extends Activity {
     private TextView metadata;
     private TextView raw;
     private TextView polished;
+    private TextView finalText;
     private MediaPlayer player;
 
     @Override public void onCreate(Bundle state) {
@@ -80,6 +81,16 @@ public final class CapsuleDetailActivity extends Activity {
         second.addView(ViewKit.button(this, "重试转写", v -> retry()), weight());
         page.addView(second, lp(-1, dp(52)));
 
+        LinearLayout third = row();
+        third.addView(ViewKit.button(this, "编辑最终文字", v -> promptFinalText()), weight());
+        third.addView(ViewKit.button(this, "复制最终文字", v -> copyFinalText()), weight());
+        page.addView(third, lp(-1, dp(52)));
+
+        page.addView(ViewKit.text(this, "最终文字", 20, Typeface.BOLD), lp(-1, dp(44)));
+        finalText = ViewKit.text(this, "尚未编辑", 17, Typeface.NORMAL);
+        finalText.setTextIsSelectable(true);
+        page.addView(finalText);
+
         page.addView(ViewKit.text(this, "原始转写", 20, Typeface.BOLD), lp(-1, dp(44)));
         raw = ViewKit.text(this, "尚未生成", 17, Typeface.NORMAL);
         raw.setTextIsSelectable(true);
@@ -99,6 +110,7 @@ public final class CapsuleDetailActivity extends Activity {
                 CapsuleRecord loaded = store.readCapsule(directory);
                 String rawText = readOptional(new File(directory, "raw.txt"));
                 String polishedText = readOptional(new File(directory, "polished.md"));
+                String finalValue = readOptional(new File(directory, "final.md"));
                 runOnUiThread(() -> {
                     record = loaded;
                     title.setText(loaded.title);
@@ -111,11 +123,42 @@ public final class CapsuleDetailActivity extends Activity {
                                     + (loaded.error.isEmpty() ? "" : "\n" + loaded.error));
                     raw.setText(rawText.isEmpty() ? "尚未生成" : rawText);
                     polished.setText(polishedText.isEmpty() ? "尚未生成" : polishedText);
+                    finalText.setText(finalValue.isEmpty() ? "尚未编辑" : finalValue);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> toast(error.getMessage()));
             }
         });
+    }
+
+    private void promptFinalText() {
+        if (record == null || record.readOnly) return;
+        String initial = record.finalText;
+        if (initial == null || initial.isEmpty()) {
+            initial = !record.polishedText.isEmpty() ? record.polishedText : record.rawText;
+        }
+        EditText input = new EditText(this);
+        input.setText(initial);
+        input.setMinLines(6);
+        input.setGravity(android.view.Gravity.TOP);
+        new AlertDialog.Builder(this)
+                .setTitle("编辑最终文字")
+                .setView(input)
+                .setPositiveButton("保存", (dialog, which) ->
+                        runOperation(
+                                () -> store.setFinalText(record.id, input.getText().toString()),
+                                "最终文字已保存"))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void copyFinalText() {
+        if (record == null) return;
+        String value = record.previewText();
+        android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PokeCapsule", value));
+        toast("文字已复制");
     }
 
     private void togglePlayback() {

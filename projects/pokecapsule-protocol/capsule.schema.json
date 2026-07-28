@@ -57,6 +57,10 @@
     "contentHash": {
       "type": ["string", "null"],
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "finalTextFile": {
+      "type": ["string", "null"],
+      "enum": ["final.md", null]
     }
   }
 }

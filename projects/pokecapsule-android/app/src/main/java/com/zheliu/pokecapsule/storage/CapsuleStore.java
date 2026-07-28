@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public final class CapsuleStore {
@@ -52,12 +53,25 @@ public final class CapsuleStore {
     }
 
     public synchronized CapsuleRecord readCapsule(File directory) throws IOException {
+        return readCapsuleDirectory(directory, true, null);
+    }
+
+    synchronized CapsuleRecord readTrashedCapsule(
+            File directory, JSONObject trash) throws IOException {
+        return readCapsuleDirectory(directory, false, trash);
+    }
+
+    private CapsuleRecord readCapsuleDirectory(
+            File directory, boolean requireUuidDirectory, JSONObject trash) throws IOException {
         paths.assertInsideRoot(directory);
-        if (!Ids.isUuid(directory.getName())) throw new IOException("胶囊目录名不是 UUID");
+        if (requireUuidDirectory && !Ids.isUuid(directory.getName())) {
+            throw new IOException("胶囊目录名不是 UUID");
+        }
         JSONObject capsule = readJson(new File(directory, "capsule.json"));
         JSONObject processing = readJson(new File(directory, "processing.json"));
-        if (!directory.getName().equalsIgnoreCase(capsule.optString("id"))
-                || !directory.getName().equalsIgnoreCase(processing.optString("capsuleId"))) {
+        String id = capsule.optString("id");
+        if (!id.equalsIgnoreCase(processing.optString("capsuleId"))
+                || (requireUuidDirectory && !directory.getName().equalsIgnoreCase(id))) {
             throw new IOException("胶囊 UUID 与目录不一致");
         }
         File parent = directory.getParentFile();
@@ -72,7 +86,11 @@ public final class CapsuleStore {
                 processing,
                 relativeFolder,
                 readOptionalText(new File(directory, "raw.txt")),
-                readOptionalText(new File(directory, "polished.md")));
+                readOptionalText(new File(directory, "polished.md")),
+                readOptionalText(new File(directory, "final.md")),
+                trash != null,
+                trash == null ? "" : trash.optString("trashedAt", ""),
+                trash == null ? "" : trash.optString("originalFolder", ""));
     }
 
     public synchronized File beginRecording(String id) throws IOException {
@@ -124,6 +142,14 @@ public final class CapsuleStore {
         File[] staged = paths.staging().listFiles(File::isDirectory);
         if (staged != null) {
             for (File directory : staged) {
+                if (directory.getName().startsWith("purge-")) {
+                    try {
+                        deleteTree(directory);
+                    } catch (IOException ignored) {
+                        // Keep residue for a later recovery pass.
+                    }
+                    continue;
+                }
                 File audio = new File(directory, "audio.m4a");
                 if (Ids.isUuid(directory.getName()) && audio.isFile() && audio.length() >= 256) {
                     File marker = new File(directory, "interrupted.txt");
@@ -175,6 +201,13 @@ public final class CapsuleStore {
     }
 
     public synchronized void deleteFolderMovingContentsToInbox(String relative) throws IOException {
+        deleteFolderMovingContentsToInbox(relative, null, null);
+    }
+
+    public synchronized void deleteFolderMovingContentsToInbox(
+            String relative,
+            List<String> expectedIds,
+            Map<String, Integer> expected) throws IOException {
         if (!PathPolicy.isSafeRelativeFolder(relative) || relative.isEmpty()) {
             throw new IOException("不能删除此目录");
         }
@@ -184,6 +217,10 @@ public final class CapsuleStore {
             assertFolderTreeContainsOnlyCapsules(folder);
             ArrayList<File> capsules = new ArrayList<>();
             collectCapsuleDirectories(folder, capsules);
+            ArrayList<String> ids = new ArrayList<>();
+            for (File capsule : capsules) ids.add(capsule.getName());
+            assertSameIds(ids, expectedIds);
+            validateExpectedRevisionsLocked(ids, expected);
             ArrayList<File> destinations = new ArrayList<>();
             for (File capsule : capsules) {
                 destinations.add(new File(paths.inbox(), capsule.getName()));
@@ -210,31 +247,65 @@ public final class CapsuleStore {
     }
 
     public synchronized void moveCapsules(List<String> ids, String destination) throws IOException {
+        moveCapsules(ids, destination, null);
+    }
+
+    public synchronized void moveCapsules(
+            List<String> ids, String destination, Map<String, Integer> expected) throws IOException {
         File target = destination.equals(PathPolicy.INBOX) ? paths.inbox()
                 : destination.equals(PathPolicy.ARCHIVE) ? paths.archive()
                 : paths.resolveUserFolder(destination);
         if (!target.isDirectory()) throw new IOException("目标目录不存在");
         try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
+            validateExpectedRevisionsLocked(ids, expected);
             ArrayList<File> sources = new ArrayList<>();
             ArrayList<File> destinations = new ArrayList<>();
+            ArrayList<String> originals = new ArrayList<>();
             for (String id : ids) {
                 File source = requireCapsule(id);
                 File destinationDirectory = new File(target, id);
                 if (source.getCanonicalFile().equals(destinationDirectory.getCanonicalFile())) continue;
                 sources.add(source);
                 destinations.add(destinationDirectory);
+                originals.add(readUtf8(new File(source, "capsule.json")));
             }
             moveDirectoriesAtomically(sources, destinations);
+            try {
+                for (File directory : destinations) touchCapsule(directory);
+            } catch (IOException error) {
+                for (int index = destinations.size() - 1; index >= 0; index--) {
+                    if (destinations.get(index).exists()) {
+                        try {
+                            AtomicFiles.writeUtf8(
+                                    new File(destinations.get(index), "capsule.json"),
+                                    originals.get(index));
+                        } catch (IOException rollbackError) {
+                            error.addSuppressed(rollbackError);
+                        }
+                        if (!destinations.get(index).renameTo(sources.get(index))) {
+                            error.addSuppressed(new IOException(
+                                    "移动回滚失败: " + sources.get(index).getName()));
+                        }
+                    }
+                }
+                throw error;
+            }
         }
     }
 
     public synchronized List<String> copyCapsules(List<String> ids, String destination) throws IOException {
+        return copyCapsules(ids, destination, null);
+    }
+
+    public synchronized List<String> copyCapsules(
+            List<String> ids, String destination, Map<String, Integer> expected) throws IOException {
         File target = destination.equals(PathPolicy.INBOX) ? paths.inbox()
                 : destination.equals(PathPolicy.ARCHIVE) ? paths.archive()
                 : paths.resolveUserFolder(destination);
         if (!target.isDirectory()) throw new IOException("目标目录不存在");
         ArrayList<String> created = new ArrayList<>();
         try (RootWriteLock lock = RootWriteLock.acquire(paths, "android")) {
+            validateExpectedRevisionsLocked(ids, expected);
             File transaction = new File(paths.staging(), lock.transactionId());
             if (!transaction.mkdir()) throw new IOException("无法创建复制事务");
             ArrayList<File> stagedCopies = new ArrayList<>();
@@ -272,23 +343,43 @@ public final class CapsuleStore {
     }
 
     public synchronized void deleteCapsules(List<String> ids) throws IOException {
-        try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
-            ArrayList<File> sources = new ArrayList<>();
-            ArrayList<File> destinations = new ArrayList<>();
-            long transactionTime = System.currentTimeMillis();
-            int index = 0;
-            for (String id : ids) {
-                File source = requireCapsule(id);
-                sources.add(source);
-                destinations.add(new File(paths.trash(), id + "-" + transactionTime + "-" + index));
-                index++;
-            }
-            moveDirectoriesAtomically(sources, destinations);
-        }
+        deleteCapsules(ids, null);
+    }
+
+    public synchronized void deleteCapsules(
+            List<String> ids, Map<String, Integer> expected) throws IOException {
+        new TrashStore(paths, this).moveToTrash(ids, expected);
+    }
+
+    public synchronized List<CapsuleRecord> scanTrash() throws IOException {
+        return new TrashStore(paths, this).scan();
+    }
+
+    public synchronized void restoreCapsules(List<String> ids) throws IOException {
+        restoreCapsules(ids, null);
+    }
+
+    public synchronized void restoreCapsules(
+            List<String> ids, Map<String, Integer> expected) throws IOException {
+        new TrashStore(paths, this).restore(ids, expected);
+    }
+
+    public synchronized void purgeCapsules(List<String> ids) throws IOException {
+        purgeCapsules(ids, null);
+    }
+
+    public synchronized void purgeCapsules(
+            List<String> ids, Map<String, Integer> expected) throws IOException {
+        new TrashStore(paths, this).purge(ids, expected);
     }
 
     public synchronized void setFavorite(List<String> ids, boolean favorite) throws IOException {
-        mutateCapsules(ids, capsule -> capsule.put("favorite", favorite));
+        setFavorite(ids, favorite, null);
+    }
+
+    public synchronized void setFavorite(
+            List<String> ids, boolean favorite, Map<String, Integer> expected) throws IOException {
+        mutateCapsules(ids, capsule -> capsule.put("favorite", favorite), expected);
     }
 
     public synchronized void setTitle(String id, String input) throws IOException {
@@ -298,80 +389,143 @@ public final class CapsuleStore {
     }
 
     public synchronized void addTag(List<String> ids, String input) throws IOException {
-        String tag = PathPolicy.normalizeTag(input);
-        if (!PathPolicy.isValidTag(tag)) throw new IOException("标签名称不合法");
+        addTags(ids, Collections.singletonList(input), null);
+    }
+
+    public synchronized void addTags(
+            List<String> ids, List<String> inputs, Map<String, Integer> expected) throws IOException {
+        ArrayList<String> normalized = new ArrayList<>();
+        for (String input : inputs) {
+            String tag = PathPolicy.normalizeTag(input);
+            if (!PathPolicy.isValidTag(tag)) throw new IOException("标签名称不合法");
+            normalized.add(tag);
+        }
         mutateCapsules(ids, capsule -> {
             JSONArray tags = capsule.optJSONArray("tags");
             if (tags == null) tags = new JSONArray();
-            for (int index = 0; index < tags.length(); index++) {
-                if (tag.equalsIgnoreCase(tags.optString(index))) return;
+            for (String tag : normalized) {
+                boolean exists = false;
+                for (int index = 0; index < tags.length(); index++) {
+                    if (tag.equalsIgnoreCase(tags.optString(index))) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) tags.put(tag);
             }
-            tags.put(tag);
             capsule.put("tags", tags);
-        });
+        }, expected);
     }
 
     public synchronized void removeTag(List<String> ids, String input) throws IOException {
-        String tag = PathPolicy.normalizeTag(input);
+        removeTags(ids, Collections.singletonList(input), null);
+    }
+
+    public synchronized void removeTags(
+            List<String> ids, List<String> inputs, Map<String, Integer> expected) throws IOException {
+        HashSet<String> normalized = new HashSet<>();
+        for (String input : inputs) {
+            String tag = PathPolicy.normalizeTag(input);
+            if (!PathPolicy.isValidTag(tag)) throw new IOException("标签名称不合法");
+            normalized.add(tag.toLowerCase(java.util.Locale.ROOT));
+        }
         mutateCapsules(ids, capsule -> {
             JSONArray old = capsule.optJSONArray("tags");
             JSONArray replacement = new JSONArray();
             if (old != null) {
                 for (int index = 0; index < old.length(); index++) {
                     String value = old.optString(index);
-                    if (!tag.equalsIgnoreCase(value)) replacement.put(value);
+                    if (!normalized.contains(value.toLowerCase(java.util.Locale.ROOT))) {
+                        replacement.put(value);
+                    }
                 }
             }
             capsule.put("tags", replacement);
-        });
+        }, expected);
     }
 
     public synchronized void renameTag(String oldInput, String newInput) throws IOException {
+        renameTag(oldInput, newInput, null, null);
+    }
+
+    public synchronized void renameTag(
+            String oldInput,
+            String newInput,
+            List<String> expectedIds,
+            Map<String, Integer> expected) throws IOException {
         String oldTag = PathPolicy.normalizeTag(oldInput);
         String newTag = PathPolicy.normalizeTag(newInput);
         if (!PathPolicy.isValidTag(oldTag) || !PathPolicy.isValidTag(newTag)) {
             throw new IOException("标签名称不合法");
         }
-        ArrayList<String> affected = new ArrayList<>();
-        for (CapsuleRecord record : scan()) {
-            for (String tag : record.tags) {
-                if (oldTag.equalsIgnoreCase(tag)) {
-                    affected.add(record.id);
-                    break;
-                }
-            }
-        }
-        if (affected.isEmpty()) return;
-        mutateCapsules(affected, capsule -> {
-            JSONArray old = capsule.optJSONArray("tags");
-            JSONArray replacement = new JSONArray();
-            Set<String> seen = new HashSet<>();
-            if (old != null) {
-                for (int index = 0; index < old.length(); index++) {
-                    String value = old.optString(index);
-                    String candidate = oldTag.equalsIgnoreCase(value) ? newTag : value;
-                    if (seen.add(candidate.toLowerCase(java.util.Locale.ROOT))) {
-                        replacement.put(candidate);
+        try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
+            ArrayList<String> affected = new ArrayList<>();
+            for (CapsuleRecord record : scan()) {
+                for (String tag : record.tags) {
+                    if (oldTag.equalsIgnoreCase(tag)) {
+                        affected.add(record.id);
+                        break;
                     }
                 }
             }
-            capsule.put("tags", replacement);
-        });
+            assertSameIds(affected, expectedIds);
+            validateExpectedRevisionsLocked(affected, expected);
+            if (affected.isEmpty()) return;
+            mutateCapsulesLocked(affected, capsule -> {
+                JSONArray old = capsule.optJSONArray("tags");
+                JSONArray replacement = new JSONArray();
+                Set<String> seen = new HashSet<>();
+                if (old != null) {
+                    for (int index = 0; index < old.length(); index++) {
+                        String value = old.optString(index);
+                        String candidate = oldTag.equalsIgnoreCase(value) ? newTag : value;
+                        if (seen.add(candidate.toLowerCase(java.util.Locale.ROOT))) {
+                            replacement.put(candidate);
+                        }
+                    }
+                }
+                capsule.put("tags", replacement);
+            });
+        }
     }
 
     public synchronized void deleteTag(String input) throws IOException {
+        deleteTag(input, null, null);
+    }
+
+    public synchronized void deleteTag(
+            String input,
+            List<String> expectedIds,
+            Map<String, Integer> expected) throws IOException {
         String tag = PathPolicy.normalizeTag(input);
         if (!PathPolicy.isValidTag(tag)) throw new IOException("标签名称不合法");
-        ArrayList<String> affected = new ArrayList<>();
-        for (CapsuleRecord record : scan()) {
-            for (String value : record.tags) {
-                if (tag.equalsIgnoreCase(value)) {
-                    affected.add(record.id);
-                    break;
+        try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
+            ArrayList<String> affected = new ArrayList<>();
+            for (CapsuleRecord record : scan()) {
+                for (String value : record.tags) {
+                    if (tag.equalsIgnoreCase(value)) {
+                        affected.add(record.id);
+                        break;
+                    }
                 }
             }
+            assertSameIds(affected, expectedIds);
+            validateExpectedRevisionsLocked(affected, expected);
+            if (!affected.isEmpty()) {
+                final String target = tag;
+                mutateCapsulesLocked(affected, capsule -> {
+                    JSONArray old = capsule.optJSONArray("tags");
+                    JSONArray replacement = new JSONArray();
+                    if (old != null) {
+                        for (int index = 0; index < old.length(); index++) {
+                            String value = old.optString(index);
+                            if (!target.equalsIgnoreCase(value)) replacement.put(value);
+                        }
+                    }
+                    capsule.put("tags", replacement);
+                });
+            }
         }
-        if (!affected.isEmpty()) removeTag(affected, tag);
     }
 
     public synchronized void commitImportedCapsule(
@@ -445,6 +599,115 @@ public final class CapsuleStore {
             }
             AtomicFiles.writeUtf8(new File(directory, "processing.json"), pretty(processing));
             deleteEmptyTree(stagedDirectory);
+        }
+    }
+
+    public synchronized void commitFinalText(
+            String stagedRelative,
+            String id,
+            int expectedRevision) throws IOException {
+        if (!Ids.isUuid(id) || stagedRelative == null || stagedRelative.contains("..")
+                || stagedRelative.startsWith("/") || stagedRelative.contains("\\")) {
+            throw new IOException("最终文字暂存路径不合法");
+        }
+        File stagedDirectory = new File(paths.root(), stagedRelative);
+        paths.assertInsideRoot(stagedDirectory);
+        String stagingRoot = paths.staging().getCanonicalPath();
+        if (!stagedDirectory.getCanonicalPath().startsWith(stagingRoot + File.separator)
+                || !stagedDirectory.isDirectory()
+                || !id.equalsIgnoreCase(stagedDirectory.getName())) {
+            throw new IOException("最终文字不在暂存区");
+        }
+        File stagedText = new File(stagedDirectory, "final.md");
+        if (!stagedText.isFile() || stagedText.length() > 1024 * 1024) {
+            throw new IOException("最终文字文件缺失或过大");
+        }
+        File directory = requireCapsule(id);
+        try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
+            JSONObject capsule = readJson(new File(directory, "capsule.json"));
+            if (expectedRevision >= 0 && capsule.optInt("revision", -1) != expectedRevision) {
+                throw new IOException("胶囊已变化，请解决同步冲突后重试");
+            }
+            writeFinalTextLocked(directory, capsule, readUtf8(stagedText));
+            deleteEmptyTree(stagedDirectory);
+        }
+    }
+
+    public synchronized void setFinalText(String id, String text) throws IOException {
+        setFinalText(id, text, -1);
+    }
+
+    public synchronized void setFinalText(
+            String id, String text, int expectedRevision) throws IOException {
+        if (text == null || text.getBytes(StandardCharsets.UTF_8).length > 1024 * 1024) {
+            throw new IOException("最终文字过大");
+        }
+        File directory = requireCapsule(id);
+        try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
+            JSONObject capsule = readJson(new File(directory, "capsule.json"));
+            if (expectedRevision >= 0
+                    && capsule.optInt("revision", -1) != expectedRevision) {
+                throw new IOException("VERSION_CONFLICT " + id
+                        + " expected=" + expectedRevision
+                        + " actual=" + capsule.optInt("revision", -1));
+            }
+            writeFinalTextLocked(directory, capsule, text);
+        }
+    }
+
+    private void writeFinalTextLocked(
+            File directory, JSONObject capsule, String text) throws IOException {
+        File finalFile = new File(directory, "final.md");
+        File capsuleFile = new File(directory, "capsule.json");
+        boolean hadFinal = finalFile.isFile();
+        String oldFinal = hadFinal ? readUtf8(finalFile) : null;
+        String oldCapsule = readUtf8(capsuleFile);
+        try {
+            capsule.put("finalTextFile", "final.md");
+            capsule.put("revision", capsule.optInt("revision", 0) + 1);
+            capsule.put("updatedAt", TimeFormat.utcNow());
+        } catch (JSONException error) {
+            throw new IOException("无法更新最终文字元数据", error);
+        }
+        try {
+            AtomicFiles.writeUtf8(finalFile, text);
+            AtomicFiles.writeUtf8(capsuleFile, pretty(capsule));
+        } catch (IOException error) {
+            try {
+                if (hadFinal) {
+                    AtomicFiles.writeUtf8(finalFile, oldFinal);
+                } else if (finalFile.exists() && !finalFile.delete()) {
+                    throw new IOException("无法移除未提交的最终文字");
+                }
+                AtomicFiles.writeUtf8(capsuleFile, oldCapsule);
+            } catch (IOException rollbackError) {
+                error.addSuppressed(rollbackError);
+            }
+            throw error;
+        }
+    }
+
+    public synchronized void validateExpectedRevisions(
+            List<String> ids, Map<String, Integer> expected) throws IOException {
+        validateExpectedRevisionsLocked(ids, expected);
+    }
+
+    void validateExpectedRevisionsLocked(
+            List<String> ids, Map<String, Integer> expected) throws IOException {
+        if (expected == null) return;
+        if (expected.size() != ids.size()) {
+            throw new IOException("缺少完整的胶囊版本快照");
+        }
+        for (String id : ids) {
+            Integer value = expected.get(id.toLowerCase(java.util.Locale.ROOT));
+            if (value == null) throw new IOException("缺少胶囊版本: " + id);
+            File directory = requireCapsule(id);
+            JSONObject capsule = readJson(new File(directory, "capsule.json"));
+            int actual = capsule.optInt("revision", -1);
+            if (actual != value) {
+                throw new IOException("VERSION_CONFLICT " + id
+                        + " expected=" + value + " actual=" + actual);
+            }
         }
     }
 
@@ -530,7 +793,7 @@ public final class CapsuleStore {
         }
     }
 
-    private static String readUtf8(File file) throws IOException {
+    static String readUtf8(File file) throws IOException {
         try (FileInputStream input = new FileInputStream(file);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
@@ -540,7 +803,7 @@ public final class CapsuleStore {
         }
     }
 
-    private static String readOptionalText(File file) {
+    static String readOptionalText(File file) {
         if (!file.isFile()) return "";
         try {
             return readUtf8(file);
@@ -575,44 +838,85 @@ public final class CapsuleStore {
         return source;
     }
 
+    File requireActiveCapsule(String id) throws IOException {
+        return requireCapsule(id);
+    }
+
+    void touchCapsule(File directory) throws IOException {
+        File file = new File(directory, "capsule.json");
+        JSONObject capsule = readJson(file);
+        try {
+            capsule.put("revision", capsule.optInt("revision", 0) + 1);
+            capsule.put("updatedAt", TimeFormat.utcNow());
+        } catch (JSONException error) {
+            throw new IOException("无法更新胶囊版本", error);
+        }
+        AtomicFiles.writeUtf8(file, pretty(capsule));
+    }
+
     private void mutateCapsules(List<String> ids, JsonMutation mutation) throws IOException {
+        mutateCapsules(ids, mutation, null);
+    }
+
+    private void mutateCapsules(
+            List<String> ids,
+            JsonMutation mutation,
+            Map<String, Integer> expected) throws IOException {
         try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
-            ArrayList<File> files = new ArrayList<>();
-            ArrayList<String> originals = new ArrayList<>();
-            ArrayList<String> updates = new ArrayList<>();
-            for (String id : ids) {
-                File directory = requireCapsule(id);
-                File file = new File(directory, "capsule.json");
-                String original = readUtf8(file);
-                JSONObject capsule;
-                try {
-                    capsule = new JSONObject(original);
-                    mutation.apply(capsule);
-                    capsule.put("revision", capsule.optInt("revision", 0) + 1);
-                    capsule.put("updatedAt", TimeFormat.utcNow());
-                } catch (JSONException error) {
-                    throw new IOException("无法修改元数据", error);
-                }
-                files.add(file);
-                originals.add(original);
-                updates.add(pretty(capsule));
-            }
-            int committed = 0;
+            validateExpectedRevisionsLocked(ids, expected);
+            mutateCapsulesLocked(ids, mutation);
+        }
+    }
+
+    private void mutateCapsulesLocked(
+            List<String> ids, JsonMutation mutation) throws IOException {
+        ArrayList<File> files = new ArrayList<>();
+        ArrayList<String> originals = new ArrayList<>();
+        ArrayList<String> updates = new ArrayList<>();
+        for (String id : ids) {
+            File directory = requireCapsule(id);
+            File file = new File(directory, "capsule.json");
+            String original = readUtf8(file);
+            JSONObject capsule;
             try {
-                for (int index = 0; index < files.size(); index++) {
-                    AtomicFiles.writeUtf8(files.get(index), updates.get(index));
-                    committed++;
-                }
-            } catch (IOException error) {
-                for (int index = committed - 1; index >= 0; index--) {
-                    try {
-                        AtomicFiles.writeUtf8(files.get(index), originals.get(index));
-                    } catch (IOException rollbackError) {
-                        error.addSuppressed(rollbackError);
-                    }
-                }
-                throw error;
+                capsule = new JSONObject(original);
+                mutation.apply(capsule);
+                capsule.put("revision", capsule.optInt("revision", 0) + 1);
+                capsule.put("updatedAt", TimeFormat.utcNow());
+            } catch (JSONException error) {
+                throw new IOException("无法修改元数据", error);
             }
+            files.add(file);
+            originals.add(original);
+            updates.add(pretty(capsule));
+        }
+        int committed = 0;
+        try {
+            for (int index = 0; index < files.size(); index++) {
+                AtomicFiles.writeUtf8(files.get(index), updates.get(index));
+                committed++;
+            }
+        } catch (IOException error) {
+            for (int index = committed - 1; index >= 0; index--) {
+                try {
+                    AtomicFiles.writeUtf8(files.get(index), originals.get(index));
+                } catch (IOException rollbackError) {
+                    error.addSuppressed(rollbackError);
+                }
+            }
+            throw error;
+        }
+    }
+
+    private void assertSameIds(
+            List<String> actual, List<String> expectedIds) throws IOException {
+        if (expectedIds == null) return;
+        HashSet<String> left = new HashSet<>();
+        HashSet<String> right = new HashSet<>();
+        for (String id : actual) left.add(id.toLowerCase(java.util.Locale.ROOT));
+        for (String id : expectedIds) right.add(id.toLowerCase(java.util.Locale.ROOT));
+        if (!left.equals(right)) {
+            throw new IOException("VERSION_CONFLICT 操作范围已变化，请同步后重试");
         }
     }
 
@@ -684,7 +988,7 @@ public final class CapsuleStore {
         }
     }
 
-    private static void moveDirectoriesAtomically(
+    static void moveDirectoriesAtomically(
             List<File> sources,
             List<File> destinations) throws IOException {
         if (sources.size() != destinations.size()) throw new IOException("移动事务参数不一致");
@@ -732,18 +1036,26 @@ public final class CapsuleStore {
         }
     }
 
-    private static void deleteEmptyTree(File file) throws IOException {
+    static void deleteTree(File file) throws IOException {
         if (file.isDirectory()) {
             File[] children = file.listFiles();
             if (children != null) {
-                for (File child : children) deleteEmptyTree(child);
+                for (File child : children) deleteTree(child);
             }
         }
         if (file.exists() && !file.delete()) throw new IOException("无法删除: " + file.getName());
     }
 
+    static void deleteEmptyTree(File file) throws IOException {
+        deleteTree(file);
+    }
+
     private interface JsonMutation {
         void apply(JSONObject object) throws JSONException;
+    }
+
+    static String prettyJson(JSONObject object) throws IOException {
+        return pretty(object);
     }
 
     private static String pretty(JSONObject object) throws IOException {

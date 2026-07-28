@@ -4,6 +4,9 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -29,6 +32,7 @@ import com.zheliu.pokecapsule.service.OverlayService;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
+import com.zheliu.pokecapsule.storage.SearchIndex;
 import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
 import java.io.File;
@@ -52,9 +56,17 @@ public final class MainActivity extends Activity {
     private ArrayAdapter<CapsuleRecord> adapter;
     private TextView heading;
     private TextView selectionBar;
+    private TextView moveAction;
+    private TextView copyAction;
+    private TextView tagAction;
+    private TextView favoriteAction;
+    private TextView deleteAction;
     private String folderFilter = PathPolicy.INBOX;
     private String tagFilter;
     private boolean favoritesOnly;
+    private boolean trashOnly;
+    private String statusFilter;
+    private String searchQuery = "";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -88,6 +100,13 @@ public final class MainActivity extends Activity {
         tabs.addView(smallButton("收藏", v -> showFavorites()), weight());
         tabs.addView(smallButton("设置", v -> showSettings()), weight());
         page.addView(tabs, lp(-1, dp(48)));
+
+        LinearLayout tools = row();
+        tools.addView(smallButton("搜索", v -> promptSearch()), weight());
+        tools.addView(smallButton("待转写", v -> showSmart("pending")), weight());
+        tools.addView(smallButton("失败", v -> showSmart("failed")), weight());
+        tools.addView(smallButton("回收站", v -> showTrash()), weight());
+        page.addView(tools, lp(-1, dp(44)));
 
         ListView list = new ListView(this);
         list.setDividerHeight(dp(1));
@@ -126,7 +145,7 @@ public final class MainActivity extends Activity {
         list.setAdapter(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> {
             CapsuleRecord record = visible.get(position);
-            if (selected.isEmpty()) {
+            if (selected.isEmpty() && !trashOnly) {
                 Intent detail = new Intent(this, CapsuleDetailActivity.class);
                 detail.putExtra("capsuleId", record.id);
                 startActivity(detail);
@@ -145,11 +164,16 @@ public final class MainActivity extends Activity {
         page.addView(selectionBar, lp(-1, dp(34)));
 
         LinearLayout actions = row();
-        actions.addView(smallButton("移动", v -> chooseDestination(false)), weight());
-        actions.addView(smallButton("复制", v -> chooseDestination(true)), weight());
-        actions.addView(smallButton("标签", v -> promptTag()), weight());
-        actions.addView(smallButton("收藏", v -> promptFavorite()), weight());
-        actions.addView(smallButton("删除", v -> confirmDelete()), weight());
+        moveAction = smallButton("移动", v -> primaryMoveAction());
+        copyAction = smallButton("复制", v -> promptCopyActions());
+        tagAction = smallButton("标签", v -> promptTag());
+        favoriteAction = smallButton("收藏", v -> promptFavorite());
+        deleteAction = smallButton("删除", v -> confirmDelete());
+        actions.addView(moveAction, weight());
+        actions.addView(copyAction, weight());
+        actions.addView(tagAction, weight());
+        actions.addView(favoriteAction, weight());
+        actions.addView(deleteAction, weight());
         page.addView(actions, lp(-1, dp(48)));
         return page;
     }
@@ -185,12 +209,13 @@ public final class MainActivity extends Activity {
     private void refresh() {
         io.execute(() -> {
             try {
-                List<CapsuleRecord> all = store.scan();
+                List<CapsuleRecord> all = trashOnly ? store.scanTrash() : store.scan();
                 ArrayList<CapsuleRecord> filtered = new ArrayList<>();
                 for (CapsuleRecord record : all) {
                     if (matches(record)) filtered.add(record);
                 }
-                runOnUiThread(() -> applyRecords(filtered));
+                List<CapsuleRecord> searched = SearchIndex.filter(filtered, searchQuery);
+                runOnUiThread(() -> applyRecords(searched));
             } catch (Exception error) {
                 runOnUiThread(() -> toast("读取失败: " + error.getMessage()));
             }
@@ -198,6 +223,21 @@ public final class MainActivity extends Activity {
     }
 
     private boolean matches(CapsuleRecord record) {
+        if (trashOnly) return true;
+        if ("pending".equals(statusFilter)) {
+            switch (record.status) {
+                case RECORDED:
+                case QUEUED:
+                case TRANSCRIBING:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        if ("failed".equals(statusFilter)) {
+            return record.status
+                    == com.zheliu.pokecapsule.core.ProcessingState.FAILED;
+        }
         if (favoritesOnly) return record.favorite;
         if (tagFilter != null) {
             for (String tag : record.tags) if (tagFilter.equalsIgnoreCase(tag)) return true;
@@ -225,12 +265,20 @@ public final class MainActivity extends Activity {
         selectionBar.setText(selected.isEmpty()
                 ? "长按胶囊开始多选"
                 : "已选择 " + selected.size() + " 个胶囊 · 轻点继续选择");
+        moveAction.setText(trashOnly ? "恢复" : "移动");
+        copyAction.setText(trashOnly ? "复制文字" : "复制");
+        tagAction.setEnabled(!trashOnly);
+        favoriteAction.setEnabled(!trashOnly);
+        deleteAction.setText(trashOnly ? "永久删除" : "删除");
     }
 
     private void showInbox() {
         folderFilter = PathPolicy.INBOX;
         tagFilter = null;
         favoritesOnly = false;
+        trashOnly = false;
+        statusFilter = null;
+        searchQuery = "";
         selected.clear();
         heading.setText("PokeCapsule · Inbox");
         refresh();
@@ -240,6 +288,9 @@ public final class MainActivity extends Activity {
         folderFilter = null;
         tagFilter = null;
         favoritesOnly = true;
+        trashOnly = false;
+        statusFilter = null;
+        searchQuery = "";
         selected.clear();
         heading.setText("PokeCapsule · 收藏");
         refresh();
@@ -258,6 +309,9 @@ public final class MainActivity extends Activity {
                             folderFilter = choices.get(which);
                             tagFilter = null;
                             favoritesOnly = false;
+                            trashOnly = false;
+                            statusFilter = null;
+                            searchQuery = "";
                             selected.clear();
                             heading.setText("PokeCapsule · " + folderFilter);
                             refresh();
@@ -301,6 +355,9 @@ public final class MainActivity extends Activity {
                             tagFilter = tags.get(which);
                             folderFilter = null;
                             favoritesOnly = false;
+                            trashOnly = false;
+                            statusFilter = null;
+                            searchQuery = "";
                             selected.clear();
                             heading.setText("PokeCapsule · #" + tagFilter);
                             refresh();
@@ -344,6 +401,57 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void primaryMoveAction() {
+        if (!trashOnly) {
+            chooseDestination(false);
+            return;
+        }
+        List<String> ids = selectedIdsOrWarn();
+        if (ids == null) return;
+        runStoreOperation(() -> store.restoreCapsules(ids), "已恢复胶囊");
+    }
+
+    private void promptCopyActions() {
+        List<String> ids = selectedIdsOrWarn();
+        if (ids == null) return;
+        if (trashOnly) {
+            copySelectedText(ids, false);
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("复制")
+                .setItems(new String[]{"复制文字", "复制 Markdown", "复制胶囊到目录"},
+                        (dialog, which) -> {
+                            if (which == 0) copySelectedText(ids, false);
+                            else if (which == 1) copySelectedText(ids, true);
+                            else chooseDestination(true);
+                        })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void copySelectedText(List<String> ids, boolean markdown) {
+        StringBuilder output = new StringBuilder();
+        for (CapsuleRecord record : visible) {
+            if (!ids.contains(record.id)) continue;
+            if (output.length() > 0) output.append(markdown ? "\n\n---\n\n" : "\n\n");
+            if (markdown) {
+                output.append("## ").append(record.title).append("\n\n")
+                        .append(record.previewText()).append("\n\n")
+                        .append(record.metadataText());
+                if (!record.tagsText().isEmpty()) {
+                    output.append("\n\n").append(record.tagsText());
+                }
+            } else {
+                output.append(record.previewText());
+            }
+        }
+        ClipboardManager clipboard =
+                (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("PokeCapsule", output.toString()));
+        toast("已复制 " + ids.size() + " 条胶囊文字");
+    }
+
     private void promptTag() {
         List<String> ids = selectedIdsOrWarn();
         if (ids == null) return;
@@ -372,12 +480,61 @@ public final class MainActivity extends Activity {
         List<String> ids = selectedIdsOrWarn();
         if (ids == null) return;
         new AlertDialog.Builder(this)
-                .setTitle("删除 " + ids.size() + " 个胶囊？")
-                .setMessage("胶囊会先移入 PokeCapsule/.trash，不会立即抹除。")
-                .setPositiveButton("删除", (dialog, which) ->
-                        runStoreOperation(() -> store.deleteCapsules(ids), "已移入回收区"))
+                .setTitle((trashOnly ? "永久删除 " : "删除 ") + ids.size() + " 个胶囊？")
+                .setMessage(trashOnly
+                        ? "录音和文字会永久删除，无法恢复。"
+                        : "胶囊会进入回收站，可随时恢复。")
+                .setPositiveButton(trashOnly ? "永久删除" : "删除", (dialog, which) ->
+                        runStoreOperation(
+                                () -> {
+                                    if (trashOnly) store.purgeCapsules(ids);
+                                    else store.deleteCapsules(ids);
+                                },
+                                trashOnly ? "已永久删除" : "已移入回收站"))
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void promptSearch() {
+        promptText("全文搜索", "文字、标签或目录", value -> {
+            searchQuery = value == null ? "" : value.trim();
+            heading.setText(searchQuery.isEmpty()
+                    ? "PokeCapsule · 全部"
+                    : "搜索 · " + searchQuery);
+            folderFilter = null;
+            tagFilter = null;
+            favoritesOnly = false;
+            trashOnly = false;
+            statusFilter = null;
+            selected.clear();
+            refresh();
+        });
+    }
+
+    private void showSmart(String filter) {
+        folderFilter = null;
+        tagFilter = null;
+        favoritesOnly = false;
+        trashOnly = false;
+        statusFilter = filter;
+        searchQuery = "";
+        selected.clear();
+        heading.setText("pending".equals(filter)
+                ? "PokeCapsule · 待转写"
+                : "PokeCapsule · 转写失败");
+        refresh();
+    }
+
+    private void showTrash() {
+        folderFilter = null;
+        tagFilter = null;
+        favoritesOnly = false;
+        trashOnly = true;
+        statusFilter = null;
+        searchQuery = "";
+        selected.clear();
+        heading.setText("PokeCapsule · 回收站");
+        refresh();
     }
 
     private void showSettings() {

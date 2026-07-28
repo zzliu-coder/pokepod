@@ -17,6 +17,7 @@ public final class CapsuleRecord {
     public final String title;
     public final String createdAt;
     public final String updatedAt;
+    public final int revision;
     public final boolean favorite;
     public final List<String> tags;
     public final ProcessingState status;
@@ -26,6 +27,51 @@ public final class CapsuleRecord {
     public final String relativeFolder;
     public final String rawText;
     public final String polishedText;
+    public final String finalText;
+    public final boolean trashed;
+    public final String trashedAt;
+    public final String originalFolder;
+
+    public CapsuleRecord(
+            File directory,
+            String id,
+            String title,
+            String createdAt,
+            String updatedAt,
+            int revision,
+            boolean favorite,
+            List<String> tags,
+            ProcessingState status,
+            long durationMs,
+            String error,
+            boolean readOnly,
+            String relativeFolder,
+            String rawText,
+            String polishedText,
+            String finalText,
+            boolean trashed,
+            String trashedAt,
+            String originalFolder) {
+        this.directory = directory;
+        this.id = id;
+        this.title = title;
+        this.createdAt = createdAt;
+        this.updatedAt = updatedAt;
+        this.revision = revision;
+        this.favorite = favorite;
+        this.tags = Collections.unmodifiableList(new ArrayList<>(tags));
+        this.status = status;
+        this.durationMs = durationMs;
+        this.error = error;
+        this.readOnly = readOnly;
+        this.relativeFolder = relativeFolder;
+        this.rawText = rawText;
+        this.polishedText = polishedText;
+        this.finalText = finalText;
+        this.trashed = trashed;
+        this.trashedAt = trashedAt;
+        this.originalFolder = originalFolder;
+    }
 
     public CapsuleRecord(
             File directory,
@@ -42,20 +88,9 @@ public final class CapsuleRecord {
             String relativeFolder,
             String rawText,
             String polishedText) {
-        this.directory = directory;
-        this.id = id;
-        this.title = title;
-        this.createdAt = createdAt;
-        this.updatedAt = updatedAt;
-        this.favorite = favorite;
-        this.tags = Collections.unmodifiableList(new ArrayList<>(tags));
-        this.status = status;
-        this.durationMs = durationMs;
-        this.error = error;
-        this.readOnly = readOnly;
-        this.relativeFolder = relativeFolder;
-        this.rawText = rawText;
-        this.polishedText = polishedText;
+        this(directory, id, title, createdAt, updatedAt, 1, favorite, tags, status,
+                durationMs, error, readOnly, relativeFolder, rawText, polishedText,
+                "", false, "", "");
     }
 
     public static CapsuleRecord fromJson(
@@ -65,6 +100,21 @@ public final class CapsuleRecord {
             String relativeFolder,
             String rawText,
             String polishedText) {
+        return fromJson(directory, capsule, processing, relativeFolder, rawText,
+                polishedText, "", false, "", "");
+    }
+
+    public static CapsuleRecord fromJson(
+            File directory,
+            JSONObject capsule,
+            JSONObject processing,
+            String relativeFolder,
+            String rawText,
+            String polishedText,
+            String finalText,
+            boolean trashed,
+            String trashedAt,
+            String originalFolder) {
         ArrayList<String> tags = new ArrayList<>();
         JSONArray values = capsule.optJSONArray("tags");
         if (values != null) {
@@ -87,6 +137,7 @@ public final class CapsuleRecord {
                 capsule.optString("title", "未命名胶囊"),
                 capsule.optString("createdAt", ""),
                 capsule.optString("updatedAt", ""),
+                capsule.optInt("revision", 1),
                 capsule.optBoolean("favorite", false),
                 tags,
                 state,
@@ -95,7 +146,11 @@ public final class CapsuleRecord {
                 capsuleVersion != 1 || processingVersion != 1,
                 relativeFolder,
                 rawText,
-                polishedText);
+                polishedText,
+                finalText,
+                trashed,
+                trashedAt,
+                originalFolder);
     }
 
     public String displayLine() {
@@ -108,8 +163,10 @@ public final class CapsuleRecord {
     }
 
     public String previewText() {
+        String finalValue = clean(finalText);
         String raw = clean(rawText);
         String polished = clean(polishedText);
+        if (!finalValue.isEmpty()) return finalValue;
         if (isPlausible(polished)
                 && (raw.isEmpty() || isPlausibleCorrection(polished, raw))) {
             return polished;
@@ -135,6 +192,7 @@ public final class CapsuleRecord {
         String state = visibleState();
         if (!state.isEmpty()) output.append(" · ").append(state);
         if (readOnly) output.append(" · 只读");
+        if (trashed) output.append(" · 已删除");
         return output.toString();
     }
 

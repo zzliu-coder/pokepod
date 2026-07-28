@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokecapsule.local/schema/trash-1.0.json",
+  "title": "PokeCapsule Trash Metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "capsuleId",
+    "trashedAt",
+    "originalFolder",
+    "revision"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "capsuleId": { "type": "string", "format": "uuid" },
+    "trashedAt": { "type": "string", "format": "date-time" },
+    "originalFolder": {
+      "oneOf": [
+        { "enum": ["Inbox", "Archive"] },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 161
+        }
+      ]
+    },
+    "revision": { "type": "integer", "minimum": 1 }
+  }
+}

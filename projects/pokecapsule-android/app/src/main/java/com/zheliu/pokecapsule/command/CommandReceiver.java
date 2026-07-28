@@ -22,6 +22,8 @@ import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -59,7 +61,10 @@ public final class CommandReceiver extends BroadcastReceiver {
                 return;
             }
             JSONObject command = CapsuleStore.readJson(commandFile);
-            if (command.optInt("schemaVersion", -1) != 1) throw new Exception("不支持的命令协议");
+            int schemaVersion = command.optInt("schemaVersion", -1);
+            if (schemaVersion != 1 && schemaVersion != 2) {
+                throw new Exception("不支持的命令协议");
+            }
             String jsonId = command.optString("transactionId", command.optString("commandId"));
             if (!commandId.equalsIgnoreCase(jsonId)) {
                 throw new Exception("transactionId 与文件名不一致");
@@ -129,6 +134,11 @@ public final class CommandReceiver extends BroadcastReceiver {
                         paths, command.optString("maintenanceId"));
                 break;
         }
+        Map<String, Integer> expected = null;
+        if (command.optInt("schemaVersion", 1) >= 2 && requiresRevisionSnapshot(operation)) {
+            if (!allowsEmptyRevisionScope(operation)) requireIds(ids);
+            expected = revisions(command.optJSONObject("expectedRevisions"));
+        }
         switch (operation) {
             case "mkdir":
             case "createFolder":
@@ -137,7 +147,9 @@ public final class CommandReceiver extends BroadcastReceiver {
             case "rmdir":
             case "deleteFolderToInbox":
                 store.deleteFolderMovingContentsToInbox(
-                        command.optString("folderPath", command.optString("folder")));
+                        command.optString("folderPath", command.optString("folder")),
+                        expected == null ? null : ids,
+                        expected);
                 return;
             case "renameFolder":
                 store.renameFolder(command.getString("folderPath"), command.getString("newFolderPath"));
@@ -145,50 +157,64 @@ public final class CommandReceiver extends BroadcastReceiver {
             case "move":
             case "moveCapsules":
                 requireIds(ids);
-                store.moveCapsules(ids, command.getString("destination"));
+                store.moveCapsules(ids, command.getString("destination"), expected);
                 return;
             case "copy":
             case "copyCapsules":
                 requireIds(ids);
-                store.copyCapsules(ids, command.getString("destination"));
+                store.copyCapsules(ids, command.getString("destination"), expected);
                 return;
             case "delete":
             case "deleteCapsules":
                 requireIds(ids);
-                store.deleteCapsules(ids);
+                store.deleteCapsules(ids, expected);
+                return;
+            case "restoreCapsules":
+                requireIds(ids);
+                store.restoreCapsules(ids, expected);
+                return;
+            case "purgeCapsules":
+                requireIds(ids);
+                store.purgeCapsules(ids, expected);
                 return;
             case "favorite":
             case "setFavorite":
                 requireIds(ids);
                 store.setFavorite(ids, command.has("favorite")
-                        ? command.getBoolean("favorite") : command.getBoolean("value"));
+                        ? command.getBoolean("favorite") : command.getBoolean("value"), expected);
                 return;
             case "tag_add":
             case "addTags":
                 requireIds(ids);
-                for (String tag : strings(command.optJSONArray("tags"), command.optString("tag"))) {
-                    store.addTag(ids, tag);
-                }
+                store.addTags(ids,
+                        strings(command.optJSONArray("tags"), command.optString("tag")),
+                        expected);
                 return;
             case "tag_remove":
             case "removeTags":
                 requireIds(ids);
-                for (String tag : strings(command.optJSONArray("tags"), command.optString("tag"))) {
-                    store.removeTag(ids, tag);
-                }
+                store.removeTags(ids,
+                        strings(command.optJSONArray("tags"), command.optString("tag")),
+                        expected);
                 return;
             case "tag_rename":
             case "renameTag":
             case "mergeTag": {
                 List<String> tags = strings(command.optJSONArray("tags"), null);
                 if (tags.size() != 2) throw new Exception("标签改名需要两个标签");
-                store.renameTag(tags.get(0), tags.get(1));
+                store.renameTag(
+                        tags.get(0), tags.get(1),
+                        expected == null ? null : ids,
+                        expected);
                 return;
             }
             case "deleteTag": {
                 List<String> tags = strings(command.optJSONArray("tags"), null);
                 if (tags.size() != 1) throw new Exception("删除标签需要一个标签");
-                store.deleteTag(tags.get(0));
+                store.deleteTag(
+                        tags.get(0),
+                        expected == null ? null : ids,
+                        expected);
                 return;
             }
             case "commitImport":
@@ -206,6 +232,21 @@ public final class CommandReceiver extends BroadcastReceiver {
                         command.getString("stagedPath"),
                         ids.get(0),
                         command.optInt("expectedRevision", -1));
+                return;
+            case "commitFinalText":
+                requireIds(ids);
+                if (ids.size() != 1) throw new Exception("每次只提交一个最终文字");
+                if (command.has("finalText")) {
+                    store.setFinalText(
+                            ids.get(0),
+                            command.getString("finalText"),
+                            command.optInt("expectedRevision", -1));
+                } else {
+                    store.commitFinalText(
+                            command.getString("stagedPath"),
+                            ids.get(0),
+                            command.optInt("expectedRevision", -1));
+                }
                 return;
             case "requeueTranscription":
                 requireIds(ids);
@@ -271,6 +312,40 @@ public final class CommandReceiver extends BroadcastReceiver {
 
     private static void requireIds(List<String> ids) throws Exception {
         if (ids.isEmpty() || ids.size() > 500) throw new Exception("胶囊数量必须为 1–500");
+    }
+
+    private static boolean requiresRevisionSnapshot(String operation) {
+        return "move".equals(operation) || "moveCapsules".equals(operation)
+                || "copy".equals(operation) || "copyCapsules".equals(operation)
+                || "delete".equals(operation) || "deleteCapsules".equals(operation)
+                || "restoreCapsules".equals(operation) || "purgeCapsules".equals(operation)
+                || "favorite".equals(operation) || "setFavorite".equals(operation)
+                || "tag_add".equals(operation) || "addTags".equals(operation)
+                || "tag_remove".equals(operation) || "removeTags".equals(operation)
+                || "deleteFolderToInbox".equals(operation)
+                || "renameTag".equals(operation) || "mergeTag".equals(operation)
+                || "deleteTag".equals(operation);
+    }
+
+    private static boolean allowsEmptyRevisionScope(String operation) {
+        return "deleteFolderToInbox".equals(operation)
+                || "renameTag".equals(operation)
+                || "mergeTag".equals(operation)
+                || "deleteTag".equals(operation);
+    }
+
+    private static Map<String, Integer> revisions(JSONObject object) throws Exception {
+        if (object == null) throw new Exception("缺少 expectedRevisions");
+        HashMap<String, Integer> result = new HashMap<>();
+        java.util.Iterator<String> keys = object.keys();
+        while (keys.hasNext()) {
+            String id = keys.next();
+            if (!Ids.isUuid(id)) throw new Exception("expectedRevisions 含无效 UUID");
+            int revision = object.getInt(id);
+            if (revision < 1) throw new Exception("expectedRevisions 含无效版本");
+            result.put(id.toLowerCase(java.util.Locale.ROOT), revision);
+        }
+        return result;
     }
 
     private static String commandId(String fileName) {

@@ -80,3 +80,21 @@ raw_ready -> correcting -> ready
 - 删除前先重新读取 `capsule.json` 并核对 UUID。
 - 删除用户目录前必须确认其中只包含合法胶囊；未知文件、隐藏文件或损坏内容会让整个操作失败并保持原状。
 - 命令响应按事务 UUID 持久化；重复提交只返回原响应，避免断线重试造成重复写入。
+## 文本层
+
+- `raw.txt`: speech recognition output; never overwritten by user editing.
+- `polished.md`: optional model-corrected text; never overwritten by user editing.
+- `final.md`: optional user-edited final text. Display priority is final, polished, raw, title.
+
+## 回收站
+
+Soft-deleted capsules live in `.trash/<capsule-id>/`. Each directory contains
+`trash.json` with the original folder, deletion time, and trash revision.
+Restore returns to the original folder when it still exists and otherwise uses
+`Inbox`. Permanent deletion only accepts capsule IDs already in `.trash`.
+
+## 离线并发保护
+
+Mutable batch commands carry `expectedRevisions`, keyed by capsule UUID.
+The device validates every revision before changing any file. A mismatch rejects
+the entire command so an offline Mac queue cannot silently overwrite newer data.
