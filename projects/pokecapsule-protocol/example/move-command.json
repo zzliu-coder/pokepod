@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "transactionId": "ae71eedb-b01b-470a-ac17-fb39cfd26079",
+  "operation": "moveCapsules",
+  "sourceFolder": ["Inbox"],
+  "destinationFolder": ["工作", "项目A"],
+  "capsuleIds": [
+    "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f"
+  ]
+}

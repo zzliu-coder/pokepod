@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokecapsule.local/schema/command-1.0.json",
+  "title": "PokeCapsule Device Command",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "transactionId",
+    "operation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "transactionId": { "type": "string", "format": "uuid" },
+    "operation": {
+      "enum": [
+        "createFolder",
+        "renameFolder",
+        "deleteFolder",
+        "moveCapsules",
+        "copyCapsules",
+        "deleteCapsules",
+        "updateTags",
+        "updateFavorite",
+        "rescan"
+      ]
+    },
+    "sourceFolder": { "$ref": "#/$defs/folder" },
+    "destinationFolder": { "$ref": "#/$defs/folder" },
+    "newName": { "$ref": "#/$defs/name" },
+    "capsuleIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "format": "uuid" }
+    },
+    "addTags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/tag" }
+    },
+    "removeTags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/tag" }
+    },
+    "favorite": { "type": "boolean" }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^(?!\\.)(?!.*[\\\\/\\u0000-\\u001f]).+$"
+    },
+    "tag": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "pattern": "^(?!#)(?!.*[\\u0000-\\u001f]).+$"
+    },
+    "folder": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/name" }
+    }
+  }
+}

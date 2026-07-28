@@ -50,3 +50,4 @@ DerivedData/
 .gradle-local/
 local.properties
 *.app/
+artifacts/models/*.bin
