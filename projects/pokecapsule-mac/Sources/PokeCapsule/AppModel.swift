@@ -106,20 +106,6 @@ final class AppModel: ObservableObject {
                 self.selection = self.selection.intersection(Set(newIndex.records.map(\.id)))
                 self.status = "已同步 \(newIndex.records.count) 个胶囊"
                 self.isBusy = false
-                let defaults = UserDefaults.standard
-                let autoCorrect = defaults.object(forKey: "AutoCorrection") == nil
-                    || defaults.bool(forKey: "AutoCorrection")
-                if autoCorrect,
-                   CorrectionAdapter().hasAPIKey(),
-                   let pending = newIndex.records.first(where: {
-                       guard $0.processing?.status == .rawReady,
-                             let raw = $0.rawText,
-                             let durationMs = $0.processing?.durationMs else { return false }
-                       return !raw.isEmpty
-                           && TranscriptionSanity.isPlausible(text: raw, durationMs: durationMs)
-                   }) {
-                    self.correct(pending)
-                }
             } catch {
                 self.status = error.localizedDescription
                 self.isBusy = false
