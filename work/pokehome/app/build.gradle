@@ -1,0 +1,14 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.zheliu.pokehome'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.zheliu.pokehome'
+        minSdk 23
+        targetSdk 28
+        versionCode 3
+        versionName '3.0'
+    }
+}
