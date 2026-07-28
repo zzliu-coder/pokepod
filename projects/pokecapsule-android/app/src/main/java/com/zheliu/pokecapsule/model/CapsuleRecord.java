@@ -99,30 +99,23 @@ public final class CapsuleRecord {
     }
 
     public String displayLine() {
-        long seconds = Math.max(0, durationMs / 1000);
         StringBuilder output = new StringBuilder();
-        if (favorite) output.append("★ ");
         output.append(previewText());
-        output.append("\n").append(TimeFormat.localDisplay(createdAt))
-                .append(" · ").append(relativeFolder)
-                .append(" · ").append(seconds).append("秒");
-        String state = visibleState();
-        if (!state.isEmpty()) output.append(" · ").append(state);
-        if (readOnly) output.append(" · 只读");
-        if (!tags.isEmpty()) {
-            output.append("\n");
-            for (int index = 0; index < tags.size(); index++) {
-                if (index > 0) output.append("  ");
-                output.append("#").append(tags.get(index));
-            }
-        }
+        output.append("\n").append(metadataText());
+        String tags = tagsText();
+        if (!tags.isEmpty()) output.append("\n").append(tags);
         return output.toString();
     }
 
     public String previewText() {
-        String preferred = clean(polishedText);
-        if (preferred.isEmpty()) preferred = clean(rawText);
-        if (!preferred.isEmpty()) return preferred;
+        String raw = clean(rawText);
+        String polished = clean(polishedText);
+        if (isPlausible(polished)
+                && (raw.isEmpty() || isPlausibleCorrection(polished, raw))) {
+            return polished;
+        }
+        if (isPlausible(raw)) return raw;
+        if (!polished.isEmpty() || !raw.isEmpty()) return "转写结果异常，请播放录音";
         switch (status) {
             case RECORDING: return "正在录音…";
             case RECORDED:
@@ -131,6 +124,27 @@ public final class CapsuleRecord {
             case FAILED: return error == null || error.isEmpty() ? "转写失败" : "转写失败，可稍后重试";
             default: return title == null || title.isEmpty() ? "语音胶囊" : title;
         }
+    }
+
+    public String metadataText() {
+        long seconds = Math.max(0, durationMs / 1000);
+        StringBuilder output = new StringBuilder();
+        output.append(TimeFormat.localDisplay(createdAt))
+                .append(" · ").append(relativeFolder)
+                .append(" · ").append(seconds).append("秒");
+        String state = visibleState();
+        if (!state.isEmpty()) output.append(" · ").append(state);
+        if (readOnly) output.append(" · 只读");
+        return output.toString();
+    }
+
+    public String tagsText() {
+        StringBuilder output = new StringBuilder();
+        for (int index = 0; index < tags.size(); index++) {
+            if (index > 0) output.append("  ");
+            output.append("#").append(tags.get(index));
+        }
+        return output.toString();
     }
 
     private String visibleState() {
@@ -147,5 +161,19 @@ public final class CapsuleRecord {
     private static String clean(String value) {
         if (value == null) return "";
         return value.trim().replaceAll("\\s+", " ");
+    }
+
+    private boolean isPlausible(String value) {
+        if (value.isEmpty() || durationMs < 2_000) return false;
+        int characters = value.codePointCount(0, value.length());
+        int limit = Math.max(24, (int) Math.ceil(durationMs / 1000.0 * 10));
+        return characters <= limit;
+    }
+
+    private static boolean isPlausibleCorrection(String polished, String raw) {
+        int polishedLength = polished.codePointCount(0, polished.length());
+        int rawLength = raw.codePointCount(0, raw.length());
+        int limit = Math.max(rawLength + 20, rawLength * 2);
+        return polishedLength <= limit;
     }
 }

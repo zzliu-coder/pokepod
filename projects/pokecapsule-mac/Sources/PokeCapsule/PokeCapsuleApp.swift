@@ -180,7 +180,7 @@ struct CapsuleListView: View {
                 HStack {
                     Text(record.displayPreview)
                         .font(.body.weight(.medium))
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .multilineTextAlignment(.leading)
                     Spacer()
                     if record.capsule.favorite {
@@ -199,14 +199,12 @@ struct CapsuleListView: View {
                             .foregroundStyle(record.processing?.status == .failed ? .red : .secondary)
                     }
                     if record.readOnly { Text("只读").foregroundStyle(.orange) }
+                    if !record.capsule.tags.isEmpty {
+                        Text(record.capsule.tags.map { "#\($0)" }.joined(separator: " "))
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                if !record.capsule.tags.isEmpty {
-                    Text(record.capsule.tags.map { "#\($0)" }.joined(separator: "  "))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
             .padding(.vertical, 4)
             .tag(record.id)

@@ -104,11 +104,18 @@ public struct CapsuleRecord: Identifiable, Hashable {
     }
 
     public var displayPreview: String {
-        if let polished = normalizedPreview(polishedText), !polished.isEmpty {
+        let durationMs = processing?.durationMs ?? 0
+        let raw = normalizedPreview(rawText) ?? ""
+        let polished = normalizedPreview(polishedText) ?? ""
+        if TranscriptionSanity.isPlausible(text: polished, durationMs: durationMs),
+           raw.isEmpty || isPlausibleCorrection(polished: polished, raw: raw) {
             return polished
         }
-        if let raw = normalizedPreview(rawText), !raw.isEmpty {
+        if TranscriptionSanity.isPlausible(text: raw, durationMs: durationMs) {
             return raw
+        }
+        if !polished.isEmpty || !raw.isEmpty {
+            return "转写结果异常，请播放录音"
         }
         switch processing?.status {
         case .recording: return "正在录音…"
@@ -135,6 +142,10 @@ public struct CapsuleRecord: Identifiable, Hashable {
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isPlausibleCorrection(polished: String, raw: String) -> Bool {
+        polished.count <= max(raw.count + 20, raw.count * 2)
     }
 }
 

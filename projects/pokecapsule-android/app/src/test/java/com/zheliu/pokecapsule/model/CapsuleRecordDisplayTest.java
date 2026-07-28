@@ -53,4 +53,41 @@ public final class CapsuleRecordDisplayTest {
                 "");
         assertTrue(record.displayLine().contains("等待插电和 Wi‑Fi 转写"));
     }
+
+    @Test public void rejectsOldHallucinatedCorrectionAndShortTranscript() {
+        CapsuleRecord expanded = new CapsuleRecord(
+                new File("/tmp/id"),
+                "00000000-0000-0000-0000-000000000000",
+                "语音时间",
+                "2026-07-28T08:00:00Z",
+                "2026-07-28T08:00:00Z",
+                false,
+                Collections.emptyList(),
+                ProcessingState.READY,
+                8_000,
+                "",
+                false,
+                "Inbox",
+                "福斯特建筑事务所商务提案英文翻译",
+                "这是一段与原文长度完全不相称的校对扩写内容，"
+                        + "其中包含大量录音里根本没有出现的信息，因此不能展示。");
+        assertTrue(expanded.previewText().contains("福斯特建筑事务所"));
+
+        CapsuleRecord tooShort = new CapsuleRecord(
+                new File("/tmp/id"),
+                "00000000-0000-0000-0000-000000000000",
+                "语音时间",
+                "2026-07-28T08:00:00Z",
+                "2026-07-28T08:00:00Z",
+                false,
+                Collections.emptyList(),
+                ProcessingState.READY,
+                1_000,
+                "",
+                false,
+                "Inbox",
+                "一秒录音却生成了很长一段文字",
+                "");
+        assertTrue(tooShort.previewText().contains("转写结果异常"));
+    }
 }

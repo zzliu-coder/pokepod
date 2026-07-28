@@ -41,6 +41,43 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertNil(record.visibleProcessingStatus)
     }
 
+    func testCapsuleListRejectsExpandedCorrection() {
+        let id = UUID()
+        let capsule = CapsuleMetadata(
+            id: id,
+            title: "语音时间",
+            createdAt: Date(),
+            updatedAt: Date(),
+            favorite: false,
+            tags: []
+        )
+        let processing = ProcessingMetadata(
+            schemaVersion: 1,
+            capsuleId: id,
+            revision: 1,
+            durationMs: 8_000,
+            status: .ready,
+            audioFile: "audio.m4a",
+            rawTextFile: "raw.txt",
+            polishedTextFile: "polished.md",
+            errorStage: nil,
+            error: nil,
+            attempts: 1,
+            engine: "tencent-asr",
+            model: "16k_zh"
+        )
+        let record = CapsuleRecord(
+            capsule: capsule,
+            processing: processing,
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/capsule"),
+            rawText: "福斯特建筑事务所商务提案英文翻译",
+            polishedText: "这是一段与原始录音长度完全不相称的校对扩写内容，其中包含大量录音里没有的信息，因此不能展示。",
+            warnings: []
+        )
+        XCTAssertEqual(record.displayPreview, "福斯特建筑事务所商务提案英文翻译")
+    }
+
     func testPathPolicyAcceptsChineseAndSpaces() throws {
         XCTAssertEqual(try PathPolicy.validatedRelativeFolder("工作 灵感/上海项目"), "工作 灵感/上海项目")
         XCTAssertEqual(try PathPolicy.validatedTag("#待整理"), "待整理")

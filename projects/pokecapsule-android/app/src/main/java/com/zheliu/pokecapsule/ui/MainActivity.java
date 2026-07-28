@@ -49,7 +49,7 @@ public final class MainActivity extends Activity {
     private final CapsuleStore store = new CapsuleStore(new PokePaths());
     private final ArrayList<CapsuleRecord> visible = new ArrayList<>();
     private final Set<String> selected = new HashSet<>();
-    private ArrayAdapter<String> adapter;
+    private ArrayAdapter<CapsuleRecord> adapter;
     private TextView heading;
     private TextView selectionBar;
     private String folderFilter = PathPolicy.INBOX;
@@ -91,19 +91,36 @@ public final class MainActivity extends Activity {
 
         ListView list = new ListView(this);
         list.setDividerHeight(dp(1));
-        adapter = new ArrayAdapter<String>(
+        adapter = new ArrayAdapter<CapsuleRecord>(
                 this, android.R.layout.simple_list_item_1, new ArrayList<>()) {
             @Override public View getView(int position, View convertView, ViewGroup parent) {
-                TextView text = (TextView) super.getView(position, convertView, parent);
-                text.setTextSize(17);
-                text.setTextColor(Color.BLACK);
-                text.setGravity(Gravity.CENTER_VERTICAL);
-                text.setMaxLines(4);
-                text.setEllipsize(TextUtils.TruncateAt.END);
-                text.setLineSpacing(dp(2), 1f);
-                text.setPadding(dp(10), dp(8), dp(10), dp(8));
-                text.setMinHeight(dp(64));
-                return text;
+                CapsuleRecord record = getItem(position);
+                LinearLayout row = new LinearLayout(MainActivity.this);
+                row.setOrientation(LinearLayout.VERTICAL);
+                row.setPadding(dp(10), dp(7), dp(10), dp(7));
+
+                TextView preview = ViewKit.text(
+                        MainActivity.this,
+                        (selected.contains(record.id) ? "☑ " : "")
+                                + (record.favorite ? "★ " : "")
+                                + record.previewText(),
+                        17,
+                        Typeface.BOLD);
+                preview.setSingleLine(true);
+                preview.setEllipsize(TextUtils.TruncateAt.END);
+                row.addView(preview, lp(-1, -2));
+
+                TextView metadata = ViewKit.text(
+                        MainActivity.this,
+                        record.metadataText()
+                                + (record.tagsText().isEmpty() ? "" : " · " + record.tagsText()),
+                        14,
+                        Typeface.NORMAL);
+                metadata.setTextColor(Color.DKGRAY);
+                metadata.setSingleLine(true);
+                metadata.setEllipsize(TextUtils.TruncateAt.END);
+                row.addView(metadata, lp(-1, dp(25)));
+                return row;
             }
         };
         list.setAdapter(adapter);
@@ -203,10 +220,7 @@ public final class MainActivity extends Activity {
 
     private void renderList() {
         adapter.clear();
-        for (CapsuleRecord record : visible) {
-            String prefix = selected.contains(record.id) ? "☑ " : "";
-            adapter.add(prefix + record.displayLine());
-        }
+        adapter.addAll(visible);
         adapter.notifyDataSetChanged();
         selectionBar.setText(selected.isEmpty()
                 ? "长按胶囊开始多选"
