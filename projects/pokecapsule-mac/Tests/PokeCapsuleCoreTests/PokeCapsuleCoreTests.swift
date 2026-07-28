@@ -1,0 +1,196 @@
+import Foundation
+import XCTest
+@testable import PokeCapsuleCore
+
+final class PokeCapsuleCoreTests: XCTestCase {
+    func testPathPolicyAcceptsChineseAndSpaces() throws {
+        XCTAssertEqual(try PathPolicy.validatedRelativeFolder("工作 灵感/上海项目"), "工作 灵感/上海项目")
+        XCTAssertEqual(try PathPolicy.validatedTag("#待整理"), "待整理")
+    }
+
+    func testPathPolicyRejectsTraversalAndUnsafeNames() {
+        for value in ["..", ".", ".hidden", "a/b/c", "a\\b", "a/\n"] {
+            XCTAssertThrowsError(try PathPolicy.validatedRelativeFolder(value))
+        }
+        XCTAssertThrowsError(try PathPolicy.safeRemoteReadPath("/sdcard/PokeCapsule/../Books"))
+        XCTAssertThrowsError(try PathPolicy.safeRemoteReadPath("/sdcard/Books"))
+    }
+
+    func testPathPolicyHandlesQuotesWithoutShellRules() throws {
+        XCTAssertEqual(try PathPolicy.normalizedFolderName("他说“你好”"), "他说“你好”")
+        XCTAssertEqual(try PathPolicy.normalizedFolderName("Alice's idea"), "Alice's idea")
+    }
+
+    func testDeviceParserStates() {
+        let output = """
+        List of devices attached
+        ABC123 device product:Poke3 model:BOOX_Poke3 transport_id:1
+        WAIT unauthorized usb:1-2
+        """
+        let devices = DeviceParser.parse(output)
+        XCTAssertEqual(devices.count, 2)
+        XCTAssertEqual(devices[0].model, "BOOX_Poke3")
+        XCTAssertEqual(DeviceParser.state(for: [devices[0]]), .connected(devices[0]))
+        XCTAssertEqual(DeviceParser.state(for: [devices[1]]), .unauthorized(["WAIT"]))
+        XCTAssertEqual(DeviceParser.state(for: []), .noDevice)
+        XCTAssertEqual(DeviceParser.state(for: [], adbExists: false), .noADB)
+    }
+
+    func testFixtureCompatibleWithSharedProtocol() throws {
+        let capsuleJSON = """
+        {
+          "schemaVersion": 1,
+          "id": "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f",
+          "title": "新胶囊",
+          "createdAt": "2026-07-28T08:30:00Z",
+          "updatedAt": "2026-07-28T08:30:00Z",
+          "revision": 1,
+          "favorite": false,
+          "tags": [],
+          "language": "zh",
+          "contentHash": null
+        }
+        """
+        let value = try PokeJSON.decoder.decode(CapsuleMetadata.self, from: Data(capsuleJSON.utf8))
+        XCTAssertEqual(value.id.uuidString.lowercased(), "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f")
+        XCTAssertEqual(value.language, "zh")
+    }
+
+    func testScannerFlagsDuplicateUUIDAndUnknownSchemaReadOnly() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        try writeCapsule(root: root, folder: "Inbox", id: id, schemaVersion: 1)
+        try writeCapsule(root: root, folder: "Archive", id: id, schemaVersion: 2)
+        let index = CapsuleScanner().scan(root: root)
+        XCTAssertEqual(index.records.count, 2)
+        XCTAssertTrue(index.warnings.contains(where: { $0.contains("重复 UUID") }))
+        XCTAssertEqual(index.records.filter(\.readOnly).count, 1)
+    }
+
+    func testExportVerifiesAllFilesAndRejectsConflict() throws {
+        let root = try makeTemporaryDirectory()
+        let output = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: output)
+        }
+        try writeCapsule(root: root, folder: "Inbox", id: UUID(), schemaVersion: 1)
+        let record = try XCTUnwrap(CapsuleScanner().scan(root: root).records.first)
+        let exported = try CapsuleExporter().export([record], to: output)
+        XCTAssertEqual(exported.count, 1)
+        XCTAssertNoThrow(try FileDigest.verifyCopy(from: record.localDirectory, to: exported[0]))
+        XCTAssertThrowsError(try CapsuleExporter().export([record], to: output))
+    }
+
+    func testImportPackageRequiresCompleteCapsule() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertThrowsError(try CapsulePackage.inspect(root))
+        try writeCapsule(root: root, folder: "Inbox", id: UUID(), schemaVersion: 1)
+        let capsuleDirectory = try XCTUnwrap(
+            FileManager.default.enumerator(at: root.appendingPathComponent("Inbox"), includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }
+                .first(where: { $0.lastPathComponent == "capsule.json" })?
+                .deletingLastPathComponent()
+        )
+        let package = try CapsulePackage.inspect(capsuleDirectory)
+        XCTAssertTrue(package.manifest.keys.contains("audio.m4a"))
+    }
+
+    func testADBUsesArgumentArrayForHostilePath() throws {
+        let runner = RecordingRunner()
+        let transport = ADBTransport(executable: URL(fileURLWithPath: "/fake/adb"), serial: "SERIAL", runner: runner)
+        let local = URL(fileURLWithPath: "/tmp/目录 'quoted'\nline")
+        _ = try transport.pull(remote: "/sdcard/PokeCapsule/Inbox", local: local)
+        XCTAssertEqual(runner.calls.first?.1, ["-s", "SERIAL", "pull", "/sdcard/PokeCapsule/Inbox", local.path])
+    }
+
+    func testStayAwakeReadsAndRestoresOriginalValue() throws {
+        let runner = SequencedRunner(results: [
+            ProcessResult(status: 0, stdout: "1\n", stderr: ""),
+            ProcessResult(status: 0, stdout: "", stderr: ""),
+            ProcessResult(status: 0, stdout: "", stderr: "")
+        ])
+        let transport = ADBTransport(executable: URL(fileURLWithPath: "/fake/adb"), serial: "SERIAL", runner: runner)
+        let session = StayAwakeSession(transport: transport)
+        try session.begin()
+        try session.restore()
+        XCTAssertEqual(runner.calls[0], ["-s", "SERIAL", "shell", "settings", "get", "global", "stay_on_while_plugged_in"])
+        XCTAssertEqual(runner.calls[1].last, "3")
+        XCTAssertEqual(runner.calls[2].last, "1")
+    }
+
+    func testStayAwakeDoesNotWriteWhenUSBAlreadyEnabled() throws {
+        let runner = SequencedRunner(results: [
+            ProcessResult(status: 0, stdout: "7\n", stderr: "")
+        ])
+        let transport = ADBTransport(executable: URL(fileURLWithPath: "/fake/adb"), serial: "SERIAL", runner: runner)
+        let session = StayAwakeSession(transport: transport)
+        try session.begin()
+        try session.restore()
+        XCTAssertEqual(runner.calls.count, 1)
+    }
+
+    func testCommandEncodingContainsNoSecretOrShell() throws {
+        let command = DeviceCommand(
+            operation: "moveCapsules",
+            capsuleIds: [UUID()],
+            destination: "工作/待办"
+        )
+        let encoded = try PokeJSON.encoder.encode(command)
+        let text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(text.contains("工作"))
+        XCTAssertFalse(text.contains("apiKey"))
+        XCTAssertFalse(text.contains("shell"))
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PokeCapsuleTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func writeCapsule(root: URL, folder: String, id: UUID, schemaVersion: Int) throws {
+        let directory = root.appendingPathComponent(folder).appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let metadata = CapsuleMetadata(
+            schemaVersion: schemaVersion,
+            id: id,
+            title: "中文测试",
+            createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        try PokeJSON.encoder.encode(metadata).write(to: directory.appendingPathComponent("capsule.json"))
+        let processing = """
+        {"schemaVersion":1,"capsuleId":"\(id.uuidString)","revision":1,"durationMs":1000,"status":"queued","audioFile":"audio.m4a"}
+        """
+        try Data(processing.utf8).write(to: directory.appendingPathComponent("processing.json"))
+        try Data("audio".utf8).write(to: directory.appendingPathComponent("audio.m4a"))
+    }
+}
+
+private final class RecordingRunner: ProcessExecuting {
+    var calls: [(URL, [String])] = []
+    func run(executable: URL, arguments: [String]) -> ProcessResult {
+        calls.append((executable, arguments))
+        return ProcessResult(status: 0, stdout: "", stderr: "")
+    }
+}
+
+private final class SequencedRunner: ProcessExecuting {
+    var calls: [[String]] = []
+    private var results: [ProcessResult]
+
+    init(results: [ProcessResult]) {
+        self.results = results
+    }
+
+    func run(executable: URL, arguments: [String]) -> ProcessResult {
+        calls.append(arguments)
+        return results.isEmpty
+            ? ProcessResult(status: 1, stdout: "", stderr: "missing test response")
+            : results.removeFirst()
+    }
+}
