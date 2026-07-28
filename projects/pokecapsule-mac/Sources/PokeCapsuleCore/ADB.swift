@@ -420,6 +420,60 @@ public final class DeviceCommandClient {
         }
         if let firstError { throw firstError }
     }
+
+    public func commitFinalText(
+        text: String,
+        capsuleID: UUID,
+        expectedRevision: Int
+    ) throws {
+        let transactionID = UUID()
+        let maintenanceID = UUID()
+        let temporary = fileManager.temporaryDirectory
+            .appendingPathComponent("PokeCapsuleFinal-\(transactionID.uuidString)", isDirectory: true)
+        let capsuleDirectory = temporary.appendingPathComponent(
+            capsuleID.uuidString.lowercased(), isDirectory: true)
+        try fileManager.createDirectory(at: capsuleDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: temporary) }
+        try Data(text.utf8).write(
+            to: capsuleDirectory.appendingPathComponent("final.md"),
+            options: .atomic)
+
+        let stagedPath = ".staging/\(transactionID.uuidString.lowercased())/\(capsuleID.uuidString.lowercased())"
+        let stayAwake = StayAwakeSession(transport: transport)
+        try stayAwake.begin()
+        var firstError: Error?
+        do {
+            _ = try submit(DeviceCommand(
+                operation: "beginMaintenance",
+                maintenanceId: maintenanceID))
+            try transport.pushImport(
+                local: capsuleDirectory,
+                transactionID: transactionID,
+                capsuleID: capsuleID)
+            _ = try submit(DeviceCommand(
+                transactionId: transactionID,
+                operation: "commitFinalText",
+                maintenanceId: maintenanceID,
+                capsuleIds: [capsuleID],
+                stagedPath: stagedPath,
+                expectedRevision: expectedRevision))
+        } catch {
+            firstError = error
+        }
+        do {
+            _ = try submit(DeviceCommand(
+                operation: "endMaintenance",
+                maintenanceId: maintenanceID))
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+        do {
+            try stayAwake.restore()
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+        if let firstError { throw firstError }
+    }
 }
 
 public final class MirrorSynchronizer {

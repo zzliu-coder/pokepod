@@ -259,6 +259,204 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertTrue(first.hasPrefix(id.uuidString.lowercased() + "-r7-"))
     }
 
+    func testOfflineQueuePersistsCommandsAndFinalText() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let queue = OfflineQueue(file: root.appendingPathComponent("pending.json"))
+        let id = UUID()
+        let command = DeviceCommand(
+            operation: "commitFinalText",
+            capsuleIds: [id],
+            expectedRevision: 4,
+            finalText: "福斯特建筑事务所商务提案英文翻译")
+        _ = try queue.enqueue(command)
+
+        let loaded = try queue.load()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].command.finalText, "福斯特建筑事务所商务提案英文翻译")
+        XCTAssertEqual(loaded[0].command.expectedRevision, 4)
+        XCTAssertEqual(loaded[0].state, .queued)
+    }
+
+    func testSyncCoordinatorStopsConflictingMutationBeforeExecution() {
+        let id = UUID()
+        let metadata = CapsuleMetadata(
+            id: id,
+            createdAt: Date(),
+            updatedAt: Date(),
+            revision: 5)
+        let record = CapsuleRecord(
+            capsule: metadata,
+            processing: nil,
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/\(id.uuidString)"),
+            rawText: "原始文字",
+            polishedText: nil,
+            warnings: [])
+        let command = DeviceCommand(
+            operation: "moveCapsules",
+            capsuleIds: [id],
+            destination: "工作",
+            expectedRevisions: [id.uuidString: 4])
+        var executed = false
+
+        let result = SyncCoordinator().replay(
+            pending: [PendingCommand(command: command)],
+            currentIndex: CapsuleIndex(records: [record])
+        ) { _ in
+            executed = true
+            return CapsuleIndex(records: [record])
+        }
+
+        XCTAssertFalse(executed)
+        XCTAssertEqual(result.pending.first?.state, .conflict)
+        XCTAssertTrue(result.pending.first?.error?.contains("版本冲突") == true)
+    }
+
+    func testTrashRevisionProtectsOfflinePermanentDelete() {
+        let id = UUID()
+        let metadata = CapsuleMetadata(
+            id: id,
+            createdAt: Date(),
+            updatedAt: Date(),
+            revision: 2)
+        let record = CapsuleRecord(
+            capsule: metadata,
+            processing: nil,
+            relativeFolder: "回收站",
+            localDirectory: URL(fileURLWithPath: "/tmp/\(id.uuidString)"),
+            rawText: nil,
+            polishedText: nil,
+            trash: TrashMetadata(
+                capsuleId: id,
+                trashedAt: Date(),
+                originalFolder: "Inbox",
+                revision: 6),
+            warnings: [])
+        let command = DeviceCommand(
+            operation: "purgeCapsules",
+            capsuleIds: [id],
+            expectedRevisions: [id.uuidString.lowercased(): 5])
+        var executed = false
+        let result = SyncCoordinator().replay(
+            pending: [PendingCommand(command: command)],
+            currentIndex: CapsuleIndex(trashRecords: [record])
+        ) { _ in
+            executed = true
+            return CapsuleIndex()
+        }
+        XCTAssertFalse(executed)
+        XCTAssertEqual(result.pending.first?.state, .conflict)
+    }
+
+    func testSyncCoordinatorReplaysSameCapsuleInOrder() {
+        let id = UUID()
+        func record(revision: Int) -> CapsuleRecord {
+            CapsuleRecord(
+                capsule: CapsuleMetadata(
+                    id: id,
+                    createdAt: Date(),
+                    updatedAt: Date(),
+                    revision: revision),
+                processing: nil,
+                relativeFolder: "Inbox",
+                localDirectory: URL(fileURLWithPath: "/tmp/\(id.uuidString)"),
+                rawText: nil,
+                polishedText: nil,
+                warnings: [])
+        }
+        let first = DeviceCommand(
+            operation: "setFavorite",
+            capsuleIds: [id],
+            favorite: true,
+            expectedRevisions: [id.uuidString.lowercased(): 1])
+        let second = DeviceCommand(
+            operation: "addTags",
+            capsuleIds: [id],
+            tags: ["商务"],
+            expectedRevisions: [id.uuidString.lowercased(): 2])
+        var revision = 1
+        let result = SyncCoordinator().replay(
+            pending: [PendingCommand(command: first), PendingCommand(command: second)],
+            currentIndex: CapsuleIndex(records: [record(revision: revision)])
+        ) { _ in
+            revision += 1
+            return CapsuleIndex(records: [record(revision: revision)])
+        }
+        XCTAssertEqual(result.appliedCount, 2)
+        XCTAssertTrue(result.pending.isEmpty)
+        XCTAssertEqual(result.index.records.first?.capsule.revision, 3)
+    }
+
+    func testScannerReadsFinalTextAndTrashMetadata() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let activeID = UUID()
+        try writeCapsule(root: root, folder: "Inbox", id: activeID, schemaVersion: 1)
+        let activeDirectory = try XCTUnwrap(
+            FileManager.default.enumerator(
+                at: root.appendingPathComponent("Inbox"),
+                includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }
+                .first(where: { $0.lastPathComponent == "capsule.json" })?
+                .deletingLastPathComponent())
+        try Data("用户最终文字".utf8).write(to: activeDirectory.appendingPathComponent("final.md"))
+
+        let trashID = UUID()
+        try writeCapsule(root: root, folder: ".trash", id: trashID, schemaVersion: 1)
+        let trashRoot = root.appendingPathComponent(".trash")
+        let trashDirectory = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: trashRoot,
+                includingPropertiesForKeys: [.isDirectoryKey])
+                .first(where: { $0.lastPathComponent != "trash.json" }))
+        let trash = TrashMetadata(
+            capsuleId: trashID,
+            trashedAt: Date(),
+            originalFolder: "工作/提案",
+            revision: 2)
+        try PokeJSON.encoder.encode(trash).write(
+            to: trashDirectory.appendingPathComponent("trash.json"))
+
+        let index = CapsuleScanner().scan(root: root)
+        XCTAssertEqual(index.records.first(where: { $0.id == activeID })?.finalText, "用户最终文字")
+        XCTAssertEqual(index.trashRecords.first?.trash?.originalFolder, "工作/提案")
+    }
+
+    func testBackupIncludesHiddenTrashAndSearchUsesFinalText() throws {
+        let mirror = try makeTemporaryDirectory()
+        let backups = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: mirror)
+            try? FileManager.default.removeItem(at: backups)
+        }
+        let trash = mirror.appendingPathComponent(".trash/one", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try Data("audio".utf8).write(to: trash.appendingPathComponent("audio.m4a"))
+        let destination = try BackupManager(root: backups).create(
+            from: mirror,
+            deviceSerial: "BE87E832",
+            capsuleCount: 1)
+        let manifest = try PokeJSON.decoder.decode(
+            BackupManifest.self,
+            from: Data(contentsOf: destination.appendingPathComponent("manifest.json")))
+        XCTAssertNotNil(
+            manifest.files[".trash/one/audio.m4a"],
+            "备份清单实际包含：\(manifest.files.keys.sorted())")
+
+        let id = UUID()
+        let record = CapsuleRecord(
+            capsule: CapsuleMetadata(id: id, createdAt: Date(), updatedAt: Date()),
+            processing: nil,
+            relativeFolder: "Inbox",
+            localDirectory: mirror,
+            rawText: nil,
+            polishedText: nil,
+            finalText: "福斯特建筑事务所商务提案英文翻译",
+            warnings: [])
+        XCTAssertEqual(CapsuleSearch.filter([record], query: "商务提案").map(\.id), [id])
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PokeCapsuleTests-\(UUID().uuidString)", isDirectory: true)

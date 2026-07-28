@@ -2,6 +2,7 @@ import Foundation
 
 public enum ProtocolConstants {
     public static let schemaVersion = 1
+    public static let commandSchemaVersion = 2
     public static let remoteRoot = "/sdcard/PokeCapsule"
     public static let reservedFolders = ["Inbox", "Archive"]
 }
@@ -17,6 +18,7 @@ public struct CapsuleMetadata: Codable, Hashable, Identifiable {
     public var tags: [String]
     public var language: String?
     public var contentHash: String?
+    public var finalTextFile: String?
 
     public init(
         schemaVersion: Int = ProtocolConstants.schemaVersion,
@@ -40,6 +42,7 @@ public struct CapsuleMetadata: Codable, Hashable, Identifiable {
         self.tags = tags
         self.language = language
         self.contentHash = contentHash
+        self.finalTextFile = nil
     }
 }
 
@@ -91,7 +94,31 @@ public struct CapsuleRecord: Identifiable, Hashable {
     public let localDirectory: URL
     public let rawText: String?
     public let polishedText: String?
+    public let finalText: String?
+    public let trash: TrashMetadata?
     public let warnings: [String]
+
+    public init(
+        capsule: CapsuleMetadata,
+        processing: ProcessingMetadata?,
+        relativeFolder: String,
+        localDirectory: URL,
+        rawText: String?,
+        polishedText: String?,
+        finalText: String? = nil,
+        trash: TrashMetadata? = nil,
+        warnings: [String]
+    ) {
+        self.capsule = capsule
+        self.processing = processing
+        self.relativeFolder = relativeFolder
+        self.localDirectory = localDirectory
+        self.rawText = rawText
+        self.polishedText = polishedText
+        self.finalText = finalText
+        self.trash = trash
+        self.warnings = warnings
+    }
 
     public var readOnly: Bool {
         capsule.schemaVersion != ProtocolConstants.schemaVersion
@@ -107,6 +134,9 @@ public struct CapsuleRecord: Identifiable, Hashable {
         let durationMs = processing?.durationMs ?? 0
         let raw = normalizedPreview(rawText) ?? ""
         let polished = normalizedPreview(polishedText) ?? ""
+        if let final = normalizedPreview(finalText), !final.isEmpty {
+            return final
+        }
         if TranscriptionSanity.isPlausible(text: polished, durationMs: durationMs),
            raw.isEmpty || isPlausibleCorrection(polished: polished, raw: raw) {
             return polished
@@ -149,13 +179,42 @@ public struct CapsuleRecord: Identifiable, Hashable {
     }
 }
 
+public struct TrashMetadata: Codable, Hashable {
+    public var schemaVersion: Int
+    public var capsuleId: UUID
+    public var trashedAt: Date
+    public var originalFolder: String
+    public var revision: Int
+
+    public init(
+        schemaVersion: Int = 1,
+        capsuleId: UUID,
+        trashedAt: Date,
+        originalFolder: String,
+        revision: Int
+    ) {
+        self.schemaVersion = schemaVersion
+        self.capsuleId = capsuleId
+        self.trashedAt = trashedAt
+        self.originalFolder = originalFolder
+        self.revision = revision
+    }
+}
+
 public struct CapsuleIndex: Equatable {
     public var records: [CapsuleRecord]
+    public var trashRecords: [CapsuleRecord]
     public var folders: [String]
     public var warnings: [String]
 
-    public init(records: [CapsuleRecord] = [], folders: [String] = [], warnings: [String] = []) {
+    public init(
+        records: [CapsuleRecord] = [],
+        trashRecords: [CapsuleRecord] = [],
+        folders: [String] = [],
+        warnings: [String] = []
+    ) {
         self.records = records
+        self.trashRecords = trashRecords
         self.folders = folders
         self.warnings = warnings
     }
@@ -216,6 +275,8 @@ public struct DeviceCommand: Codable, Equatable {
     public var favorite: Bool?
     public var stagedPath: String?
     public var expectedRevision: Int?
+    public var expectedRevisions: [String: Int]?
+    public var finalText: String?
 
     public init(
         transactionId: UUID = UUID(),
@@ -228,9 +289,11 @@ public struct DeviceCommand: Codable, Equatable {
         tags: [String]? = nil,
         favorite: Bool? = nil,
         stagedPath: String? = nil,
-        expectedRevision: Int? = nil
+        expectedRevision: Int? = nil,
+        expectedRevisions: [String: Int]? = nil,
+        finalText: String? = nil
     ) {
-        self.schemaVersion = ProtocolConstants.schemaVersion
+        self.schemaVersion = ProtocolConstants.commandSchemaVersion
         self.transactionId = transactionId
         self.operation = operation
         self.createdAt = Date()
@@ -243,6 +306,8 @@ public struct DeviceCommand: Codable, Equatable {
         self.favorite = favorite
         self.stagedPath = stagedPath
         self.expectedRevision = expectedRevision
+        self.expectedRevisions = expectedRevisions
+        self.finalText = finalText
     }
 }
 

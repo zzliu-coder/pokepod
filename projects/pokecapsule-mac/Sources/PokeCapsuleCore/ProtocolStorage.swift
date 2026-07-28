@@ -67,6 +67,7 @@ public struct CapsuleScanner {
 
     public func scan(root: URL) -> CapsuleIndex {
         var records: [CapsuleRecord] = []
+        var trashRecords: [CapsuleRecord] = []
         var folders = Set(ProtocolConstants.reservedFolders)
         var warnings: [String] = []
         var seen = Set<UUID>()
@@ -85,8 +86,37 @@ public struct CapsuleScanner {
             scanFolder(first, relativeFolder: first.lastPathComponent, depth: 1, records: &records, folders: &folders, warnings: &warnings, seen: &seen)
         }
 
+        let trashRoot = root.appendingPathComponent(".trash", isDirectory: true)
+        if let deleted = try? fileManager.contentsOfDirectory(
+            at: trashRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) {
+            for directory in deleted where isDirectory(directory) {
+                do {
+                    let trashURL = directory.appendingPathComponent("trash.json")
+                    let trash = try PokeJSON.decoder.decode(
+                        TrashMetadata.self,
+                        from: Data(contentsOf: trashURL))
+                    trashRecords.append(try decodeCapsule(
+                        directory: directory,
+                        relativeFolder: "回收站",
+                        trash: trash))
+                } catch {
+                    warnings.append("回收站/\(directory.lastPathComponent)：\(error.localizedDescription)")
+                }
+            }
+        }
+
         records.sort { $0.capsule.createdAt > $1.capsule.createdAt }
-        return CapsuleIndex(records: records, folders: folders.sorted(), warnings: warnings)
+        trashRecords.sort {
+            ($0.trash?.trashedAt ?? .distantPast) > ($1.trash?.trashedAt ?? .distantPast)
+        }
+        return CapsuleIndex(
+            records: records,
+            trashRecords: trashRecords,
+            folders: folders.sorted(),
+            warnings: warnings)
     }
 
     private func scanFolder(
@@ -108,7 +138,10 @@ public struct CapsuleScanner {
             let metadataURL = child.appendingPathComponent("capsule.json")
             if fileManager.fileExists(atPath: metadataURL.path) {
                 do {
-                    let record = try decodeCapsule(directory: child, relativeFolder: relativeFolder)
+                    let record = try decodeCapsule(
+                        directory: child,
+                        relativeFolder: relativeFolder,
+                        trash: nil)
                     if !seen.insert(record.id).inserted {
                         warnings.append("发现重复 UUID：\(record.id.uuidString)")
                     }
@@ -124,7 +157,11 @@ public struct CapsuleScanner {
         }
     }
 
-    private func decodeCapsule(directory: URL, relativeFolder: String) throws -> CapsuleRecord {
+    private func decodeCapsule(
+        directory: URL,
+        relativeFolder: String,
+        trash: TrashMetadata?
+    ) throws -> CapsuleRecord {
         let metadataURL = directory.appendingPathComponent("capsule.json")
         let capsule: CapsuleMetadata
         do {
@@ -155,6 +192,7 @@ public struct CapsuleScanner {
         }
         let rawURL = directory.appendingPathComponent("raw.txt")
         let polishedURL = directory.appendingPathComponent("polished.md")
+        let finalURL = directory.appendingPathComponent("final.md")
         return CapsuleRecord(
             capsule: capsule,
             processing: processing,
@@ -162,6 +200,8 @@ public struct CapsuleScanner {
             localDirectory: directory,
             rawText: try? String(contentsOf: rawURL, encoding: .utf8),
             polishedText: try? String(contentsOf: polishedURL, encoding: .utf8),
+            finalText: try? String(contentsOf: finalURL, encoding: .utf8),
+            trash: trash,
             warnings: localWarnings
         )
     }

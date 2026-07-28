@@ -50,21 +50,35 @@ struct ContentView: View {
             .padding(10)
             .background(.bar)
         }
+        .searchable(text: $model.searchQuery, prompt: "搜索文字、标签或目录")
         .toolbar {
             ToolbarItemGroup {
                 Button { model.refreshDevices() } label: { Label("检查连接", systemImage: "cable.connector") }
                 Button { model.sync() } label: { Label("同步", systemImage: "arrow.clockwise") }
                     .disabled(model.isBusy)
+                Button { importCapsules() } label: {
+                    Label("导入胶囊", systemImage: "square.and.arrow.down")
+                }
+                .disabled(model.isBusy)
                 Menu("批量操作") {
-                    Button("移动…") { dialog = .move }
-                    Button("复制…") { dialog = .copy }
-                    Button("添加标签…") { dialog = .tag }
-                    Button("设为收藏") { model.setFavorite(true) }
-                    Button("取消收藏") { model.setFavorite(false) }
-                    Divider()
-                    Button("导入胶囊…") { importCapsules() }
-                    Button("导出…") { exportSelection() }
-                    Button("删除", role: .destructive) { dialog = .delete }
+                    if model.sidebar == .trash {
+                        Button("恢复") { model.restoreSelected() }
+                        Button("复制文字") { model.copySelectedText(markdown: false) }
+                        Button("复制 Markdown") { model.copySelectedText(markdown: true) }
+                        Divider()
+                        Button("永久删除", role: .destructive) { dialog = .purge }
+                    } else {
+                        Button("移动…") { dialog = .move }
+                        Button("复制胶囊…") { dialog = .copy }
+                        Button("复制文字") { model.copySelectedText(markdown: false) }
+                        Button("复制 Markdown") { model.copySelectedText(markdown: true) }
+                        Button("添加标签…") { dialog = .tag }
+                        Button("设为收藏") { model.setFavorite(true) }
+                        Button("取消收藏") { model.setFavorite(false) }
+                        Divider()
+                        Button("导出…") { exportSelection() }
+                        Button("删除", role: .destructive) { dialog = .delete }
+                    }
                 }
                 .disabled(model.selection.isEmpty || model.isBusy)
             }
@@ -74,6 +88,16 @@ struct ContentView: View {
                 get: { dialog != nil },
                 set: { if !$0 { dialog = nil } }
             ))
+        }
+        .onChange(of: model.sidebar) { _ in
+            model.selection.removeAll()
+            selectedRecord = nil
+        }
+        .onChange(of: model.index) { newIndex in
+            guard let id = selectedRecord?.id else { return }
+            selectedRecord = (newIndex.records + newIndex.trashRecords).first {
+                $0.id == id
+            }
         }
     }
 
@@ -102,7 +126,7 @@ struct ContentView: View {
 }
 
 enum ActionDialog: String, Identifiable {
-    case move, copy, tag, delete, createFolder, renameFolder, deleteFolder, renameTag, mergeTag, deleteTag
+    case move, copy, tag, delete, purge, createFolder, renameFolder, deleteFolder, renameTag, mergeTag, deleteTag
     var id: String { rawValue }
 }
 
@@ -129,6 +153,9 @@ struct SidebarView: View {
                 Label("Inbox", systemImage: "tray").tag(SidebarSelection.folder("Inbox"))
                 Label("Archive", systemImage: "archivebox").tag(SidebarSelection.folder("Archive"))
                 Label("收藏", systemImage: "star").tag(SidebarSelection.favorites)
+                Label("待转写", systemImage: "clock").tag(SidebarSelection.pending)
+                Label("转写失败", systemImage: "exclamationmark.triangle").tag(SidebarSelection.failed)
+                Label("回收站", systemImage: "trash").tag(SidebarSelection.trash)
             }
             Section("目录") {
                 ForEach(model.index.folders.filter { !ProtocolConstants.reservedFolders.contains($0) }, id: \.self) { folder in
@@ -165,8 +192,48 @@ struct SidebarView: View {
                         }
                 }
             }
+            if !model.pendingCommands.isEmpty {
+                Section("待同步 \(model.pendingCommands.count)") {
+                    ForEach(model.pendingCommands) { pending in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(commandName(pending.command.operation))
+                            if let error = pending.error {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .lineLimit(2)
+                            } else {
+                                Text(pending.state == .conflict ? "版本冲突" : "等待连接")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .contextMenu {
+                            Button("丢弃这项操作", role: .destructive) {
+                                model.discardPending(pending.id)
+                            }
+                            .disabled(model.isBusy)
+                        }
+                    }
+                }
+            }
         }
         .navigationTitle("PokeCapsule")
+    }
+
+    private func commandName(_ operation: String) -> String {
+        switch operation {
+        case "moveCapsules": return "移动胶囊"
+        case "copyCapsules": return "复制胶囊"
+        case "deleteCapsules": return "删除到回收站"
+        case "restoreCapsules": return "恢复胶囊"
+        case "purgeCapsules": return "永久删除"
+        case "setFavorite": return "修改收藏"
+        case "addTags": return "添加标签"
+        case "removeTags": return "移除标签"
+        case "commitFinalText": return "保存最终文字"
+        default: return operation
+        }
     }
 }
 
@@ -199,6 +266,7 @@ struct CapsuleListView: View {
                             .foregroundStyle(record.processing?.status == .failed ? .red : .secondary)
                     }
                     if record.readOnly { Text("只读").foregroundStyle(.orange) }
+                    if record.trash != nil { Text("已删除").foregroundStyle(.secondary) }
                     if !record.capsule.tags.isEmpty {
                         Text(record.capsule.tags.map { "#\($0)" }.joined(separator: " "))
                     }
@@ -262,6 +330,7 @@ struct CapsuleDetailView: View {
                         Text(record.polishedText ?? "尚未生成").textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    FinalTextEditor(record: record)
                     GroupBox("原始转写") {
                         Text(record.rawText ?? "尚未生成").textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -271,6 +340,42 @@ struct CapsuleDetailView: View {
             }
         } else {
             PlaceholderView(title: "选择一个胶囊", systemImage: "waveform")
+        }
+    }
+}
+
+struct FinalTextEditor: View {
+    @EnvironmentObject private var model: AppModel
+    let record: CapsuleRecord
+    @State private var text = ""
+
+    var body: some View {
+        GroupBox("最终文字") {
+            VStack(alignment: .leading, spacing: 10) {
+                TextEditor(text: $text)
+                    .font(.body)
+                    .frame(minHeight: 150)
+                    .disabled(record.trash != nil || record.readOnly)
+                HStack {
+                    Text("你的编辑单独保存，原始转写和模型校对不会被覆盖。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("保存最终文字") {
+                        model.saveFinalText(text, for: record)
+                    }
+                    .disabled(record.trash != nil || record.readOnly || model.isBusy)
+                }
+            }
+        }
+        .onAppear {
+            text = record.finalText ?? record.polishedText ?? record.rawText ?? ""
+        }
+        .onChange(of: record.id) { _ in
+            text = record.finalText ?? record.polishedText ?? record.rawText ?? ""
+        }
+        .onChange(of: record.capsule.revision) { _ in
+            text = record.finalText ?? record.polishedText ?? record.rawText ?? ""
         }
     }
 }
@@ -302,6 +407,8 @@ struct ActionSheetView: View {
             Text(title).font(.title2.bold())
             if action == .delete {
                 Text("将删除 \(model.selection.count) 个胶囊。原始音频也会进入设备垃圾箱。")
+            } else if action == .purge {
+                Text("将永久删除 \(model.selection.count) 个胶囊及其录音。这个操作无法恢复。")
             } else if action == .deleteFolder {
                 Text("目录“\(target)”中的所有胶囊会先移回 Inbox，然后删除目录。")
             } else if action == .deleteTag {
@@ -327,7 +434,7 @@ struct ActionSheetView: View {
             HStack {
                 Spacer()
                 Button("取消") { isPresented = false }
-                Button(action == .delete ? "确认删除" : "确定") {
+                Button(action == .delete || action == .purge ? "确认删除" : "确定") {
                     submit()
                     isPresented = false
                 }
@@ -347,6 +454,7 @@ struct ActionSheetView: View {
         case .copy: return "复制胶囊"
         case .tag: return "添加标签"
         case .delete: return "确认删除"
+        case .purge: return "确认永久删除"
         case .createFolder: return "新建目录"
         case .renameFolder: return "目录改名"
         case .deleteFolder: return "删除目录"
@@ -362,6 +470,7 @@ struct ActionSheetView: View {
         case .copy: model.copySelected(to: text)
         case .tag: model.addTag(text)
         case .delete: model.deleteSelected()
+        case .purge: model.purgeSelected()
         case .createFolder: model.createFolder(text, parent: parent.isEmpty ? nil : parent)
         case .renameFolder: model.renameFolder(target, to: text)
         case .deleteFolder: model.deleteFolder(target)
