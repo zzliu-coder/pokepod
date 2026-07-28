@@ -29,7 +29,9 @@ public final class TranscriptionScheduler {
                 id, new ComponentName(context, TranscriptionJobService.class))
                 .setPersisted(true)
                 .setRequiresCharging(charging)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
                 .setRequiresDeviceIdle(false)
+                .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
                 .setExtras(extras);
         scheduler.schedule(builder.build());
     }

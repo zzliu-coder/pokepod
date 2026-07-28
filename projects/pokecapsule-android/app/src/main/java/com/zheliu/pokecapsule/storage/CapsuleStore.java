@@ -492,6 +492,19 @@ public final class CapsuleStore {
         AtomicFiles.writeUtf8(new File(directory, "processing.json"), pretty(processing));
     }
 
+    public synchronized void requeueFailedTranscriptions(List<String> ids) throws IOException {
+        for (String id : ids) {
+            File directory = requireCapsule(id);
+            JSONObject processing = readJson(new File(directory, "processing.json"));
+            ProcessingState current = ProcessingState.fromWire(
+                    processing.optString("status", "failed"));
+            if (current != ProcessingState.FAILED) {
+                throw new IOException("只有失败的胶囊可以重新排队");
+            }
+            updateProcessing(directory, ProcessingState.QUEUED, null, null, false);
+        }
+    }
+
     public static JSONObject readJson(File file) throws IOException {
         if (!file.isFile()) throw new IOException("缺少文件: " + file.getName());
         try (FileInputStream input = new FileInputStream(file);
@@ -597,8 +610,8 @@ public final class CapsuleStore {
             processing.put("errorStage", JSONObject.NULL);
             processing.put("error", JSONObject.NULL);
             processing.put("attempts", 0);
-            processing.put("engine", "whisper.cpp");
-            processing.put("model", "tiny-q5_1-multilingual");
+            processing.put("engine", "tencent-asr");
+            processing.put("model", "16k_zh");
             return processing;
         } catch (JSONException error) {
             throw new IOException("无法生成处理状态", error);

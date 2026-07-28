@@ -27,7 +27,7 @@ import com.zheliu.pokecapsule.service.OverlayService;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
-import com.zheliu.pokecapsule.transcription.ModelVerifier;
+import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
 import java.io.File;
 import java.io.IOException;
@@ -351,7 +351,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showSettings() {
-        ModelVerifier.Verification model = ModelVerifier.verify(store.paths());
+        boolean cloudConfigured = TencentAsrConfig.isConfigured(this);
         boolean adbEnabled = Settings.Global.getInt(
                 getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
         String usbConfig = readProperty("sys.usb.config");
@@ -365,7 +365,7 @@ public final class MainActivity extends Activity {
                 "彻底关闭悬浮按钮",
                 "立即处理一条排队胶囊",
                 computerStatus,
-                model.message,
+                cloudConfigured ? "腾讯转写：已安全配置" : "腾讯转写：等待配置",
                 "重新申请录音/文件权限"
         };
         new AlertDialog.Builder(this)
@@ -392,7 +392,9 @@ public final class MainActivity extends Activity {
                             requestRequiredPermissions();
                             break;
                         default:
-                            toast(model.message + "\n" + model.file.getAbsolutePath());
+                            toast(cloudConfigured
+                                    ? "腾讯转写已配置；插电并连接 Wi‑Fi 后自动处理"
+                                    : "尚未配置腾讯语音识别");
                     }
                 })
                 .setNegativeButton("关闭", null)

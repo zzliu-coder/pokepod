@@ -12,8 +12,8 @@
 - 录音先进入 `.staging`；停止并检查大小和时长后提交到 Inbox。
 - `capsule.json` 与 `processing.json` 分离，使用 `AtomicFile` 写入。
 - 文件扫描恢复；转写中断后回到 `queued`；未知协议只读。
-- 充电约束的持久化单任务转写队列，以及手动立即处理入口。转写与 Mac 维护事务共享根写锁，任务停止时会通知原生推理取消。
-- whisper.cpp JNI：固定官方提交 `f049fff95a089aa9969deb009cdd4892b3e74916`，CPU、中文、多语言 tiny、最多 2 线程、仅 `arm64-v8a`。
+- 同时满足“插电 + 非计费 Wi‑Fi”才运行的持久化单任务转写队列；无需打开应用，重启后继续等待。
+- 腾讯一句话识别 `16k_zh`：M4A 原音直接上传，密钥一次性导入后由 Android Keystore 加密保存，明文暂存文件立即删除。
 - 短音频与幻觉保护：不足 2 秒不自动转写；输出字数超过录音时长的合理上限时拦截，不进入 API 校对。
 - 固定 JSON 命令入口，供 Mac 端提交经过设备端校验的移动、复制、删除、目录、标签和收藏事务。
 
@@ -27,27 +27,14 @@
 ├── .locks/
 ├── .commands/
 ├── .trash/
-├── .models/
 └── 用户目录/二级目录/
 ```
 
 每个正式胶囊目录包含 `audio.m4a`、`capsule.json`、`processing.json`；转写成功后增加 `raw.txt`，校对成功后增加 `polished.md`。
 
-## 模型
+## 转写
 
-运行时模型固定放在：
-
-```text
-/sdcard/PokeCapsule/.models/ggml-tiny-q5_1.bin
-```
-
-应用只接受以下 SHA-256：
-
-```text
-818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7
-```
-
-仓库中的模型位于 `artifacts/models/ggml-tiny-q5_1.bin`，没有打进 APK。总控安装后应单独复制并在设备上再次校验。
+录音先进入 `queued`。设备插电且 Wi‑Fi 可用时，Android 系统唤醒任务并调用腾讯语音识别；失败会保留原始录音并重新排队。DeepSeek 校对只在 Mac 端点击按钮后调用。
 
 ## 本机构建
 
@@ -82,10 +69,9 @@ component: com.zheliu.pokecapsule/.command.CommandReceiver
 
 ## 当前验证
 
-- Release APK、arm64 JNI、单元测试和 `lintRelease` 已通过。
-- Release APK 已覆盖安装到 Poke3；原有胶囊、模型、书籍和系统设置保留。
-- 悬浮窗、60 秒倒计时录音、本地中文转写、熄屏继续录音、开机恢复和 Mac 命令入口已做真机验证。
-- tiny 模型曾对 1.536 秒录音生成约 160 字幻觉文本；该结果暴露了旧版缺少短音频保护。新版已加入设备端和 Mac 端双重拦截，仍需用用户提供的 8 秒标准句做升级后真机验收。
+- Release APK、单元测试和 `lintRelease` 已通过，APK 内无 native Whisper/模型。
+- Release APK 1.1.0 已覆盖安装到 Poke3；原有胶囊、书籍和系统设置保留，设备 tiny 模型已删除。
+- 用户 8 秒测试录音已在 Poke3 上通过腾讯 `16k_zh` 真机转写为“福斯特建筑事务所商务。”。
 - 重复事务 UUID 已在真机验证为幂等；测试目录创建一次、重复命令被消费、清理成功。
 - API 校对由 Mac 端负责，本 Android 工程在 `raw_ready` 等待 Mac。
 - 长期待机耗电、100 条真实胶囊批量操作和断线压力测试仍需持续观察。

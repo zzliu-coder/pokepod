@@ -2,19 +2,15 @@ package com.zheliu.pokecapsule.service;
 
 import android.app.job.JobParameters;
 import android.app.job.JobService;
-import android.os.Debug;
-
 import com.zheliu.pokecapsule.core.ProcessingState;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.storage.AtomicFiles;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
 import com.zheliu.pokecapsule.storage.RootWriteLock;
-import com.zheliu.pokecapsule.transcription.ModelVerifier;
 import com.zheliu.pokecapsule.transcription.TranscriptionGuard;
-import com.zheliu.pokecapsule.transcription.WhisperAdapter;
-import com.zheliu.pokecapsule.transcription.WhisperCppAdapter;
-import com.zheliu.pokecapsule.transcription.WhisperNative;
+import com.zheliu.pokecapsule.transcription.TencentAsrClient;
+import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
 import java.io.File;
 import java.io.IOException;
@@ -24,7 +20,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class TranscriptionJobService extends JobService {
-    private static final int MAX_PSS_KB = 450 * 1024;
     private static final AtomicBoolean RUNNING = new AtomicBoolean(false);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean stopped;
@@ -38,7 +33,6 @@ public final class TranscriptionJobService extends JobService {
 
     @Override public boolean onStopJob(JobParameters parameters) {
         stopped = true;
-        WhisperNative.cancelCurrent();
         return true;
     }
 
@@ -53,10 +47,8 @@ public final class TranscriptionJobService extends JobService {
             PokePaths paths = new PokePaths();
             CapsuleStore store = new CapsuleStore(paths);
             paths.ensureBase();
-            ModelVerifier.Verification verification = ModelVerifier.verify(paths);
-            if (!verification.valid) {
-                reschedule = !verification.file.exists();
-                if (verification.file.exists()) markFirstQueuedFailed(store, verification.message);
+            if (!TencentAsrConfig.isConfigured(this)) {
+                reschedule = true;
                 return;
             }
             CapsuleRecord queued = firstQueued(store.scan());
@@ -66,7 +58,7 @@ public final class TranscriptionJobService extends JobService {
                     reschedule = true;
                     return;
                 }
-                process(store, verification.file, queued);
+                process(store, queued);
             }
             reschedule = firstQueued(store.scan()) != null;
         } catch (Exception ignored) {
@@ -77,7 +69,7 @@ public final class TranscriptionJobService extends JobService {
         }
     }
 
-    private void process(CapsuleStore store, File model, CapsuleRecord record) throws IOException {
+    private void process(CapsuleStore store, CapsuleRecord record) throws IOException {
         try {
             TranscriptionGuard.requireTranscribableDuration(record.durationMs);
         } catch (IOException error) {
@@ -93,37 +85,25 @@ public final class TranscriptionJobService extends JobService {
                         "transcription", "任务被系统暂停", false);
                 return;
             }
-            WhisperNative.prepareCurrent();
-            if (stopped) {
-                WhisperNative.cancelCurrent();
-            }
-            WhisperAdapter adapter = new WhisperCppAdapter();
-            String text = adapter.transcribe(model, new File(record.directory, "audio.m4a"));
+            TencentAsrConfig credentials = TencentAsrConfig.load(this);
+            String text = new TencentAsrClient().transcribe(
+                    new File(record.directory, "audio.m4a"), credentials);
             TranscriptionGuard.requirePlausibleOutput(text, record.durationMs);
             if (stopped) {
                 store.updateProcessing(record.directory, ProcessingState.QUEUED,
                         "transcription", "任务被系统暂停", false);
                 return;
             }
-            long pss = Debug.getPss();
-            if (pss > MAX_PSS_KB) {
-                store.updateProcessing(record.directory, ProcessingState.FAILED,
-                        "transcription", "峰值内存门触发: " + pss + "KB", false);
-                return;
-            }
             AtomicFiles.writeUtf8(new File(record.directory, "raw.txt"), text + "\n");
             store.updateProcessing(record.directory, ProcessingState.RAW_READY,
                     null, null, false);
-        } catch (IOException error) {
+        } catch (TencentAsrClient.AsrException error) {
+            store.updateProcessing(record.directory, ProcessingState.QUEUED,
+                    "tencent-asr", safeMessage(error), false);
+        } catch (Exception error) {
             store.updateProcessing(record.directory,
-                    stopped ? ProcessingState.QUEUED : ProcessingState.FAILED,
-                    "transcription",
-                    stopped ? "任务被系统暂停" : safeMessage(error),
-                    false);
-        } catch (RuntimeException error) {
-            store.updateProcessing(record.directory,
-                    stopped ? ProcessingState.QUEUED : ProcessingState.FAILED,
-                    "transcription",
+                    ProcessingState.QUEUED,
+                    "tencent-asr",
                     stopped ? "任务被系统暂停" : safeMessage(error),
                     false);
         }
@@ -134,14 +114,6 @@ public final class TranscriptionJobService extends JobService {
             if (record.status == ProcessingState.QUEUED) return record;
         }
         return null;
-    }
-
-    private static void markFirstQueuedFailed(CapsuleStore store, String message) throws IOException {
-        CapsuleRecord queued = firstQueued(store.scan());
-        if (queued != null) {
-            store.updateProcessing(queued.directory, ProcessingState.FAILED,
-                    "model", message, false);
-        }
     }
 
     private static String safeMessage(Throwable error) {

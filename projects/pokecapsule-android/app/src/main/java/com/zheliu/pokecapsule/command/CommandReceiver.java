@@ -11,11 +11,15 @@ import com.zheliu.pokecapsule.storage.AtomicFiles;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.MaintenanceSession;
 import com.zheliu.pokecapsule.storage.PokePaths;
+import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -69,7 +73,7 @@ public final class CommandReceiver extends BroadcastReceiver {
                 throw new Exception("上次执行结果不确定，已拒绝重复执行；请重新同步检查");
             }
             AtomicFiles.writeUtf8(inflightFile, command.toString(2) + "\n");
-            execute(paths, new CapsuleStore(paths), command);
+            execute(context, paths, new CapsuleStore(paths), command);
             result.put("schemaVersion", 1);
             result.put("commandId", commandId);
             result.put("transactionId", commandId);
@@ -102,9 +106,14 @@ public final class CommandReceiver extends BroadcastReceiver {
         }
     }
 
-    private static void execute(PokePaths paths, CapsuleStore store, JSONObject command) throws Exception {
+    private static void execute(
+            Context context, PokePaths paths, CapsuleStore store, JSONObject command) throws Exception {
         String operation = command.getString("operation");
         List<String> ids = ids(command.optJSONArray("capsuleIds"));
+        if ("importTencentCredentials".equals(operation)) {
+            importTencentCredentials(context, paths, command.getString("stagedPath"));
+            return;
+        }
         switch (operation) {
             case "beginMaintenance":
                 MaintenanceSession.begin(paths, command.optString("maintenanceId"));
@@ -198,8 +207,43 @@ public final class CommandReceiver extends BroadcastReceiver {
                         ids.get(0),
                         command.optInt("expectedRevision", -1));
                 return;
+            case "requeueTranscription":
+                requireIds(ids);
+                store.requeueFailedTranscriptions(ids);
+                return;
             default:
                 throw new Exception("未知命令: " + operation);
+        }
+    }
+
+    private static void importTencentCredentials(
+            Context context, PokePaths paths, String stagedRelative) throws Exception {
+        if (stagedRelative == null || stagedRelative.contains("..")
+                || stagedRelative.startsWith("/") || stagedRelative.contains("\\")) {
+            throw new Exception("腾讯密钥暂存路径不合法");
+        }
+        File staged = new File(paths.root(), stagedRelative);
+        paths.assertInsideRoot(staged);
+        String stagingRoot = paths.staging().getCanonicalPath();
+        if (!staged.getCanonicalPath().startsWith(stagingRoot + File.separator)
+                || !staged.isFile() || staged.length() == 0 || staged.length() > 32 * 1024) {
+            throw new Exception("腾讯密钥文件不在暂存区或大小异常");
+        }
+        try {
+            String text = readUtf8(staged);
+            TencentAsrConfig.save(context, TencentAsrConfig.parse(text));
+        } finally {
+            staged.delete();
+        }
+    }
+
+    private static String readUtf8(File file) throws Exception {
+        try (FileInputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 
