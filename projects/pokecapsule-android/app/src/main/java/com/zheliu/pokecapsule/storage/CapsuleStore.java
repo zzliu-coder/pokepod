@@ -143,10 +143,10 @@ public final class CapsuleStore {
         if (staged != null) {
             for (File directory : staged) {
                 if (directory.getName().startsWith("purge-")) {
-                    try {
+                    try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android-recovery")) {
                         deleteTree(directory);
                     } catch (IOException ignored) {
-                        // Keep residue for a later recovery pass.
+                        // An active purge owns the lock, or residue needs a later pass.
                     }
                     continue;
                 }

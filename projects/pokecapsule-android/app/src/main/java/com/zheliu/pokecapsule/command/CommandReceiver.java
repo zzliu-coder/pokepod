@@ -115,6 +115,10 @@ public final class CommandReceiver extends BroadcastReceiver {
             Context context, PokePaths paths, CapsuleStore store, JSONObject command) throws Exception {
         String operation = command.getString("operation");
         List<String> ids = ids(command.optJSONArray("capsuleIds"));
+        if (command.optInt("schemaVersion", 1) == 1
+                && !allowsLegacyReadOrSetup(operation)) {
+            throw new Exception("v1 写命令已停用，请更新 Mac 端后重试");
+        }
         if ("importTencentCredentials".equals(operation)) {
             importTencentCredentials(context, paths, command.getString("stagedPath"));
             return;
@@ -322,16 +326,25 @@ public final class CommandReceiver extends BroadcastReceiver {
                 || "favorite".equals(operation) || "setFavorite".equals(operation)
                 || "tag_add".equals(operation) || "addTags".equals(operation)
                 || "tag_remove".equals(operation) || "removeTags".equals(operation)
-                || "deleteFolderToInbox".equals(operation)
+                || "rmdir".equals(operation) || "deleteFolderToInbox".equals(operation)
+                || "tag_rename".equals(operation)
                 || "renameTag".equals(operation) || "mergeTag".equals(operation)
                 || "deleteTag".equals(operation);
     }
 
     private static boolean allowsEmptyRevisionScope(String operation) {
-        return "deleteFolderToInbox".equals(operation)
+        return "rmdir".equals(operation) || "deleteFolderToInbox".equals(operation)
+                || "tag_rename".equals(operation)
                 || "renameTag".equals(operation)
                 || "mergeTag".equals(operation)
                 || "deleteTag".equals(operation);
+    }
+
+    private static boolean allowsLegacyReadOrSetup(String operation) {
+        return "beginMaintenance".equals(operation)
+                || "endMaintenance".equals(operation)
+                || "rescan".equals(operation)
+                || "importTencentCredentials".equals(operation);
     }
 
     private static Map<String, Integer> revisions(JSONObject object) throws Exception {
