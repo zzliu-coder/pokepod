@@ -66,6 +66,12 @@ Poke3 需要开启 USB 调试并接受 Mac 的 RSA 授权。管理器在事务�
 - API 密钥保存在 `~/Library/Application Support/PokeCapsule/Secrets/correction-api-key`，权限为当前用户只读写。首次发现 `~/Desktop/api.txt` 时会自动迁移第一条非空且以 `sk-` 开头的内容；迁移后可删除桌面文件。旧钥匙串仅作为兼容回退，正常使用不会触发授权窗口。其余粘贴文档不会进入请求或设备。
 - 校对结果先原子写入 `~/Library/Application Support/PokeCapsule/PendingCorrections/`，设备确认提交后才删除缓存。
 
+## 1.4.0 界面
+
+- 三端共用“最佳文字优先”的信息顺序，Mac 详情不再把原始转写、校对和最终文字并列堆满首屏。
+- 云端错误码会转换为可理解的原因与恢复方向，原始录音始终保留。
+- 原始转写、校对版本和最终文字仍可在展开区逐项查看与复制。
+
 ## 已完成的真机验收
 
 - 14 项 Swift 测试和 Release App 构建通过。

@@ -19,6 +19,7 @@ import com.zheliu.pokecapsule.core.Ids;
 import com.zheliu.pokecapsule.core.AudioLevel;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
+import com.zheliu.pokecapsule.transcription.SentenceAudioPolicy;
 import com.zheliu.pokecapsule.ui.MainActivity;
 
 import java.io.File;
@@ -34,7 +35,8 @@ public final class RecordingService extends Service {
     public static final String EXTRA_SILENT = "silent";
 
     private static final int NOTIFICATION_ID = 4202;
-    private static final long MAX_DURATION_MS = 60_000;
+    private static final long DISPLAY_DURATION_MS = 60_000;
+    private static final long MAX_DURATION_MS = SentenceAudioPolicy.SAFE_CAPTURE_DURATION_MS;
     private static final long MIN_FREE_BYTES = 5L * 1024 * 1024;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -43,13 +45,15 @@ public final class RecordingService extends Service {
     private long startedAt;
     private boolean recording;
     private int silentTicks;
+    private long lastRecordedDurationMs;
     private PowerManager.WakeLock wakeLock;
 
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (!recording) return;
             long elapsed = SystemClock.elapsedRealtime() - startedAt;
-            int secondsLeft = (int) Math.max(0, (MAX_DURATION_MS - elapsed + 999) / 1000);
+            int secondsLeft =
+                    (int) Math.max(0, (DISPLAY_DURATION_MS - elapsed + 999) / 1000);
             int amplitude = 0;
             try {
                 if (recorder != null) amplitude = recorder.getMaxAmplitude();
@@ -108,6 +112,7 @@ public final class RecordingService extends Service {
         CapsuleStore store = new CapsuleStore(new PokePaths());
         String id = Ids.newId();
         try {
+            lastRecordedDurationMs = 0;
             stagingDirectory = store.beginRecording(id);
             File output = new File(stagingDirectory, "audio.m4a");
             File original = new File(stagingDirectory, "audio.original.wav");
@@ -135,8 +140,10 @@ public final class RecordingService extends Service {
         }
         recording = false;
         handler.removeCallbacks(tick);
-        long duration = Math.min(MAX_DURATION_MS, SystemClock.elapsedRealtime() - startedAt);
         boolean stoppedCleanly = releaseRecorder(true);
+        long duration = lastRecordedDurationMs > 0
+                ? lastRecordedDurationMs
+                : SystemClock.elapsedRealtime() - startedAt;
         releaseWakeLock();
         if (!stoppedCleanly) {
             fail("录音停止异常；音频保留在暂存区");
@@ -158,13 +165,17 @@ public final class RecordingService extends Service {
     private boolean releaseRecorder(boolean stopFirst) {
         boolean clean = true;
         if (recorder != null) {
+            EnhancedAudioRecorder current = recorder;
             try {
-                if (stopFirst) recorder.stop();
-                else recorder.abort();
-            } catch (Exception ignored) {
+                if (stopFirst) current.stop();
+                else current.abort();
+            } catch (Exception error) {
                 clean = false;
+                current.abort();
+            } finally {
+                lastRecordedDurationMs = current.getRecordedDurationMs();
+                recorder = null;
             }
-            recorder = null;
         }
         return clean;
     }

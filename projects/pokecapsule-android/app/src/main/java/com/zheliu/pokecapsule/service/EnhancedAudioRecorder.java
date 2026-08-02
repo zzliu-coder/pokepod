@@ -12,6 +12,7 @@ import android.media.audiofx.AutomaticGainControl;
 import android.os.Process;
 
 import com.zheliu.pokecapsule.core.AdaptiveVoiceGain;
+import com.zheliu.pokecapsule.transcription.SentenceAudioPolicy;
 
 import java.io.File;
 import java.io.RandomAccessFile;
@@ -27,6 +28,8 @@ final class EnhancedAudioRecorder {
     private static final int BIT_RATE = 32_000;
     private static final int SAMPLES_PER_BLOCK = 320;
     private static final String MIME = MediaFormat.MIMETYPE_AUDIO_AAC;
+    private static final long MAX_CAPTURE_SAMPLES =
+            SentenceAudioPolicy.SAFE_CAPTURE_DURATION_MS * SAMPLE_RATE / 1_000L;
 
     private final File output;
     private final File original;
@@ -38,6 +41,7 @@ final class EnhancedAudioRecorder {
     private volatile boolean stopRequested;
     private volatile Throwable failure;
     private volatile AudioRecord audioRecord;
+    private volatile long recordedSamples;
     private Thread worker;
 
     EnhancedAudioRecorder(File output, File original, boolean lowPowerReader) {
@@ -81,6 +85,10 @@ final class EnhancedAudioRecorder {
         return latestPeak.getAndSet(0);
     }
 
+    long getRecordedDurationMs() {
+        return recordedSamples * 1_000L / SAMPLE_RATE;
+    }
+
     private void recordLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
         AudioRecord capture = null;
@@ -113,7 +121,10 @@ final class EnhancedAudioRecorder {
             ready.countDown();
 
             while (!stopRequested) {
-                int count = capture.read(samples, 0, samples.length);
+                long remaining = MAX_CAPTURE_SAMPLES - submittedSamples;
+                if (remaining <= 0) break;
+                int requested = (int) Math.min(samples.length, remaining);
+                int count = capture.read(samples, 0, requested);
                 if (count < 0 && stopRequested) break;
                 if (count < 0) throw new IllegalStateException("麦克风读取失败: " + count);
                 if (count == 0) continue;
@@ -121,6 +132,7 @@ final class EnhancedAudioRecorder {
                 int peak = voiceGain.process(samples, count);
                 rememberPeak(peak);
                 submittedSamples = queuePcm(encoder, samples, count, submittedSamples, false);
+                recordedSamples = submittedSamples;
                 MuxerState state = drainEncoder(encoder, muxer, trackIndex, muxerStarted, false);
                 trackIndex = state.trackIndex;
                 muxerStarted = state.started;
@@ -157,10 +169,15 @@ final class EnhancedAudioRecorder {
                 if (muxerStarted) {
                     try {
                         muxer.stop();
-                    } catch (RuntimeException ignored) {
+                    } catch (RuntimeException error) {
+                        if (failure == null) failure = error;
                     }
                 }
-                muxer.release();
+                try {
+                    muxer.release();
+                } catch (RuntimeException error) {
+                    if (failure == null) failure = error;
+                }
             }
             if (wav != null) {
                 try {

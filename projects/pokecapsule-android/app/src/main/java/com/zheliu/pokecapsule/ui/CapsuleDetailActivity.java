@@ -10,6 +10,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.media.MediaPlayer;
 import android.os.Bundle;
+import android.view.Gravity;
+import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -40,10 +42,21 @@ public final class CapsuleDetailActivity extends Activity {
     private CapsuleRecord record;
     private TextView title;
     private TextView metadata;
+    private TextView stateChip;
+    private TextView primaryTextLabel;
+    private TextView bestText;
+    private TextView errorText;
+    private TextView retryButton;
+    private TextView playbackButton;
+    private TextView favoriteButton;
+    private TextView versionsToggle;
+    private LinearLayout errorCard;
+    private LinearLayout versions;
     private TextView raw;
     private TextView polished;
     private TextView finalText;
     private MediaPlayer player;
+    private boolean versionsExpanded;
     private boolean libraryReceiverRegistered;
 
     private final BroadcastReceiver libraryChangeReceiver = new BroadcastReceiver() {
@@ -95,49 +108,96 @@ public final class CapsuleDetailActivity extends Activity {
 
     private ScrollView buildPage() {
         ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(ViewKit.background(this));
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(18), dp(14), dp(18), dp(20));
-        page.setBackgroundColor(Color.WHITE);
+        page.setPadding(dp(18), dp(18), dp(18), dp(28));
+        page.setBackgroundColor(ViewKit.background(this));
         scroll.addView(page);
 
-        title = ViewKit.text(this, "胶囊", 27, Typeface.BOLD);
-        page.addView(title, lp(-1, dp(54)));
+        LinearLayout header = row();
+        title = ViewKit.text(this, "胶囊", 26, Typeface.BOLD);
+        title.setMaxLines(2);
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+        favoriteButton = ViewKit.quietButton(this, "收藏", v -> toggleFavorite());
+        header.addView(favoriteButton, lp(dp(88), dp(48)));
+        page.addView(header, block());
+
         metadata = ViewKit.text(this, "读取中…", 15, Typeface.NORMAL);
-        metadata.setPadding(0, 0, 0, dp(10));
-        page.addView(metadata);
+        metadata.setTextColor(ViewKit.secondary(this));
+        metadata.setPadding(0, 0, 0, dp(8));
+        page.addView(metadata, lp(-1, -2));
 
-        LinearLayout first = row();
-        first.addView(ViewKit.button(this, "播放/停止", v -> togglePlayback()), weight());
-        first.addView(ViewKit.button(this, "改标题", v -> promptTitle()), weight());
-        first.addView(ViewKit.button(this, "收藏", v -> toggleFavorite()), weight());
-        page.addView(first, lp(-1, dp(52)));
+        stateChip = ViewKit.status(this, "读取中", false);
+        LinearLayout.LayoutParams stateParams = lp(-2, dp(34));
+        stateParams.bottomMargin = dp(18);
+        page.addView(stateChip, stateParams);
 
-        LinearLayout second = row();
-        second.addView(ViewKit.button(this, "加标签", v -> promptTag(true)), weight());
-        second.addView(ViewKit.button(this, "移标签", v -> promptTag(false)), weight());
-        second.addView(ViewKit.button(this, "重试转写", v -> retry()), weight());
-        page.addView(second, lp(-1, dp(52)));
+        errorCard = ViewKit.card(this);
+        TextView errorHeading = ViewKit.sectionTitle(this, "这段录音需要处理");
+        errorHeading.setTextColor(ViewKit.error(this));
+        errorCard.addView(errorHeading);
+        errorText = ViewKit.text(this, "", 16, Typeface.NORMAL);
+        errorText.setTextColor(ViewKit.error(this));
+        errorText.setPadding(0, 0, 0, dp(10));
+        errorCard.addView(errorText);
+        retryButton = ViewKit.secondaryButton(this, "修复并重新转写", v -> retry());
+        errorCard.addView(retryButton, lp(-1, dp(48)));
+        errorCard.setVisibility(View.GONE);
+        page.addView(errorCard, block());
 
-        LinearLayout third = row();
-        third.addView(ViewKit.button(this, "编辑最终文字", v -> promptFinalText()), weight());
-        third.addView(ViewKit.button(this, "复制最终文字", v -> copyFinalText()), weight());
-        page.addView(third, lp(-1, dp(52)));
+        LinearLayout audioCard = ViewKit.card(this);
+        audioCard.addView(ViewKit.sectionTitle(this, "录音"));
+        playbackButton = ViewKit.primaryButton(this, "播放录音", v -> togglePlayback());
+        audioCard.addView(playbackButton, lp(-1, dp(50)));
+        page.addView(audioCard, block());
 
-        page.addView(ViewKit.text(this, "原始转写", 20, Typeface.BOLD), lp(-1, dp(44)));
-        raw = ViewKit.text(this, "尚未生成", 17, Typeface.NORMAL);
+        LinearLayout textCard = ViewKit.card(this);
+        primaryTextLabel = ViewKit.sectionTitle(this, "胶囊文字");
+        textCard.addView(primaryTextLabel);
+        bestText = ViewKit.text(this, "转写完成后，文字会出现在这里。", 18, Typeface.NORMAL);
+        bestText.setTextIsSelectable(true);
+        bestText.setGravity(Gravity.TOP);
+        bestText.setLineSpacing(0, 1.15f);
+        bestText.setPadding(0, 0, 0, dp(14));
+        textCard.addView(bestText, lp(-1, -2));
+        LinearLayout textActions = row();
+        textActions.addView(
+                ViewKit.secondaryButton(this, "编辑", v -> promptFinalText()), weight());
+        textActions.addView(
+                ViewKit.quietButton(this, "复制", v -> copyFinalText()), weight());
+        textCard.addView(textActions, lp(-1, dp(50)));
+        page.addView(textCard, block());
+
+        page.addView(ViewKit.sectionTitle(this, "整理"));
+        LinearLayout organize = row();
+        organize.addView(ViewKit.quietButton(this, "改标题", v -> promptTitle()), weight());
+        organize.addView(ViewKit.quietButton(this, "加标签", v -> promptTag(true)), weight());
+        organize.addView(ViewKit.quietButton(this, "移标签", v -> promptTag(false)), weight());
+        page.addView(organize, block());
+
+        versionsToggle = ViewKit.quietButton(this, "查看文字版本", v -> toggleVersions());
+        page.addView(versionsToggle, lp(-1, dp(48)));
+        versions = ViewKit.card(this);
+        versions.setVisibility(View.GONE);
+        versions.addView(ViewKit.sectionTitle(this, "原始转写"));
+        raw = ViewKit.text(this, "", 16, Typeface.NORMAL);
         raw.setTextIsSelectable(true);
-        page.addView(raw);
-
-        page.addView(ViewKit.text(this, "校对文字", 20, Typeface.BOLD), lp(-1, dp(44)));
-        polished = ViewKit.text(this, "尚未生成", 17, Typeface.NORMAL);
+        raw.setPadding(0, 0, 0, dp(16));
+        versions.addView(raw);
+        versions.addView(ViewKit.sectionTitle(this, "校对文字"));
+        polished = ViewKit.text(this, "", 16, Typeface.NORMAL);
         polished.setTextIsSelectable(true);
-        page.addView(polished);
-
-        page.addView(ViewKit.text(this, "最终文字", 20, Typeface.BOLD), lp(-1, dp(44)));
-        finalText = ViewKit.text(this, "尚未编辑", 17, Typeface.NORMAL);
+        polished.setPadding(0, 0, 0, dp(16));
+        versions.addView(polished);
+        versions.addView(ViewKit.sectionTitle(this, "最终文字"));
+        finalText = ViewKit.text(this, "", 16, Typeface.NORMAL);
         finalText.setTextIsSelectable(true);
-        page.addView(finalText);
+        versions.addView(finalText);
+        LinearLayout.LayoutParams versionsParams = block();
+        versionsParams.topMargin = dp(10);
+        page.addView(versions, versionsParams);
         return scroll;
     }
 
@@ -154,12 +214,32 @@ public final class CapsuleDetailActivity extends Activity {
                     record = loaded;
                     title.setText(loaded.title);
                     metadata.setText(loaded.metadataText()
-                            + (loaded.favorite ? "\n★ 已收藏" : "")
-                            + (loaded.tagsText().isEmpty() ? "" : "\n" + loaded.tagsText())
-                            + (loaded.error.isEmpty() ? "" : "\n" + loaded.error));
-                    raw.setText(rawText.isEmpty() ? "尚未生成" : rawText);
-                    polished.setText(polishedText.isEmpty() ? "尚未生成" : polishedText);
-                    finalText.setText(finalValue.isEmpty() ? "尚未编辑" : finalValue);
+                            + (loaded.tagsText().isEmpty() ? "" : "\n" + loaded.tagsText()));
+                    String status = statusLabel(loaded);
+                    stateChip.setText(status);
+                    stateChip.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
+                    favoriteButton.setText(loaded.favorite ? "★ 已收藏" : "☆ 收藏");
+                    applyError(loaded);
+                    String primary = primaryText(loaded, finalValue, polishedText, rawText);
+                    bestText.setText(primary.isEmpty()
+                            ? "转写完成后，文字会出现在这里。"
+                            : primary);
+                    primaryTextLabel.setText(finalValue.isEmpty()
+                            ? (polishedText.isEmpty() && rawText.isEmpty()
+                                    ? "胶囊文字"
+                                    : "转写文字")
+                            : "最终文字");
+                    raw.setText(rawText.isEmpty() ? "暂无" : rawText);
+                    polished.setText(polishedText.isEmpty() ? "暂无" : polishedText);
+                    finalText.setText(finalValue.isEmpty() ? "暂无" : finalValue);
+                    boolean hasVersions = !rawText.isEmpty()
+                            || !polishedText.isEmpty()
+                            || !finalValue.isEmpty();
+                    versionsToggle.setVisibility(hasVersions ? View.VISIBLE : View.GONE);
+                    if (!hasVersions) {
+                        versionsExpanded = false;
+                        versions.setVisibility(View.GONE);
+                    }
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> toast(error.getMessage()));
@@ -201,7 +281,6 @@ public final class CapsuleDetailActivity extends Activity {
         if (record == null) return;
         if (player != null) {
             stopPlayback();
-            toast("已停止播放");
             return;
         }
         File audio = new File(record.directory, "audio.m4a");
@@ -211,6 +290,7 @@ public final class CapsuleDetailActivity extends Activity {
             player.setOnCompletionListener(value -> stopPlayback());
             player.prepare();
             player.start();
+            playbackButton.setText("停止播放");
             toast(DeviceRuntimeProfile.isLowPowerReader()
                     ? "正在播放；Poke3 需连接蓝牙或 USB 音频设备"
                     : "正在通过手机扬声器播放");
@@ -244,13 +324,8 @@ public final class CapsuleDetailActivity extends Activity {
 
     private void retry() {
         if (record == null || record.readOnly) return;
-        if (record.status != ProcessingState.FAILED) {
-            toast("当前状态无需重试");
-            return;
-        }
         runOperation(() -> {
-            store.updateProcessing(record.directory, ProcessingState.QUEUED,
-                    null, null, false);
+            store.requeueFailedTranscriptions(Collections.singletonList(record.id));
             TranscriptionScheduler.scheduleManual(this);
         }, "已重新排队");
     }
@@ -290,6 +365,116 @@ public final class CapsuleDetailActivity extends Activity {
             player.release();
             player = null;
         }
+        if (playbackButton != null) playbackButton.setText("播放录音");
+    }
+
+    private void toggleVersions() {
+        versionsExpanded = !versionsExpanded;
+        versions.setVisibility(versionsExpanded ? View.VISIBLE : View.GONE);
+        versionsToggle.setText(versionsExpanded ? "收起文字版本" : "查看文字版本");
+    }
+
+    private void applyError(CapsuleRecord loaded) {
+        String message = friendlyError(loaded.error);
+        boolean visible = !message.isEmpty() || loaded.status == ProcessingState.FAILED;
+        errorCard.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible) return;
+        errorText.setText(message.isEmpty()
+                ? "转写没有完成，原始录音仍然安全保存。"
+                : message);
+        boolean configure = isConfigurationFailure(loaded.error);
+        boolean canRetry = loaded.status == ProcessingState.FAILED
+                && canRetryTranscription(loaded.error);
+        retryButton.setVisibility(canRetry || configure ? View.VISIBLE : View.GONE);
+        if (configure) {
+            retryButton.setText("打开转写设置");
+            retryButton.setOnClickListener(v -> openTranscriptionSettings());
+        } else {
+            retryButton.setText(containsDurationLimit(loaded.error)
+                    ? "生成安全副本并重新转写"
+                    : "重新转写");
+            retryButton.setOnClickListener(v -> retry());
+        }
+    }
+
+    private static String friendlyError(String value) {
+        if (value == null || value.trim().isEmpty()) return "";
+        if (value.contains("ErrorVoicedataTooLong") || value.contains("longer than 60 seconds")) {
+            return "录音略微超过云端的 60 秒上限。应用会保留原音，使用安全副本重新转写。";
+        }
+        if (value.startsWith("InvalidParameter")
+                || value.startsWith("UnsupportedOperation")) {
+            return "这段录音暂时无法转写，原始录音仍然安全保存。";
+        }
+        if (value.startsWith("AuthFailure")) {
+            return "转写服务配置失效，请在设置中重新导入。";
+        }
+        if (value.contains("Exception") || value.contains("Error")) {
+            return "转写暂时没有完成，原始录音仍然安全保存。";
+        }
+        return value;
+    }
+
+    private static boolean canRetryTranscription(String value) {
+        if (value == null || value.trim().isEmpty()) return true;
+        if (value.startsWith("AuthFailure")
+                || value.contains("配置失效")
+                || value.contains("自动裁剪失败")
+                || value.contains("超过自动修复范围")
+                || value.contains("音轨")
+                || value.contains("本地音频")) {
+            return false;
+        }
+        return containsDurationLimit(value)
+                || value.contains("网络")
+                || value.contains("服务")
+                || value.contains("稍后")
+                || value.contains("连续失败");
+    }
+
+    private static boolean isConfigurationFailure(String value) {
+        return value != null && (value.startsWith("AuthFailure")
+                || value.contains("配置失效"));
+    }
+
+    private static boolean containsDurationLimit(String value) {
+        return value != null && (value.contains("ErrorVoicedataTooLong")
+                || value.contains("longer than 60 seconds"));
+    }
+
+    private void openTranscriptionSettings() {
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.putExtra(MainActivity.EXTRA_OPEN_SETTINGS, true);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        startActivity(intent);
+        finish();
+    }
+
+    private static String primaryText(
+            CapsuleRecord record,
+            String finalValue,
+            String polishedValue,
+            String rawValue) {
+        if (finalValue.trim().isEmpty()
+                && polishedValue.trim().isEmpty()
+                && rawValue.trim().isEmpty()) {
+            return "";
+        }
+        return record.previewText();
+    }
+
+    private static String statusLabel(CapsuleRecord value) {
+        switch (value.status) {
+            case RECORDING: return "录音中";
+            case RECORDED:
+            case QUEUED: return "等待转写";
+            case TRANSCRIBING: return "正在转写";
+            case RAW_READY: return "转写完成";
+            case CORRECTING: return "正在校对";
+            case READY: return "已整理";
+            case FAILED: return "需要处理";
+            default: return "";
+        }
     }
 
     private static String readOptional(File file) throws Exception {
@@ -316,6 +501,7 @@ public final class CapsuleDetailActivity extends Activity {
     private LinearLayout row() {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
         return row;
     }
 
@@ -327,6 +513,12 @@ public final class CapsuleDetailActivity extends Activity {
 
     private LinearLayout.LayoutParams lp(int width, int height) {
         return new LinearLayout.LayoutParams(width, height);
+    }
+
+    private LinearLayout.LayoutParams block() {
+        LinearLayout.LayoutParams value = lp(-1, -2);
+        value.bottomMargin = dp(18);
+        return value;
     }
 
     private int dp(int value) {

@@ -109,6 +109,97 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertEqual(record.displayPreview, raw)
     }
 
+    func testQueuedCapsuleUsesCurrentPolicyText() {
+        let id = UUID()
+        let record = CapsuleRecord(
+            capsule: CapsuleMetadata(
+                id: id,
+                createdAt: Date(),
+                updatedAt: Date()),
+            processing: ProcessingMetadata(
+                schemaVersion: 1,
+                capsuleId: id,
+                revision: 1,
+                durationMs: 10_000,
+                status: .queued,
+                audioFile: "audio.m4a",
+                rawTextFile: nil,
+                polishedTextFile: nil,
+                errorStage: nil,
+                error: nil,
+                attempts: 0,
+                engine: nil,
+                model: nil),
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/capsule"),
+            rawText: nil,
+            polishedText: nil,
+            warnings: [])
+        XCTAssertEqual(record.displayPreview, "等待转写")
+    }
+
+    func testTencentDurationErrorIsNotShownRaw() {
+        let id = UUID()
+        let record = CapsuleRecord(
+            capsule: CapsuleMetadata(
+                id: id,
+                createdAt: Date(),
+                updatedAt: Date()),
+            processing: ProcessingMetadata(
+                schemaVersion: 1,
+                capsuleId: id,
+                revision: 1,
+                durationMs: 60_000,
+                status: .failed,
+                audioFile: "audio.m4a",
+                rawTextFile: nil,
+                polishedTextFile: nil,
+                errorStage: "tencent-asr",
+                error: "InvalidParameterValue.ErrorVoicedataTooLong: longer than 60 seconds.",
+                attempts: 1,
+                engine: "tencent-asr",
+                model: "16k_zh"),
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/capsule"),
+            rawText: nil,
+            polishedText: nil,
+            warnings: [])
+        XCTAssertEqual(
+            record.userFacingError,
+            "录音略微超过云端的 60 秒上限。原音已经保留，可以生成安全副本重新转写。")
+        XCTAssertTrue(record.canRetryTranscription)
+    }
+
+    func testAuthenticationFailureDoesNotOfferPointlessRetry() {
+        let id = UUID()
+        let record = CapsuleRecord(
+            capsule: CapsuleMetadata(
+                id: id,
+                createdAt: Date(),
+                updatedAt: Date()),
+            processing: ProcessingMetadata(
+                schemaVersion: 1,
+                capsuleId: id,
+                revision: 1,
+                durationMs: 8_000,
+                status: .failed,
+                audioFile: "audio.m4a",
+                rawTextFile: nil,
+                polishedTextFile: nil,
+                errorStage: "tencent-asr",
+                error: "AuthFailure.SecretIdNotFound",
+                attempts: 1,
+                engine: "tencent-asr",
+                model: "16k_zh"),
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/capsule"),
+            rawText: nil,
+            polishedText: nil,
+            warnings: [])
+        XCTAssertEqual(record.userFacingError, "转写服务配置失效，请在设备设置中重新导入。")
+        XCTAssertFalse(record.canRetryTranscription)
+    }
+
     func testPathPolicyAcceptsChineseAndSpaces() throws {
         XCTAssertEqual(try PathPolicy.validatedRelativeFolder("工作 灵感/上海项目"), "工作 灵感/上海项目")
         XCTAssertEqual(try PathPolicy.validatedTag("#待整理"), "待整理")

@@ -11,6 +11,7 @@ struct PokeCapsuleApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 980, minHeight: 640)
+                .tint(.pokeAccent)
         }
         .commands {
             CommandGroup(after: .importExport) {
@@ -343,43 +344,117 @@ struct CapsuleListView: View {
 struct CapsuleDetailView: View {
     @EnvironmentObject private var model: AppModel
     let record: CapsuleRecord?
+    @State private var showVersions = false
 
     var body: some View {
         if let record {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    HStack {
-                        Text(record.displayTitle).font(.title2.bold())
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(record.displayTitle)
+                                .font(.title2.weight(.semibold))
+                                .textSelection(.enabled)
+                            HStack(spacing: 8) {
+                                Text(record.capsule.createdAt, style: .date)
+                                Text(record.capsule.createdAt, style: .time)
+                                Text(record.relativeFolder)
+                                Text(duration(record.processing?.durationMs))
+                            }
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        }
                         Spacer()
-                        Button("DeepSeek 校对") { model.correct(record) }
-                            .disabled(record.rawText == nil || model.isBusy)
-                        Button("播放录音") { model.play(record) }
+                        Button { model.play(record) } label: {
+                            Label("播放录音", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    LabeledContent("位置", value: record.relativeFolder)
-                    LabeledContent("状态", value: record.processing?.status.localizedName ?? "未知")
-                    if let error = record.processing?.error {
-                        GroupBox("处理错误") { Text(error).foregroundStyle(.red) }
+
+                    if let status = record.visibleProcessingStatus {
+                        StatusBadge(
+                            text: status,
+                            isError: record.processing?.status == .failed)
                     }
-                    if !record.warnings.isEmpty {
-                        GroupBox("文件警告") {
-                            ForEach(record.warnings, id: \.self) { Text($0) }
+
+                    if let error = record.userFacingError {
+                        NoticePanel(
+                            title: "这段录音需要处理",
+                            message: error,
+                            isError: true)
+                        if record.canRetryTranscription {
+                            Button {
+                                model.retryTranscription(record)
+                            } label: {
+                                Label(
+                                    "重新转写",
+                                    systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.isBusy || record.readOnly)
                         }
                     }
-                    GroupBox("原始转写") {
-                        Text(record.rawText ?? "尚未生成").textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if !record.warnings.isEmpty {
+                        DisclosureGroup("文件检查") {
+                            ForEach(record.warnings, id: \.self) { Text($0) }
+                        }
+                        .foregroundStyle(.secondary)
                     }
-                    GroupBox("校对文字") {
-                        Text(record.polishedText ?? "尚未生成").textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                    TextPanel(
+                        title: record.primaryTextLabel,
+                        text: record.primaryText ?? "转写完成后，文字会出现在这里。")
+
+                    HStack {
+                        if record.rawText != nil {
+                            Button { model.correct(record) } label: {
+                                Label("用 DeepSeek 校对", systemImage: "wand.and.stars")
+                            }
+                            .disabled(model.isBusy)
+                        }
+                        Spacer()
                     }
-                    FinalTextEditor(record: record)
+
+                    if record.trash == nil && !record.readOnly {
+                        FinalTextEditor(record: record)
+                    }
+
+                    if record.rawText != nil
+                        || record.polishedText != nil
+                        || record.finalText != nil {
+                        DisclosureGroup(
+                            showVersions ? "收起文字版本" : "查看文字版本",
+                            isExpanded: $showVersions
+                        ) {
+                            VStack(alignment: .leading, spacing: 18) {
+                                VersionText(
+                                    title: "原始转写",
+                                    text: record.rawText ?? "暂无")
+                                VersionText(
+                                    title: "校对文字",
+                                    text: record.polishedText ?? "暂无")
+                                VersionText(
+                                    title: "最终文字",
+                                    text: record.finalText ?? "暂无")
+                            }
+                            .padding(.top, 10)
+                        }
+                    }
                 }
-                .padding()
+                .padding(24)
+                .frame(maxWidth: 860, alignment: .leading)
             }
+            .background(Color.pokeBackground)
+            .onChange(of: record.id) { _ in showVersions = false }
         } else {
             PlaceholderView(title: "选择一个胶囊", systemImage: "waveform")
         }
+    }
+
+    private func duration(_ milliseconds: Int?) -> String {
+        guard let milliseconds else { return "时长未知" }
+        return String(format: "%d:%02d", milliseconds / 60_000, (milliseconds / 1_000) % 60)
     }
 }
 
@@ -389,24 +464,32 @@ struct FinalTextEditor: View {
     @State private var text = ""
 
     var body: some View {
-        GroupBox("最终文字") {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("编辑最终文字")
+                    .font(.headline)
+                Spacer()
+                Button("保存") {
+                    model.saveFinalText(text, for: record)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(record.trash != nil || record.readOnly || model.isBusy)
+            }
             VStack(alignment: .leading, spacing: 10) {
                 TextEditor(text: $text)
                     .font(.body)
-                    .frame(minHeight: 150)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 170)
+                    .padding(10)
+                    .background(Color.pokeEditor, in: RoundedRectangle(cornerRadius: 10))
                     .disabled(record.trash != nil || record.readOnly)
-                HStack {
-                    Text("你的编辑单独保存，原始转写和模型校对不会被覆盖。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("保存最终文字") {
-                        model.saveFinalText(text, for: record)
-                    }
-                    .disabled(record.trash != nil || record.readOnly || model.isBusy)
-                }
+                Text("你的编辑单独保存，原始转写和模型校对不会被覆盖。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .padding(18)
+        .background(Color.pokeSurface, in: RoundedRectangle(cornerRadius: 14))
         .onAppear {
             text = record.finalText ?? record.polishedText ?? record.rawText ?? ""
         }
@@ -417,6 +500,87 @@ struct FinalTextEditor: View {
             text = record.finalText ?? record.polishedText ?? record.rawText ?? ""
         }
     }
+}
+
+struct TextPanel: View {
+    let title: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+            Text(text)
+                .font(.title3)
+                .lineSpacing(5)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(20)
+        .background(Color.pokeSurface, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct VersionText: View {
+    let title: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+struct StatusBadge: View {
+    let text: String
+    let isError: Bool
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(isError ? Color.pokeError : Color.pokeAccent)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                isError ? Color.pokeErrorSoft : Color.pokeAccentSoft,
+                in: Capsule())
+    }
+}
+
+struct NoticePanel: View {
+    let title: String
+    let message: String
+    let isError: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isError ? Color.pokeErrorSoft : Color.pokeAccentSoft,
+            in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private extension Color {
+    static let pokeAccent = Color(red: 49 / 255, green: 95 / 255, blue: 82 / 255)
+    static let pokeAccentSoft = Color(red: 226 / 255, green: 236 / 255, blue: 231 / 255)
+    static let pokeError = Color(red: 162 / 255, green: 59 / 255, blue: 50 / 255)
+    static let pokeErrorSoft = Color(red: 247 / 255, green: 232 / 255, blue: 229 / 255)
+    static let pokeBackground = Color(nsColor: .windowBackgroundColor)
+    static let pokeSurface = Color(nsColor: .controlBackgroundColor)
+    static let pokeEditor = Color(nsColor: .textBackgroundColor)
 }
 
 struct PlaceholderView: View {

@@ -131,6 +131,22 @@ public struct CapsuleRecord: Identifiable, Hashable {
     }
 
     public var displayPreview: String {
+        if let text = primaryText { return text }
+        let raw = normalizedPreview(rawText) ?? ""
+        let polished = normalizedPreview(polishedText) ?? ""
+        if !polished.isEmpty || !raw.isEmpty {
+            return "转写结果异常，请播放录音"
+        }
+        switch processing?.status {
+        case .recording: return "正在录音…"
+        case .recorded, .queued: return "等待转写"
+        case .transcribing: return "正在转写…"
+        case .failed: return "转写失败，可稍后重试"
+        default: return displayTitle
+        }
+    }
+
+    public var primaryText: String? {
         let durationMs = processing?.durationMs ?? 0
         let raw = normalizedPreview(rawText) ?? ""
         let polished = normalizedPreview(polishedText) ?? ""
@@ -146,16 +162,55 @@ public struct CapsuleRecord: Identifiable, Hashable {
            TranscriptionSanity.isPlausible(text: raw, durationMs: durationMs) {
             return raw
         }
-        if !polished.isEmpty || !raw.isEmpty {
-            return "转写结果异常，请播放录音"
+        return nil
+    }
+
+    public var primaryTextLabel: String {
+        if normalizedPreview(finalText)?.isEmpty == false { return "最终文字" }
+        if normalizedPreview(polishedText)?.isEmpty == false { return "校对文字" }
+        if normalizedPreview(rawText)?.isEmpty == false { return "原始转写" }
+        return "胶囊文字"
+    }
+
+    public var userFacingError: String? {
+        guard let value = processing?.error?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        if value.contains("ErrorVoicedataTooLong")
+            || value.contains("longer than 60 seconds") {
+            return "录音略微超过云端的 60 秒上限。原音已经保留，可以生成安全副本重新转写。"
         }
-        switch processing?.status {
-        case .recording: return "正在录音…"
-        case .recorded, .queued: return "等待 Wi‑Fi 和 15% 以上电量转写"
-        case .transcribing: return "正在转写…"
-        case .failed: return "转写失败，可稍后重试"
-        default: return displayTitle
+        if value.hasPrefix("AuthFailure") {
+            return "转写服务配置失效，请在设备设置中重新导入。"
         }
+        if value.hasPrefix("InvalidParameter")
+            || value.hasPrefix("UnsupportedOperation") {
+            return "这段录音暂时无法转写，原始录音仍然安全保存。"
+        }
+        if value.contains("Exception") || value.contains("Error") {
+            return "转写暂时没有完成，原始录音仍然安全保存。"
+        }
+        return value
+    }
+
+    public var canRetryTranscription: Bool {
+        guard processing?.status == .failed else { return false }
+        let value = processing?.error ?? ""
+        if value.hasPrefix("AuthFailure")
+            || value.contains("配置失效")
+            || value.contains("自动裁剪失败")
+            || value.contains("超过自动修复范围")
+            || value.contains("音轨")
+            || value.contains("本地音频") {
+            return false
+        }
+        return value.isEmpty
+            || value.contains("ErrorVoicedataTooLong")
+            || value.contains("longer than 60 seconds")
+            || value.contains("网络")
+            || value.contains("服务")
+            || value.contains("稍后")
+            || value.contains("连续失败")
     }
 
     public var visibleProcessingStatus: String? {

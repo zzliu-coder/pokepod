@@ -113,7 +113,7 @@ public final class CapsuleStore {
         }
         String now = TimeFormat.utcNow();
         JSONObject capsule = new JSONObject();
-        JSONObject processing = processingJson(id, Math.min(60000, durationMs), ProcessingState.QUEUED, 2);
+        JSONObject processing = processingJson(id, durationMs, ProcessingState.QUEUED, 2);
         try {
             capsule.put("schemaVersion", 1);
             capsule.put("id", id);
@@ -776,7 +776,18 @@ public final class CapsuleStore {
             if (current != ProcessingState.FAILED) {
                 throw new IOException("只有失败的胶囊可以重新排队");
             }
-            updateProcessing(directory, ProcessingState.QUEUED, null, null, false);
+            try {
+                processing.put("status", ProcessingState.QUEUED.wireValue());
+                processing.put("revision", processing.optInt("revision", 0) + 1);
+                processing.put("errorStage", JSONObject.NULL);
+                processing.put("error", JSONObject.NULL);
+                processing.put("attempts", 0);
+            } catch (JSONException error) {
+                throw new IOException("无法重置转写次数", error);
+            }
+            AtomicFiles.writeUtf8(
+                    new File(directory, "processing.json"),
+                    pretty(processing));
         }
     }
 

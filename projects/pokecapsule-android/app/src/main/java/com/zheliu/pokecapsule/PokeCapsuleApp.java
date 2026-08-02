@@ -8,7 +8,6 @@ import android.util.Log;
 
 import com.zheliu.pokecapsule.service.OverlayService;
 import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
-import com.zheliu.pokecapsule.service.TranscriptionScheduler;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.DeviceIdentity;
 import com.zheliu.pokecapsule.storage.PokePaths;
@@ -16,13 +15,15 @@ import com.zheliu.pokecapsule.storage.RootWriteLock;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public final class PokeCapsuleApp extends Application {
+    private static final CountDownLatch STARTUP_READY = new CountDownLatch(1);
     private final ExecutorService startupExecutor = Executors.newSingleThreadExecutor();
 
     @Override public void onCreate() {
         super.onCreate();
-        TranscriptionScheduler.cancelAutomatic(this);
         boolean lowPowerReader = DeviceRuntimeProfile.isLowPowerReader();
         boolean overlayEnabled = getSharedPreferences("overlay", MODE_PRIVATE)
                 .getBoolean("enabled", false);
@@ -46,7 +47,13 @@ public final class PokeCapsuleApp extends Application {
             } catch (Exception error) {
                 Log.e("PokeCapsule", "启动初始化失败", error);
                 // MainActivity presents permission and storage recovery actions.
+            } finally {
+                STARTUP_READY.countDown();
             }
         });
+    }
+
+    public static boolean awaitStartupReady(long timeoutMs) throws InterruptedException {
+        return STARTUP_READY.await(timeoutMs, TimeUnit.MILLISECONDS);
     }
 }

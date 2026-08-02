@@ -621,6 +621,13 @@ final class AppModel: ObservableObject {
             finalText: text))
     }
 
+    func retryTranscription(_ record: CapsuleRecord) {
+        perform(DeviceCommand(
+            operation: "requeueTranscription",
+            capsuleIds: [record.id],
+            expectedRevision: record.capsule.revision))
+    }
+
     func discardPending(_ id: UUID) {
         guard !isBusy else {
             status = "同步进行中，完成后才能丢弃待同步操作"

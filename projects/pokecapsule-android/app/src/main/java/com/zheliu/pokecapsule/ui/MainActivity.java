@@ -62,6 +62,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 
 public final class MainActivity extends Activity {
+    public static final String EXTRA_OPEN_SETTINGS = "openSettings";
     private static final int REQUEST_PERMISSIONS = 91;
     private static final int REQUEST_TENCENT_CONFIG = 92;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -76,6 +77,7 @@ public final class MainActivity extends Activity {
     private TextView tagAction;
     private TextView favoriteAction;
     private TextView deleteAction;
+    private LinearLayout selectionActions;
     private String folderFilter = PathPolicy.INBOX;
     private String tagFilter;
     private boolean favoritesOnly;
@@ -115,6 +117,9 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         setContentView(buildPage());
         requestRequiredPermissions();
+        if (getIntent().getBooleanExtra(EXTRA_OPEN_SETTINGS, false)) {
+            getWindow().getDecorView().post(this::showSettings);
+        }
     }
 
     @Override public void onResume() {
@@ -122,6 +127,14 @@ public final class MainActivity extends Activity {
         cloudConfigured = TencentAsrConfig.isConfigured(this);
         refresh();
         if (cloudConfigured) TranscriptionScheduler.scheduleAutomatic(this);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent.getBooleanExtra(EXTRA_OPEN_SETTINGS, false)) {
+            getWindow().getDecorView().post(this::showSettings);
+        }
     }
 
     @Override public void onStart() {
@@ -153,36 +166,40 @@ public final class MainActivity extends Activity {
         boolean lowPowerReader = DeviceRuntimeProfile.isLowPowerReader();
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(14), dp(10), dp(14), dp(10));
-        page.setBackgroundColor(Color.WHITE);
+        page.setPadding(dp(16), dp(12), dp(16), dp(12));
+        page.setBackgroundColor(ViewKit.background(this));
 
+        LinearLayout header = row();
         heading = ViewKit.text(this, "PokeCapsule · Inbox", 25, Typeface.BOLD);
-        page.addView(heading, lp(-1, dp(lowPowerReader ? 46 : 72)));
+        header.addView(heading, new LinearLayout.LayoutParams(0, -1, 1f));
+        header.addView(
+                ViewKit.quietButton(this, "设置", v -> showSettings()),
+                lp(dp(78), dp(48)));
+        page.addView(header, lp(-1, dp(lowPowerReader ? 50 : 64)));
 
         LinearLayout tabs = row();
         tabs.addView(smallButton("Inbox", v -> showInbox()), weight());
         tabs.addView(smallButton("目录", v -> showFolderChooser()), weight());
         tabs.addView(smallButton("标签", v -> showTagChooser()), weight());
         tabs.addView(smallButton("收藏", v -> showFavorites()), weight());
-        tabs.addView(smallButton("设置", v -> showSettings()), weight());
         page.addView(tabs, lp(-1, dp(48)));
 
         LinearLayout tools = row();
         tools.addView(smallButton("搜索", v -> promptSearch()), weight());
-        tools.addView(smallButton("待转写", v -> showSmart("pending")), weight());
-        tools.addView(smallButton("失败", v -> showSmart("failed")), weight());
-        tools.addView(smallButton("回收站", v -> showTrash()), weight());
-        page.addView(tools, lp(-1, dp(44)));
+        tools.addView(smallButton("筛选", v -> showFilterChooser()), weight());
+        page.addView(tools, lp(-1, dp(48)));
 
         ListView list = new ListView(this);
         list.setDividerHeight(dp(1));
+        list.setBackgroundColor(ViewKit.surface(this));
         adapter = new ArrayAdapter<CapsuleRecord>(
                 this, android.R.layout.simple_list_item_1, new ArrayList<>()) {
             @Override public View getView(int position, View convertView, ViewGroup parent) {
                 CapsuleRecord record = getItem(position);
                 LinearLayout row = new LinearLayout(MainActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
-                row.setPadding(dp(10), dp(7), dp(10), dp(7));
+                row.setPadding(dp(12), dp(10), dp(12), dp(10));
+                row.setBackgroundColor(ViewKit.surface(MainActivity.this));
 
                 TextView preview = ViewKit.text(
                         MainActivity.this,
@@ -201,7 +218,7 @@ public final class MainActivity extends Activity {
                                 + (record.tagsText().isEmpty() ? "" : " · " + record.tagsText()),
                         14,
                         Typeface.NORMAL);
-                metadata.setTextColor(Color.DKGRAY);
+                metadata.setTextColor(ViewKit.secondary(MainActivity.this));
                 metadata.setSingleLine(true);
                 metadata.setEllipsize(TextUtils.TruncateAt.END);
                 row.addView(metadata, lp(-1, dp(25)));
@@ -229,22 +246,23 @@ public final class MainActivity extends Activity {
         selectionBar.setGravity(Gravity.CENTER);
         page.addView(selectionBar, lp(-1, dp(34)));
 
-        LinearLayout actions = row();
+        selectionActions = row();
         moveAction = smallButton("移动", v -> primaryMoveAction());
         copyAction = smallButton("复制", v -> promptCopyActions());
         tagAction = smallButton("标签", v -> promptTag());
         favoriteAction = smallButton("收藏", v -> promptFavorite());
         deleteAction = smallButton("删除", v -> confirmDelete());
-        actions.addView(moveAction, weight());
-        actions.addView(copyAction, weight());
-        actions.addView(tagAction, weight());
-        actions.addView(favoriteAction, weight());
-        actions.addView(deleteAction, weight());
-        page.addView(actions, lp(-1, dp(48)));
+        selectionActions.addView(moveAction, weight());
+        selectionActions.addView(copyAction, weight());
+        selectionActions.addView(tagAction, weight());
+        selectionActions.addView(favoriteAction, weight());
+        selectionActions.addView(deleteAction, weight());
+        selectionActions.setVisibility(View.GONE);
+        page.addView(selectionActions, lp(-1, dp(48)));
         if (lowPowerReader) return page;
 
         FrameLayout screen = new FrameLayout(this);
-        screen.setBackgroundColor(Color.WHITE);
+        screen.setBackgroundColor(ViewKit.background(this));
         screen.addView(page, new FrameLayout.LayoutParams(-1, -1));
 
         inlineRecordButton = new CapsuleRecordButtonView(this);
@@ -396,6 +414,7 @@ public final class MainActivity extends Activity {
         selectionBar.setText(selected.isEmpty()
                 ? "长按胶囊开始多选"
                 : "已选择 " + selected.size() + " 个胶囊 · 轻点继续选择");
+        selectionActions.setVisibility(selected.isEmpty() ? View.GONE : View.VISIBLE);
         moveAction.setText(trashOnly ? "恢复" : "移动");
         copyAction.setText(trashOnly ? "复制文字" : "复制");
         tagAction.setEnabled(!trashOnly);
@@ -654,6 +673,19 @@ public final class MainActivity extends Activity {
                 ? "PokeCapsule · 待转写"
                 : "PokeCapsule · 转写失败");
         refresh();
+    }
+
+    private void showFilterChooser() {
+        String[] options = {"待转写", "转写失败", "回收站"};
+        new AlertDialog.Builder(this)
+                .setTitle("筛选胶囊")
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) showSmart("pending");
+                    else if (which == 1) showSmart("failed");
+                    else showTrash();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void showTrash() {
@@ -922,7 +954,7 @@ public final class MainActivity extends Activity {
     }
 
     private TextView smallButton(String label, View.OnClickListener listener) {
-        return ViewKit.button(this, label, listener);
+        return ViewKit.quietButton(this, label, listener);
     }
 
     private LinearLayout row() {
