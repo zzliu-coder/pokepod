@@ -137,11 +137,13 @@ public struct CapsuleRecord: Identifiable, Hashable {
         if let final = normalizedPreview(finalText), !final.isEmpty {
             return final
         }
-        if TranscriptionSanity.isPlausible(text: polished, durationMs: durationMs),
+        if !polished.isEmpty,
+           TranscriptionSanity.isPlausible(text: polished, durationMs: durationMs),
            raw.isEmpty || isPlausibleCorrection(polished: polished, raw: raw) {
             return polished
         }
-        if TranscriptionSanity.isPlausible(text: raw, durationMs: durationMs) {
+        if !raw.isEmpty,
+           TranscriptionSanity.isPlausible(text: raw, durationMs: durationMs) {
             return raw
         }
         if !polished.isEmpty || !raw.isEmpty {
@@ -225,6 +227,7 @@ public enum DeviceConnectionState: Equatable {
     case noDevice
     case unauthorized([String])
     case offline([String])
+    case usbDetectedButADBUnavailable(USBPhysicalDevice)
     case connected(ADBDevice)
     case multiple([ADBDevice])
 
@@ -232,10 +235,13 @@ public enum DeviceConnectionState: Equatable {
         switch self {
         case .noADB: return "没有找到 ADB"
         case .noDevice: return "未连接设备"
-        case .unauthorized: return "设备尚未授权，请在 Poke3 上允许 USB 调试"
+        case .unauthorized: return "设备尚未授权，请在 Android 设备上允许 USB 调试"
         case .offline: return "设备离线，请重新插拔 USB"
+        case .usbDetectedButADBUnavailable(let device):
+            let owner = device.exclusiveOwner == nil ? "" : "；USB 正由另一进程使用"
+            return "已识别到 \(device.displayName)；等待 ADB\(owner)"
         case .connected(let device): return "已连接：\(device.displayName)"
-        case .multiple: return "检测到多台设备，请选择 Poke3"
+        case .multiple: return "检测到多台设备，请选择一台"
         }
     }
 }
@@ -258,6 +264,97 @@ public struct ADBDevice: Codable, Hashable, Identifiable {
 
     public var displayName: String {
         model?.replacingOccurrences(of: "_", with: " ") ?? serial
+    }
+}
+
+public struct USBPhysicalDevice: Equatable, Hashable, Identifiable {
+    public var id: String { serial ?? "\(vendor ?? "unknown")-\(product ?? "unknown")" }
+    public let serial: String?
+    public let vendor: String?
+    public let product: String?
+    public let exclusiveOwner: String?
+
+    public init(
+        serial: String? = nil,
+        vendor: String? = nil,
+        product: String? = nil,
+        exclusiveOwner: String? = nil
+    ) {
+        self.serial = serial
+        self.vendor = vendor
+        self.product = product
+        self.exclusiveOwner = exclusiveOwner
+    }
+
+    public var displayName: String {
+        product ?? vendor ?? serial ?? "Android USB 设备"
+    }
+
+    public var isLikelyAndroid: Bool {
+        let fingerprint = [vendor, product].compactMap { $0 }.joined(separator: " ").lowercased()
+        return ["android", "onyx", "boox", "vivo", "xiaomi", "redmi", "huawei", "honor", "oppo", "oneplus", "samsung", "google", "motorola"]
+            .contains { fingerprint.contains($0) }
+    }
+}
+
+public struct DeviceIdentity: Codable, Hashable, Identifiable {
+    public var id: String { deviceId }
+    public let schemaVersion: Int
+    public let deviceId: String
+    public let displayName: String
+    public let platform: String
+    public let manufacturer: String?
+    public let model: String?
+    public let androidVersion: String?
+    public let createdAt: String?
+
+    public init(
+        schemaVersion: Int = 1,
+        deviceId: String,
+        displayName: String,
+        platform: String = "android",
+        manufacturer: String? = nil,
+        model: String? = nil,
+        androidVersion: String? = nil,
+        createdAt: String? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.deviceId = deviceId
+        self.displayName = displayName
+        self.platform = platform
+        self.manufacturer = manufacturer
+        self.model = model
+        self.androidVersion = androidVersion
+        self.createdAt = createdAt
+    }
+}
+
+public struct RegisteredDevice: Codable, Hashable, Identifiable {
+    public var id: String { deviceId }
+    public var deviceId: String
+    public var displayName: String
+    public var platform: String
+    public var manufacturer: String?
+    public var model: String?
+    public var serialAliases: [String]
+    public var lastSeenAt: Date?
+
+    public init(
+        deviceId: String,
+        displayName: String,
+        platform: String = "android",
+        manufacturer: String? = nil,
+        model: String? = nil,
+        serialAliases: [String] = [],
+        lastSeenAt: Date? = nil
+    ) {
+        self.deviceId = deviceId
+        self.displayName = displayName
+        self.platform = platform
+        self.manufacturer = manufacturer
+        self.model = model
+        self.serialAliases = serialAliases
+        self.lastSeenAt = lastSeenAt
     }
 }
 
@@ -344,8 +441,8 @@ public enum PokeCapsuleError: LocalizedError, Equatable {
         case .adbUnavailable: return "没有找到 ADB"
         case .adbFailure(let value): return "ADB 操作失败：\(value)"
         case .deviceUnavailable(let value): return "设备不可用：\(value)"
-        case .maintenanceRejected(let value): return "Poke3 未允许维护操作：\(value)"
-        case .commandTimedOut: return "等待 Poke3 确认超时，设备没有被修改"
+        case .maintenanceRejected(let value): return "设备未允许维护操作：\(value)"
+        case .commandTimedOut: return "等待设备确认超时，设备没有被修改"
         case .uuidConflict(let id): return "UUID 冲突：\(id.uuidString)"
         case .hashMismatch(let path): return "文件校验失败：\(path)"
         case .missingAPIKey: return "尚未配置 API 密钥"

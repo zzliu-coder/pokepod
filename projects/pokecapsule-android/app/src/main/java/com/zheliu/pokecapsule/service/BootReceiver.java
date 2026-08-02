@@ -8,7 +8,7 @@ import android.os.Build;
 public final class BootReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
         if (intent == null || !Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) return;
-        TranscriptionScheduler.scheduleAutomatic(context);
+        if (!DeviceRuntimeProfile.isLowPowerReader()) return;
         boolean enabled = context.getSharedPreferences("overlay", Context.MODE_PRIVATE)
                 .getBoolean("enabled", false);
         if (enabled) {

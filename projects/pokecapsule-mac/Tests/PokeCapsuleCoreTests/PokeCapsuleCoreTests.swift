@@ -78,6 +78,37 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertEqual(record.displayPreview, "福斯特建筑事务所商务提案英文翻译")
     }
 
+    func testCapsuleListFallsBackToRawWhenCorrectionIsMissing() {
+        let id = UUID()
+        let raw = "我测试一下，这个新的麦克风好不好用，是不是清晰的？"
+        let record = CapsuleRecord(
+            capsule: CapsuleMetadata(
+                id: id,
+                title: "语音时间",
+                createdAt: Date(),
+                updatedAt: Date()),
+            processing: ProcessingMetadata(
+                schemaVersion: 1,
+                capsuleId: id,
+                revision: 1,
+                durationMs: 8_800,
+                status: .rawReady,
+                audioFile: "audio.m4a",
+                rawTextFile: "raw.txt",
+                polishedTextFile: nil,
+                errorStage: nil,
+                error: nil,
+                attempts: 1,
+                engine: "tencent-asr",
+                model: "16k_zh"),
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/capsule"),
+            rawText: raw,
+            polishedText: nil,
+            warnings: [])
+        XCTAssertEqual(record.displayPreview, raw)
+    }
+
     func testPathPolicyAcceptsChineseAndSpaces() throws {
         XCTAssertEqual(try PathPolicy.validatedRelativeFolder("工作 灵感/上海项目"), "工作 灵感/上海项目")
         XCTAssertEqual(try PathPolicy.validatedTag("#待整理"), "待整理")
@@ -109,6 +140,25 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertEqual(DeviceParser.state(for: [devices[1]]), .unauthorized(["WAIT"]))
         XCTAssertEqual(DeviceParser.state(for: []), .noDevice)
         XCTAssertEqual(DeviceParser.state(for: [], adbExists: false), .noADB)
+    }
+
+    func testUSBProbeReportsPhysicalDeviceWhenADBIsUnavailable() {
+        let registry = """
+          | |   \"USB Product Name\" = \"SDM636-MTP _SN:CDD2F6FE\"
+          | |   \"USB Serial Number\" = \"BE87E832\"
+          | |   \"UsbExclusiveOwner\" = \"pid 1922, adb\"
+          | |   \"USB Vendor Name\" = \"ONYX\"
+        """
+        let usb = USBDeviceProbe.parseIORegistry(registry)
+        XCTAssertEqual(usb.count, 1)
+        XCTAssertEqual(usb[0].serial, "BE87E832")
+        XCTAssertEqual(usb[0].exclusiveOwner, "pid 1922, adb")
+        XCTAssertEqual(
+            DeviceParser.state(
+                for: [],
+                usbDevices: usb,
+                preferredSerials: ["BE87E832"]),
+            .usbDetectedButADBUnavailable(usb[0]))
     }
 
     func testFixtureCompatibleWithSharedProtocol() throws {
@@ -179,6 +229,75 @@ final class PokeCapsuleCoreTests: XCTestCase {
         let local = URL(fileURLWithPath: "/tmp/目录 'quoted'\nline")
         _ = try transport.pull(remote: "/sdcard/PokeCapsule/Inbox", local: local)
         XCTAssertEqual(runner.calls.first?.1, ["-s", "SERIAL", "pull", "/sdcard/PokeCapsule/Inbox", local.path])
+    }
+
+    func testMetadataFingerprintUsesReadOnlyDeviceScan() throws {
+        let runner = SequencedRunner(results: [
+            ProcessResult(
+                status: 0,
+                stdout: "/sdcard/PokeCapsule/Inbox/id/raw.txt|12|100\n",
+                stderr: "")
+        ])
+        let transport = ADBTransport(
+            executable: URL(fileURLWithPath: "/fake/adb"),
+            serial: "SERIAL",
+            runner: runner)
+        let fingerprint = try transport.metadataFingerprint()
+        XCTAssertEqual(fingerprint, "/sdcard/PokeCapsule/Inbox/id/raw.txt|12|100")
+        XCTAssertEqual(Array(runner.calls[0].prefix(5)), [
+            "-s", "SERIAL", "exec-out", "sh", "-c"
+        ])
+        let script = try XCTUnwrap(runner.calls[0].last)
+        XCTAssertTrue(script.contains("find /sdcard/PokeCapsule"))
+        XCTAssertTrue(script.contains("processing.json"))
+        XCTAssertFalse(script.contains(" rm "))
+        XCTAssertFalse(script.contains("settings put"))
+    }
+
+    func testReadsPermanentDeviceIdentity() throws {
+        let runner = SequencedRunner(results: [
+            ProcessResult(status: 0, stdout: """
+            {
+              "schemaVersion": 1,
+              "deviceId": "96771507-e949-4073-861d-823862d78217",
+              "displayName": "Vivo X Fold3",
+              "platform": "android",
+              "manufacturer": "vivo",
+              "model": "V2303A",
+              "androidVersion": "16",
+              "createdAt": "2026-07-28T14:29:25.281Z"
+            }
+            """, stderr: "")
+        ])
+        let transport = ADBTransport(
+            executable: URL(fileURLWithPath: "/fake/adb"),
+            serial: "PHONE",
+            runner: runner)
+        let identity = try XCTUnwrap(transport.readDeviceIdentity())
+        XCTAssertEqual(identity.displayName, "Vivo X Fold3")
+        XCTAssertEqual(identity.deviceId, "96771507-e949-4073-861d-823862d78217")
+        XCTAssertEqual(runner.calls.first, [
+            "-s", "PHONE", "exec-out", "cat", "/sdcard/PokeCapsule/device.json"
+        ])
+    }
+
+    func testDeviceRegistryPersistsIndependentDevices() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DeviceRegistryStore(file: root.appendingPathComponent("registry.json"))
+        let devices = [
+            RegisteredDevice(
+                deviceId: "poke",
+                displayName: "Poke3",
+                serialAliases: ["BE87E832"]),
+            RegisteredDevice(
+                deviceId: "phone",
+                displayName: "Vivo X Fold3",
+                model: "V2303A",
+                serialAliases: ["10AE3Q07J4000UK"])
+        ]
+        try store.save(devices)
+        XCTAssertEqual(try store.load(), devices)
     }
 
     func testStayAwakeReadsAndRestoresOriginalValue() throws {

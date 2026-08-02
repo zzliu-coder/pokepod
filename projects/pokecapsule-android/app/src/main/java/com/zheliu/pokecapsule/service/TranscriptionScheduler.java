@@ -4,7 +4,6 @@ import android.app.job.JobInfo;
 import android.app.job.JobScheduler;
 import android.content.ComponentName;
 import android.content.Context;
-import android.os.Build;
 import android.os.PersistableBundle;
 
 public final class TranscriptionScheduler {
@@ -21,6 +20,12 @@ public final class TranscriptionScheduler {
         schedule(context, MANUAL_JOB_ID, true);
     }
 
+    public static void cancelAutomatic(Context context) {
+        JobScheduler scheduler =
+                (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+        if (scheduler != null) scheduler.cancel(AUTO_JOB_ID);
+    }
+
     private static void schedule(Context context, int id, boolean manual) {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler == null) return;
@@ -28,15 +33,12 @@ public final class TranscriptionScheduler {
         extras.putBoolean("manual", manual);
         JobInfo.Builder builder = new JobInfo.Builder(
                 id, new ComponentName(context, TranscriptionJobService.class))
-                .setPersisted(true)
+                .setPersisted(false)
                 .setRequiresCharging(false)
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setRequiresDeviceIdle(false)
                 .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
                 .setExtras(extras);
-        if (!manual && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            builder.setRequiresBatteryNotLow(true);
-        }
         scheduler.schedule(builder.build());
     }
 }

@@ -111,7 +111,8 @@ public final class RecordingService extends Service {
             stagingDirectory = store.beginRecording(id);
             File output = new File(stagingDirectory, "audio.m4a");
             File original = new File(stagingDirectory, "audio.original.wav");
-            recorder = new EnhancedAudioRecorder(output, original);
+            recorder = new EnhancedAudioRecorder(
+                    output, original, DeviceRuntimeProfile.isLowPowerReader());
             recorder.start();
             recording = true;
             silentTicks = 0;
@@ -144,7 +145,7 @@ public final class RecordingService extends Service {
         try {
             CapsuleStore store = new CapsuleStore(new PokePaths());
             store.commitRecording(stagingDirectory, duration);
-            TranscriptionScheduler.scheduleAutomatic(this);
+            LibraryChangeNotifier.notifyChanged(this);
             broadcast(false, 0, 0, false, "已保存到 Inbox");
         } catch (Exception error) {
             broadcast(false, 0, 0, false,

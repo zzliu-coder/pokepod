@@ -77,6 +77,10 @@ public final class TencentAsrConfig {
         }
     }
 
+    public String exportForTransfer() {
+        return "SecretId=" + secretId + "\nSecretKey=" + secretKey + "\n";
+    }
+
     private static SecretKey getOrCreateKey() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");
         store.load(null);

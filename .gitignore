@@ -42,6 +42,8 @@ work/pokehome/*.png
 work/pokehome/*.apk
 work/LocalSend-*.apk
 work/AndroidFileSync/
+work/backups/
+work/diagnostics/
 
 # New build outputs.
 *.apk

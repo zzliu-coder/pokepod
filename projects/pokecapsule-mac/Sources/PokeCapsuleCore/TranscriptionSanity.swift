@@ -4,6 +4,9 @@ public enum TranscriptionSanity {
     public static let minimumAutomaticDurationMs = 2_000
 
     public static func issue(text: String, durationMs: Int) -> String? {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "转写内容为空"
+        }
         if durationMs < minimumAutomaticDurationMs {
             return "录音不足 2 秒，已保留音频，不进行自动校对"
         }

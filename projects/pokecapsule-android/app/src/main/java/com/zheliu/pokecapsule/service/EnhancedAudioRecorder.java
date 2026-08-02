@@ -8,6 +8,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.media.MediaRecorder;
+import android.media.audiofx.AutomaticGainControl;
 import android.os.Process;
 
 import com.zheliu.pokecapsule.core.AdaptiveVoiceGain;
@@ -29,6 +30,7 @@ final class EnhancedAudioRecorder {
 
     private final File output;
     private final File original;
+    private final boolean lowPowerReader;
     private final CountDownLatch ready = new CountDownLatch(1);
     private final CountDownLatch finished = new CountDownLatch(1);
     private final AtomicInteger latestPeak = new AtomicInteger();
@@ -38,9 +40,10 @@ final class EnhancedAudioRecorder {
     private volatile AudioRecord audioRecord;
     private Thread worker;
 
-    EnhancedAudioRecorder(File output, File original) {
+    EnhancedAudioRecorder(File output, File original, boolean lowPowerReader) {
         this.output = output;
         this.original = original;
+        this.lowPowerReader = lowPowerReader;
     }
 
     void start() throws Exception {
@@ -84,17 +87,23 @@ final class EnhancedAudioRecorder {
         MediaCodec encoder = null;
         MediaMuxer muxer = null;
         WavWriter wav = null;
+        AutomaticGainControl automaticGainControl = null;
         boolean muxerStarted = false;
         int trackIndex = -1;
         long submittedSamples = 0;
         try {
             capture = createAudioRecord();
             audioRecord = capture;
+            if (!lowPowerReader) {
+                automaticGainControl = enableAutomaticGainControl(capture);
+            }
             encoder = createEncoder();
             muxer = new MediaMuxer(
                     output.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
             wav = new WavWriter(original, SAMPLE_RATE, CHANNELS);
-            AdaptiveVoiceGain voiceGain = new AdaptiveVoiceGain();
+            AdaptiveVoiceGain voiceGain = lowPowerReader
+                    ? new AdaptiveVoiceGain()
+                    : AdaptiveVoiceGain.forPhone();
             short[] samples = new short[SAMPLES_PER_BLOCK];
 
             capture.startRecording();
@@ -135,6 +144,7 @@ final class EnhancedAudioRecorder {
                 }
                 capture.release();
             }
+            if (automaticGainControl != null) automaticGainControl.release();
             audioRecord = null;
             if (encoder != null) {
                 try {
@@ -172,8 +182,14 @@ final class EnhancedAudioRecorder {
                 AudioFormat.ENCODING_PCM_16BIT);
         if (minimum <= 0) throw new IllegalStateException("设备不支持 16kHz 单声道录音");
         int bufferBytes = Math.max(minimum * 2, SAMPLES_PER_BLOCK * 8);
+        int preferredSource = lowPowerReader
+                ? MediaRecorder.AudioSource.VOICE_RECOGNITION
+                : MediaRecorder.AudioSource.MIC;
+        int fallbackSource = lowPowerReader
+                ? MediaRecorder.AudioSource.MIC
+                : MediaRecorder.AudioSource.VOICE_RECOGNITION;
         AudioRecord preferred = new AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                preferredSource,
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -182,7 +198,7 @@ final class EnhancedAudioRecorder {
         preferred.release();
 
         AudioRecord fallback = new AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                fallbackSource,
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -192,6 +208,19 @@ final class EnhancedAudioRecorder {
             throw new IllegalStateException("麦克风初始化失败");
         }
         return fallback;
+    }
+
+    private static AutomaticGainControl enableAutomaticGainControl(AudioRecord capture) {
+        if (!AutomaticGainControl.isAvailable()) return null;
+        try {
+            AutomaticGainControl control =
+                    AutomaticGainControl.create(capture.getAudioSessionId());
+            if (control == null) return null;
+            control.setEnabled(true);
+            return control;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     private MediaCodec createEncoder() throws Exception {

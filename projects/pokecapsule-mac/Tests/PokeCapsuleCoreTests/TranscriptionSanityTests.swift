@@ -2,6 +2,10 @@ import XCTest
 @testable import PokeCapsuleCore
 
 final class TranscriptionSanityTests: XCTestCase {
+    func testRejectsEmptyTranscript() {
+        XCTAssertNotNil(TranscriptionSanity.issue(text: " \n", durationMs: 8_000))
+    }
+
     func testRejectsShortRecording() {
         XCTAssertNotNil(TranscriptionSanity.issue(text: "测试", durationMs: 1_999))
     }

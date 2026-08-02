@@ -18,11 +18,14 @@ enum SidebarSelection: Hashable {
 final class AppModel: ObservableObject {
     @Published var connection: DeviceConnectionState = .noDevice
     @Published var devices: [ADBDevice] = []
+    @Published var usbDevices: [USBPhysicalDevice] = []
+    @Published var registeredDevices: [RegisteredDevice] = []
+    @Published var selectedDeviceID: String?
     @Published var selectedSerial: String?
     @Published var index = CapsuleIndex()
     @Published var selection = Set<UUID>()
     @Published var sidebar: SidebarSelection = .folder("Inbox")
-    @Published var status = "请连接已开启 USB 调试的 Poke3"
+    @Published var status = "请连接已开启 USB 调试的 Android 设备"
     @Published var isBusy = false
     @Published var showingSettings = false
     @Published var searchQuery = ""
@@ -31,6 +34,11 @@ final class AppModel: ObservableObject {
     private var adbURL: URL?
     private var transport: ADBTransport?
     private var audioPlayer: AVAudioPlayer?
+    private var monitorTask: Task<Void, Never>?
+    private var applicationIsActive = true
+    private var lastRemoteFingerprint: String?
+    private let monitorIntervalNanoseconds: UInt64 = 5_000_000_000
+    private let reconnectIntervalNanoseconds: UInt64 = 10_000_000_000
 
     private var applicationBase: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -38,17 +46,23 @@ final class AppModel: ObservableObject {
     }
 
     var mirrorURL: URL {
-        let serial = selectedSerial
+        let serial = selectedDeviceID
+            ?? UserDefaults.standard.string(forKey: "LastDeviceID")
             ?? UserDefaults.standard.string(forKey: "LastDeviceSerial")
             ?? "default"
         return applicationBase.appendingPathComponent("Mirrors/\(serial)", isDirectory: true)
     }
 
     var queueURL: URL {
-        let serial = selectedSerial
+        let serial = selectedDeviceID
+            ?? UserDefaults.standard.string(forKey: "LastDeviceID")
             ?? UserDefaults.standard.string(forKey: "LastDeviceSerial")
             ?? "default"
         return applicationBase.appendingPathComponent("Queues/\(serial).json")
+    }
+
+    private var registryURL: URL {
+        applicationBase.appendingPathComponent("Devices/registry.json")
     }
 
     var backupURL: URL {
@@ -80,13 +94,41 @@ final class AppModel: ObservableObject {
         Array(Set(index.records.flatMap(\.capsule.tags))).sorted()
     }
 
+    var selectedRegisteredDevice: RegisteredDevice? {
+        guard let selectedDeviceID else { return nil }
+        return registeredDevices.first { $0.deviceId == selectedDeviceID }
+    }
+
+    func connectedDevice(for registered: RegisteredDevice) -> ADBDevice? {
+        devices.first {
+            $0.state == "device" && registered.serialAliases.contains($0.serial)
+        }
+    }
+
+    func connectionLabel(for registered: RegisteredDevice) -> String {
+        if connectedDevice(for: registered) != nil { return "已连接" }
+        if usbDevices.contains(where: { device in
+            guard let serial = device.serial else { return false }
+            return registered.serialAliases.contains(serial)
+        }) {
+            return "已插入，等待 ADB"
+        }
+        return "离线镜像"
+    }
+
     init() {
-        selectedSerial = UserDefaults.standard.string(forKey: "LastDeviceSerial")
+        loadRegistryAndBootstrapLegacyMirrors()
+        selectedDeviceID = UserDefaults.standard.string(forKey: "LastDeviceID")
+            ?? UserDefaults.standard.string(forKey: "LastDeviceSerial")
+            ?? registeredDevices.first?.deviceId
         loadLocalState()
         refreshDevices()
     }
 
     private func loadLocalState() {
+        index = CapsuleIndex()
+        pendingCommands = []
+        selection.removeAll()
         if FileManager.default.fileExists(atPath: mirrorURL.path) {
             index = CapsuleScanner().scan(root: mirrorURL)
         }
@@ -99,55 +141,151 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func loadRegistryAndBootstrapLegacyMirrors() {
+        registeredDevices = (try? DeviceRegistryStore(file: registryURL).load()) ?? []
+        let mirrors = applicationBase.appendingPathComponent("Mirrors", isDirectory: true)
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: mirrors,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles])) ?? []
+        var changed = false
+        for entry in entries {
+            let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            guard isDirectory else { continue }
+            let key = entry.lastPathComponent
+            guard key != "default",
+                  !registeredDevices.contains(where: { $0.deviceId == key }) else { continue }
+            let name = key == "BE87E832" ? "Poke3" : "Android \(key.suffix(4))"
+            registeredDevices.append(RegisteredDevice(
+                deviceId: key,
+                displayName: name,
+                serialAliases: [key]))
+            changed = true
+        }
+        sortRegisteredDevices()
+        if changed {
+            try? DeviceRegistryStore(file: registryURL).save(registeredDevices)
+        }
+    }
+
     func refreshDevices() {
         guard !isBusy else { return }
         guard let adb = ADBLocator.locate() else {
+            stopMonitoring()
             adbURL = nil
             transport = nil
             devices = []
             connection = .noADB
             status = connection.localizedDescription
+            scheduleMonitor(afterNanoseconds: reconnectIntervalNanoseconds)
             return
         }
         adbURL = adb
         devices = ADBTransport.discover(executable: adb)
-        connection = DeviceParser.state(for: devices)
-        if case .connected(let device) = connection {
-            choose(device)
-        } else if let selectedSerial,
-                  let selected = devices.first(where: { $0.serial == selectedSerial && $0.state == "device" }) {
-            choose(selected)
+        if devices.contains(where: { $0.state == "device" || $0.state == "unauthorized" || $0.state == "offline" }) {
+            usbDevices = []
         } else {
+            usbDevices = USBDeviceProbe.discover()
+        }
+        connection = DeviceParser.state(
+            for: devices,
+            usbDevices: usbDevices,
+            preferredSerials: selectedRegisteredDevice?.serialAliases ?? [])
+        if let selectedDevice = selectedRegisteredDevice,
+           let selected = connectedDevice(for: selectedDevice) {
+            choose(selected)
+        } else if case .connected(let device) = connection {
+            choose(device)
+        } else {
+            stopMonitoring()
             transport = nil
             status = connection.localizedDescription
+            scheduleMonitor(afterNanoseconds: reconnectIntervalNanoseconds)
         }
     }
 
     func choose(_ device: ADBDevice) {
         guard !isBusy else { return }
         guard let adbURL else { return }
+        let candidateTransport = ADBTransport(executable: adbURL, serial: device.serial)
+        let identity = (try? candidateTransport.readDeviceIdentity())
+            ?? DeviceIdentity(
+                deviceId: device.serial,
+                displayName: device.displayName,
+                manufacturer: nil,
+                model: device.model)
+        let deviceID = register(identity: identity, adbDevice: device)
+        let changedDevice = selectedDeviceID != deviceID
+        selectedDeviceID = deviceID
         selectedSerial = device.serial
+        UserDefaults.standard.set(deviceID, forKey: "LastDeviceID")
         UserDefaults.standard.set(device.serial, forKey: "LastDeviceSerial")
-        transport = ADBTransport(executable: adbURL, serial: device.serial)
+        transport = candidateTransport
         connection = .connected(device)
-        status = connection.localizedDescription
+        status = "已连接：\(identity.displayName)"
+        if changedDevice {
+            stopMonitoring()
+            lastRemoteFingerprint = nil
+            loadLocalState()
+        }
         if !isBusy { sync() }
+    }
+
+    func selectRegisteredDevice(_ deviceID: String) {
+        guard !isBusy, selectedDeviceID != deviceID else { return }
+        stopMonitoring()
+        selectedDeviceID = deviceID
+        UserDefaults.standard.set(deviceID, forKey: "LastDeviceID")
+        lastRemoteFingerprint = nil
+        if let registered = registeredDevices.first(where: { $0.deviceId == deviceID }),
+           let connected = connectedDevice(for: registered),
+           let adbURL {
+            selectedSerial = connected.serial
+            transport = ADBTransport(executable: adbURL, serial: connected.serial)
+            connection = .connected(connected)
+            status = "已选择并连接：\(registered.displayName)"
+        } else {
+            selectedSerial = nil
+            transport = nil
+            connection = DeviceParser.state(
+                for: devices,
+                usbDevices: usbDevices,
+                preferredSerials: selectedRegisteredDevice?.serialAliases ?? [])
+            status = connection == .noDevice
+                ? "已打开离线镜像：\(selectedRegisteredDevice?.displayName ?? "Android 设备")"
+                : connection.localizedDescription
+        }
+        loadLocalState()
+        if transport != nil { sync() }
+        else { scheduleMonitor(afterNanoseconds: reconnectIntervalNanoseconds) }
+    }
+
+    func setApplicationActive(_ active: Bool) {
+        applicationIsActive = active
+        if active {
+            refreshDevices()
+        } else {
+            stopMonitoring()
+        }
     }
 
     func sync() {
         guard !isBusy else { return }
         guard let transport else {
-            status = "先连接并选择 Poke3"
+            status = "先连接当前选择的 Android 设备"
             return
         }
+        stopMonitoring()
         isBusy = true
         status = "正在建立只读镜像…"
         let mirror = mirrorURL
         let queueFile = queueURL
         let backups = backupURL
+        let deviceKey = selectedDeviceID ?? transport.serial
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
+                    let fingerprint = try transport.metadataFingerprint()
                     _ = try MirrorSynchronizer().refresh(using: transport, mirror: mirror)
                     var queue = (try? OfflineQueue(file: queueFile).load()) ?? []
                     let replay = SyncCoordinator().replay(
@@ -163,31 +301,87 @@ final class AppModel: ObservableObject {
                     do {
                         _ = try BackupManager(root: backups).create(
                             from: mirror,
-                            deviceSerial: transport.serial,
+                            deviceSerial: deviceKey,
                             capsuleCount: replay.index.records.count
                                 + replay.index.trashRecords.count)
                     } catch {
                         backupWarning = error.localizedDescription
                     }
-                    return (replay.index, queue, replay.appliedCount, backupWarning)
+                    return (replay.index, queue, replay.appliedCount, backupWarning, fingerprint)
                 }.value
                 self.index = result.0
                 self.pendingCommands = result.1
+                self.lastRemoteFingerprint = result.4
                 self.selection = self.selection.intersection(
                     Set((result.0.records + result.0.trashRecords).map(\.id)))
                 let conflicts = result.1.filter { $0.state == .conflict }.count
                 let syncStatus = conflicts > 0
-                    ? "已同步；\(conflicts) 项版本冲突等待处理"
-                    : "已同步 \(result.0.records.count) 个胶囊"
+                    ? "已同步；\(conflicts) 项版本冲突等待处理；自动同步已开启"
+                    : "已同步 \(result.0.records.count) 个胶囊；自动同步已开启"
                 self.status = result.3.map {
                     "\(syncStatus)；自动备份失败：\($0)"
                 } ?? syncStatus
                 self.isBusy = false
+                self.scheduleMonitor()
             } catch {
                 self.status = error.localizedDescription
                 self.isBusy = false
+                self.scheduleMonitor()
             }
         }
+    }
+
+    private func scheduleMonitor(
+        afterNanoseconds delay: UInt64? = nil
+    ) {
+        stopMonitoring()
+        guard applicationIsActive else { return }
+        let wait = delay ?? (transport == nil
+            ? reconnectIntervalNanoseconds
+            : monitorIntervalNanoseconds)
+        monitorTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: wait)
+            guard !Task.isCancelled, let self else { return }
+            if self.transport == nil {
+                self.refreshDevices()
+            } else {
+                self.checkForRemoteChanges()
+            }
+        }
+    }
+
+    private func checkForRemoteChanges() {
+        guard applicationIsActive, !isBusy else {
+            scheduleMonitor()
+            return
+        }
+        guard let transport else {
+            refreshDevices()
+            return
+        }
+        Task {
+            do {
+                let fingerprint = try await Task.detached(priority: .utility) {
+                    try transport.metadataFingerprint()
+                }.value
+                if let previous = self.lastRemoteFingerprint,
+                   previous != fingerprint {
+                    self.lastRemoteFingerprint = fingerprint
+                    self.sync()
+                } else {
+                    self.lastRemoteFingerprint = fingerprint
+                    self.scheduleMonitor()
+                }
+            } catch {
+                self.status = "自动同步等待设备连接"
+                self.scheduleMonitor()
+            }
+        }
+    }
+
+    private func stopMonitoring() {
+        monitorTask?.cancel()
+        monitorTask = nil
     }
 
     func perform(_ input: DeviceCommand) {
@@ -206,7 +400,7 @@ final class AppModel: ObservableObject {
             return
         }
         isBusy = true
-        status = "正在等待 Poke3 进入维护状态…"
+        status = "正在等待设备进入维护状态…"
         Task {
             do {
                 try await Task.detached(priority: .userInitiated) {
@@ -447,7 +641,7 @@ final class AppModel: ObservableObject {
             status = "设备未连接"
             return
         }
-        guard let deviceSerial = selectedSerial else {
+        guard let deviceSerial = selectedDeviceID else {
             status = "设备身份不可用，请重新连接"
             return
         }
@@ -510,7 +704,7 @@ final class AppModel: ObservableObject {
                         expectedRevision: revision)
                 }.value
                 try? FileManager.default.removeItem(at: cache)
-                self.status = "校对完成，已写回 Poke3"
+                self.status = "校对完成，已写回当前设备"
                 self.isBusy = false
                 self.sync()
             } catch {
@@ -533,6 +727,79 @@ final class AppModel: ObservableObject {
                 revision: revision,
                 deviceSerial: deviceSerial,
                 rawText: rawText))
+    }
+
+    private func register(identity: DeviceIdentity, adbDevice: ADBDevice) -> String {
+        let exactIndex = registeredDevices.firstIndex {
+            $0.deviceId == identity.deviceId
+        }
+        let aliasIndex = registeredDevices.firstIndex {
+            $0.serialAliases.contains(adbDevice.serial)
+        }
+        var record: RegisteredDevice
+        if let exactIndex {
+            record = registeredDevices.remove(at: exactIndex)
+        } else if let aliasIndex {
+            record = registeredDevices.remove(at: aliasIndex)
+            if record.deviceId != identity.deviceId {
+                migrateLocalDeviceStorage(from: record.deviceId, to: identity.deviceId)
+                record.deviceId = identity.deviceId
+            }
+        } else {
+            record = RegisteredDevice(
+                deviceId: identity.deviceId,
+                displayName: identity.displayName)
+        }
+        record.displayName = identity.displayName
+        record.platform = identity.platform
+        record.manufacturer = identity.manufacturer
+        record.model = identity.model ?? adbDevice.model
+        if !record.serialAliases.contains(adbDevice.serial) {
+            record.serialAliases.append(adbDevice.serial)
+        }
+        record.lastSeenAt = Date()
+        registeredDevices.removeAll { $0.deviceId == record.deviceId }
+        registeredDevices.append(record)
+        sortRegisteredDevices()
+        try? DeviceRegistryStore(file: registryURL).save(registeredDevices)
+        return record.deviceId
+    }
+
+    private func migrateLocalDeviceStorage(from oldID: String, to newID: String) {
+        guard oldID != newID else { return }
+        let fileManager = FileManager.default
+        let oldMirror = applicationBase.appendingPathComponent(
+            "Mirrors/\(oldID)", isDirectory: true)
+        let newMirror = applicationBase.appendingPathComponent(
+            "Mirrors/\(newID)", isDirectory: true)
+        if fileManager.fileExists(atPath: oldMirror.path),
+           !fileManager.fileExists(atPath: newMirror.path) {
+            try? fileManager.createDirectory(
+                at: newMirror.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try? fileManager.moveItem(at: oldMirror, to: newMirror)
+        }
+        let oldQueue = applicationBase.appendingPathComponent("Queues/\(oldID).json")
+        let newQueue = applicationBase.appendingPathComponent("Queues/\(newID).json")
+        if fileManager.fileExists(atPath: oldQueue.path),
+           !fileManager.fileExists(atPath: newQueue.path) {
+            try? fileManager.createDirectory(
+                at: newQueue.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try? fileManager.moveItem(at: oldQueue, to: newQueue)
+        }
+        if UserDefaults.standard.string(forKey: "LastDeviceID") == oldID {
+            UserDefaults.standard.set(newID, forKey: "LastDeviceID")
+        }
+    }
+
+    private func sortRegisteredDevices() {
+        registeredDevices.sort {
+            let left = $0.lastSeenAt ?? .distantPast
+            let right = $1.lastSeenAt ?? .distantPast
+            if left != right { return left > right }
+            return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
     }
 
     private func expectedRevisions(for ids: [UUID]) -> [String: Int] {

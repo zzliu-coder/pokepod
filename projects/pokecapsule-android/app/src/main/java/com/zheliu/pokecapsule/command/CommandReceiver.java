@@ -6,7 +6,7 @@ import android.content.Intent;
 
 import com.zheliu.pokecapsule.core.Ids;
 import com.zheliu.pokecapsule.core.TimeFormat;
-import com.zheliu.pokecapsule.service.TranscriptionScheduler;
+import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
 import com.zheliu.pokecapsule.storage.AtomicFiles;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.MaintenanceSession;
@@ -86,7 +86,7 @@ public final class CommandReceiver extends BroadcastReceiver {
             result.put("success", true);
             result.put("message", "committed");
             result.put("completedAt", TimeFormat.utcNow());
-            TranscriptionScheduler.scheduleAutomatic(context);
+            LibraryChangeNotifier.notifyChanged(context);
         } catch (Exception error) {
             try {
                 result.put("schemaVersion", 1);
@@ -121,6 +121,10 @@ public final class CommandReceiver extends BroadcastReceiver {
         }
         if ("importTencentCredentials".equals(operation)) {
             importTencentCredentials(context, paths, command.getString("stagedPath"));
+            return;
+        }
+        if ("exportTencentCredentials".equals(operation)) {
+            exportTencentCredentials(context, paths, command.getString("stagedPath"));
             return;
         }
         switch (operation) {
@@ -263,15 +267,8 @@ public final class CommandReceiver extends BroadcastReceiver {
 
     private static void importTencentCredentials(
             Context context, PokePaths paths, String stagedRelative) throws Exception {
-        if (stagedRelative == null || stagedRelative.contains("..")
-                || stagedRelative.startsWith("/") || stagedRelative.contains("\\")) {
-            throw new Exception("腾讯密钥暂存路径不合法");
-        }
-        File staged = new File(paths.root(), stagedRelative);
-        paths.assertInsideRoot(staged);
-        String stagingRoot = paths.staging().getCanonicalPath();
-        if (!staged.getCanonicalPath().startsWith(stagingRoot + File.separator)
-                || !staged.isFile() || staged.length() == 0 || staged.length() > 32 * 1024) {
+        File staged = tencentStagedFile(paths, stagedRelative);
+        if (!staged.isFile() || staged.length() == 0 || staged.length() > 32 * 1024) {
             throw new Exception("腾讯密钥文件不在暂存区或大小异常");
         }
         try {
@@ -280,6 +277,30 @@ public final class CommandReceiver extends BroadcastReceiver {
         } finally {
             staged.delete();
         }
+    }
+
+    private static void exportTencentCredentials(
+            Context context, PokePaths paths, String stagedRelative) throws Exception {
+        File staged = tencentStagedFile(paths, stagedRelative);
+        if (staged.exists()) throw new Exception("腾讯密钥导出目标已存在");
+        TencentAsrConfig credentials = TencentAsrConfig.load(context);
+        AtomicFiles.writeUtf8(staged, credentials.exportForTransfer());
+    }
+
+    private static File tencentStagedFile(PokePaths paths, String stagedRelative)
+            throws Exception {
+        if (stagedRelative == null || stagedRelative.contains("..")
+                || stagedRelative.startsWith("/") || stagedRelative.contains("\\")
+                || !stagedRelative.endsWith(".txt")) {
+            throw new Exception("腾讯密钥暂存路径不合法");
+        }
+        File staged = new File(paths.root(), stagedRelative);
+        paths.assertInsideRoot(staged);
+        String stagingRoot = paths.staging().getCanonicalPath();
+        if (!staged.getCanonicalPath().startsWith(stagingRoot + File.separator)) {
+            throw new Exception("腾讯密钥文件不在暂存区");
+        }
+        return staged;
     }
 
     private static String readUtf8(File file) throws Exception {
@@ -344,7 +365,8 @@ public final class CommandReceiver extends BroadcastReceiver {
         return "beginMaintenance".equals(operation)
                 || "endMaintenance".equals(operation)
                 || "rescan".equals(operation)
-                || "importTencentCredentials".equals(operation);
+                || "importTencentCredentials".equals(operation)
+                || "exportTencentCredentials".equals(operation);
     }
 
     private static Map<String, Integer> revisions(JSONObject object) throws Exception {

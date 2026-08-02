@@ -14,7 +14,7 @@ struct PokeCapsuleApp: App {
         }
         .commands {
             CommandGroup(after: .importExport) {
-                Button("同步 Poke3") { model.sync() }
+                Button("同步当前设备") { model.sync() }
                     .keyboardShortcut("r", modifiers: [.command])
             }
         }
@@ -27,6 +27,7 @@ struct PokeCapsuleApp: App {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedRecord: CapsuleRecord?
     @State private var dialog: ActionDialog?
     @State private var actionTarget = ""
@@ -53,7 +54,7 @@ struct ContentView: View {
         .searchable(text: $model.searchQuery, prompt: "搜索文字、标签或目录")
         .toolbar {
             ToolbarItemGroup {
-                Button { model.refreshDevices() } label: { Label("检查连接", systemImage: "cable.connector") }
+                Button { model.refreshDevices() } label: { Label("检查设备", systemImage: "cable.connector") }
                 Button { model.sync() } label: { Label("同步", systemImage: "arrow.clockwise") }
                     .disabled(model.isBusy)
                 Button { importCapsules() } label: {
@@ -93,11 +94,18 @@ struct ContentView: View {
             model.selection.removeAll()
             selectedRecord = nil
         }
+        .onChange(of: model.selectedDeviceID) { _ in
+            model.selection.removeAll()
+            selectedRecord = nil
+        }
         .onChange(of: model.index) { newIndex in
             guard let id = selectedRecord?.id else { return }
             selectedRecord = (newIndex.records + newIndex.trashRecords).first {
                 $0.id == id
             }
+        }
+        .onChange(of: scenePhase) { phase in
+            model.setApplicationActive(phase == .active)
         }
     }
 
@@ -141,11 +149,42 @@ struct SidebarView: View {
             set: { model.sidebar = $0 ?? .folder("Inbox") }
         )) {
             Section("设备") {
-                Label(model.connection.localizedDescription, systemImage: "externaldrive.connected.to.line.below")
-                if case .multiple(let devices) = model.connection {
-                    ForEach(devices) { device in
-                        Button(device.displayName) { model.choose(device) }
+                ForEach(model.registeredDevices) { device in
+                    Button {
+                        model.selectRegisteredDevice(device.deviceId)
+                    } label: {
+                        HStack(spacing: 9) {
+                            Image(systemName: device.displayName.localizedCaseInsensitiveContains("poke")
+                                  || device.model?.localizedCaseInsensitiveContains("poke") == true
+                                  ? "book.closed"
+                                  : "smartphone")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.displayName)
+                                    .foregroundStyle(.primary)
+                                Text(model.connectionLabel(for: device))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if model.selectedDeviceID == device.deviceId {
+                                Image(systemName: "checkmark")
+                            }
+                        }
                     }
+                    .buttonStyle(.plain)
+                }
+                if case .multiple(let devices) = model.connection {
+                    ForEach(devices.filter { adb in
+                        !model.registeredDevices.contains {
+                            $0.serialAliases.contains(adb.serial)
+                        }
+                    }) { device in
+                        Button("添加 \(device.displayName)") { model.choose(device) }
+                    }
+                }
+                if model.registeredDevices.isEmpty {
+                    Label(model.connection.localizedDescription,
+                          systemImage: "externaldrive.connected.to.line.below")
                 }
             }
             Section("胶囊") {
@@ -218,7 +257,7 @@ struct SidebarView: View {
                 }
             }
         }
-        .navigationTitle("PokeCapsule")
+        .navigationTitle(model.selectedRegisteredDevice?.displayName ?? "PokeCapsule")
     }
 
     private func commandName(_ operation: String) -> String {

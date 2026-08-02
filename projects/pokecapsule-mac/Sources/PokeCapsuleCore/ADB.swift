@@ -101,7 +101,12 @@ public enum DeviceParser {
         }
     }
 
-    public static func state(for devices: [ADBDevice], adbExists: Bool = true) -> DeviceConnectionState {
+    public static func state(
+        for devices: [ADBDevice],
+        adbExists: Bool = true,
+        usbDevices: [USBPhysicalDevice] = [],
+        preferredSerials: [String] = []
+    ) -> DeviceConnectionState {
         guard adbExists else { return .noADB }
         let ready = devices.filter { $0.state == "device" }
         if ready.count == 1 { return .connected(ready[0]) }
@@ -110,7 +115,61 @@ public enum DeviceParser {
         if !unauthorized.isEmpty { return .unauthorized(unauthorized) }
         let offline = devices.filter { $0.state == "offline" }.map(\.serial)
         if !offline.isEmpty { return .offline(offline) }
+        if let preferred = usbDevices.first(where: { device in
+            guard let serial = device.serial else { return false }
+            return preferredSerials.contains(serial)
+        }) {
+            return .usbDetectedButADBUnavailable(preferred)
+        }
+        if let androidUSB = usbDevices.first(where: \.isLikelyAndroid) {
+            return .usbDetectedButADBUnavailable(androidUSB)
+        }
         return .noDevice
+    }
+}
+
+public enum USBDeviceProbe {
+    public static func discover(runner: ProcessExecuting = ProcessRunner()) -> [USBPhysicalDevice] {
+        let result = runner.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/ioreg"),
+            arguments: ["-p", "IOUSB", "-l", "-w", "0"])
+        guard result.status == 0 else { return [] }
+        return parseIORegistry(result.stdout)
+    }
+
+    public static func parseIORegistry(_ output: String) -> [USBPhysicalDevice] {
+        let lines = output.components(separatedBy: .newlines)
+        var devices: [USBPhysicalDevice] = []
+        var seen = Set<String>()
+
+        for index in lines.indices where lines[index].contains("\"USB Vendor Name\"") {
+            let start = max(lines.startIndex, index - 32)
+            let end = min(lines.endIndex, index + 33)
+            let block = Array(lines[start..<end])
+            guard let vendor = property("USB Vendor Name", in: block) else { continue }
+            let serial = property("USB Serial Number", in: block)
+                ?? property("kUSBSerialNumberString", in: block)
+            let product = property("USB Product Name", in: block)
+                ?? property("kUSBProductString", in: block)
+            let owner = property("UsbExclusiveOwner", in: block)
+            let key = serial ?? "\(vendor)|\(product ?? "")"
+            guard seen.insert(key).inserted else { continue }
+            devices.append(USBPhysicalDevice(
+                serial: serial,
+                vendor: vendor,
+                product: product,
+                exclusiveOwner: owner))
+        }
+        return devices
+    }
+
+    private static func property(_ name: String, in lines: [String]) -> String? {
+        let marker = "\"\(name)\" = \""
+        guard let line = lines.first(where: { $0.contains(marker) }),
+              let start = line.range(of: marker)?.upperBound,
+              let end = line[start...].firstIndex(of: "\"") else { return nil }
+        let value = String(line[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }
 
@@ -129,6 +188,35 @@ public final class ADBTransport {
         let result = runner.run(executable: executable, arguments: ["devices", "-l"])
         guard result.status == 0 else { return [] }
         return DeviceParser.parse(result.stdout)
+    }
+
+    public func readDeviceIdentity() throws -> DeviceIdentity? {
+        let result = runner.run(
+            executable: executable,
+            arguments: [
+                "-s", serial, "exec-out", "cat",
+                "\(ProtocolConstants.remoteRoot)/device.json"
+            ])
+        if result.status != 0 {
+            let combined = result.combinedOutput.lowercased()
+            if combined.contains("no such file") || combined.contains("does not exist") {
+                return nil
+            }
+            throw PokeCapsuleError.adbFailure(result.combinedOutput)
+        }
+        let data = Data(result.stdout.utf8)
+        do {
+            let identity = try PokeJSON.decoder.decode(DeviceIdentity.self, from: data)
+            guard identity.schemaVersion == 1,
+                  !identity.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PokeCapsuleError.adbFailure("设备身份文件不完整")
+            }
+            return identity
+        } catch let error as PokeCapsuleError {
+            throw error
+        } catch {
+            throw PokeCapsuleError.adbFailure("设备身份文件无法读取：\(error.localizedDescription)")
+        }
     }
 
     public func readStayOnWhilePluggedIn() throws -> Int {
@@ -168,6 +256,22 @@ public final class ADBTransport {
         let result = runner.run(executable: executable, arguments: ["-s", serial, "pull", safe, local.path])
         guard result.status == 0 else { throw PokeCapsuleError.adbFailure(result.combinedOutput) }
         return result
+    }
+
+    public func metadataFingerprint() throws -> String {
+        let script = """
+        find /sdcard/PokeCapsule \\( -type d -o -type f \\( \
+        -name capsule.json -o -name processing.json -o -name raw.txt -o \
+        -name polished.md -o -name final.md -o -name trash.json \\) \\) \
+        -exec stat -c '%n|%s|%Y' '{}' ';' 2>/dev/null | sort
+        """
+        let result = runner.run(
+            executable: executable,
+            arguments: ["-s", serial, "exec-out", "sh", "-c", script])
+        guard result.status == 0 else {
+            throw PokeCapsuleError.adbFailure(result.combinedOutput)
+        }
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @discardableResult

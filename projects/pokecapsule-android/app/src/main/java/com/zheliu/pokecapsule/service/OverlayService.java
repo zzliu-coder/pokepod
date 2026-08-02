@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.IBinder;
@@ -78,7 +79,13 @@ public final class OverlayService extends Service {
         }
         getSharedPreferences("overlay", MODE_PRIVATE).edit().putBoolean("enabled", true).apply();
         if (button == null) showButton();
+        else clampAndSave();
         return START_STICKY;
+    }
+
+    @Override public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (button != null) button.post(this::clampAndSave);
     }
 
     @Override public void onDestroy() {
@@ -111,6 +118,7 @@ public final class OverlayService extends Service {
         layout.y = getSharedPreferences("overlay", MODE_PRIVATE).getInt("y", dp(240));
         button.setOnTouchListener(this::onTouch);
         windowManager.addView(button, layout);
+        button.post(this::clampAndSave);
     }
 
     private boolean onTouch(View view, MotionEvent event) {
@@ -143,6 +151,18 @@ public final class OverlayService extends Service {
         int width = getResources().getDisplayMetrics().widthPixels;
         layout.x = layout.x + button.getWidth() / 2 < width / 2
                 ? dp(8) : width - button.getWidth() - dp(8);
+        clampAndSave();
+    }
+
+    private void clampAndSave() {
+        if (button == null || windowManager == null || layout == null) return;
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        int margin = dp(8);
+        int buttonWidth = Math.max(button.getWidth(), dp(64));
+        int buttonHeight = Math.max(button.getHeight(), dp(64));
+        layout.x = Math.max(margin, Math.min(width - buttonWidth - margin, layout.x));
+        layout.y = Math.max(0, Math.min(height - buttonHeight, layout.y));
         windowManager.updateViewLayout(button, layout);
         getSharedPreferences("overlay", MODE_PRIVATE).edit()
                 .putInt("x", layout.x)

@@ -26,6 +26,7 @@ public final class PokePaths {
     public File locks() { return new File(root, ".locks"); }
     public File commands() { return new File(root, ".commands"); }
     public File trash() { return new File(root, ".trash"); }
+    public File deviceIdentity() { return new File(root, "device.json"); }
     public File writeLock() { return new File(locks(), "write.json"); }
     public File maintenanceLock() { return new File(locks(), "mac-maintenance.json"); }
 

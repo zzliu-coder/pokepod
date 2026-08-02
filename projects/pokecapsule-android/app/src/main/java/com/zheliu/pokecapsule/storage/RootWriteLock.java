@@ -60,6 +60,22 @@ public final class RootWriteLock implements AutoCloseable {
         }
     }
 
+    /**
+     * Clears a write lock left by the previous application process.
+     *
+     * <p>All app components run in the default process. This method is called
+     * once from {@code Application.onCreate}, before any component in the new
+     * process can acquire the lock, so an existing lock cannot have a live
+     * in-process owner.</p>
+     */
+    public static void clearLockFromPreviousProcess(PokePaths paths) throws IOException {
+        paths.ensureBase();
+        File file = paths.writeLock();
+        if (file.isFile() && !file.delete()) {
+            throw new IOException("无法清理上次进程遗留的写锁");
+        }
+    }
+
     private static boolean isStale(File file) {
         return file.isFile()
                 && System.currentTimeMillis() - file.lastModified() > STALE_AFTER_MS;

@@ -2,6 +2,10 @@ package com.zheliu.pokecapsule.ui;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.media.MediaPlayer;
@@ -13,10 +17,13 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.zheliu.pokecapsule.core.ProcessingState;
+import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
+import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
+import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -37,6 +44,16 @@ public final class CapsuleDetailActivity extends Activity {
     private TextView polished;
     private TextView finalText;
     private MediaPlayer player;
+    private boolean libraryReceiverRegistered;
+
+    private final BroadcastReceiver libraryChangeReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            load();
+            if (TencentAsrConfig.isConfigured(CapsuleDetailActivity.this)) {
+                TranscriptionScheduler.scheduleAutomatic(CapsuleDetailActivity.this);
+            }
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -47,6 +64,27 @@ public final class CapsuleDetailActivity extends Activity {
     @Override public void onResume() {
         super.onResume();
         load();
+        if (TencentAsrConfig.isConfigured(this)) {
+            TranscriptionScheduler.scheduleAutomatic(this);
+        }
+    }
+
+    @Override public void onStart() {
+        super.onStart();
+        registerReceiver(
+                libraryChangeReceiver,
+                new IntentFilter(LibraryChangeNotifier.ACTION),
+                LibraryChangeNotifier.INTERNAL_PERMISSION,
+                null);
+        libraryReceiverRegistered = true;
+    }
+
+    @Override public void onStop() {
+        if (libraryReceiverRegistered) {
+            unregisterReceiver(libraryChangeReceiver);
+            libraryReceiverRegistered = false;
+        }
+        super.onStop();
     }
 
     @Override public void onDestroy() {
@@ -115,13 +153,10 @@ public final class CapsuleDetailActivity extends Activity {
                 runOnUiThread(() -> {
                     record = loaded;
                     title.setText(loaded.title);
-                    metadata.setText(
-                            loaded.createdAt + "\n"
-                                    + Math.max(0, loaded.durationMs / 1000) + " 秒 · "
-                                    + loaded.status.wireValue() + "\n"
-                                    + (loaded.favorite ? "★ 已收藏 · " : "")
-                                    + tagsLine(loaded)
-                                    + (loaded.error.isEmpty() ? "" : "\n" + loaded.error));
+                    metadata.setText(loaded.metadataText()
+                            + (loaded.favorite ? "\n★ 已收藏" : "")
+                            + (loaded.tagsText().isEmpty() ? "" : "\n" + loaded.tagsText())
+                            + (loaded.error.isEmpty() ? "" : "\n" + loaded.error));
                     raw.setText(rawText.isEmpty() ? "尚未生成" : rawText);
                     polished.setText(polishedText.isEmpty() ? "尚未生成" : polishedText);
                     finalText.setText(finalValue.isEmpty() ? "尚未编辑" : finalValue);
@@ -176,7 +211,9 @@ public final class CapsuleDetailActivity extends Activity {
             player.setOnCompletionListener(value -> stopPlayback());
             player.prepare();
             player.start();
-            toast("正在播放；Poke3 需连接蓝牙或 USB 音频设备");
+            toast(DeviceRuntimeProfile.isLowPowerReader()
+                    ? "正在播放；Poke3 需连接蓝牙或 USB 音频设备"
+                    : "正在通过手机扬声器播放");
         } catch (Exception error) {
             stopPlayback();
             toast("无法播放: " + error.getMessage());

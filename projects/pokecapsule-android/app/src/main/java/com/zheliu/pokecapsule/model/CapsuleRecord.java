@@ -142,7 +142,7 @@ public final class CapsuleRecord {
                 tags,
                 state,
                 processing.optLong("durationMs", 0),
-                processing.optString("error", ""),
+                processing.isNull("error") ? "" : processing.optString("error", ""),
                 capsuleVersion != 1 || processingVersion != 1,
                 relativeFolder,
                 rawText,
@@ -176,7 +176,7 @@ public final class CapsuleRecord {
         switch (status) {
             case RECORDING: return "正在录音…";
             case RECORDED:
-            case QUEUED: return "等待 Wi‑Fi 和足够电量转写";
+            case QUEUED: return "等待自动转写";
             case TRANSCRIBING: return "正在转写…";
             case FAILED: return error == null || error.isEmpty() ? "转写失败" : "转写失败，可稍后重试";
             default: return title == null || title.isEmpty() ? "语音胶囊" : title;

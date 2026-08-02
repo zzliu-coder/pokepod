@@ -4,9 +4,11 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -16,10 +18,13 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ScrollView;
@@ -27,10 +32,16 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.zheliu.pokecapsule.core.PathPolicy;
+import com.zheliu.pokecapsule.core.ProcessingState;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
+import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
+import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
 import com.zheliu.pokecapsule.service.OverlayService;
+import com.zheliu.pokecapsule.service.RecordingService;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
+import com.zheliu.pokecapsule.service.TranscriptionPolicyText;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
+import com.zheliu.pokecapsule.storage.DeviceIdentity;
 import com.zheliu.pokecapsule.storage.PokePaths;
 import com.zheliu.pokecapsule.storage.SearchIndex;
 import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
@@ -45,10 +56,14 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 91;
+    private static final int REQUEST_TENCENT_CONFIG = 92;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final CapsuleStore store = new CapsuleStore(new PokePaths());
     private final ArrayList<CapsuleRecord> visible = new ArrayList<>();
@@ -67,6 +82,34 @@ public final class MainActivity extends Activity {
     private boolean trashOnly;
     private String statusFilter;
     private String searchQuery = "";
+    private boolean cloudConfigured;
+    private boolean libraryReceiverRegistered;
+    private boolean inlineRecording;
+    private CapsuleRecordButtonView inlineRecordButton;
+
+    private final BroadcastReceiver libraryChangeReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (RecordingService.ACTION_STATE.equals(intent.getAction())) {
+                inlineRecording = intent.getBooleanExtra(
+                        RecordingService.EXTRA_RECORDING, false);
+                if (inlineRecordButton != null) {
+                    if (inlineRecording) {
+                        inlineRecordButton.showRecording(
+                                intent.getIntExtra(RecordingService.EXTRA_SECONDS_LEFT, 0),
+                                intent.getIntExtra(RecordingService.EXTRA_AUDIO_LEVEL, 0),
+                                intent.getBooleanExtra(RecordingService.EXTRA_SILENT, false));
+                    } else {
+                        inlineRecordButton.showIdle(
+                                intent.getStringExtra(RecordingService.EXTRA_MESSAGE));
+                    }
+                }
+                return;
+            }
+            cloudConfigured = TencentAsrConfig.isConfigured(MainActivity.this);
+            refresh();
+            if (cloudConfigured) TranscriptionScheduler.scheduleAutomatic(MainActivity.this);
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -76,7 +119,29 @@ public final class MainActivity extends Activity {
 
     @Override public void onResume() {
         super.onResume();
+        cloudConfigured = TencentAsrConfig.isConfigured(this);
         refresh();
+        if (cloudConfigured) TranscriptionScheduler.scheduleAutomatic(this);
+    }
+
+    @Override public void onStart() {
+        super.onStart();
+        IntentFilter filter = new IntentFilter(LibraryChangeNotifier.ACTION);
+        filter.addAction(RecordingService.ACTION_STATE);
+        registerReceiver(
+                libraryChangeReceiver,
+                filter,
+                LibraryChangeNotifier.INTERNAL_PERMISSION,
+                null);
+        libraryReceiverRegistered = true;
+    }
+
+    @Override public void onStop() {
+        if (libraryReceiverRegistered) {
+            unregisterReceiver(libraryChangeReceiver);
+            libraryReceiverRegistered = false;
+        }
+        super.onStop();
     }
 
     @Override public void onDestroy() {
@@ -85,13 +150,14 @@ public final class MainActivity extends Activity {
     }
 
     private View buildPage() {
+        boolean lowPowerReader = DeviceRuntimeProfile.isLowPowerReader();
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(14), dp(10), dp(14), dp(10));
         page.setBackgroundColor(Color.WHITE);
 
         heading = ViewKit.text(this, "PokeCapsule · Inbox", 25, Typeface.BOLD);
-        page.addView(heading, lp(-1, dp(46)));
+        page.addView(heading, lp(-1, dp(lowPowerReader ? 46 : 72)));
 
         LinearLayout tabs = row();
         tabs.addView(smallButton("Inbox", v -> showInbox()), weight());
@@ -122,7 +188,7 @@ public final class MainActivity extends Activity {
                         MainActivity.this,
                         (selected.contains(record.id) ? "☑ " : "")
                                 + (record.favorite ? "★ " : "")
-                                + record.previewText(),
+                                + previewText(record),
                         17,
                         Typeface.BOLD);
                 preview.setSingleLine(true);
@@ -175,7 +241,71 @@ public final class MainActivity extends Activity {
         actions.addView(favoriteAction, weight());
         actions.addView(deleteAction, weight());
         page.addView(actions, lp(-1, dp(48)));
-        return page;
+        if (lowPowerReader) return page;
+
+        FrameLayout screen = new FrameLayout(this);
+        screen.setBackgroundColor(Color.WHITE);
+        screen.addView(page, new FrameLayout.LayoutParams(-1, -1));
+
+        inlineRecordButton = new CapsuleRecordButtonView(this);
+        inlineRecordButton.setOnClickListener(v -> toggleInlineRecording());
+        FrameLayout.LayoutParams recordParams =
+                new FrameLayout.LayoutParams(dp(64), dp(64), Gravity.RIGHT | Gravity.BOTTOM);
+        recordParams.rightMargin = dp(20);
+        recordParams.bottomMargin = dp(96);
+        screen.addView(inlineRecordButton, recordParams);
+        attachInlineRecordDrag(screen);
+        return screen;
+    }
+
+    private void attachInlineRecordDrag(FrameLayout screen) {
+        int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+        inlineRecordButton.setOnTouchListener(new View.OnTouchListener() {
+            private float downRawX;
+            private float downRawY;
+            private float startX;
+            private float startY;
+            private boolean moved;
+
+            @Override public boolean onTouch(View view, MotionEvent event) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        downRawX = event.getRawX();
+                        downRawY = event.getRawY();
+                        startX = view.getX();
+                        startY = view.getY();
+                        moved = false;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        float dx = event.getRawX() - downRawX;
+                        float dy = event.getRawY() - downRawY;
+                        if (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop) moved = true;
+                        if (moved) {
+                            float maxX = Math.max(0, screen.getWidth() - view.getWidth());
+                            float maxY = Math.max(0, screen.getHeight() - view.getHeight());
+                            view.setX(Math.max(0, Math.min(maxX, startX + dx)));
+                            view.setY(Math.max(0, Math.min(maxY, startY + dy)));
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        if (!moved) view.performClick();
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        });
+    }
+
+    private String previewText(CapsuleRecord record) {
+        if ((record.status == ProcessingState.RECORDED
+                || record.status == ProcessingState.QUEUED)
+                && !cloudConfigured) {
+            return "等待配置腾讯转写";
+        }
+        return record.previewText();
     }
 
     private void requestRequiredPermissions() {
@@ -209,6 +339,7 @@ public final class MainActivity extends Activity {
     private void refresh() {
         io.execute(() -> {
             try {
+                DeviceIdentity.ensure(this, store.paths());
                 List<CapsuleRecord> all = trashOnly ? store.scanTrash() : store.scan();
                 ArrayList<CapsuleRecord> filtered = new ArrayList<>();
                 for (CapsuleRecord record : all) {
@@ -538,7 +669,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showSettings() {
-        boolean cloudConfigured = TencentAsrConfig.isConfigured(this);
+        cloudConfigured = TencentAsrConfig.isConfigured(this);
         boolean adbEnabled = Settings.Global.getInt(
                 getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
         String usbConfig = readProperty("sys.usb.config");
@@ -546,13 +677,18 @@ public final class MainActivity extends Activity {
                 ? "电脑管理：ADB 已就绪"
                 : adbEnabled ? "电脑管理：调试已开，等待 USB"
                 : "电脑管理：USB 调试未开启";
+        if (!DeviceRuntimeProfile.isLowPowerReader()) {
+            showPhoneSettings(computerStatus);
+            return;
+        }
         String[] options = {
                 Settings.canDrawOverlays(this) ? "开启悬浮按钮" : "授予悬浮窗权限",
                 "临时隐藏悬浮按钮",
                 "彻底关闭悬浮按钮",
                 "立即处理一条排队胶囊",
                 computerStatus,
-                cloudConfigured ? "腾讯转写：已安全配置" : "腾讯转写：等待配置",
+                (cloudConfigured ? "腾讯转写：已配置 · " : "腾讯转写：待配置 · ")
+                        + TranscriptionPolicyText.shortCondition(),
                 "重新申请录音/文件权限"
         };
         new AlertDialog.Builder(this)
@@ -573,22 +709,72 @@ public final class MainActivity extends Activity {
                             toast("已提交处理任务");
                             break;
                         case 4:
-                            openOnyxSettings();
+                            openDeviceSettings();
+                            break;
+                        case 5:
+                            if (cloudConfigured) {
+                                toast(TranscriptionPolicyText.automaticCondition());
+                            } else {
+                                openTencentConfigPicker();
+                            }
                             break;
                         case 6:
                             requestRequiredPermissions();
                             break;
                         default:
-                            toast(cloudConfigured
-                                    ? "腾讯转写已配置；Wi‑Fi 且电量不低于 15% 时自动处理"
-                                    : "尚未配置腾讯语音识别");
+                            break;
                     }
                 })
                 .setNegativeButton("关闭", null)
                 .show();
     }
 
-    private void openOnyxSettings() {
+    private void showPhoneSettings(String computerStatus) {
+        String[] options = {
+                "立即处理排队胶囊",
+                computerStatus,
+                (cloudConfigured ? "腾讯转写：已配置 · " : "腾讯转写：待配置 · ")
+                        + TranscriptionPolicyText.shortCondition(),
+                "重新申请录音/文件权限"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("设置")
+                .setItems(options, (dialog, which) -> {
+                    switch (which) {
+                        case 0:
+                            TranscriptionScheduler.scheduleManual(this);
+                            toast("已提交处理任务");
+                            break;
+                        case 1:
+                            openDeviceSettings();
+                            break;
+                        case 2:
+                            if (cloudConfigured) {
+                                toast(TranscriptionPolicyText.automaticCondition());
+                            } else {
+                                openTencentConfigPicker();
+                            }
+                            break;
+                        case 3:
+                            requestRequiredPermissions();
+                            break;
+                        default:
+                            break;
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void openDeviceSettings() {
+        if (!DeviceRuntimeProfile.isLowPowerReader()) {
+            try {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+            } catch (Exception error) {
+                startActivity(new Intent(Settings.ACTION_SETTINGS));
+            }
+            return;
+        }
         try {
             Intent settings = new Intent("com.onyx.action.SETTING");
             settings.setPackage("com.onyx");
@@ -596,6 +782,50 @@ public final class MainActivity extends Activity {
         } catch (Exception error) {
             startActivity(new Intent(Settings.ACTION_SETTINGS));
         }
+    }
+
+    private void openTencentConfigPicker() {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType("text/plain");
+        startActivityForResult(picker, REQUEST_TENCENT_CONFIG);
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_TENCENT_CONFIG
+                || resultCode != RESULT_OK
+                || data == null
+                || data.getData() == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        io.execute(() -> {
+            try (InputStream input = getContentResolver().openInputStream(uri);
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                if (input == null) throw new IOException("无法读取密钥文件");
+                byte[] buffer = new byte[4096];
+                int total = 0;
+                int count;
+                while ((count = input.read(buffer)) >= 0) {
+                    total += count;
+                    if (total > 64 * 1024) throw new IOException("密钥文件过大");
+                    output.write(buffer, 0, count);
+                }
+                TencentAsrConfig.save(
+                        this,
+                        TencentAsrConfig.parse(
+                                new String(output.toByteArray(), StandardCharsets.UTF_8)));
+                cloudConfigured = true;
+                TranscriptionScheduler.scheduleAutomatic(this);
+                runOnUiThread(() -> {
+                    toast("腾讯转写已配置，排队胶囊将自动处理");
+                    refresh();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> toast("配置失败：" + error.getMessage()));
+            }
+        });
     }
 
     private String readProperty(String key) {
@@ -621,6 +851,21 @@ public final class MainActivity extends Activity {
             return;
         }
         Intent service = new Intent(this, OverlayService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+        else startService(service);
+    }
+
+    private void toggleInlineRecording() {
+        if (DeviceRuntimeProfile.isLowPowerReader()) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestRequiredPermissions();
+            return;
+        }
+        Intent service = new Intent(this, RecordingService.class);
+        service.setAction(inlineRecording
+                ? RecordingService.ACTION_STOP
+                : RecordingService.ACTION_START);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
         else startService(service);
     }

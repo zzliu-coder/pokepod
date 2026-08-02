@@ -45,6 +45,21 @@ public final class AdaptiveVoiceGainTest {
         assertEquals(peak, Math.abs(loud[0]));
     }
 
+    @Test public void phoneProfileRaisesVeryQuietSpeechWithoutRaisingSilence() {
+        AdaptiveVoiceGain gain = AdaptiveVoiceGain.forPhone();
+        short[] silence = new short[320];
+        assertEquals(0, gain.process(silence, silence.length));
+
+        int laterPeak = 0;
+        for (int block = 0; block < 20; block++) {
+            short[] quiet = constantBlock((short) 60);
+            laterPeak = gain.process(quiet, quiet.length);
+        }
+
+        assertTrue(laterPeak >= 900);
+        assertTrue(laterPeak <= 960);
+    }
+
     private static short[] constantBlock(short value) {
         short[] samples = new short[320];
         for (int index = 0; index < samples.length; index++) samples[index] = value;

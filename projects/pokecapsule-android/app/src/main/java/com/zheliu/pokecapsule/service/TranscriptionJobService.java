@@ -2,7 +2,6 @@ package com.zheliu.pokecapsule.service;
 
 import android.app.job.JobParameters;
 import android.app.job.JobService;
-import android.os.BatteryManager;
 import com.zheliu.pokecapsule.core.ProcessingState;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.storage.AtomicFiles;
@@ -48,25 +47,26 @@ public final class TranscriptionJobService extends JobService {
             PokePaths paths = new PokePaths();
             CapsuleStore store = new CapsuleStore(paths);
             paths.ensureBase();
-            boolean manual = parameters.getExtras().getBoolean("manual", false);
-            if (!manual && !BatteryPolicy.allowsAutomatic(batteryPercent())) {
-                reschedule = true;
-                return;
-            }
             if (!TencentAsrConfig.isConfigured(this)) {
                 reschedule = true;
                 return;
             }
-            CapsuleRecord queued = firstQueued(store.scan());
-            if (queued == null || stopped) return;
+            List<CapsuleRecord> queued = queuedRecords(store.scan());
+            if (queued.isEmpty() || stopped) return;
             try (RootWriteLock ignored = RootWriteLock.acquire(paths, "transcription")) {
                 if (paths.isMaintenanceActive()) {
                     reschedule = true;
                     return;
                 }
-                process(store, queued);
+                for (CapsuleRecord record : queued) {
+                    if (stopped) {
+                        reschedule = true;
+                        break;
+                    }
+                    process(store, record);
+                }
             }
-            reschedule = firstQueued(store.scan()) != null;
+            if (!reschedule) reschedule = firstQueued(store.scan()) != null;
         } catch (Exception ignored) {
             reschedule = true;
         } finally {
@@ -77,41 +77,56 @@ public final class TranscriptionJobService extends JobService {
 
     private void process(CapsuleStore store, CapsuleRecord record) throws IOException {
         try {
-            TranscriptionGuard.requireTranscribableDuration(record.durationMs);
-        } catch (IOException error) {
-            store.updateProcessing(record.directory, ProcessingState.FAILED,
-                    "audio", error.getMessage(), false);
-            return;
-        }
-        store.updateProcessing(record.directory, ProcessingState.TRANSCRIBING,
-                null, null, true);
-        try {
-            if (stopped) {
-                store.updateProcessing(record.directory, ProcessingState.QUEUED,
-                        "transcription", "任务被系统暂停", false);
+            try {
+                TranscriptionGuard.requireTranscribableDuration(record.durationMs);
+            } catch (IOException error) {
+                store.updateProcessing(record.directory, ProcessingState.FAILED,
+                        "audio", error.getMessage(), false);
                 return;
             }
-            TencentAsrConfig credentials = TencentAsrConfig.load(this);
-            String text = new TencentAsrClient().transcribe(
-                    new File(record.directory, "audio.m4a"), credentials);
-            TranscriptionGuard.requirePlausibleOutput(text, record.durationMs);
-            if (stopped) {
-                store.updateProcessing(record.directory, ProcessingState.QUEUED,
-                        "transcription", "任务被系统暂停", false);
-                return;
+            store.updateProcessing(record.directory, ProcessingState.TRANSCRIBING,
+                    null, null, true);
+            try {
+                if (stopped) {
+                    store.updateProcessing(record.directory, ProcessingState.QUEUED,
+                            "transcription", "任务被系统暂停", false);
+                    return;
+                }
+                TencentAsrConfig credentials = TencentAsrConfig.load(this);
+                String text = new TencentAsrClient().transcribe(
+                        new File(record.directory, "audio.m4a"), credentials);
+                try {
+                    TranscriptionGuard.requirePlausibleOutput(text, record.durationMs);
+                } catch (IOException error) {
+                    store.updateProcessing(record.directory, ProcessingState.FAILED,
+                            "transcription-output", error.getMessage(), false);
+                    return;
+                }
+                if (stopped) {
+                    store.updateProcessing(record.directory, ProcessingState.QUEUED,
+                            "transcription", "任务被系统暂停", false);
+                    return;
+                }
+                AtomicFiles.writeUtf8(new File(record.directory, "raw.txt"), text + "\n");
+                store.updateProcessing(record.directory, ProcessingState.RAW_READY,
+                        null, null, false);
+            } catch (TencentAsrClient.AsrException error) {
+                boolean retryable = !"EmptyResult".equals(error.code);
+                store.updateProcessing(
+                        record.directory,
+                        retryable ? ProcessingState.QUEUED : ProcessingState.FAILED,
+                        "tencent-asr",
+                        safeMessage(error),
+                        false);
+            } catch (Exception error) {
+                store.updateProcessing(record.directory,
+                        ProcessingState.QUEUED,
+                        "tencent-asr",
+                        stopped ? "任务被系统暂停" : safeMessage(error),
+                        false);
             }
-            AtomicFiles.writeUtf8(new File(record.directory, "raw.txt"), text + "\n");
-            store.updateProcessing(record.directory, ProcessingState.RAW_READY,
-                    null, null, false);
-        } catch (TencentAsrClient.AsrException error) {
-            store.updateProcessing(record.directory, ProcessingState.QUEUED,
-                    "tencent-asr", safeMessage(error), false);
-        } catch (Exception error) {
-            store.updateProcessing(record.directory,
-                    ProcessingState.QUEUED,
-                    "tencent-asr",
-                    stopped ? "任务被系统暂停" : safeMessage(error),
-                    false);
+        } finally {
+            LibraryChangeNotifier.notifyChanged(this);
         }
     }
 
@@ -122,11 +137,12 @@ public final class TranscriptionJobService extends JobService {
         return null;
     }
 
-    private int batteryPercent() {
-        BatteryManager manager = (BatteryManager) getSystemService(BATTERY_SERVICE);
-        return manager == null
-                ? -1
-                : manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+    private static List<CapsuleRecord> queuedRecords(List<CapsuleRecord> records) {
+        java.util.ArrayList<CapsuleRecord> queued = new java.util.ArrayList<>();
+        for (CapsuleRecord record : records) {
+            if (record.status == ProcessingState.QUEUED) queued.add(record);
+        }
+        return queued;
     }
 
     private static String safeMessage(Throwable error) {

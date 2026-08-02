@@ -10,6 +10,17 @@ import java.io.File;
 import java.nio.file.Files;
 
 public final class RootWriteLockTest {
+    @Test public void startupClearsLockFromPreviousProcess() throws Exception {
+        File root = Files.createTempDirectory("pokecapsule-restart-lock").toFile();
+        PokePaths paths = new PokePaths(root);
+        RootWriteLock previous = RootWriteLock.acquire(paths, "transcription");
+
+        RootWriteLock.clearLockFromPreviousProcess(paths);
+
+        assertFalse(paths.writeLock().exists());
+        previous.close();
+    }
+
     @Test public void oldOwnerCannotDeleteReplacementLock() throws Exception {
         File root = Files.createTempDirectory("pokecapsule-lock").toFile();
         PokePaths paths = new PokePaths(root);
