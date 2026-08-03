@@ -117,7 +117,7 @@ public final class RecordingService extends Service {
             File output = new File(stagingDirectory, "audio.m4a");
             File original = new File(stagingDirectory, "audio.original.wav");
             recorder = new EnhancedAudioRecorder(
-                    output, original, DeviceRuntimeProfile.isLowPowerReader());
+                    output, original, DeviceCapabilities.current().eink);
             recorder.start();
             recording = true;
             silentTicks = 0;

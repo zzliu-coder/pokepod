@@ -60,7 +60,7 @@ public enum ProcessingStatus: String, Codable, CaseIterable {
         switch self {
         case .recording: return "录音中"
         case .recorded: return "已录音"
-        case .queued: return "等待转写"
+        case .queued: return "等待自动转写"
         case .transcribing: return "正在转写"
         case .rawReady: return "待校对"
         case .correcting: return "正在校对"
@@ -122,7 +122,8 @@ public struct CapsuleRecord: Identifiable, Hashable {
 
     public var readOnly: Bool {
         capsule.schemaVersion != ProtocolConstants.schemaVersion
-            || processing.map { $0.schemaVersion != ProtocolConstants.schemaVersion } == true
+            || processing == nil
+            || processing?.schemaVersion != ProtocolConstants.schemaVersion
     }
 
     public var displayTitle: String {
@@ -139,7 +140,7 @@ public struct CapsuleRecord: Identifiable, Hashable {
         }
         switch processing?.status {
         case .recording: return "正在录音…"
-        case .recorded, .queued: return "等待转写"
+        case .recorded, .queued: return "等待自动转写"
         case .transcribing: return "正在转写…"
         case .failed: return "转写失败，可稍后重试"
         default: return displayTitle
@@ -216,7 +217,7 @@ public struct CapsuleRecord: Identifiable, Hashable {
     public var visibleProcessingStatus: String? {
         switch processing?.status {
         case .recording: return "录音中"
-        case .recorded, .queued: return "等待转写"
+        case .recorded, .queued: return "等待自动转写"
         case .transcribing: return "转写中"
         case .correcting: return "校对中"
         case .failed: return "转写失败"
@@ -416,7 +417,7 @@ public struct RegisteredDevice: Codable, Hashable, Identifiable {
 public struct DeviceCommand: Codable, Equatable {
     public let schemaVersion: Int
     public let transactionId: UUID
-    public let operation: String
+    public let operation: CommandOperation
     public let createdAt: Date
     public var maintenanceId: UUID?
     public var capsuleIds: [UUID]?
@@ -432,7 +433,7 @@ public struct DeviceCommand: Codable, Equatable {
 
     public init(
         transactionId: UUID = UUID(),
-        operation: String,
+        operation: CommandOperation,
         maintenanceId: UUID? = nil,
         capsuleIds: [UUID]? = nil,
         destination: String? = nil,
@@ -480,6 +481,7 @@ public enum PokeCapsuleError: LocalizedError, Equatable {
     case adbFailure(String)
     case deviceUnavailable(String)
     case maintenanceRejected(String)
+    case commandRejected(String)
     case commandTimedOut
     case uuidConflict(UUID)
     case hashMismatch(String)
@@ -497,7 +499,8 @@ public enum PokeCapsuleError: LocalizedError, Equatable {
         case .adbFailure(let value): return "ADB 操作失败：\(value)"
         case .deviceUnavailable(let value): return "设备不可用：\(value)"
         case .maintenanceRejected(let value): return "设备未允许维护操作：\(value)"
-        case .commandTimedOut: return "等待设备确认超时，设备没有被修改"
+        case .commandRejected(let value): return "设备操作失败：\(value)"
+        case .commandTimedOut: return "等待设备确认超时；操作结果未知，重新连接后会核对"
         case .uuidConflict(let id): return "UUID 冲突：\(id.uuidString)"
         case .hashMismatch(let path): return "文件校验失败：\(path)"
         case .missingAPIKey: return "尚未配置 API 密钥"

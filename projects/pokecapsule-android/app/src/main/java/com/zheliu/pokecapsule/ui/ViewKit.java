@@ -9,7 +9,7 @@ import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
+import com.zheliu.pokecapsule.service.DeviceCapabilities;
 
 final class ViewKit {
     static final int COLOR_BACKGROUND = Color.rgb(245, 246, 244);
@@ -87,7 +87,7 @@ final class ViewKit {
     }
 
     static int background(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader() ? Color.WHITE : COLOR_BACKGROUND;
+        return DeviceCapabilities.current().eink ? Color.WHITE : COLOR_BACKGROUND;
     }
 
     static int surface(Context context) {
@@ -95,35 +95,39 @@ final class ViewKit {
     }
 
     static int ink(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader() ? Color.BLACK : COLOR_INK;
+        return DeviceCapabilities.current().eink ? Color.BLACK : COLOR_INK;
     }
 
     static int secondary(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader() ? Color.DKGRAY : COLOR_SECONDARY;
+        return DeviceCapabilities.current().eink ? Color.DKGRAY : COLOR_SECONDARY;
     }
 
     static int accent(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader() ? Color.BLACK : COLOR_ACCENT;
+        return DeviceCapabilities.current().eink ? Color.BLACK : COLOR_ACCENT;
     }
 
     static int accentSoft(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader()
+        return DeviceCapabilities.current().eink
                 ? Color.rgb(235, 235, 235)
                 : COLOR_ACCENT_SOFT;
     }
 
     static int error(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader() ? Color.BLACK : COLOR_ERROR;
+        return DeviceCapabilities.current().eink ? Color.BLACK : COLOR_ERROR;
     }
 
     static int errorSoft(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader()
+        return DeviceCapabilities.current().eink
                 ? Color.rgb(235, 235, 235)
                 : COLOR_ERROR_SOFT;
     }
 
     static int outline(Context context) {
-        return DeviceRuntimeProfile.isLowPowerReader() ? Color.BLACK : COLOR_OUTLINE;
+        return DeviceCapabilities.current().eink ? Color.BLACK : COLOR_OUTLINE;
+    }
+
+    static GradientDrawable outlinedBackground(Context context) {
+        return box(context, surface(context), outline(context), 10);
     }
 
     private static TextView control(Context context, String value, View.OnClickListener action) {
@@ -141,7 +145,7 @@ final class ViewKit {
         box.setColor(fill);
         if (stroke != Color.TRANSPARENT) box.setStroke(dp(context, 1), stroke);
         box.setCornerRadius(dp(
-                context, DeviceRuntimeProfile.isLowPowerReader() ? Math.min(radiusDp, 8) : radiusDp));
+                context, DeviceCapabilities.current().eink ? Math.min(radiusDp, 8) : radiusDp));
         return box;
     }
 

@@ -19,25 +19,18 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.zheliu.pokecapsule.core.ProcessingState;
-import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
+import com.zheliu.pokecapsule.service.DeviceCapabilities;
 import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
+import com.zheliu.pokecapsule.service.InternalBroadcasts;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
-import com.zheliu.pokecapsule.storage.CapsuleStore;
-import com.zheliu.pokecapsule.storage.PokePaths;
+import com.zheliu.pokecapsule.storage.LibraryRepository;
 import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 public final class CapsuleDetailActivity extends Activity {
-    private final CapsuleStore store = new CapsuleStore(new PokePaths());
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private LibraryRepository repository;
     private String capsuleId;
     private CapsuleRecord record;
     private TextView title;
@@ -49,6 +42,7 @@ public final class CapsuleDetailActivity extends Activity {
     private TextView retryButton;
     private TextView playbackButton;
     private TextView favoriteButton;
+    private TextView organizeButton;
     private TextView versionsToggle;
     private LinearLayout errorCard;
     private LinearLayout versions;
@@ -70,6 +64,7 @@ public final class CapsuleDetailActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        repository = new LibraryRepository(this, message -> toast("操作失败：" + message));
         capsuleId = getIntent().getStringExtra("capsuleId");
         setContentView(buildPage());
     }
@@ -84,11 +79,9 @@ public final class CapsuleDetailActivity extends Activity {
 
     @Override public void onStart() {
         super.onStart();
-        registerReceiver(
-                libraryChangeReceiver,
+        InternalBroadcasts.register(this, libraryChangeReceiver,
                 new IntentFilter(LibraryChangeNotifier.ACTION),
-                LibraryChangeNotifier.INTERNAL_PERMISSION,
-                null);
+                LibraryChangeNotifier.INTERNAL_PERMISSION);
         libraryReceiverRegistered = true;
     }
 
@@ -102,7 +95,7 @@ public final class CapsuleDetailActivity extends Activity {
 
     @Override public void onDestroy() {
         stopPlayback();
-        io.shutdownNow();
+        repository.close();
         super.onDestroy();
     }
 
@@ -115,6 +108,11 @@ public final class CapsuleDetailActivity extends Activity {
         page.setPadding(dp(18), dp(18), dp(18), dp(28));
         page.setBackgroundColor(ViewKit.background(this));
         scroll.addView(page);
+
+        TextView back = ViewKit.text(this, "‹ 返回收件箱", 16, Typeface.BOLD);
+        back.setPadding(0, 0, 0, dp(12));
+        back.setOnClickListener(view -> finish());
+        page.addView(back, lp(-1, dp(42)));
 
         LinearLayout header = row();
         title = ViewKit.text(this, "胶囊", 26, Typeface.BOLD);
@@ -170,12 +168,9 @@ public final class CapsuleDetailActivity extends Activity {
         textCard.addView(textActions, lp(-1, dp(50)));
         page.addView(textCard, block());
 
-        page.addView(ViewKit.sectionTitle(this, "整理"));
-        LinearLayout organize = row();
-        organize.addView(ViewKit.quietButton(this, "改标题", v -> promptTitle()), weight());
-        organize.addView(ViewKit.quietButton(this, "加标签", v -> promptTag(true)), weight());
-        organize.addView(ViewKit.quietButton(this, "移标签", v -> promptTag(false)), weight());
-        page.addView(organize, block());
+        organizeButton = ViewKit.quietButton(this, "整理：收件箱　›", v -> openOrganize());
+        organizeButton.setGravity(Gravity.CENTER_VERTICAL);
+        page.addView(organizeButton, lp(-1, dp(54)));
 
         versionsToggle = ViewKit.quietButton(this, "查看文字版本", v -> toggleVersions());
         page.addView(versionsToggle, lp(-1, dp(48)));
@@ -202,23 +197,25 @@ public final class CapsuleDetailActivity extends Activity {
     }
 
     private void load() {
-        io.execute(() -> {
-            try {
-                File directory = store.paths().findCapsuleById(capsuleId);
-                if (directory == null) throw new Exception("胶囊已移动或不存在");
-                CapsuleRecord loaded = store.readCapsule(directory);
-                String rawText = readOptional(new File(directory, "raw.txt"));
-                String polishedText = readOptional(new File(directory, "polished.md"));
-                String finalValue = readOptional(new File(directory, "final.md"));
-                runOnUiThread(() -> {
+        repository.loadRecord(capsuleId, loaded -> {
+                    String rawText = loaded.rawText;
+                    String polishedText = loaded.polishedText;
+                    String finalValue = loaded.finalText;
                     record = loaded;
                     title.setText(loaded.title);
-                    metadata.setText(loaded.metadataText()
-                            + (loaded.tagsText().isEmpty() ? "" : "\n" + loaded.tagsText()));
+                    metadata.setText(loaded.tagsText().isEmpty()
+                            ? loaded.metadataText()
+                            : getString(com.zheliu.pokecapsule.R.string.metadata_with_tags_multiline,
+                                    loaded.metadataText(), loaded.tagsText()));
                     String status = statusLabel(loaded);
                     stateChip.setText(status);
                     stateChip.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
                     favoriteButton.setText(loaded.favorite ? "★ 已收藏" : "☆ 收藏");
+                    String organizeText = "整理：" + displayFolder(loaded.relativeFolder);
+                    if (!loaded.tagsText().isEmpty()) organizeText += "　" + loaded.tagsText();
+                    if (loaded.favorite) organizeText += "　★";
+                    organizeButton.setText(getString(
+                            com.zheliu.pokecapsule.R.string.organize_summary, organizeText));
                     applyError(loaded);
                     String primary = primaryText(loaded, finalValue, polishedText, rawText);
                     bestText.setText(primary.isEmpty()
@@ -240,10 +237,6 @@ public final class CapsuleDetailActivity extends Activity {
                         versionsExpanded = false;
                         versions.setVisibility(View.GONE);
                     }
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast(error.getMessage()));
-            }
         });
     }
 
@@ -260,10 +253,9 @@ public final class CapsuleDetailActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("编辑最终文字")
                 .setView(input)
-                .setPositiveButton("保存", (dialog, which) ->
-                        runOperation(
-                                () -> store.setFinalText(record.id, input.getText().toString()),
-                                "最终文字已保存"))
+                .setPositiveButton("保存", (dialog, which) -> repository.setFinalText(
+                        record, input.getText().toString(),
+                        () -> operationFinished("最终文字已保存")))
                 .setNegativeButton("取消", null)
                 .show();
     }
@@ -291,9 +283,9 @@ public final class CapsuleDetailActivity extends Activity {
             player.prepare();
             player.start();
             playbackButton.setText("停止播放");
-            toast(DeviceRuntimeProfile.isLowPowerReader()
-                    ? "正在播放；Poke3 需连接蓝牙或 USB 音频设备"
-                    : "正在通过手机扬声器播放");
+            toast(DeviceCapabilities.current().directSpeakerPlayback
+                    ? "正在使用手机扬声器播放"
+                    : "正在播放；Poke3 需连接蓝牙或 USB 音频设备");
         } catch (Exception error) {
             stopPlayback();
             toast("无法播放: " + error.getMessage());
@@ -303,45 +295,43 @@ public final class CapsuleDetailActivity extends Activity {
     private void promptTitle() {
         if (record == null || record.readOnly) return;
         prompt("修改标题", record.title, value ->
-                runOperation(() -> store.setTitle(record.id, value), "标题已更新"));
+                repository.setTitle(record, value, () -> operationFinished("标题已更新")));
+    }
+
+    private void openOrganize() {
+        if (record == null || record.readOnly) return;
+        Intent intent = new Intent(this, CapsuleOrganizeActivity.class);
+        intent.putExtra("capsuleId", record.id);
+        startActivity(intent);
     }
 
     private void toggleFavorite() {
         if (record == null || record.readOnly) return;
-        runOperation(
-                () -> store.setFavorite(Collections.singletonList(record.id), !record.favorite),
-                record.favorite ? "已取消收藏" : "已收藏");
+        boolean wasFavorite = record.favorite;
+        repository.setFavorite(record, !wasFavorite,
+                () -> operationFinished(wasFavorite ? "已取消收藏" : "已收藏"));
     }
 
     private void promptTag(boolean add) {
         if (record == null || record.readOnly) return;
-        prompt(add ? "添加标签" : "移除标签", "", value ->
-                runOperation(() -> {
-                    if (add) store.addTag(Collections.singletonList(record.id), value);
-                    else store.removeTag(Collections.singletonList(record.id), value);
-                }, "标签已更新"));
+        prompt(add ? "添加标签" : "移除标签", "", value -> {
+            Runnable success = () -> operationFinished("标签已更新");
+            if (add) repository.addTag(record, value, success);
+            else repository.removeTag(record, value, success);
+        });
     }
 
     private void retry() {
         if (record == null || record.readOnly) return;
-        runOperation(() -> {
-            store.requeueFailedTranscriptions(Collections.singletonList(record.id));
+        repository.requeue(record, () -> {
             TranscriptionScheduler.scheduleManual(this);
-        }, "已重新排队");
+            operationFinished("已重新排队");
+        });
     }
 
-    private void runOperation(Operation operation, String message) {
-        io.execute(() -> {
-            try {
-                operation.run();
-                runOnUiThread(() -> {
-                    toast(message);
-                    load();
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast("操作失败: " + error.getMessage()));
-            }
-        });
+    private void operationFinished(String message) {
+        toast(message);
+        load();
     }
 
     private void prompt(String heading, String initial, TextResult callback) {
@@ -467,24 +457,13 @@ public final class CapsuleDetailActivity extends Activity {
         switch (value.status) {
             case RECORDING: return "录音中";
             case RECORDED:
-            case QUEUED: return "等待转写";
+            case QUEUED: return "等待自动转写";
             case TRANSCRIBING: return "正在转写";
             case RAW_READY: return "转写完成";
             case CORRECTING: return "正在校对";
             case READY: return "已整理";
             case FAILED: return "需要处理";
             default: return "";
-        }
-    }
-
-    private static String readOptional(File file) throws Exception {
-        if (!file.isFile()) return "";
-        try (FileInputStream input = new FileInputStream(file);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int count;
-            while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
-            return output.toString(StandardCharsets.UTF_8.name());
         }
     }
 
@@ -496,6 +475,12 @@ public final class CapsuleDetailActivity extends Activity {
             result.append('#').append(tag);
         }
         return result.toString();
+    }
+
+    private static String displayFolder(String folder) {
+        if ("Inbox".equals(folder)) return "收件箱";
+        if ("Archive".equals(folder)) return "归档";
+        return folder;
     }
 
     private LinearLayout row() {
@@ -527,10 +512,6 @@ public final class CapsuleDetailActivity extends Activity {
 
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-    }
-
-    private interface Operation {
-        void run() throws Exception;
     }
 
     private interface TextResult {

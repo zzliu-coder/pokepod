@@ -208,7 +208,7 @@ public final class ADBTransport {
         do {
             let identity = try PokeJSON.decoder.decode(DeviceIdentity.self, from: data)
             guard identity.schemaVersion == 1,
-                  !identity.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                  UUID(uuidString: identity.deviceId) != nil else {
                 throw PokeCapsuleError.adbFailure("设备身份文件不完整")
             }
             return identity
@@ -303,10 +303,17 @@ public final class ADBTransport {
         return result
     }
 
-    public func pullResponse(transactionID: UUID, to local: URL) -> Bool {
+    public func pullResponse(transactionID: UUID, to local: URL) throws -> Bool {
         let remote = "\(ProtocolConstants.remoteRoot)/.commands/results/\(transactionID.uuidString.lowercased()).json"
         let result = runner.run(executable: executable, arguments: ["-s", serial, "pull", remote, local.path])
-        return result.status == 0
+        if result.status == 0 { return true }
+        let output = result.combinedOutput.lowercased()
+        if output.contains("remote object") && output.contains("does not exist")
+                || output.contains("no such file or directory") {
+            return false
+        }
+        throw PokeCapsuleError.adbFailure(
+            result.combinedOutput.isEmpty ? "读取设备响应失败" : result.combinedOutput)
     }
 }
 
@@ -373,11 +380,19 @@ public final class DeviceCommandClient {
         let responseURL = temp.appendingPathComponent("response.json")
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if transport.pullResponse(transactionID: command.transactionId, to: responseURL),
+            if try transport.pullResponse(transactionID: command.transactionId, to: responseURL),
                let data = try? Data(contentsOf: responseURL),
                let response = try? PokeJSON.decoder.decode(DeviceCommandResponse.self, from: data) {
+                guard response.transactionId == command.transactionId else {
+                    throw PokeCapsuleError.adbFailure("设备响应与当前事务不匹配")
+                }
                 guard response.success else {
-                    throw PokeCapsuleError.maintenanceRejected(response.message ?? "设备拒绝了操作")
+                    let message = response.message ?? "设备拒绝了操作"
+                    if command.operation == .beginMaintenance
+                            || command.operation == .endMaintenance {
+                        throw PokeCapsuleError.maintenanceRejected(message)
+                    }
+                    throw PokeCapsuleError.commandRejected(message)
                 }
                 return response
             }
@@ -393,7 +408,7 @@ public final class DeviceCommandClient {
         var firstError: Error?
         do {
             _ = try submit(DeviceCommand(
-                operation: "beginMaintenance",
+                operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
             for var command in commands {
                 command.maintenanceId = maintenanceID
@@ -404,7 +419,7 @@ public final class DeviceCommandClient {
         }
         do {
             _ = try submit(DeviceCommand(
-                operation: "endMaintenance",
+                operation: .endMaintenance,
                 maintenanceId: maintenanceID))
         } catch {
             if firstError == nil { firstError = error }
@@ -437,7 +452,7 @@ public final class DeviceCommandClient {
         var firstError: Error?
         do {
             _ = try submit(DeviceCommand(
-                operation: "beginMaintenance",
+                operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
             try transport.pushImport(
                 local: package.directory,
@@ -446,7 +461,7 @@ public final class DeviceCommandClient {
             )
             _ = try submit(DeviceCommand(
                 transactionId: transactionID,
-                operation: "commitImport",
+                operation: .commitImport,
                 maintenanceId: maintenanceID,
                 capsuleIds: [package.metadata.id],
                 destination: destination,
@@ -457,7 +472,7 @@ public final class DeviceCommandClient {
         }
         do {
             _ = try submit(DeviceCommand(
-                operation: "endMaintenance",
+                operation: .endMaintenance,
                 maintenanceId: maintenanceID))
         } catch {
             if firstError == nil { firstError = error }
@@ -494,7 +509,7 @@ public final class DeviceCommandClient {
         var firstError: Error?
         do {
             _ = try submit(DeviceCommand(
-                operation: "beginMaintenance",
+                operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
             try transport.pushImport(
                 local: capsuleDirectory,
@@ -502,7 +517,7 @@ public final class DeviceCommandClient {
                 capsuleID: capsuleID)
             _ = try submit(DeviceCommand(
                 transactionId: transactionID,
-                operation: "commitCorrection",
+                operation: .commitCorrection,
                 maintenanceId: maintenanceID,
                 capsuleIds: [capsuleID],
                 stagedPath: stagedPath,
@@ -512,7 +527,7 @@ public final class DeviceCommandClient {
         }
         do {
             _ = try submit(DeviceCommand(
-                operation: "endMaintenance",
+                operation: .endMaintenance,
                 maintenanceId: maintenanceID))
         } catch {
             if firstError == nil { firstError = error }
@@ -548,7 +563,7 @@ public final class DeviceCommandClient {
         var firstError: Error?
         do {
             _ = try submit(DeviceCommand(
-                operation: "beginMaintenance",
+                operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
             try transport.pushImport(
                 local: capsuleDirectory,
@@ -556,7 +571,7 @@ public final class DeviceCommandClient {
                 capsuleID: capsuleID)
             _ = try submit(DeviceCommand(
                 transactionId: transactionID,
-                operation: "commitFinalText",
+                operation: .commitFinalText,
                 maintenanceId: maintenanceID,
                 capsuleIds: [capsuleID],
                 stagedPath: stagedPath,
@@ -566,7 +581,7 @@ public final class DeviceCommandClient {
         }
         do {
             _ = try submit(DeviceCommand(
-                operation: "endMaintenance",
+                operation: .endMaintenance,
                 maintenanceId: maintenanceID))
         } catch {
             if firstError == nil { firstError = error }

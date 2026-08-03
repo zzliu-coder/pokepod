@@ -98,10 +98,14 @@ public struct CapsuleScanner {
                     let trash = try PokeJSON.decoder.decode(
                         TrashMetadata.self,
                         from: Data(contentsOf: trashURL))
-                    trashRecords.append(try decodeCapsule(
+                    let record = try decodeCapsule(
                         directory: directory,
                         relativeFolder: "回收站",
-                        trash: trash))
+                        trash: trash)
+                    guard seen.insert(record.id).inserted else {
+                        throw PokeCapsuleError.uuidConflict(record.id)
+                    }
+                    trashRecords.append(record)
                 } catch {
                     warnings.append("回收站/\(directory.lastPathComponent)：\(error.localizedDescription)")
                 }
@@ -144,6 +148,7 @@ public struct CapsuleScanner {
                         trash: nil)
                     if !seen.insert(record.id).inserted {
                         warnings.append("发现重复 UUID：\(record.id.uuidString)")
+                        continue
                     }
                     records.append(record)
                 } catch {
@@ -169,6 +174,19 @@ public struct CapsuleScanner {
         } catch {
             throw PokeCapsuleError.malformedCapsule(error.localizedDescription)
         }
+        guard directory.lastPathComponent.caseInsensitiveCompare(
+            capsule.id.uuidString) == .orderedSame else {
+            throw PokeCapsuleError.malformedCapsule("目录名与 capsule UUID 不一致")
+        }
+
+        if let trash {
+            guard trash.schemaVersion == ProtocolConstants.schemaVersion,
+                  trash.capsuleId == capsule.id,
+                  trash.revision > capsule.revision,
+                  (try? PathPolicy.validatedRelativeFolder(trash.originalFolder)) != nil else {
+                throw PokeCapsuleError.malformedCapsule("trash.json 与胶囊不一致")
+            }
+        }
 
         let processingURL = directory.appendingPathComponent("processing.json")
         var processing: ProcessingMetadata?
@@ -178,6 +196,7 @@ public struct CapsuleScanner {
                 processing = try PokeJSON.decoder.decode(ProcessingMetadata.self, from: Data(contentsOf: processingURL))
                 if processing?.capsuleId != capsule.id {
                     localWarnings.append("processing.json 的 UUID 不一致")
+                    processing = nil
                 }
             } catch {
                 localWarnings.append("processing.json 无法解析")

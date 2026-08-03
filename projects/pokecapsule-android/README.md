@@ -4,11 +4,13 @@
 
 ## 已实现
 
-- 黑白静态主界面：Inbox、两级目录、标签、收藏、设置。
+- 统一资料库语义：Inbox、全部、收藏、待转写、转写失败、两级目录、标签和回收站。
+- 手机与 Poke3 共用同一个 APK，由 `DeviceCapabilities` 自动选择录音入口、播放提示、移动网络和墨水屏刷新策略。
+- 顶部菜单打开资料库抽屉，长按进入多选；移动、标签、收藏、复制和删除集中在底部操作栏。
 - 胶囊详情：音频播放、原始转写、校对文本、标题、标签和收藏。
 - 长按进入多选；批量移动、复制、回收、标签和收藏。
 - Poke3 使用胶囊形悬浮录音按钮：拖动吸附左右边缘、记忆位置、临时隐藏、彻底关闭、重启恢复。
-- 普通 Android 手机在主界面右上角显示胶囊录音按钮，不申请或运行悬浮窗服务。
+- 普通 Android 手机在主界面右下角显示应用内胶囊录音按钮，不申请或运行悬浮窗服务。
 - 麦克风前台服务：点击即录、半秒刷新真实音量环、静音提示、提前停止、60 秒硬停止。
 - 普通安卓手机自动使用 `MIC`、系统 AGC、低电平人声增益和软限幅；Poke3 保留轻量录音参数，无需用户选择模式。
 - 录音先进入 `.staging`；停止并检查大小和时长后提交到 Inbox。
@@ -56,7 +58,7 @@ Debug APK：
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-单测覆盖协议路径规则、状态跳转和 100 次复制 UUID 唯一性。测试依赖使用工作区 Gradle 发行包自带的 JUnit，避免依赖本机代理。
+当前 44 项本地单测覆盖共享展示 fixture、智能清单、搜索排序、设备能力、命令兼容、协议 UUID 规范化、路径规则、损坏转写状态保护、回收站目录绑定、状态跳转、XML 自定义控件构造和 100 次复制 UUID 唯一性。另有 3 项 Android 真机仪器测试，覆盖损坏 processing 的启动只读保护，以及“大写协议 UUID + 小写磁盘目录”的回收与恢复。测试依赖使用工作区 Gradle 发行包自带的 JUnit，避免依赖本机代理。
 
 ## Mac 命令入口
 
@@ -74,7 +76,8 @@ component: com.zheliu.pokecapsule/.command.CommandReceiver
 
 ## 当前验证
 
-- Release APK、单元测试和 `lintRelease` 已通过，APK 内无 native Whisper/模型。
+- 1.7.0（versionCode 22）已通过 44 项本地单元测试、Vivo X Fold3 上 3 项文件系统仪器测试、资源编译、Java 全量编译、DEX 打包、Release/Debug 构建和 Lint `No issues found`。APK 内无 native Whisper/模型。
+- 1.7.0 将查询选择交给 `LibraryController`，异步扫描和写操作交给 `LibraryRepository`，侧栏与锚定菜单交给 `LibraryMenuCoordinator`，列表行交给 `CapsuleListAdapter`，设置与整理迁入独立页面；`CapsuleStore` 只作为稳定写入门面。
 - Release APK 1.4.6 已由用户在 Vivo X Fold3 真机确认录音结束后新胶囊会立即出现。
 - Poke3 1.4.6 真机诊断确认：电量 100%、Wi‑Fi 已连接且通过联网验证，但文石系统未给网络附加 `NOT_METERED` 标记，导致旧调度条件一直不满足。1.4.7 改为接受任意可联网网络；Poke3 无蜂窝数据，实际仍通过 Wi‑Fi 转写。
 - 1.4.8 修复多条队列被 30/60/120 秒指数退避拖慢的问题；腾讯明确返回空文本或输出保护命中时标记为“转写失败”，停止无意义的自动重复请求，用户仍可在详情中手动重试。

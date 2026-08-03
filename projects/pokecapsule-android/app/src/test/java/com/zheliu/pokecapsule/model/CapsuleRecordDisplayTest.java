@@ -29,7 +29,7 @@ public final class CapsuleRecordDisplayTest {
                 "校对后的内容");
         String line = record.displayLine();
         assertTrue(line.contains("校对后的内容"));
-        assertTrue(line.contains("Inbox"));
+        assertTrue(line.contains("收件箱"));
         assertTrue(line.contains("#商务"));
         assertFalse(line.contains("raw_ready"));
         assertFalse(line.contains("原始转写"));
@@ -89,5 +89,12 @@ public final class CapsuleRecordDisplayTest {
                 "一秒录音却生成了很长一段文字",
                 "");
         assertTrue(tooShort.previewText().contains("转写结果异常"));
+    }
+
+    @Test public void rejectsMalformedProcessingState() {
+        assertFalse(CapsuleRecord.hasValidProcessingState("unknown_state", 4, 1_000));
+        assertFalse(CapsuleRecord.hasValidProcessingState("queued", -1, 1_000));
+        assertFalse(CapsuleRecord.hasValidProcessingState("queued", 4, -1));
+        assertTrue(CapsuleRecord.hasValidProcessingState("queued", 4, 1_000));
     }
 }

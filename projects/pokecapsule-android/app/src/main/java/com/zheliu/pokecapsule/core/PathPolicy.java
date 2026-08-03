@@ -60,4 +60,17 @@ public final class PathPolicy {
         }
         return true;
     }
+
+    public static String normalizeRelativeFolder(String relative) {
+        if (relative == null) return "";
+        String[] parts = relative.trim().split("/", -1);
+        StringBuilder output = new StringBuilder();
+        for (String part : parts) {
+            String normalized = normalizeName(part);
+            if (normalized.isEmpty()) continue;
+            if (output.length() > 0) output.append('/');
+            output.append(normalized);
+        }
+        return output.toString();
+    }
 }

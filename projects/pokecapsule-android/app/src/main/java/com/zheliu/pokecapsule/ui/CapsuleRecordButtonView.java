@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.util.AttributeSet;
 import android.view.View;
 
 public final class CapsuleRecordButtonView extends View {
@@ -18,6 +19,21 @@ public final class CapsuleRecordButtonView extends View {
 
     public CapsuleRecordButtonView(Context context) {
         super(context);
+        initialize();
+    }
+
+    public CapsuleRecordButtonView(Context context, AttributeSet attributes) {
+        super(context, attributes);
+        initialize();
+    }
+
+    public CapsuleRecordButtonView(
+            Context context, AttributeSet attributes, int defaultStyleAttribute) {
+        super(context, attributes, defaultStyleAttribute);
+        initialize();
+    }
+
+    private void initialize() {
         setContentDescription("开始录音");
     }
 
@@ -38,6 +54,11 @@ public final class CapsuleRecordButtonView extends View {
                 ? "录音中，未检测到声音，剩余 " + seconds + " 秒"
                 : "录音中，剩余 " + seconds + " 秒，音量 " + audioLevel + " 级");
         invalidate();
+    }
+
+    @Override public boolean performClick() {
+        super.performClick();
+        return true;
     }
 
     @Override protected void onDraw(Canvas canvas) {

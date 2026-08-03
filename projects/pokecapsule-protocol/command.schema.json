@@ -35,6 +35,9 @@
         "commitImport",
         "commitCorrection",
         "commitFinalText",
+        "requeueTranscription",
+        "importTencentCredentials",
+        "exportTencentCredentials",
         "rescan"
       ]
     },
@@ -72,6 +75,18 @@
     "finalText": { "type": "string", "maxLength": 1048576 }
   },
   "allOf": [
+    {
+      "if": { "properties": { "operation": { "const": "requeueTranscription" } } },
+      "then": { "required": ["capsuleIds", "expectedRevisions"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": { "enum": ["importTencentCredentials", "exportTencentCredentials"] }
+        }
+      },
+      "then": { "required": ["stagedPath"] }
+    },
     {
       "if": {
         "properties": {

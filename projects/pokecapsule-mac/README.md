@@ -1,6 +1,6 @@
 # PokeCapsule Mac
 
-PokeCapsule Mac 是 Poke3 语音胶囊的 USB 管理器。它保留普通文件作为事实源，Mac 上的数据库或缓存损坏不会影响设备中的录音。
+PokeCapsule Mac 是 Poke3 与 Android 手机共用的 USB 管理器。每台设备拥有独立资料库、镜像、备份和离线队列；普通文件继续作为事实源，Mac 缓存损坏不会影响设备中的录音。
 
 ## 当前能力
 
@@ -8,7 +8,8 @@ PokeCapsule Mac 是 Poke3 语音胶囊的 USB 管理器。它保留普通文件�
 - 当 macOS 已识别到 Android USB、但 ADB 暂不可用时，明确显示“已插入，等待 ADB”；App 在前台每 10 秒自动重试。离线镜像和待同步队列持续可用。
 - 将 `/sdcard/PokeCapsule/` 拉取为只读本地镜像。
 - 应用活跃且 Poke3 已连接时，每 5 秒读取一次轻量元数据指纹；只有检测到新录音、转写、标签或目录变化才重新同步完整镜像。
-- 浏览 Inbox、Archive、两级目录、标签、收藏、原始转写和校对文本。
+- 设备选择器只切换独立资料库，不合并不同设备的数据。
+- 浏览 Inbox、资料库、收藏、待转写、转写失败、两级目录、标签、回收站和分层文字版本。
 - 多选移动、复制、删除、收藏、标签；修改统一提交为固定位置 JSON 命令。
 - 设备确认维护状态后才允许修改；超时保持只读。
 - 批量导出完整胶囊，并逐文件执行 SHA-256 校验。
@@ -66,15 +67,18 @@ Poke3 需要开启 USB 调试并接受 Mac 的 RSA 授权。管理器在事务�
 - API 密钥保存在 `~/Library/Application Support/PokeCapsule/Secrets/correction-api-key`，权限为当前用户只读写。首次发现 `~/Desktop/api.txt` 时会自动迁移第一条非空且以 `sk-` 开头的内容；迁移后可删除桌面文件。旧钥匙串仅作为兼容回退，正常使用不会触发授权窗口。其余粘贴文档不会进入请求或设备。
 - 校对结果先原子写入 `~/Library/Application Support/PokeCapsule/PendingCorrections/`，设备确认提交后才删除缓存。
 
-## 1.4.0 界面
+## 1.7.0 架构与界面
 
 - 三端共用“最佳文字优先”的信息顺序，Mac 详情不再把原始转写、校对和最终文字并列堆满首屏。
 - 云端错误码会转换为可理解的原因与恢复方向，原始录音始终保留。
 - 原始转写、校对版本和最终文字仍可在展开区逐项查看与复制。
+- `AppModel` 保留顶层协调；设备路径与注册、同步引擎、播放和校对分别由 `DeviceWorkspace`、`DeviceSyncEngine`、`CapsulePlaybackController` 与 `CorrectionWorkflow` 承担，资料库查询、乐观更新和强类型命令位于可测试组件。
+- SwiftUI 页面拆为应用壳、设备侧栏、胶囊列表、设置和批量操作组件；批量操作只在选中胶囊后出现。
+- DeepSeek 继续由用户手动触发，不参与设备端自动转写。
 
 ## 已完成的真机验收
 
-- 14 项 Swift 测试和 Release App 构建通过。
+- 43 项 Swift 测试、Release 构建、应用打包和代码签名校验通过；响应文件尚未生成会继续等待，ADB 断线或其他读取错误会立即结束等待并进入连接状态复核。
 - 已自动识别 USB 连接的 Poke3，并建立只读镜像。
 - 两条真机录音已从 `raw_ready` 自动调用 DeepSeek，写回 `polished.md` 后变为 `ready`。
 - 维护握手、目录创建、目录删除、校对提交和重复事务幂等已在真机通过。

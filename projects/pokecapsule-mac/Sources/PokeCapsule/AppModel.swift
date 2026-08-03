@@ -1,18 +1,9 @@
 import AppKit
-import AVFoundation
 import Foundation
 import PokeCapsuleCore
 import SwiftUI
 
-enum SidebarSelection: Hashable {
-    case all
-    case folder(String)
-    case tag(String)
-    case favorites
-    case pending
-    case failed
-    case trash
-}
+typealias SidebarSelection = LibraryScope
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -29,61 +20,42 @@ final class AppModel: ObservableObject {
     @Published var isBusy = false
     @Published var showingSettings = false
     @Published var searchQuery = ""
+    @Published var librarySort: LibrarySort = .newestFirst
     @Published var pendingCommands: [PendingCommand] = []
 
     private var adbURL: URL?
     private var transport: ADBTransport?
-    private var audioPlayer: AVAudioPlayer?
+    private let workspace = DeviceWorkspace()
+    private let playback = CapsulePlaybackController()
     private var monitorTask: Task<Void, Never>?
     private var applicationIsActive = true
     private var lastRemoteFingerprint: String?
     private let monitorIntervalNanoseconds: UInt64 = 5_000_000_000
     private let reconnectIntervalNanoseconds: UInt64 = 10_000_000_000
 
-    private var applicationBase: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PokeCapsule", isDirectory: true)
-    }
-
     var mirrorURL: URL {
-        let serial = selectedDeviceID
+        let deviceID = selectedDeviceID
             ?? UserDefaults.standard.string(forKey: "LastDeviceID")
             ?? UserDefaults.standard.string(forKey: "LastDeviceSerial")
             ?? "default"
-        return applicationBase.appendingPathComponent("Mirrors/\(serial)", isDirectory: true)
+        return workspace.mirrorURL(deviceID: deviceID)
     }
 
     var queueURL: URL {
-        let serial = selectedDeviceID
+        let deviceID = selectedDeviceID
             ?? UserDefaults.standard.string(forKey: "LastDeviceID")
             ?? UserDefaults.standard.string(forKey: "LastDeviceSerial")
             ?? "default"
-        return applicationBase.appendingPathComponent("Queues/\(serial).json")
-    }
-
-    private var registryURL: URL {
-        applicationBase.appendingPathComponent("Devices/registry.json")
+        return workspace.queueURL(deviceID: deviceID)
     }
 
     var backupURL: URL {
-        applicationBase.appendingPathComponent("Backups", isDirectory: true)
+        workspace.backupURL
     }
 
     var filteredRecords: [CapsuleRecord] {
-        let records: [CapsuleRecord]
-        switch sidebar {
-        case .all: records = index.records
-        case .folder(let folder): records = index.records.filter { $0.relativeFolder == folder }
-        case .tag(let tag): records = index.records.filter { $0.capsule.tags.contains(tag) }
-        case .favorites: records = index.records.filter(\.capsule.favorite)
-        case .pending:
-            records = index.records.filter {
-                [.recorded, .queued, .transcribing].contains($0.processing?.status)
-            }
-        case .failed: records = index.records.filter { $0.processing?.status == .failed }
-        case .trash: records = index.trashRecords
-        }
-        return CapsuleSearch.filter(records, query: searchQuery)
+        LibraryQuery.records(in: index, scope: sidebar,
+                             search: searchQuery, sort: librarySort)
     }
 
     var selectedRecords: [CapsuleRecord] {
@@ -97,6 +69,10 @@ final class AppModel: ObservableObject {
     var selectedRegisteredDevice: RegisteredDevice? {
         guard let selectedDeviceID else { return nil }
         return registeredDevices.first { $0.deviceId == selectedDeviceID }
+    }
+
+    func recordCount(in scope: LibraryScope) -> Int {
+        LibraryQuery.records(in: index, scope: scope, search: "").count
     }
 
     func connectedDevice(for registered: RegisteredDevice) -> ADBDevice? {
@@ -117,7 +93,7 @@ final class AppModel: ObservableObject {
     }
 
     init() {
-        loadRegistryAndBootstrapLegacyMirrors()
+        registeredDevices = workspace.loadRegistryAndBootstrapLegacyMirrors()
         selectedDeviceID = UserDefaults.standard.string(forKey: "LastDeviceID")
             ?? UserDefaults.standard.string(forKey: "LastDeviceSerial")
             ?? registeredDevices.first?.deviceId
@@ -138,33 +114,6 @@ final class AppModel: ObservableObject {
         }
         if !index.records.isEmpty || !index.trashRecords.isEmpty {
             status = "已载入上次镜像；\(pendingCommands.count) 项等待同步"
-        }
-    }
-
-    private func loadRegistryAndBootstrapLegacyMirrors() {
-        registeredDevices = (try? DeviceRegistryStore(file: registryURL).load()) ?? []
-        let mirrors = applicationBase.appendingPathComponent("Mirrors", isDirectory: true)
-        let entries = (try? FileManager.default.contentsOfDirectory(
-            at: mirrors,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles])) ?? []
-        var changed = false
-        for entry in entries {
-            let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            guard isDirectory else { continue }
-            let key = entry.lastPathComponent
-            guard key != "default",
-                  !registeredDevices.contains(where: { $0.deviceId == key }) else { continue }
-            let name = key == "BE87E832" ? "Poke3" : "Android \(key.suffix(4))"
-            registeredDevices.append(RegisteredDevice(
-                deviceId: key,
-                displayName: name,
-                serialAliases: [key]))
-            changed = true
-        }
-        sortRegisteredDevices()
-        if changed {
-            try? DeviceRegistryStore(file: registryURL).save(registeredDevices)
         }
     }
 
@@ -214,7 +163,8 @@ final class AppModel: ObservableObject {
                 displayName: device.displayName,
                 manufacturer: nil,
                 model: device.model)
-        let deviceID = register(identity: identity, adbDevice: device)
+        let deviceID = workspace.register(
+            identity: identity, adbDevice: device, devices: &registeredDevices)
         let changedDevice = selectedDeviceID != deviceID
         selectedDeviceID = deviceID
         selectedSerial = device.serial
@@ -285,48 +235,38 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    let fingerprint = try transport.metadataFingerprint()
-                    _ = try MirrorSynchronizer().refresh(using: transport, mirror: mirror)
-                    var queue = (try? OfflineQueue(file: queueFile).load()) ?? []
-                    let replay = SyncCoordinator().replay(
-                        pending: queue,
-                        currentIndex: CapsuleScanner().scan(root: mirror)
-                    ) { command in
-                        try DeviceCommandClient(transport: transport).performMaintenance([command])
-                        return try MirrorSynchronizer().refresh(using: transport, mirror: mirror)
-                    }
-                    queue = replay.pending
-                    try OfflineQueue(file: queueFile).save(queue)
-                    var backupWarning: String?
-                    do {
-                        _ = try BackupManager(root: backups).create(
-                            from: mirror,
-                            deviceSerial: deviceKey,
-                            capsuleCount: replay.index.records.count
-                                + replay.index.trashRecords.count)
-                    } catch {
-                        backupWarning = error.localizedDescription
-                    }
-                    return (replay.index, queue, replay.appliedCount, backupWarning, fingerprint)
+                    try DeviceSyncEngine().run(
+                        transport: transport,
+                        mirror: mirror,
+                        queueFile: queueFile,
+                        backups: backups,
+                        deviceKey: deviceKey)
                 }.value
-                self.index = result.0
-                self.pendingCommands = result.1
-                self.lastRemoteFingerprint = result.4
+                self.index = result.index
+                self.pendingCommands = result.queue
+                self.lastRemoteFingerprint = result.fingerprint
                 self.selection = self.selection.intersection(
-                    Set((result.0.records + result.0.trashRecords).map(\.id)))
-                let conflicts = result.1.filter { $0.state == .conflict }.count
+                    Set((result.index.records + result.index.trashRecords).map(\.id)))
+                let conflicts = result.queue.filter { $0.state == .conflict }.count
                 let syncStatus = conflicts > 0
                     ? "已同步；\(conflicts) 项版本冲突等待处理；自动同步已开启"
-                    : "已同步 \(result.0.records.count) 个胶囊；自动同步已开启"
-                self.status = result.3.map {
+                    : "已同步 \(result.index.records.count) 个胶囊；自动同步已开启"
+                self.status = result.backupWarning.map {
                     "\(syncStatus)；自动备份失败：\($0)"
                 } ?? syncStatus
                 self.isBusy = false
                 self.scheduleMonitor()
             } catch {
-                self.status = error.localizedDescription
                 self.isBusy = false
-                self.scheduleMonitor()
+                if !self.selectedDeviceIsConnected() {
+                    self.transport = nil
+                    self.connection = .noDevice
+                    self.status = "设备已断开；当前镜像和离线队列仍可使用"
+                    self.refreshDevices()
+                } else {
+                    self.status = error.localizedDescription
+                    self.scheduleMonitor()
+                }
             }
         }
     }
@@ -373,8 +313,10 @@ final class AppModel: ObservableObject {
                     self.scheduleMonitor()
                 }
             } catch {
-                self.status = "自动同步等待设备连接"
-                self.scheduleMonitor()
+                self.transport = nil
+                self.connection = .noDevice
+                self.status = "设备已断开；自动同步等待重新连接"
+                self.refreshDevices()
             }
         }
     }
@@ -388,11 +330,15 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         var command = input
         if let ids = command.capsuleIds, command.expectedRevisions == nil {
-            command.expectedRevisions = expectedRevisions(for: ids)
+            command.expectedRevisions = expectedRevisions(for: ids, operation: command.operation)
         }
-        guard selectedRecords.allSatisfy({ !$0.readOnly }) else {
-            status = "选择中包含未知协议版本，只能读取"
-            return
+        if let ids = command.capsuleIds {
+            let targetIDs = Set(ids)
+            let targets = (index.records + index.trashRecords).filter { targetIDs.contains($0.id) }
+            guard targets.allSatisfy({ !$0.readOnly }) else {
+                status = "目标中包含损坏或未知协议胶囊，只能读取"
+                return
+            }
         }
         guard let transport, selectedDeviceIsConnected() else {
             self.transport = nil
@@ -412,8 +358,14 @@ final class AppModel: ObservableObject {
                 self.isBusy = false
                 self.sync()
             } catch {
-                self.status = error.localizedDescription
                 self.isBusy = false
+                if !self.selectedDeviceIsConnected() {
+                    self.transport = nil
+                    self.connection = .noDevice
+                    self.enqueueOffline(command)
+                } else {
+                    self.status = error.localizedDescription
+                }
             }
         }
     }
@@ -421,49 +373,64 @@ final class AppModel: ObservableObject {
     func moveSelected(to folder: String) {
         do {
             let destination = try PathPolicy.validatedRelativeFolder(folder)
-            perform(DeviceCommand(operation: "moveCapsules", capsuleIds: Array(selection), destination: destination))
+            perform(DeviceCommand(operation: .moveCapsules, capsuleIds: Array(selection), destination: destination))
         } catch { status = error.localizedDescription }
     }
 
     func copySelected(to folder: String) {
         do {
             let destination = try PathPolicy.validatedRelativeFolder(folder)
-            perform(DeviceCommand(operation: "copyCapsules", capsuleIds: Array(selection), destination: destination))
+            perform(DeviceCommand(operation: .copyCapsules, capsuleIds: Array(selection), destination: destination))
         } catch { status = error.localizedDescription }
     }
 
     func deleteSelected() {
-        perform(DeviceCommand(operation: "deleteCapsules", capsuleIds: Array(selection)))
+        perform(DeviceCommand(operation: .deleteCapsules, capsuleIds: Array(selection)))
     }
 
     func restoreSelected() {
-        perform(DeviceCommand(operation: "restoreCapsules", capsuleIds: Array(selection)))
+        perform(DeviceCommand(operation: .restoreCapsules, capsuleIds: Array(selection)))
     }
 
     func purgeSelected() {
-        perform(DeviceCommand(operation: "purgeCapsules", capsuleIds: Array(selection)))
+        perform(DeviceCommand(operation: .purgeCapsules, capsuleIds: Array(selection)))
     }
 
     func setFavorite(_ value: Bool) {
-        perform(DeviceCommand(operation: "setFavorite", capsuleIds: Array(selection), favorite: value))
+        perform(DeviceCommand(operation: .setFavorite, capsuleIds: Array(selection), favorite: value))
+    }
+
+    func setFavorite(_ record: CapsuleRecord, _ value: Bool) {
+        perform(DeviceCommand(operation: .setFavorite, capsuleIds: [record.id], favorite: value))
+    }
+
+    func move(_ record: CapsuleRecord, to folder: String) {
+        guard let destination = try? PathPolicy.validatedRelativeFolder(folder) else { return }
+        perform(DeviceCommand(operation: .moveCapsules,
+                              capsuleIds: [record.id], destination: destination))
+    }
+
+    func addTag(_ input: String, to record: CapsuleRecord) {
+        guard let tag = try? PathPolicy.validatedTag(input) else { return }
+        perform(DeviceCommand(operation: .addTags, capsuleIds: [record.id], tags: [tag]))
     }
 
     func addTag(_ input: String) {
         do {
             let tag = try PathPolicy.validatedTag(input)
-            perform(DeviceCommand(operation: "addTags", capsuleIds: Array(selection), tags: [tag]))
+            perform(DeviceCommand(operation: .addTags, capsuleIds: Array(selection), tags: [tag]))
         } catch { status = error.localizedDescription }
     }
 
     func removeTag(_ tag: String) {
-        perform(DeviceCommand(operation: "removeTags", capsuleIds: Array(selection), tags: [tag]))
+        perform(DeviceCommand(operation: .removeTags, capsuleIds: Array(selection), tags: [tag]))
     }
 
     func createFolder(_ input: String, parent: String? = nil) {
         do {
             let name = try PathPolicy.normalizedFolderName(input)
             let path = try PathPolicy.validatedRelativeFolder(parent.map { "\($0)/\(name)" } ?? name, allowReserved: false)
-            perform(DeviceCommand(operation: "createFolder", folderPath: path))
+            perform(DeviceCommand(operation: .createFolder, folderPath: path))
         } catch { status = error.localizedDescription }
     }
 
@@ -474,7 +441,7 @@ final class AppModel: ObservableObject {
                 $0.relativeFolder == path || $0.relativeFolder.hasPrefix(path + "/")
             }.map(\.id)
             perform(DeviceCommand(
-                operation: "deleteFolderToInbox",
+                operation: .deleteFolderToInbox,
                 capsuleIds: ids,
                 folderPath: path))
         } catch { status = error.localizedDescription }
@@ -489,7 +456,7 @@ final class AppModel: ObservableObject {
                 parts.count == 2 ? "\(parts[0])/\(cleanName)" : cleanName,
                 allowReserved: false
             )
-            perform(DeviceCommand(operation: "renameFolder", folderPath: oldPath, newFolderPath: newPath))
+            perform(DeviceCommand(operation: .renameFolder, folderPath: oldPath, newFolderPath: newPath))
         } catch { status = error.localizedDescription }
     }
 
@@ -497,7 +464,7 @@ final class AppModel: ObservableObject {
         do {
             let clean = try PathPolicy.validatedTag(newName)
             perform(DeviceCommand(
-                operation: "renameTag",
+                operation: .renameTag,
                 capsuleIds: index.records.filter {
                     $0.capsule.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
                 }.map(\.id),
@@ -509,7 +476,7 @@ final class AppModel: ObservableObject {
         do {
             let clean = try PathPolicy.validatedTag(destination)
             perform(DeviceCommand(
-                operation: "mergeTag",
+                operation: .mergeTag,
                 capsuleIds: index.records.filter {
                     $0.capsule.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
                 }.map(\.id),
@@ -519,7 +486,7 @@ final class AppModel: ObservableObject {
 
     func deleteTag(_ tag: String) {
         perform(DeviceCommand(
-            operation: "deleteTag",
+            operation: .deleteTag,
             capsuleIds: index.records.filter {
                 $0.capsule.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
             }.map(\.id),
@@ -584,10 +551,8 @@ final class AppModel: ObservableObject {
     }
 
     func play(_ record: CapsuleRecord) {
-        let audio = record.localDirectory.appendingPathComponent("audio.m4a")
         do {
-            audioPlayer = try AVAudioPlayer(contentsOf: audio)
-            audioPlayer?.play()
+            try playback.play(record)
             status = "正在播放：\(record.displayTitle)"
         } catch {
             status = "无法播放音频：\(error.localizedDescription)"
@@ -615,17 +580,21 @@ final class AppModel: ObservableObject {
 
     func saveFinalText(_ text: String, for record: CapsuleRecord) {
         perform(DeviceCommand(
-            operation: "commitFinalText",
+            operation: .commitFinalText,
             capsuleIds: [record.id],
             expectedRevision: record.capsule.revision,
             finalText: text))
     }
 
     func retryTranscription(_ record: CapsuleRecord) {
+        guard let processingRevision = record.processing?.revision else {
+            status = "缺少转写状态版本，已停止重新转写"
+            return
+        }
         perform(DeviceCommand(
-            operation: "requeueTranscription",
+            operation: .requeueTranscription,
             capsuleIds: [record.id],
-            expectedRevision: record.capsule.revision))
+            expectedRevisions: [record.id.uuidString.lowercased(): processingRevision]))
     }
 
     func discardPending(_ id: UUID) {
@@ -652,65 +621,16 @@ final class AppModel: ObservableObject {
             status = "设备身份不可用，请重新连接"
             return
         }
-        guard let raw = record.rawText?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty,
-              let revision = record.processing?.revision,
-              let durationMs = record.processing?.durationMs else {
-            status = "这条胶囊还没有可校对的原始转写"
-            return
-        }
-        if let issue = TranscriptionSanity.issue(text: raw, durationMs: durationMs) {
-            status = "\(issue)，已阻止 DeepSeek 扩写"
-            return
-        }
-        let defaults = UserDefaults.standard
-        let endpointText = defaults.string(forKey: "CorrectionEndpoint")
-            ?? "https://api.deepseek.com/chat/completions"
-        let modelName = defaults.string(forKey: "CorrectionModel")
-            ?? "deepseek-v4-flash"
-        let prompt = defaults.string(forKey: "CorrectionPrompt")
-            ?? "只校正识别错误和标点；不解释、不增删原意；无法判断时原样输出。只输出正文。"
-        guard let endpoint = URL(string: endpointText),
-              !modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            status = "校对 API 地址或模型配置无效"
-            return
-        }
-
         isBusy = true
-        status = "正在用 \(modelName) 快速校对…"
+        status = "正在快速校对…"
         Task {
             do {
-                let cache = pendingCorrectionURL(
-                    for: record.id,
-                    revision: revision,
-                    deviceSerial: deviceSerial,
-                    rawText: raw)
-                let polished: String
-                if let saved = try? String(contentsOf: cache, encoding: .utf8),
-                   !saved.isEmpty {
-                    polished = saved
-                    self.status = "正在重试写回已完成的校对结果…"
-                } else {
-                    let configuration = CorrectionConfiguration(
-                        endpoint: endpoint,
-                        model: modelName,
-                        systemPrompt: prompt)
-                    polished = try await CorrectionAdapter().correct(
-                        text: raw,
-                        configuration: configuration)
-                    try FileManager.default.createDirectory(
-                        at: cache.deletingLastPathComponent(),
-                        withIntermediateDirectories: true)
-                    try Data(polished.utf8).write(to: cache, options: .atomic)
-                }
-                try await Task.detached(priority: .userInitiated) {
-                    let client = DeviceCommandClient(transport: transport)
-                    try client.commitCorrection(
-                        text: polished,
-                        capsuleID: record.id,
-                        expectedRevision: revision)
-                }.value
-                try? FileManager.default.removeItem(at: cache)
+                try await CorrectionWorkflow().run(
+                    record: record,
+                    deviceID: deviceSerial,
+                    transport: transport,
+                    cacheRoot: workspace.applicationBase
+                        .appendingPathComponent("PendingCorrections", isDirectory: true))
                 self.status = "校对完成，已写回当前设备"
                 self.isBusy = false
                 self.sync()
@@ -721,104 +641,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func pendingCorrectionURL(
-        for id: UUID,
-        revision: Int,
-        deviceSerial: String,
-        rawText: String
-    ) -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PokeCapsule/PendingCorrections", isDirectory: true)
-            .appendingPathComponent(CorrectionCacheKey.fileName(
-                capsuleID: id,
-                revision: revision,
-                deviceSerial: deviceSerial,
-                rawText: rawText))
-    }
-
-    private func register(identity: DeviceIdentity, adbDevice: ADBDevice) -> String {
-        let exactIndex = registeredDevices.firstIndex {
-            $0.deviceId == identity.deviceId
-        }
-        let aliasIndex = registeredDevices.firstIndex {
-            $0.serialAliases.contains(adbDevice.serial)
-        }
-        var record: RegisteredDevice
-        if let exactIndex {
-            record = registeredDevices.remove(at: exactIndex)
-        } else if let aliasIndex {
-            record = registeredDevices.remove(at: aliasIndex)
-            if record.deviceId != identity.deviceId {
-                migrateLocalDeviceStorage(from: record.deviceId, to: identity.deviceId)
-                record.deviceId = identity.deviceId
-            }
-        } else {
-            record = RegisteredDevice(
-                deviceId: identity.deviceId,
-                displayName: identity.displayName)
-        }
-        record.displayName = identity.displayName
-        record.platform = identity.platform
-        record.manufacturer = identity.manufacturer
-        record.model = identity.model ?? adbDevice.model
-        if !record.serialAliases.contains(adbDevice.serial) {
-            record.serialAliases.append(adbDevice.serial)
-        }
-        record.lastSeenAt = Date()
-        registeredDevices.removeAll { $0.deviceId == record.deviceId }
-        registeredDevices.append(record)
-        sortRegisteredDevices()
-        try? DeviceRegistryStore(file: registryURL).save(registeredDevices)
-        return record.deviceId
-    }
-
-    private func migrateLocalDeviceStorage(from oldID: String, to newID: String) {
-        guard oldID != newID else { return }
-        let fileManager = FileManager.default
-        let oldMirror = applicationBase.appendingPathComponent(
-            "Mirrors/\(oldID)", isDirectory: true)
-        let newMirror = applicationBase.appendingPathComponent(
-            "Mirrors/\(newID)", isDirectory: true)
-        if fileManager.fileExists(atPath: oldMirror.path),
-           !fileManager.fileExists(atPath: newMirror.path) {
-            try? fileManager.createDirectory(
-                at: newMirror.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            try? fileManager.moveItem(at: oldMirror, to: newMirror)
-        }
-        let oldQueue = applicationBase.appendingPathComponent("Queues/\(oldID).json")
-        let newQueue = applicationBase.appendingPathComponent("Queues/\(newID).json")
-        if fileManager.fileExists(atPath: oldQueue.path),
-           !fileManager.fileExists(atPath: newQueue.path) {
-            try? fileManager.createDirectory(
-                at: newQueue.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            try? fileManager.moveItem(at: oldQueue, to: newQueue)
-        }
-        if UserDefaults.standard.string(forKey: "LastDeviceID") == oldID {
-            UserDefaults.standard.set(newID, forKey: "LastDeviceID")
-        }
-    }
-
-    private func sortRegisteredDevices() {
-        registeredDevices.sort {
-            let left = $0.lastSeenAt ?? .distantPast
-            let right = $1.lastSeenAt ?? .distantPast
-            if left != right { return left > right }
-            return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
-        }
-    }
-
-    private func expectedRevisions(for ids: [UUID]) -> [String: Int] {
+    private func expectedRevisions(
+        for ids: [UUID],
+        operation: CommandOperation
+    ) -> [String: Int] {
         var records: [UUID: CapsuleRecord] = [:]
         for record in index.records + index.trashRecords where records[record.id] == nil {
             records[record.id] = record
         }
-        return Dictionary(uniqueKeysWithValues: ids.compactMap { id in
-            records[id].map {
-                (id.uuidString.lowercased(), $0.trash?.revision ?? $0.capsule.revision)
-            }
-        })
+        var result: [String: Int] = [:]
+        for id in ids {
+            guard let record = records[id] else { continue }
+            let revision = operation == .requeueTranscription
+                ? record.processing?.revision
+                : (record.trash?.revision ?? record.capsule.revision)
+            if let revision { result[id.uuidString.lowercased()] = revision }
+        }
+        return result
     }
 
     private func selectedDeviceIsConnected() -> Bool {
@@ -848,113 +687,6 @@ final class AppModel: ObservableObject {
     }
 
     private func applyOptimistic(_ command: DeviceCommand) {
-        let ids = Set(command.capsuleIds ?? [])
-        switch command.operation {
-        case "moveCapsules":
-            guard let destination = command.destination else { return }
-            index.records = index.records.map {
-                ids.contains($0.id) ? changed($0, folder: destination) : $0
-            }
-        case "setFavorite":
-            guard let favorite = command.favorite else { return }
-            index.records = index.records.map {
-                ids.contains($0.id) ? changed($0, favorite: favorite) : $0
-            }
-        case "addTags":
-            let additions = command.tags ?? []
-            index.records = index.records.map {
-                ids.contains($0.id) ? changed($0, addingTags: additions) : $0
-            }
-        case "removeTags":
-            let removals = Set(command.tags ?? [])
-            index.records = index.records.map {
-                ids.contains($0.id) ? changed($0, removingTags: removals) : $0
-            }
-        case "deleteCapsules":
-            let moved = index.records.filter { ids.contains($0.id) }.map {
-                CapsuleRecord(
-                    capsule: $0.capsule,
-                    processing: $0.processing,
-                    relativeFolder: "回收站",
-                    localDirectory: $0.localDirectory,
-                    rawText: $0.rawText,
-                    polishedText: $0.polishedText,
-                    finalText: $0.finalText,
-                    trash: TrashMetadata(
-                        schemaVersion: 1,
-                        capsuleId: $0.id,
-                        trashedAt: Date(),
-                        originalFolder: $0.relativeFolder,
-                        revision: $0.capsule.revision + 1),
-                    warnings: $0.warnings)
-            }
-            index.records.removeAll { ids.contains($0.id) }
-            index.trashRecords.append(contentsOf: moved)
-        case "restoreCapsules":
-            let restored = index.trashRecords.filter { ids.contains($0.id) }.map {
-                CapsuleRecord(
-                    capsule: incremented($0.capsule),
-                    processing: $0.processing,
-                    relativeFolder: $0.trash?.originalFolder ?? "Inbox",
-                    localDirectory: $0.localDirectory,
-                    rawText: $0.rawText,
-                    polishedText: $0.polishedText,
-                    finalText: $0.finalText,
-                    trash: nil,
-                    warnings: $0.warnings)
-            }
-            index.trashRecords.removeAll { ids.contains($0.id) }
-            index.records.append(contentsOf: restored)
-        case "purgeCapsules":
-            index.trashRecords.removeAll { ids.contains($0.id) }
-        case "commitFinalText":
-            guard let text = command.finalText else { return }
-            index.records = index.records.map { record in
-                guard ids.contains(record.id) else { return record }
-                return CapsuleRecord(
-                    capsule: incremented(record.capsule),
-                    processing: record.processing,
-                    relativeFolder: record.relativeFolder,
-                    localDirectory: record.localDirectory,
-                    rawText: record.rawText,
-                    polishedText: record.polishedText,
-                    finalText: text,
-                    trash: record.trash,
-                    warnings: record.warnings)
-            }
-        default:
-            break
-        }
-    }
-
-    private func changed(
-        _ record: CapsuleRecord,
-        folder: String? = nil,
-        favorite: Bool? = nil,
-        addingTags: [String] = [],
-        removingTags: Set<String> = []
-    ) -> CapsuleRecord {
-        var metadata = incremented(record.capsule)
-        if let favorite { metadata.favorite = favorite }
-        var tags = metadata.tags.filter { !removingTags.contains($0) }
-        for tag in addingTags where !tags.contains(tag) { tags.append(tag) }
-        metadata.tags = tags
-        return CapsuleRecord(
-            capsule: metadata,
-            processing: record.processing,
-            relativeFolder: folder ?? record.relativeFolder,
-            localDirectory: record.localDirectory,
-            rawText: record.rawText,
-            polishedText: record.polishedText,
-            finalText: record.finalText,
-            trash: record.trash,
-            warnings: record.warnings)
-    }
-
-    private func incremented(_ original: CapsuleMetadata) -> CapsuleMetadata {
-        var value = original
-        value.revision += 1
-        value.updatedAt = Date()
-        return value
+        index = OptimisticLibraryReducer.apply(command, to: index)
     }
 }

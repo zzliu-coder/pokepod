@@ -1,6 +1,7 @@
 package com.zheliu.pokecapsule.model;
 
 import com.zheliu.pokecapsule.core.ProcessingState;
+import com.zheliu.pokecapsule.core.PathPolicy;
 import com.zheliu.pokecapsule.core.TimeFormat;
 
 import org.json.JSONArray;
@@ -21,6 +22,7 @@ public final class CapsuleRecord {
     public final boolean favorite;
     public final List<String> tags;
     public final ProcessingState status;
+    public final int processingRevision;
     public final long durationMs;
     public final String error;
     public final boolean readOnly;
@@ -42,6 +44,7 @@ public final class CapsuleRecord {
             boolean favorite,
             List<String> tags,
             ProcessingState status,
+            int processingRevision,
             long durationMs,
             String error,
             boolean readOnly,
@@ -61,6 +64,7 @@ public final class CapsuleRecord {
         this.favorite = favorite;
         this.tags = Collections.unmodifiableList(new ArrayList<>(tags));
         this.status = status;
+        this.processingRevision = processingRevision;
         this.durationMs = durationMs;
         this.error = error;
         this.readOnly = readOnly;
@@ -79,6 +83,31 @@ public final class CapsuleRecord {
             String title,
             String createdAt,
             String updatedAt,
+            int revision,
+            boolean favorite,
+            List<String> tags,
+            ProcessingState status,
+            long durationMs,
+            String error,
+            boolean readOnly,
+            String relativeFolder,
+            String rawText,
+            String polishedText,
+            String finalText,
+            boolean trashed,
+            String trashedAt,
+            String originalFolder) {
+        this(directory, id, title, createdAt, updatedAt, revision, favorite, tags,
+                status, revision, durationMs, error, readOnly, relativeFolder,
+                rawText, polishedText, finalText, trashed, trashedAt, originalFolder);
+    }
+
+    public CapsuleRecord(
+            File directory,
+            String id,
+            String title,
+            String createdAt,
+            String updatedAt,
             boolean favorite,
             List<String> tags,
             ProcessingState status,
@@ -89,7 +118,7 @@ public final class CapsuleRecord {
             String rawText,
             String polishedText) {
         this(directory, id, title, createdAt, updatedAt, 1, favorite, tags, status,
-                durationMs, error, readOnly, relativeFolder, rawText, polishedText,
+                1, durationMs, error, readOnly, relativeFolder, rawText, polishedText,
                 "", false, "", "");
     }
 
@@ -101,7 +130,7 @@ public final class CapsuleRecord {
             String rawText,
             String polishedText) {
         return fromJson(directory, capsule, processing, relativeFolder, rawText,
-                polishedText, "", false, "", "");
+                polishedText, "", false, "", "", -1);
     }
 
     public static CapsuleRecord fromJson(
@@ -114,7 +143,8 @@ public final class CapsuleRecord {
             String finalText,
             boolean trashed,
             String trashedAt,
-            String originalFolder) {
+            String originalFolder,
+            int trashRevision) {
         ArrayList<String> tags = new ArrayList<>();
         JSONArray values = capsule.optJSONArray("tags");
         if (values != null) {
@@ -125,11 +155,18 @@ public final class CapsuleRecord {
         }
         int capsuleVersion = capsule.optInt("schemaVersion", -1);
         int processingVersion = processing.optInt("schemaVersion", -1);
-        ProcessingState state;
-        try {
-            state = ProcessingState.fromWire(processing.optString("status", "failed"));
-        } catch (IllegalArgumentException ignored) {
-            state = ProcessingState.FAILED;
+        String wireStatus = processing.optString("status", "");
+        int processingRevision = processing.optInt("revision", -1);
+        long durationMs = processing.optLong("durationMs", -1);
+        boolean processingValid = hasValidProcessingState(
+                wireStatus, processingRevision, durationMs);
+        ProcessingState state = processingValid
+                ? ProcessingState.fromWire(wireStatus)
+                : ProcessingState.FAILED;
+        String processingError = processing.isNull("error")
+                ? "" : processing.optString("error", "");
+        if (!processingValid && processingError.isEmpty()) {
+            processingError = "处理状态文件损坏";
         }
         return new CapsuleRecord(
                 directory,
@@ -137,13 +174,15 @@ public final class CapsuleRecord {
                 capsule.optString("title", "未命名胶囊"),
                 capsule.optString("createdAt", ""),
                 capsule.optString("updatedAt", ""),
-                capsule.optInt("revision", 1),
+                trashed && trashRevision >= 0
+                        ? trashRevision : capsule.optInt("revision", 1),
                 capsule.optBoolean("favorite", false),
                 tags,
                 state,
-                processing.optLong("durationMs", 0),
-                processing.isNull("error") ? "" : processing.optString("error", ""),
-                capsuleVersion != 1 || processingVersion != 1,
+                processingRevision,
+                Math.max(0, durationMs),
+                processingError,
+                capsuleVersion != 1 || processingVersion != 1 || !processingValid,
                 relativeFolder,
                 rawText,
                 polishedText,
@@ -151,6 +190,16 @@ public final class CapsuleRecord {
                 trashed,
                 trashedAt,
                 originalFolder);
+    }
+
+    static boolean hasValidProcessingState(String status, int revision, long durationMs) {
+        if (status == null || status.isEmpty() || revision < 0 || durationMs < 0) return false;
+        try {
+            ProcessingState.fromWire(status);
+            return true;
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
     }
 
     public String displayLine() {
@@ -187,13 +236,19 @@ public final class CapsuleRecord {
         long seconds = Math.max(0, durationMs / 1000);
         StringBuilder output = new StringBuilder();
         output.append(TimeFormat.localDisplay(createdAt))
-                .append(" · ").append(relativeFolder)
+                .append(" · ").append(displayFolder(relativeFolder))
                 .append(" · ").append(seconds).append("秒");
         String state = visibleState();
         if (!state.isEmpty()) output.append(" · ").append(state);
         if (readOnly) output.append(" · 只读");
         if (trashed) output.append(" · 已删除");
         return output.toString();
+    }
+
+    private static String displayFolder(String folder) {
+        if (PathPolicy.INBOX.equals(folder)) return "收件箱";
+        if (PathPolicy.ARCHIVE.equals(folder)) return "归档";
+        return folder;
     }
 
     public String tagsText() {
@@ -209,7 +264,7 @@ public final class CapsuleRecord {
         switch (status) {
             case RECORDING: return "录音中";
             case RECORDED:
-            case QUEUED: return "等待转写";
+            case QUEUED: return "等待自动转写";
             case TRANSCRIBING: return "转写中";
             case FAILED: return "转写失败";
             default: return "";

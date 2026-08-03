@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "transactionId": "ae71eedb-b01b-470a-ac17-fb39cfd26079",
   "maintenanceId": "3ba48c19-bcd4-4c78-80bc-9f31db663f38",
   "operation": "moveCapsules",

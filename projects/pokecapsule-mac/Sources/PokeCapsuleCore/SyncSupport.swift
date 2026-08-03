@@ -113,7 +113,13 @@ public struct SyncCoordinator {
     public func conflictMessage(command: DeviceCommand, index: CapsuleIndex) -> String? {
         var active: [UUID: Int] = [:]
         for record in index.records + index.trashRecords where active[record.id] == nil {
-            active[record.id] = record.trash?.revision ?? record.capsule.revision
+            if command.operation == .requeueTranscription {
+                if let processingRevision = record.processing?.revision {
+                    active[record.id] = processingRevision
+                }
+            } else {
+                active[record.id] = record.trash?.revision ?? record.capsule.revision
+            }
         }
         if let revision = command.expectedRevision,
            let id = command.capsuleIds?.first {
@@ -171,11 +177,12 @@ public final class BackupManager {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let safeSerial = DeviceStorageKey.fileComponent(deviceSerial)
         var destination = root.appendingPathComponent(
-            "\(formatter.string(from: Date()))-\(deviceSerial)", isDirectory: true)
+            "\(formatter.string(from: Date()))-\(safeSerial)", isDirectory: true)
         if fileManager.fileExists(atPath: destination.path) {
             destination = root.appendingPathComponent(
-                "\(formatter.string(from: Date()))-\(deviceSerial)-\(UUID().uuidString.prefix(8))",
+                "\(formatter.string(from: Date()))-\(safeSerial)-\(UUID().uuidString.prefix(8))",
                 isDirectory: true)
         }
         let dataDirectory = destination.appendingPathComponent("data", isDirectory: true)
@@ -184,7 +191,7 @@ public final class BackupManager {
             try fileManager.copyItem(at: mirror, to: dataDirectory)
             let manifest = BackupManifest(
                 createdAt: Date(),
-                deviceSerial: deviceSerial,
+                deviceSerial: safeSerial,
                 capsuleCount: capsuleCount,
                 files: try completeManifest(of: dataDirectory))
             try PokeJSON.encoder.encode(manifest).write(

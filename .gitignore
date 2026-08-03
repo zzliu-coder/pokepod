@@ -47,6 +47,7 @@ work/diagnostics/
 
 # New build outputs.
 *.apk
+*.idsig
 *.aab
 DerivedData/
 .gradle/

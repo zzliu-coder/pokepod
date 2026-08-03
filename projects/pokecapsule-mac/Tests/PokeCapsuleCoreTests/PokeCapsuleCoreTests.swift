@@ -135,7 +135,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
             rawText: nil,
             polishedText: nil,
             warnings: [])
-        XCTAssertEqual(record.displayPreview, "等待转写")
+        XCTAssertEqual(record.displayPreview, "等待自动转写")
     }
 
     func testTencentDurationErrorIsNotShownRaw() {
@@ -278,6 +278,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
         let id = UUID()
         try writeCapsule(root: root, folder: "Inbox", id: id, schemaVersion: 1)
         try writeCapsule(root: root, folder: "Archive", id: id, schemaVersion: 2)
+        try writeCapsule(root: root, folder: "Archive", id: UUID(), schemaVersion: 2)
         let index = CapsuleScanner().scan(root: root)
         XCTAssertEqual(index.records.count, 2)
         XCTAssertTrue(index.warnings.contains(where: { $0.contains("重复 UUID") }))
@@ -343,6 +344,28 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertTrue(script.contains("processing.json"))
         XCTAssertFalse(script.contains(" rm "))
         XCTAssertFalse(script.contains("settings put"))
+    }
+
+    func testPullResponseDistinguishesPendingFileFromDisconnectedDevice() throws {
+        let transaction = UUID(uuidString: "4010f256-ce50-4db9-98d9-e1076d89f061")!
+        let target = URL(fileURLWithPath: "/tmp/response.json")
+        let pendingRunner = SequencedRunner(results: [
+            ProcessResult(status: 1, stdout: "", stderr: "remote object does not exist")
+        ])
+        let pending = ADBTransport(
+            executable: URL(fileURLWithPath: "/fake/adb"),
+            serial: "SERIAL",
+            runner: pendingRunner)
+        XCTAssertFalse(try pending.pullResponse(transactionID: transaction, to: target))
+
+        let disconnectedRunner = SequencedRunner(results: [
+            ProcessResult(status: 1, stdout: "", stderr: "adb: device 'SERIAL' not found")
+        ])
+        let disconnected = ADBTransport(
+            executable: URL(fileURLWithPath: "/fake/adb"),
+            serial: "SERIAL",
+            runner: disconnectedRunner)
+        XCTAssertThrowsError(try disconnected.pullResponse(transactionID: transaction, to: target))
     }
 
     func testReadsPermanentDeviceIdentity() throws {
@@ -419,7 +442,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
 
     func testCommandEncodingContainsNoSecretOrShell() throws {
         let command = DeviceCommand(
-            operation: "moveCapsules",
+            operation: .moveCapsules,
             capsuleIds: [UUID()],
             destination: "工作/待办"
         )
@@ -475,7 +498,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
         let queue = OfflineQueue(file: root.appendingPathComponent("pending.json"))
         let id = UUID()
         let command = DeviceCommand(
-            operation: "commitFinalText",
+            operation: .commitFinalText,
             capsuleIds: [id],
             expectedRevision: 4,
             finalText: "福斯特建筑事务所商务提案英文翻译")
@@ -504,7 +527,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
             polishedText: nil,
             warnings: [])
         let command = DeviceCommand(
-            operation: "moveCapsules",
+            operation: .moveCapsules,
             capsuleIds: [id],
             destination: "工作",
             expectedRevisions: [id.uuidString: 4])
@@ -521,6 +544,36 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertFalse(executed)
         XCTAssertEqual(result.pending.first?.state, .conflict)
         XCTAssertTrue(result.pending.first?.error?.contains("版本冲突") == true)
+    }
+
+    func testSyncCoordinatorUsesProcessingRevisionForOfflineRequeue() {
+        let id = UUID()
+        let record = CapsuleRecord(
+            capsule: CapsuleMetadata(id: id, createdAt: Date(), updatedAt: Date(), revision: 9),
+            processing: ProcessingMetadata(schemaVersion: 1, capsuleId: id,
+                revision: 3, durationMs: 8_000, status: .failed,
+                audioFile: "audio.m4a", rawTextFile: nil, polishedTextFile: nil,
+                errorStage: "tencent-asr", error: "timeout", attempts: 1,
+                engine: "tencent-asr", model: "16k_zh"),
+            relativeFolder: "Inbox",
+            localDirectory: URL(fileURLWithPath: "/tmp/\(id.uuidString)"),
+            rawText: nil,
+            polishedText: nil,
+            warnings: [])
+        let command = DeviceCommand(
+            operation: .requeueTranscription,
+            capsuleIds: [id],
+            expectedRevisions: [id.uuidString.lowercased(): 3])
+        var executed = false
+        let result = SyncCoordinator().replay(
+            pending: [PendingCommand(command: command)],
+            currentIndex: CapsuleIndex(records: [record])) { _ in
+                executed = true
+                return CapsuleIndex(records: [record])
+            }
+        XCTAssertTrue(executed)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertTrue(result.pending.isEmpty)
     }
 
     func testTrashRevisionProtectsOfflinePermanentDelete() {
@@ -544,7 +597,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
                 revision: 6),
             warnings: [])
         let command = DeviceCommand(
-            operation: "purgeCapsules",
+            operation: .purgeCapsules,
             capsuleIds: [id],
             expectedRevisions: [id.uuidString.lowercased(): 5])
         var executed = false
@@ -576,12 +629,12 @@ final class PokeCapsuleCoreTests: XCTestCase {
                 warnings: [])
         }
         let first = DeviceCommand(
-            operation: "setFavorite",
+            operation: .setFavorite,
             capsuleIds: [id],
             favorite: true,
             expectedRevisions: [id.uuidString.lowercased(): 1])
         let second = DeviceCommand(
-            operation: "addTags",
+            operation: .addTags,
             capsuleIds: [id],
             tags: ["商务"],
             expectedRevisions: [id.uuidString.lowercased(): 2])
@@ -633,6 +686,49 @@ final class PokeCapsuleCoreTests: XCTestCase {
         XCTAssertEqual(index.trashRecords.first?.trash?.originalFolder, "工作/提案")
     }
 
+    func testScannerMakesProcessingUUIDMismatchReadOnly() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID()
+        try writeCapsule(root: root, folder: "Inbox", id: id, schemaVersion: 1)
+        let directory = root.appendingPathComponent("Inbox/\(id.uuidString)")
+        let wrong = UUID()
+        let processing = """
+        {"schemaVersion":1,"capsuleId":"\(wrong.uuidString)","revision":3,"durationMs":1000,"status":"queued","audioFile":"audio.m4a"}
+        """
+        try Data(processing.utf8).write(to: directory.appendingPathComponent("processing.json"))
+
+        let index = CapsuleScanner().scan(root: root)
+        XCTAssertEqual(index.records.count, 1)
+        XCTAssertTrue(try XCTUnwrap(index.records.first).readOnly)
+        XCTAssertTrue(index.records[0].warnings.contains("processing.json 的 UUID 不一致"))
+    }
+
+    func testScannerRejectsDirectoryMismatchAndCrossLibraryDuplicate() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mismatchID = UUID()
+        try writeCapsule(root: root, folder: "Inbox", id: mismatchID, schemaVersion: 1)
+        let correct = root.appendingPathComponent("Inbox/\(mismatchID.uuidString)")
+        let mismatched = root.appendingPathComponent("Inbox/\(UUID().uuidString)")
+        try FileManager.default.moveItem(at: correct, to: mismatched)
+
+        let duplicateID = UUID()
+        try writeCapsule(root: root, folder: "Archive", id: duplicateID, schemaVersion: 1)
+        try writeCapsule(root: root, folder: ".trash", id: duplicateID, schemaVersion: 1)
+        let trashDirectory = root.appendingPathComponent(".trash/\(duplicateID.uuidString)")
+        let trash = TrashMetadata(capsuleId: duplicateID, trashedAt: Date(),
+                                  originalFolder: "Inbox", revision: 2)
+        try PokeJSON.encoder.encode(trash).write(
+            to: trashDirectory.appendingPathComponent("trash.json"))
+
+        let index = CapsuleScanner().scan(root: root)
+        XCTAssertNil(index.records.first(where: { $0.id == mismatchID }))
+        XCTAssertEqual(index.records.filter { $0.id == duplicateID }.count, 1)
+        XCTAssertTrue(index.trashRecords.isEmpty)
+        XCTAssertTrue(index.warnings.contains { $0.contains("重复 UUID") || $0.contains("UUID 冲突") })
+    }
+
     func testBackupIncludesHiddenTrashAndSearchUsesFinalText() throws {
         let mirror = try makeTemporaryDirectory()
         let backups = try makeTemporaryDirectory()
@@ -675,7 +771,7 @@ final class PokeCapsuleCoreTests: XCTestCase {
     }
 
     private func writeCapsule(root: URL, folder: String, id: UUID, schemaVersion: Int) throws {
-        let directory = root.appendingPathComponent(folder).appendingPathComponent(UUID().uuidString)
+        let directory = root.appendingPathComponent(folder).appendingPathComponent(id.uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let metadata = CapsuleMetadata(
             schemaVersion: schemaVersion,

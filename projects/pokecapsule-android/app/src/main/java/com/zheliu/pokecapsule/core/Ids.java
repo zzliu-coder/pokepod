@@ -27,4 +27,9 @@ public final class Ids {
             return false;
         }
     }
+
+    public static String normalized(String value) {
+        if (!isUuid(value)) throw new IllegalArgumentException("value must be UUID");
+        return UUID.fromString(value).toString().toLowerCase(Locale.ROOT);
+    }
 }

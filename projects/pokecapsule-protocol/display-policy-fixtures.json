@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {"name":"final wins","durationMs":8000,"status":"ready","finalText":"最终文字","polishedText":"校对文字","rawText":"原始转写","expected":"最终文字"},
+    {"name":"polished before raw","durationMs":8000,"status":"ready","finalText":"","polishedText":"校对文字","rawText":"原始转写","expected":"校对文字"},
+    {"name":"raw fallback","durationMs":8000,"status":"ready","finalText":"","polishedText":"","rawText":"原始转写","expected":"原始转写"},
+    {"name":"queued state","durationMs":8000,"status":"queued","finalText":"","polishedText":"","rawText":"","expected":"等待自动转写"},
+    {"name":"implausible short result","durationMs":1000,"status":"ready","finalText":"","polishedText":"凭空生成的一长段校对内容","rawText":"凭空生成的一长段原始转写","expected":"转写结果异常，请播放录音"}
+  ]
+}

@@ -16,13 +16,12 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -32,45 +31,39 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.zheliu.pokecapsule.core.PathPolicy;
-import com.zheliu.pokecapsule.core.ProcessingState;
+import com.zheliu.pokecapsule.core.LibraryScope;
+import com.zheliu.pokecapsule.core.LibrarySort;
+import com.zheliu.pokecapsule.R;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
-import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
+import com.zheliu.pokecapsule.service.DeviceCapabilities;
+import com.zheliu.pokecapsule.service.InternalBroadcasts;
 import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
 import com.zheliu.pokecapsule.service.OverlayService;
 import com.zheliu.pokecapsule.service.RecordingService;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
 import com.zheliu.pokecapsule.service.TranscriptionPolicyText;
-import com.zheliu.pokecapsule.storage.CapsuleStore;
-import com.zheliu.pokecapsule.storage.DeviceIdentity;
-import com.zheliu.pokecapsule.storage.PokePaths;
-import com.zheliu.pokecapsule.storage.SearchIndex;
+import com.zheliu.pokecapsule.storage.LibraryRepository;
 import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
 
-import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 
 public final class MainActivity extends Activity {
     public static final String EXTRA_OPEN_SETTINGS = "openSettings";
     private static final int REQUEST_PERMISSIONS = 91;
     private static final int REQUEST_TENCENT_CONFIG = 92;
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private final CapsuleStore store = new CapsuleStore(new PokePaths());
+    private LibraryRepository repository;
     private final ArrayList<CapsuleRecord> visible = new ArrayList<>();
-    private final Set<String> selected = new HashSet<>();
-    private ArrayAdapter<CapsuleRecord> adapter;
+    private final LibraryController controller = new LibraryController();
+    private final Set<String> selected = controller.selection();
+    private CapsuleListAdapter adapter;
     private TextView heading;
+    private TextView libraryContext;
+    private TextView statusStrip;
+    private TextView menuButton;
+    private TextView moreButton;
     private TextView selectionBar;
     private TextView moveAction;
     private TextView copyAction;
@@ -78,12 +71,11 @@ public final class MainActivity extends Activity {
     private TextView favoriteAction;
     private TextView deleteAction;
     private LinearLayout selectionActions;
-    private String folderFilter = PathPolicy.INBOX;
-    private String tagFilter;
-    private boolean favoritesOnly;
-    private boolean trashOnly;
-    private String statusFilter;
-    private String searchQuery = "";
+    private LibraryMenuCoordinator menus;
+    private String currentHeading = "收件箱";
+    private int pendingCount;
+    private int failedCount;
+    private boolean selectionMode;
     private boolean cloudConfigured;
     private boolean libraryReceiverRegistered;
     private boolean inlineRecording;
@@ -115,6 +107,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        repository = new LibraryRepository(this, message -> toast("操作失败: " + message));
         setContentView(buildPage());
         requestRequiredPermissions();
         if (getIntent().getBooleanExtra(EXTRA_OPEN_SETTINGS, false)) {
@@ -141,11 +134,8 @@ public final class MainActivity extends Activity {
         super.onStart();
         IntentFilter filter = new IntentFilter(LibraryChangeNotifier.ACTION);
         filter.addAction(RecordingService.ACTION_STATE);
-        registerReceiver(
-                libraryChangeReceiver,
-                filter,
-                LibraryChangeNotifier.INTERNAL_PERMISSION,
-                null);
+        InternalBroadcasts.register(this, libraryChangeReceiver, filter,
+                LibraryChangeNotifier.INTERNAL_PERMISSION);
         libraryReceiverRegistered = true;
     }
 
@@ -158,77 +148,57 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onDestroy() {
-        io.shutdownNow();
+        repository.close();
         super.onDestroy();
     }
 
     private View buildPage() {
-        boolean lowPowerReader = DeviceRuntimeProfile.isLowPowerReader();
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(16), dp(12), dp(16), dp(12));
+        DeviceCapabilities capabilities = DeviceCapabilities.current();
+        ViewGroup windowContent = findViewById(android.R.id.content);
+        FrameLayout screen = (FrameLayout) LayoutInflater.from(this)
+                .inflate(R.layout.activity_library, windowContent, false);
+        LinearLayout page = screen.findViewById(R.id.library_page);
+        ListView list = screen.findViewById(R.id.capsule_list);
+        heading = screen.findViewById(R.id.library_heading);
+        libraryContext = screen.findViewById(R.id.library_context);
+        statusStrip = screen.findViewById(R.id.library_status_strip);
+        menuButton = screen.findViewById(R.id.library_menu);
+        moreButton = screen.findViewById(R.id.library_more);
+        selectionBar = screen.findViewById(R.id.selection_bar);
+        selectionActions = screen.findViewById(R.id.selection_actions);
+        moveAction = screen.findViewById(R.id.action_move);
+        copyAction = screen.findViewById(R.id.action_copy);
+        tagAction = screen.findViewById(R.id.action_tag);
+        favoriteAction = screen.findViewById(R.id.action_favorite);
+        deleteAction = screen.findViewById(R.id.action_delete);
+        inlineRecordButton = screen.findViewById(R.id.inline_record_button);
+        menus = new LibraryMenuCoordinator(this, screen);
+
+        screen.setBackgroundColor(ViewKit.background(this));
         page.setBackgroundColor(ViewKit.background(this));
-
-        LinearLayout header = row();
-        heading = ViewKit.text(this, "PokeCapsule · Inbox", 25, Typeface.BOLD);
-        header.addView(heading, new LinearLayout.LayoutParams(0, -1, 1f));
-        header.addView(
-                ViewKit.quietButton(this, "设置", v -> showSettings()),
-                lp(dp(78), dp(48)));
-        page.addView(header, lp(-1, dp(lowPowerReader ? 50 : 64)));
-
-        LinearLayout tabs = row();
-        tabs.addView(smallButton("Inbox", v -> showInbox()), weight());
-        tabs.addView(smallButton("目录", v -> showFolderChooser()), weight());
-        tabs.addView(smallButton("标签", v -> showTagChooser()), weight());
-        tabs.addView(smallButton("收藏", v -> showFavorites()), weight());
-        page.addView(tabs, lp(-1, dp(48)));
-
-        LinearLayout tools = row();
-        tools.addView(smallButton("搜索", v -> promptSearch()), weight());
-        tools.addView(smallButton("筛选", v -> showFilterChooser()), weight());
-        page.addView(tools, lp(-1, dp(48)));
-
-        ListView list = new ListView(this);
+        heading.setTextColor(ViewKit.ink(this));
+        libraryContext.setTextColor(ViewKit.secondary(this));
+        statusStrip.setTextColor(ViewKit.ink(this));
+        statusStrip.setBackgroundColor(ViewKit.accentSoft(this));
+        selectionBar.setTextColor(ViewKit.secondary(this));
+        menuButton.setTextColor(ViewKit.ink(this));
+        moreButton.setTextColor(ViewKit.ink(this));
+        menuButton.setOnClickListener(v -> {
+            if (selectionMode) exitSelectionMode();
+            else showLibraryDrawer();
+        });
+        moreButton.setOnClickListener(v -> {
+            if (selectionMode) selectAllVisible();
+            else showOverflowMenu();
+        });
+        statusStrip.setOnClickListener(v -> showFilterChooser());
         list.setDividerHeight(dp(1));
         list.setBackgroundColor(ViewKit.surface(this));
-        adapter = new ArrayAdapter<CapsuleRecord>(
-                this, android.R.layout.simple_list_item_1, new ArrayList<>()) {
-            @Override public View getView(int position, View convertView, ViewGroup parent) {
-                CapsuleRecord record = getItem(position);
-                LinearLayout row = new LinearLayout(MainActivity.this);
-                row.setOrientation(LinearLayout.VERTICAL);
-                row.setPadding(dp(12), dp(10), dp(12), dp(10));
-                row.setBackgroundColor(ViewKit.surface(MainActivity.this));
-
-                TextView preview = ViewKit.text(
-                        MainActivity.this,
-                        (selected.contains(record.id) ? "☑ " : "")
-                                + (record.favorite ? "★ " : "")
-                                + previewText(record),
-                        17,
-                        Typeface.BOLD);
-                preview.setSingleLine(true);
-                preview.setEllipsize(TextUtils.TruncateAt.END);
-                row.addView(preview, lp(-1, -2));
-
-                TextView metadata = ViewKit.text(
-                        MainActivity.this,
-                        record.metadataText()
-                                + (record.tagsText().isEmpty() ? "" : " · " + record.tagsText()),
-                        14,
-                        Typeface.NORMAL);
-                metadata.setTextColor(ViewKit.secondary(MainActivity.this));
-                metadata.setSingleLine(true);
-                metadata.setEllipsize(TextUtils.TruncateAt.END);
-                row.addView(metadata, lp(-1, dp(25)));
-                return row;
-            }
-        };
+        adapter = new CapsuleListAdapter(this, selected);
         list.setAdapter(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> {
             CapsuleRecord record = visible.get(position);
-            if (selected.isEmpty() && !trashOnly) {
+            if (!selectionMode && !controller.isTrash()) {
                 Intent detail = new Intent(this, CapsuleDetailActivity.class);
                 detail.putExtra("capsuleId", record.id);
                 startActivity(detail);
@@ -237,41 +207,25 @@ public final class MainActivity extends Activity {
             }
         });
         list.setOnItemLongClickListener((parent, view, position, id) -> {
+            selectionMode = true;
             toggleSelected(visible.get(position).id);
             return true;
         });
-        page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1f));
+        moveAction.setOnClickListener(v -> primaryMoveAction());
+        copyAction.setOnClickListener(v -> promptCopyActions());
+        tagAction.setOnClickListener(v -> promptTag());
+        favoriteAction.setOnClickListener(v -> promptFavorite());
+        deleteAction.setOnClickListener(v -> confirmDelete());
+        for (TextView action : new TextView[]{moveAction, copyAction, tagAction,
+                favoriteAction, deleteAction}) {
+            action.setTextColor(ViewKit.ink(this));
+        }
 
-        selectionBar = ViewKit.text(this, "长按胶囊开始多选", 14, Typeface.NORMAL);
-        selectionBar.setGravity(Gravity.CENTER);
-        page.addView(selectionBar, lp(-1, dp(34)));
-
-        selectionActions = row();
-        moveAction = smallButton("移动", v -> primaryMoveAction());
-        copyAction = smallButton("复制", v -> promptCopyActions());
-        tagAction = smallButton("标签", v -> promptTag());
-        favoriteAction = smallButton("收藏", v -> promptFavorite());
-        deleteAction = smallButton("删除", v -> confirmDelete());
-        selectionActions.addView(moveAction, weight());
-        selectionActions.addView(copyAction, weight());
-        selectionActions.addView(tagAction, weight());
-        selectionActions.addView(favoriteAction, weight());
-        selectionActions.addView(deleteAction, weight());
-        selectionActions.setVisibility(View.GONE);
-        page.addView(selectionActions, lp(-1, dp(48)));
-        if (lowPowerReader) return page;
-
-        FrameLayout screen = new FrameLayout(this);
-        screen.setBackgroundColor(ViewKit.background(this));
-        screen.addView(page, new FrameLayout.LayoutParams(-1, -1));
-
-        inlineRecordButton = new CapsuleRecordButtonView(this);
+        if (!capabilities.inlineRecorder) {
+            inlineRecordButton.setVisibility(View.GONE);
+            return screen;
+        }
         inlineRecordButton.setOnClickListener(v -> toggleInlineRecording());
-        FrameLayout.LayoutParams recordParams =
-                new FrameLayout.LayoutParams(dp(64), dp(64), Gravity.RIGHT | Gravity.BOTTOM);
-        recordParams.rightMargin = dp(20);
-        recordParams.bottomMargin = dp(96);
-        screen.addView(inlineRecordButton, recordParams);
         attachInlineRecordDrag(screen);
         return screen;
     }
@@ -317,15 +271,6 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private String previewText(CapsuleRecord record) {
-        if ((record.status == ProcessingState.RECORDED
-                || record.status == ProcessingState.QUEUED)
-                && !cloudConfigured) {
-            return "等待配置腾讯转写";
-        }
-        return record.previewText();
-    }
-
     private void requestRequiredPermissions() {
         ArrayList<String> missing = new ArrayList<>();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -355,55 +300,22 @@ public final class MainActivity extends Activity {
     }
 
     private void refresh() {
-        io.execute(() -> {
-            try {
-                DeviceIdentity.ensure(this, store.paths());
-                List<CapsuleRecord> all = trashOnly ? store.scanTrash() : store.scan();
-                ArrayList<CapsuleRecord> filtered = new ArrayList<>();
-                for (CapsuleRecord record : all) {
-                    if (matches(record)) filtered.add(record);
-                }
-                List<CapsuleRecord> searched = SearchIndex.filter(filtered, searchQuery);
-                runOnUiThread(() -> applyRecords(searched));
-            } catch (Exception error) {
-                runOnUiThread(() -> toast("读取失败: " + error.getMessage()));
-            }
+        repository.load(snapshot -> {
+            List<CapsuleRecord> source = controller.isTrash()
+                    ? snapshot.trash : snapshot.active;
+            applyRecords(
+                    controller.query(source),
+                    countScope(snapshot.active, LibraryScope.PENDING),
+                    countScope(snapshot.active, LibraryScope.FAILED));
         });
     }
 
-    private boolean matches(CapsuleRecord record) {
-        if (trashOnly) return true;
-        if ("pending".equals(statusFilter)) {
-            switch (record.status) {
-                case RECORDED:
-                case QUEUED:
-                case TRANSCRIBING:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-        if ("failed".equals(statusFilter)) {
-            return record.status
-                    == com.zheliu.pokecapsule.core.ProcessingState.FAILED;
-        }
-        if (favoritesOnly) return record.favorite;
-        if (tagFilter != null) {
-            for (String tag : record.tags) if (tagFilter.equalsIgnoreCase(tag)) return true;
-            return false;
-        }
-        if (folderFilter == null) return true;
-        File parent = record.directory.getParentFile();
-        if (parent == null) return false;
-        String relative = store.paths().root().toURI().relativize(parent.toURI()).getPath();
-        if (relative.endsWith("/")) relative = relative.substring(0, relative.length() - 1);
-        return folderFilter.equals(relative);
-    }
-
-    private void applyRecords(List<CapsuleRecord> records) {
+    private void applyRecords(List<CapsuleRecord> records, int pending, int failed) {
         visible.clear();
         visible.addAll(records);
         selected.retainAll(ids(records));
+        pendingCount = pending;
+        failedCount = failed;
         renderList();
     }
 
@@ -411,74 +323,81 @@ public final class MainActivity extends Activity {
         adapter.clear();
         adapter.addAll(visible);
         adapter.notifyDataSetChanged();
-        selectionBar.setText(selected.isEmpty()
-                ? "长按胶囊开始多选"
-                : "已选择 " + selected.size() + " 个胶囊 · 轻点继续选择");
-        selectionActions.setVisibility(selected.isEmpty() ? View.GONE : View.VISIBLE);
-        moveAction.setText(trashOnly ? "恢复" : "移动");
-        copyAction.setText(trashOnly ? "复制文字" : "复制");
-        tagAction.setEnabled(!trashOnly);
-        favoriteAction.setEnabled(!trashOnly);
-        deleteAction.setText(trashOnly ? "永久删除" : "删除");
+        if (selectionMode) {
+            heading.setText(getString(R.string.selected_count_short, selected.size()));
+            libraryContext.setText(R.string.select_more_hint);
+            menuButton.setText("×");
+            menuButton.setContentDescription("取消多选");
+            moreButton.setText("全选");
+            moreButton.setTextSize(14);
+        } else {
+            heading.setText(currentHeading);
+            libraryContext.setText(getString(R.string.capsule_count, visible.size()));
+            menuButton.setText(R.string.menu_symbol);
+            menuButton.setContentDescription(getString(R.string.open_library));
+            moreButton.setText(R.string.more_symbol);
+            moreButton.setTextSize(28);
+        }
+        selectionBar.setText(selectionMode
+                ? getString(R.string.selected_count, selected.size())
+                : getString(R.string.select_hint));
+        selectionActions.setVisibility(selectionMode ? View.VISIBLE : View.GONE);
+        if (pendingCount > 0 || failedCount > 0) {
+            if (pendingCount > 0 && failedCount > 0) {
+                statusStrip.setText(getString(
+                        R.string.status_pending_failed, pendingCount, failedCount));
+            } else if (pendingCount > 0) {
+                statusStrip.setText(getString(R.string.status_pending, pendingCount));
+            } else {
+                statusStrip.setText(getString(R.string.status_failed, failedCount));
+            }
+            statusStrip.setVisibility(View.VISIBLE);
+        } else {
+            statusStrip.setVisibility(View.GONE);
+        }
+        moveAction.setText(controller.isTrash() ? R.string.restore : R.string.move);
+        copyAction.setText(controller.isTrash() ? R.string.copy_text : R.string.copy);
+        tagAction.setEnabled(!controller.isTrash());
+        favoriteAction.setEnabled(!controller.isTrash());
+        deleteAction.setText(controller.isTrash() ? R.string.purge : R.string.delete);
     }
 
     private void showInbox() {
-        folderFilter = PathPolicy.INBOX;
-        tagFilter = null;
-        favoritesOnly = false;
-        trashOnly = false;
-        statusFilter = null;
-        searchQuery = "";
-        selected.clear();
-        heading.setText("PokeCapsule · Inbox");
+        controller.show(LibraryScope.INBOX);
+        currentHeading = getString(R.string.inbox);
         refresh();
     }
 
     private void showFavorites() {
-        folderFilter = null;
-        tagFilter = null;
-        favoritesOnly = true;
-        trashOnly = false;
-        statusFilter = null;
-        searchQuery = "";
-        selected.clear();
-        heading.setText("PokeCapsule · 收藏");
+        controller.show(LibraryScope.FAVORITES);
+        currentHeading = getString(R.string.scope_favorites);
         refresh();
     }
 
     private void showFolderChooser() {
-        io.execute(() -> {
-            try {
-                ArrayList<String> choices = new ArrayList<>();
-                choices.add(PathPolicy.INBOX);
-                choices.add(PathPolicy.ARCHIVE);
-                choices.addAll(store.allUserFolders());
-                runOnUiThread(() -> new AlertDialog.Builder(this)
-                        .setTitle("目录")
-                        .setItems(choices.toArray(new String[0]), (dialog, which) -> {
-                            folderFilter = choices.get(which);
-                            tagFilter = null;
-                            favoritesOnly = false;
-                            trashOnly = false;
-                            statusFilter = null;
-                            searchQuery = "";
-                            selected.clear();
-                            heading.setText("PokeCapsule · " + folderFilter);
-                            refresh();
-                        })
-                        .setPositiveButton("新建", (dialog, which) -> promptCreateFolder())
-                        .setNeutralButton("删除目录", (dialog, which) -> promptDeleteFolder())
-                        .setNegativeButton("取消", null)
-                        .show());
-            } catch (IOException error) {
-                runOnUiThread(() -> toast(error.getMessage()));
-            }
+        repository.loadFolders(folders -> {
+            ArrayList<String> choices = new ArrayList<>();
+            choices.add(PathPolicy.INBOX);
+            choices.add(PathPolicy.ARCHIVE);
+            choices.addAll(folders);
+            new AlertDialog.Builder(this)
+                    .setTitle("目录")
+                    .setItems(choices.toArray(new String[0]), (dialog, which) -> {
+                        String folder = choices.get(which);
+                        controller.show(LibraryScope.folder(folder));
+                        currentHeading = displayFolder(folder);
+                        refresh();
+                    })
+                    .setPositiveButton("新建", (dialog, which) -> promptCreateFolder())
+                    .setNeutralButton("删除目录", (dialog, which) -> promptDeleteFolder())
+                    .setNegativeButton("取消", null)
+                    .show();
         });
     }
 
     private void promptCreateFolder() {
         promptText("新建目录", "一级目录 或 一级/二级", value ->
-                runStoreOperation(() -> store.createFolder(value), "目录已创建"));
+                repository.createFolder(value, () -> operationCompleted("目录已创建")));
     }
 
     private void promptDeleteFolder() {
@@ -487,84 +406,67 @@ public final class MainActivity extends Activity {
                         .setTitle("确认删除目录")
                         .setMessage("目录内全部胶囊会移回 Inbox。")
                         .setPositiveButton("确认", (d, w) ->
-                                runStoreOperation(
-                                        () -> store.deleteFolderMovingContentsToInbox(value),
-                                        "目录已删除，内容已回 Inbox"))
+                                repository.deleteFolder(value,
+                                        () -> operationCompleted("目录已删除，内容已回 Inbox")))
                         .setNegativeButton("取消", null)
                         .show());
     }
 
     private void showTagChooser() {
-        io.execute(() -> {
-            try {
-                ArrayList<String> tags = new ArrayList<>(store.allTags());
-                Collections.sort(tags);
-                runOnUiThread(() -> new AlertDialog.Builder(this)
-                        .setTitle("标签")
-                        .setItems(tags.toArray(new String[0]), (dialog, which) -> {
-                            tagFilter = tags.get(which);
-                            folderFilter = null;
-                            favoritesOnly = false;
-                            trashOnly = false;
-                            statusFilter = null;
-                            searchQuery = "";
-                            selected.clear();
-                            heading.setText("PokeCapsule · #" + tagFilter);
-                            refresh();
-                        })
-                        .setPositiveButton("改名/合并", (dialog, which) -> promptRenameTag())
-                        .setNegativeButton("取消", null)
-                        .show());
-            } catch (IOException error) {
-                runOnUiThread(() -> toast(error.getMessage()));
-            }
-        });
+        repository.loadTags(tags -> new AlertDialog.Builder(this)
+                .setTitle("标签")
+                .setItems(tags.toArray(new String[0]), (dialog, which) -> {
+                    String tag = tags.get(which);
+                    controller.show(LibraryScope.tag(tag));
+                    currentHeading = getString(R.string.scope_tag, tag);
+                    refresh();
+                })
+                .setPositiveButton("改名/合并", (dialog, which) -> promptRenameTag())
+                .setNegativeButton("取消", null)
+                .show());
     }
 
     private void promptRenameTag() {
         promptText("原标签", "不含 #", oldTag ->
                 promptText("新标签", "同名即合并", newTag ->
-                        runStoreOperation(() -> store.renameTag(oldTag, newTag), "标签已更新")));
+                        repository.renameTag(oldTag, newTag,
+                                () -> operationCompleted("标签已更新"))));
     }
 
     private void chooseDestination(boolean copy) {
-        List<String> ids = selectedIdsOrWarn();
-        if (ids == null) return;
-        io.execute(() -> {
-            try {
-                ArrayList<String> destinations = new ArrayList<>();
-                destinations.add(PathPolicy.INBOX);
-                destinations.add(PathPolicy.ARCHIVE);
-                destinations.addAll(store.allUserFolders());
-                runOnUiThread(() -> new AlertDialog.Builder(this)
-                        .setTitle(copy ? "复制到" : "移动到")
-                        .setItems(destinations.toArray(new String[0]), (dialog, which) ->
-                                runStoreOperation(() -> {
-                                    if (copy) store.copyCapsules(ids, destinations.get(which));
-                                    else store.moveCapsules(ids, destinations.get(which));
-                                }, copy ? "复制完成" : "移动完成"))
-                        .setNegativeButton("取消", null)
-                        .show());
-            } catch (IOException error) {
-                runOnUiThread(() -> toast(error.getMessage()));
-            }
+        List<CapsuleRecord> records = selectedRecordsOrWarn();
+        if (records == null) return;
+        repository.loadFolders(folders -> {
+            ArrayList<String> destinations = new ArrayList<>();
+            destinations.add(PathPolicy.INBOX);
+            destinations.add(PathPolicy.ARCHIVE);
+            destinations.addAll(folders);
+            new AlertDialog.Builder(this)
+                    .setTitle(copy ? "复制到" : "移动到")
+                    .setItems(destinations.toArray(new String[0]), (dialog, which) -> {
+                        Runnable success = () -> operationCompleted(copy ? "复制完成" : "移动完成");
+                        if (copy) repository.copy(records, destinations.get(which), success);
+                        else repository.move(records, destinations.get(which), success);
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
         });
     }
 
     private void primaryMoveAction() {
-        if (!trashOnly) {
+        if (!controller.isTrash()) {
             chooseDestination(false);
             return;
         }
-        List<String> ids = selectedIdsOrWarn();
-        if (ids == null) return;
-        runStoreOperation(() -> store.restoreCapsules(ids), "已恢复胶囊");
+        List<CapsuleRecord> records = selectedRecordsOrWarn();
+        if (records == null) return;
+        repository.restore(records, () -> operationCompleted("已恢复胶囊"));
     }
 
     private void promptCopyActions() {
         List<String> ids = selectedIdsOrWarn();
         if (ids == null) return;
-        if (trashOnly) {
+        if (controller.isTrash()) {
             copySelectedText(ids, false);
             return;
         }
@@ -603,75 +505,63 @@ public final class MainActivity extends Activity {
     }
 
     private void promptTag() {
-        List<String> ids = selectedIdsOrWarn();
-        if (ids == null) return;
+        List<CapsuleRecord> records = selectedRecordsOrWarn();
+        if (records == null) return;
         promptText("批量标签", "输入标签，不含 #", tag ->
                 new AlertDialog.Builder(this)
                         .setTitle("#" + PathPolicy.normalizeTag(tag))
-                        .setItems(new String[]{"添加", "移除"}, (dialog, which) ->
-                                runStoreOperation(() -> {
-                                    if (which == 0) store.addTag(ids, tag);
-                                    else store.removeTag(ids, tag);
-                                }, "标签已更新"))
+                        .setItems(new String[]{"添加", "移除"}, (dialog, which) -> {
+                            Runnable success = () -> operationCompleted("标签已更新");
+                            if (which == 0) repository.addTag(records, tag, success);
+                            else repository.removeTag(records, tag, success);
+                        })
                         .show());
     }
 
     private void promptFavorite() {
-        List<String> ids = selectedIdsOrWarn();
-        if (ids == null) return;
+        List<CapsuleRecord> records = selectedRecordsOrWarn();
+        if (records == null) return;
         new AlertDialog.Builder(this)
                 .setTitle("收藏")
                 .setItems(new String[]{"设为收藏", "取消收藏"}, (dialog, which) ->
-                        runStoreOperation(() -> store.setFavorite(ids, which == 0), "收藏状态已更新"))
+                        repository.setFavorite(records, which == 0,
+                                () -> operationCompleted("收藏状态已更新")))
                 .show();
     }
 
     private void confirmDelete() {
-        List<String> ids = selectedIdsOrWarn();
-        if (ids == null) return;
+        List<CapsuleRecord> records = selectedRecordsOrWarn();
+        if (records == null) return;
         new AlertDialog.Builder(this)
-                .setTitle((trashOnly ? "永久删除 " : "删除 ") + ids.size() + " 个胶囊？")
-                .setMessage(trashOnly
+                .setTitle((controller.isTrash() ? "永久删除 " : "删除 ")
+                        + records.size() + " 个胶囊？")
+                .setMessage(controller.isTrash()
                         ? "录音和文字会永久删除，无法恢复。"
                         : "胶囊会进入回收站，可随时恢复。")
-                .setPositiveButton(trashOnly ? "永久删除" : "删除", (dialog, which) ->
-                        runStoreOperation(
-                                () -> {
-                                    if (trashOnly) store.purgeCapsules(ids);
-                                    else store.deleteCapsules(ids);
-                                },
-                                trashOnly ? "已永久删除" : "已移入回收站"))
+                .setPositiveButton(controller.isTrash() ? "永久删除" : "删除", (dialog, which) -> {
+                    Runnable success = () -> operationCompleted(
+                            controller.isTrash() ? "已永久删除" : "已移入回收站");
+                    if (controller.isTrash()) repository.purge(records, success);
+                    else repository.delete(records, success);
+                })
                 .setNegativeButton("取消", null)
                 .show();
     }
 
     private void promptSearch() {
         promptText("全文搜索", "文字、标签或目录", value -> {
-            searchQuery = value == null ? "" : value.trim();
-            heading.setText(searchQuery.isEmpty()
-                    ? "PokeCapsule · 全部"
-                    : "搜索 · " + searchQuery);
-            folderFilter = null;
-            tagFilter = null;
-            favoritesOnly = false;
-            trashOnly = false;
-            statusFilter = null;
-            selected.clear();
+            controller.search(value);
+            currentHeading = controller.search().isEmpty()
+                    ? getString(R.string.scope_all)
+                    : getString(R.string.scope_search, controller.search());
             refresh();
         });
     }
 
     private void showSmart(String filter) {
-        folderFilter = null;
-        tagFilter = null;
-        favoritesOnly = false;
-        trashOnly = false;
-        statusFilter = filter;
-        searchQuery = "";
-        selected.clear();
-        heading.setText("pending".equals(filter)
-                ? "PokeCapsule · 待转写"
-                : "PokeCapsule · 转写失败");
+        boolean pending = "pending".equals(filter);
+        controller.show(pending ? LibraryScope.PENDING : LibraryScope.FAILED);
+        currentHeading = getString(pending ? R.string.scope_pending : R.string.scope_failed);
         refresh();
     }
 
@@ -689,206 +579,137 @@ public final class MainActivity extends Activity {
     }
 
     private void showTrash() {
-        folderFilter = null;
-        tagFilter = null;
-        favoritesOnly = false;
-        trashOnly = true;
-        statusFilter = null;
-        searchQuery = "";
-        selected.clear();
-        heading.setText("PokeCapsule · 回收站");
+        controller.show(LibraryScope.TRASH);
+        currentHeading = getString(R.string.scope_trash);
         refresh();
     }
 
-    private void showSettings() {
-        cloudConfigured = TencentAsrConfig.isConfigured(this);
-        boolean adbEnabled = Settings.Global.getInt(
-                getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 1;
-        String usbConfig = readProperty("sys.usb.config");
-        String computerStatus = adbEnabled && usbConfig.contains("adb")
-                ? "电脑管理：ADB 已就绪"
-                : adbEnabled ? "电脑管理：调试已开，等待 USB"
-                : "电脑管理：USB 调试未开启";
-        if (!DeviceRuntimeProfile.isLowPowerReader()) {
-            showPhoneSettings(computerStatus);
-            return;
-        }
-        String[] options = {
-                Settings.canDrawOverlays(this) ? "开启悬浮按钮" : "授予悬浮窗权限",
-                "临时隐藏悬浮按钮",
-                "彻底关闭悬浮按钮",
-                "立即处理一条排队胶囊",
-                computerStatus,
-                (cloudConfigured ? "腾讯转写：已配置 · " : "腾讯转写：待配置 · ")
-                        + TranscriptionPolicyText.shortCondition(),
-                "重新申请录音/文件权限"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("设置")
-                .setItems(options, (dialog, which) -> {
-                    switch (which) {
-                        case 0:
-                            enableOverlay();
-                            break;
-                        case 1:
-                            overlayAction(OverlayService.ACTION_HIDE);
-                            break;
-                        case 2:
-                            overlayAction(OverlayService.ACTION_DISABLE);
-                            break;
-                        case 3:
-                            TranscriptionScheduler.scheduleManual(this);
-                            toast("已提交处理任务");
-                            break;
-                        case 4:
-                            openDeviceSettings();
-                            break;
-                        case 5:
-                            if (cloudConfigured) {
-                                toast(TranscriptionPolicyText.automaticCondition());
-                            } else {
-                                openTencentConfigPicker();
-                            }
-                            break;
-                        case 6:
-                            requestRequiredPermissions();
-                            break;
-                        default:
-                            break;
-                    }
-                })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
-
-    private void showPhoneSettings(String computerStatus) {
-        String[] options = {
-                "立即处理排队胶囊",
-                computerStatus,
-                (cloudConfigured ? "腾讯转写：已配置 · " : "腾讯转写：待配置 · ")
-                        + TranscriptionPolicyText.shortCondition(),
-                "重新申请录音/文件权限"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("设置")
-                .setItems(options, (dialog, which) -> {
-                    switch (which) {
-                        case 0:
-                            TranscriptionScheduler.scheduleManual(this);
-                            toast("已提交处理任务");
-                            break;
-                        case 1:
-                            openDeviceSettings();
-                            break;
-                        case 2:
-                            if (cloudConfigured) {
-                                toast(TranscriptionPolicyText.automaticCondition());
-                            } else {
-                                openTencentConfigPicker();
-                            }
-                            break;
-                        case 3:
-                            requestRequiredPermissions();
-                            break;
-                        default:
-                            break;
-                    }
-                })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
-
-    private void openDeviceSettings() {
-        if (!DeviceRuntimeProfile.isLowPowerReader()) {
-            try {
-                startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
-            } catch (Exception error) {
-                startActivity(new Intent(Settings.ACTION_SETTINGS));
-            }
-            return;
-        }
-        try {
-            Intent settings = new Intent("com.onyx.action.SETTING");
-            settings.setPackage("com.onyx");
-            startActivity(settings);
-        } catch (Exception error) {
-            startActivity(new Intent(Settings.ACTION_SETTINGS));
-        }
-    }
-
-    private void openTencentConfigPicker() {
-        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        picker.addCategory(Intent.CATEGORY_OPENABLE);
-        picker.setType("text/plain");
-        startActivityForResult(picker, REQUEST_TENCENT_CONFIG);
-    }
-
-    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_TENCENT_CONFIG
-                || resultCode != RESULT_OK
-                || data == null
-                || data.getData() == null) {
-            return;
-        }
-        Uri uri = data.getData();
-        io.execute(() -> {
-            try (InputStream input = getContentResolver().openInputStream(uri);
-                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                if (input == null) throw new IOException("无法读取密钥文件");
-                byte[] buffer = new byte[4096];
-                int total = 0;
-                int count;
-                while ((count = input.read(buffer)) >= 0) {
-                    total += count;
-                    if (total > 64 * 1024) throw new IOException("密钥文件过大");
-                    output.write(buffer, 0, count);
-                }
-                TencentAsrConfig.save(
-                        this,
-                        TencentAsrConfig.parse(
-                                new String(output.toByteArray(), StandardCharsets.UTF_8)));
-                cloudConfigured = true;
-                TranscriptionScheduler.scheduleAutomatic(this);
-                runOnUiThread(() -> {
-                    toast("腾讯转写已配置，排队胶囊将自动处理");
+    private void showLibraryDrawer() {
+        repository.loadMenu(data -> {
+                List<CapsuleRecord> active = data.snapshot.active;
+                List<CapsuleRecord> trash = data.snapshot.trash;
+                ArrayList<LibraryMenuCoordinator.Entry> entries = new ArrayList<>();
+                entries.add(LibraryMenuCoordinator.Entry.section("胶囊"));
+                entries.add(scopeEntry("收件箱", active, LibraryScope.INBOX, this::showInbox));
+                entries.add(scopeEntry("全部胶囊", active, LibraryScope.ALL, () -> {
+                    controller.show(LibraryScope.ALL);
+                    currentHeading = getString(R.string.scope_all);
                     refresh();
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast("配置失败：" + error.getMessage()));
-            }
+                }));
+                entries.add(scopeEntry("收藏", active, LibraryScope.FAVORITES, this::showFavorites));
+                entries.add(scopeEntry("待转写", active, LibraryScope.PENDING,
+                        () -> showSmart("pending")));
+                entries.add(scopeEntry("转写失败", active, LibraryScope.FAILED,
+                        () -> showSmart("failed")));
+                entries.add(LibraryMenuCoordinator.Entry.divider());
+                entries.add(LibraryMenuCoordinator.Entry.section("目录", this::showFolderChooser));
+                entries.add(scopeEntry("归档", active, LibraryScope.folder(PathPolicy.ARCHIVE), () -> {
+                    controller.show(LibraryScope.folder(PathPolicy.ARCHIVE));
+                    currentHeading = "归档";
+                    refresh();
+                }));
+                for (String folder : data.folders) {
+                    LibraryScope scope = LibraryScope.folder(folder);
+                    entries.add(LibraryMenuCoordinator.Entry.item(
+                            displayFolder(folder), String.valueOf(countScope(active, scope)),
+                            folder.contains("/"), controller.scope().equals(scope), () -> {
+                                controller.show(scope);
+                                currentHeading = displayFolder(folder);
+                                refresh();
+                            }));
+                }
+                entries.add(LibraryMenuCoordinator.Entry.divider());
+                entries.add(LibraryMenuCoordinator.Entry.section("标签", this::showTagChooser));
+                for (String tag : data.tags) {
+                    LibraryScope scope = LibraryScope.tag(tag);
+                    entries.add(LibraryMenuCoordinator.Entry.item(
+                            "#" + tag, String.valueOf(countScope(active, scope)), false,
+                            controller.scope().equals(scope), () -> {
+                                controller.show(scope);
+                                currentHeading = getString(R.string.scope_tag, tag);
+                                refresh();
+                            }));
+                }
+                entries.add(LibraryMenuCoordinator.Entry.divider());
+                entries.add(LibraryMenuCoordinator.Entry.item(
+                        "回收站", String.valueOf(trash.size()), false,
+                        controller.isTrash(), this::showTrash));
+                menus.showDrawer(deviceLabel(), entries,
+                        this::promptCreateFolder, this::showSettings);
         });
     }
 
-    private String readProperty(String key) {
-        try {
-            Process process = Runtime.getRuntime().exec(
-                    new String[]{"/system/bin/getprop", key});
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()));
-            String value = reader.readLine();
-            process.waitFor();
-            return value == null ? "" : value.trim();
-        } catch (Exception error) {
-            return "";
-        }
+    private void showOverflowMenu() {
+        String order = controller.sort() == LibrarySort.NEWEST_FIRST
+                ? "排序：最新在前" : "排序：最旧在前";
+        ArrayList<LibraryMenuCoordinator.Entry> entries = new ArrayList<>();
+        entries.add(LibraryMenuCoordinator.Entry.item("⌕  搜索当前清单", "", false, false,
+                this::promptSearch));
+        entries.add(LibraryMenuCoordinator.Entry.item("⇅  " + order, "", false, false, () -> {
+            controller.toggleSort();
+            refresh();
+        }));
+        entries.add(LibraryMenuCoordinator.Entry.item("≡  筛选状态", "", false, false,
+                this::showFilterChooser));
+        entries.add(LibraryMenuCoordinator.Entry.item("✓  批量选择", "", false, false, () -> {
+            selectionMode = true;
+            renderList();
+        }));
+        menus.showOverflow(entries);
     }
 
-    private void enableOverlay() {
-        if (!Settings.canDrawOverlays(this)) {
-            Intent permission = new Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()));
-            startActivity(permission);
+    @Override public void onBackPressed() {
+        if (menus != null && menus.closeTransientSurface()) return;
+        if (selectionMode) {
+            exitSelectionMode();
             return;
         }
-        Intent service = new Intent(this, OverlayService.class);
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
-        else startService(service);
+        super.onBackPressed();
+    }
+
+    private LibraryMenuCoordinator.Entry scopeEntry(String label,
+            List<CapsuleRecord> records, LibraryScope scope, Runnable action) {
+        return LibraryMenuCoordinator.Entry.item(label,
+                String.valueOf(countScope(records, scope)), false,
+                controller.scope().equals(scope), action);
+    }
+
+    private static int countScope(List<CapsuleRecord> records, LibraryScope scope) {
+        int count = 0;
+        for (CapsuleRecord record : records) if (scope.includes(record)) count++;
+        return count;
+    }
+
+    private String displayFolder(String folder) {
+        if (PathPolicy.INBOX.equals(folder)) return "收件箱";
+        if (PathPolicy.ARCHIVE.equals(folder)) return "归档";
+        int separator = folder.lastIndexOf('/');
+        return separator >= 0 ? folder.substring(separator + 1) : folder;
+    }
+
+    private String deviceLabel() {
+        if (DeviceCapabilities.current().eink) return "Poke3";
+        String model = Build.MODEL == null ? "Android" : Build.MODEL.trim();
+        return model.isEmpty() ? "Android" : model;
+    }
+
+    private void exitSelectionMode() {
+        selectionMode = false;
+        selected.clear();
+        renderList();
+    }
+
+    private void selectAllVisible() {
+        selected.addAll(ids(visible));
+        renderList();
+    }
+
+    private void showSettings() {
+        startActivity(new Intent(this, SettingsActivity.class));
     }
 
     private void toggleInlineRecording() {
-        if (DeviceRuntimeProfile.isLowPowerReader()) return;
+        if (!DeviceCapabilities.current().inlineRecorder) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             requestRequiredPermissions();
@@ -910,7 +731,7 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleSelected(String id) {
-        if (!selected.add(id)) selected.remove(id);
+        controller.toggleSelection(id);
         renderList();
     }
 
@@ -922,19 +743,28 @@ public final class MainActivity extends Activity {
         return new ArrayList<>(selected);
     }
 
-    private void runStoreOperation(StoreOperation operation, String success) {
-        io.execute(() -> {
-            try {
-                operation.run();
-                runOnUiThread(() -> {
-                    selected.clear();
-                    toast(success);
-                    refresh();
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> toast("操作失败: " + error.getMessage()));
-            }
-        });
+    private List<CapsuleRecord> selectedRecordsOrWarn() {
+        if (selected.isEmpty()) {
+            toast("请先长按选择胶囊");
+            return null;
+        }
+        ArrayList<CapsuleRecord> records = new ArrayList<>();
+        for (CapsuleRecord record : visible) {
+            if (selected.contains(record.id)) records.add(record);
+        }
+        if (records.size() != selected.size()) {
+            toast("列表已经变化，请重新选择");
+            exitSelectionMode();
+            return null;
+        }
+        return records;
+    }
+
+    private void operationCompleted(String success) {
+        selected.clear();
+        selectionMode = false;
+        toast(success);
+        refresh();
     }
 
     private void promptText(String title, String hint, TextResult callback) {
@@ -986,10 +816,6 @@ public final class MainActivity extends Activity {
         HashSet<String> result = new HashSet<>();
         for (CapsuleRecord record : records) result.add(record.id);
         return result;
-    }
-
-    private interface StoreOperation {
-        void run() throws Exception;
     }
 
     private interface TextResult {

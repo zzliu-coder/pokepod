@@ -1,0 +1,916 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PokeCapsule 三端交互原型</title>
+  <!--
+  THESIS: 三端共享同一套胶囊字段与操作语义；Mac 用三栏，移动端用单一清单、侧边导航和情境操作。
+  CONTENT: 模拟设备、胶囊、目录、标签、同步和错误状态，不接真实文件或接口。
+  INTERACTION: 顶部切换平台和场景；移动端可打开侧边导航、当前清单菜单、详情和长按批量模式。
+  VISUAL_LANGUAGE: 彩色屏使用安静的中性色与低饱和绿色；Poke3 使用高对比黑白和实线分组。
+  -->
+  <style>
+    :root {
+      --bg: #edf0ed;
+      --paper: #fff;
+      --ink: #171a18;
+      --muted: #626762;
+      --line: #d9ddd9;
+      --accent: #315f52;
+      --accent-soft: #e2ece7;
+      --danger: #a23b32;
+      --danger-soft: #f7e8e5;
+      --shadow: 0 18px 50px rgba(24, 38, 31, .12);
+      --ease: cubic-bezier(.2,.8,.2,1);
+    }
+    * { box-sizing: border-box; }
+    html { color-scheme: light; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible { outline: 3px solid rgba(49,95,82,.28); outline-offset: 2px; }
+    .prototype-bar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      gap: 16px;
+      align-items: center;
+      min-height: 76px;
+      padding: 12px 24px;
+      color: #f8faf8;
+      background: #18211e;
+      box-shadow: 0 8px 24px rgba(15,23,20,.16);
+    }
+    .brandline { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brandmark { position: relative; width: 38px; height: 26px; flex: 0 0 auto; border: 2px solid #f6faf7; border-radius: 14px; }
+    .brandmark::after { content: ""; position: absolute; width: 8px; height: 8px; right: 6px; top: 7px; border-radius: 50%; background: #8db6a8; }
+    .brandline strong { font-size: 17px; letter-spacing: -.01em; }
+    .brandline small { display: block; margin-top: 2px; color: #b9c4bf; font-size: 12px; }
+    .switcher, .scenario-switcher { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(255,255,255,.09); }
+    .switcher button, .scenario-switcher button {
+      min-height: 38px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 9px;
+      color: #cbd5d0;
+      background: transparent;
+      cursor: pointer;
+    }
+    .switcher button.active, .scenario-switcher button.active { color: #17201d; background: #f7f9f7; font-weight: 650; }
+    .canvas { padding: 34px; }
+    .stage-note { max-width: 1280px; margin: 0 auto 20px; display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+    .stage-note h1 { margin: 0; font-size: clamp(22px, 3vw, 34px); letter-spacing: -.035em; }
+    .stage-note p { max-width: 620px; margin: 6px 0 0; color: var(--muted); line-height: 1.6; }
+    .legend { flex: 0 0 auto; font-size: 13px; color: var(--muted); }
+    .legend kbd { padding: 3px 7px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; background: white; font-family: inherit; }
+    .platform { display: none; max-width: 1280px; margin: 0 auto; }
+    .platform.active { display: block; animation: reveal .36s var(--ease) both; }
+    @keyframes reveal { from { opacity: .3; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .icon { width: 20px; height: 20px; display: inline-grid; place-items: center; font-size: 17px; line-height: 1; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #5f8f7d; }
+    .status.pending::before { background: #b18135; }
+    .text-button { min-height: 36px; padding: 0 11px; border: 0; border-radius: 9px; background: transparent; cursor: pointer; }
+    .text-button:hover { background: #eef1ee; }
+    .soft-button { min-height: 40px; padding: 0 14px; border: 0; border-radius: 10px; background: #eef1ee; cursor: pointer; font-weight: 600; }
+    .soft-button:hover { background: #e4e9e5; }
+    .primary-button { min-height: 42px; padding: 0 16px; border: 0; border-radius: 11px; color: white; background: var(--accent); cursor: pointer; font-weight: 650; }
+    .primary-button:hover { background: #274f44; }
+    .capsule-list { overflow: auto; }
+    .capsule-row {
+      position: relative;
+      width: 100%;
+      display: block;
+      padding: 15px 18px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      background: transparent;
+      cursor: pointer;
+    }
+    .capsule-row:hover { background: #f3f6f4; }
+    .capsule-row.active { background: var(--accent-soft); }
+    .capsule-row.selected::after { content: "✓"; position: absolute; right: 15px; top: 17px; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--accent); font-size: 13px; }
+    .capsule-row strong { display: block; margin-right: 28px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.35; }
+    .capsule-row .row-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; color: var(--muted); font-size: 12px; }
+    .capsule-row .tag { color: var(--accent); }
+    .capsule-row .warning { color: #8b5d1e; }
+
+    /* Mac */
+    .mac-shell { overflow: hidden; height: min(760px, calc(100vh - 180px)); min-height: 620px; border: 1px solid rgba(23,26,24,.12); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
+    .mac-titlebar { height: 48px; display: grid; grid-template-columns: 270px 340px 1fr; border-bottom: 1px solid var(--line); background: #f6f7f6; }
+    .traffic { display: flex; gap: 8px; align-items: center; padding-left: 18px; }
+    .traffic i { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; }
+    .traffic i:nth-child(2) { background: #febc2e; }
+    .traffic i:nth-child(3) { background: #28c840; }
+    .mac-title { display: flex; align-items: center; font-size: 13px; color: var(--muted); }
+    .mac-tools { display: flex; justify-content: flex-end; align-items: center; gap: 6px; padding-right: 12px; }
+    .mac-grid { position: relative; height: calc(100% - 48px); display: grid; grid-template-columns: 270px 340px minmax(420px,1fr); }
+    .mac-sidebar { padding: 18px 14px; border-right: 1px solid var(--line); background: #f7f8f7; overflow: auto; }
+    .device-select {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 36px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: white;
+      text-align: left;
+      cursor: pointer;
+    }
+    .device-glyph { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--accent-soft); }
+    .device-select strong { display: block; font-size: 14px; }
+    .device-select small { color: var(--muted); }
+    .device-menu { display: none; margin-top: 7px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: white; box-shadow: 0 12px 30px rgba(20,28,24,.1); }
+    .device-menu.open { display: block; }
+    .device-option { width: 100%; padding: 10px; border: 0; border-radius: 8px; text-align: left; background: transparent; cursor: pointer; }
+    .device-option:hover { background: #edf2ef; }
+    .nav-section { margin-top: 24px; }
+    .nav-section-title { display: flex; align-items: center; justify-content: space-between; padding: 0 10px 7px; color: #7c817d; font-size: 12px; font-weight: 650; }
+    .nav-item { width: 100%; min-height: 39px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer; text-align: left; }
+    .nav-item:hover { background: #e9ece9; }
+    .nav-item.active { background: #dde7e2; color: #244b40; font-weight: 650; }
+    .nav-item .count { margin-left: auto; color: #7a807b; font-size: 12px; }
+    .nav-item.subtle { color: #555b56; }
+    .mac-settings { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .mac-settings-panel { display: none; position: absolute; z-index: 4; inset: 0 0 0 270px; overflow: auto; padding: 30px 38px 50px; background: var(--paper); }
+    .mac-settings-panel.show { display: block; }
+    .mac-settings-panel h2 { margin: 0; font-size: 27px; letter-spacing: -.03em; }
+    .mac-settings-panel > p { margin: 7px 0 0; color: var(--muted); }
+    .mac-settings-columns { display: grid; grid-template-columns: repeat(2,minmax(260px,1fr)); gap: 28px 48px; margin-top: 28px; }
+    .mac-settings-block h3 { margin: 0 0 7px; font-size: 15px; }
+    .mac-settings-block .setting-row { padding: 0 4px; }
+    .mac-list-panel { position: relative; display: flex; min-width: 0; flex-direction: column; border-right: 1px solid var(--line); }
+    .list-head { padding: 15px 16px 10px; border-bottom: 1px solid var(--line); }
+    .list-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .list-title-row h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .searchbox { margin-top: 12px; }
+    .searchbox input { width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: #f7f8f7; }
+    .filterline { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
+    .filterline .text-button { min-height: 30px; padding: 0 8px; color: var(--muted); font-size: 12px; }
+    .filterline .text-button.active { color: var(--accent); background: var(--accent-soft); }
+    .mac-list-panel .capsule-list { flex: 1; }
+    .batch-bar { display: none; align-items: center; gap: 7px; padding: 10px 12px; border-top: 1px solid var(--line); background: #f7f9f7; }
+    .batch-bar.show { display: flex; }
+    .batch-bar strong { margin-right: auto; font-size: 13px; }
+    .batch-bar .soft-button { min-height: 34px; padding: 0 10px; font-size: 13px; }
+    .mac-detail { min-width: 0; overflow: auto; padding: 28px 30px 40px; }
+    .detail-top { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
+    .detail-top h2 { max-width: 680px; margin: 0; font-size: 25px; line-height: 1.3; letter-spacing: -.025em; }
+    .detail-actions { display: flex; gap: 7px; flex: 0 0 auto; }
+    .detail-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .player { display: flex; align-items: center; gap: 12px; margin-top: 26px; padding: 12px 14px; border-radius: 14px; background: #f1f4f2; }
+    .play-circle { width: 42px; height: 42px; display: grid; place-items: center; border: 0; border-radius: 50%; color: white; background: var(--accent); cursor: pointer; }
+    .wave { flex: 1; height: 22px; display: flex; align-items: center; gap: 3px; }
+    .wave i { width: 3px; border-radius: 2px; background: #6c8f83; }
+    .wave i:nth-child(1),.wave i:nth-child(8){height:7px}.wave i:nth-child(2),.wave i:nth-child(6){height:14px}.wave i:nth-child(3),.wave i:nth-child(7){height:20px}.wave i:nth-child(4){height:10px}.wave i:nth-child(5){height:17px}
+    .text-section { margin-top: 28px; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .section-heading h3 { margin: 0; font-size: 16px; }
+    .final-copy { margin: 0; max-width: 72ch; font-size: 17px; line-height: 1.75; }
+    .organize-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
+    .organize-line .label { margin-right: 4px; color: var(--muted); font-size: 13px; }
+    .mini-tag { padding: 5px 9px; border-radius: 999px; color: #285044; background: var(--accent-soft); font-size: 12px; }
+    details.versions { margin-top: 25px; border-top: 1px solid var(--line); }
+    details.versions summary { padding: 16px 0; cursor: pointer; font-weight: 650; }
+    .version-block { padding: 13px 0; border-top: 1px solid #edf0ed; }
+    .version-block small { color: var(--muted); }
+    .version-block p { margin: 7px 0 0; line-height: 1.65; }
+    .offline-banner { display: none; margin-bottom: 18px; padding: 12px 14px; border-radius: 12px; background: #f3eee4; color: #6b4d1f; font-size: 13px; }
+    .offline-banner.show { display: block; }
+
+    /* Shared mobile shells */
+    .phone-wrap, .poke-wrap { display: grid; place-items: center; }
+    .mobile-menu-button { width: 48px; height: 48px; display: grid; place-items: center; border: 0; background: transparent; cursor: pointer; font-size: 25px; }
+    .mobile-menu-button:hover { background: #e9eeeb; }
+    .circle-button { width: 48px; height: 48px; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+    .circle-button:hover { background: #e9eeeb; }
+    .drawer-section-title { padding: 18px 18px 7px; color: #727873; font-size: 12px; font-weight: 700; }
+    .drawer-row { width: 100%; min-height: 50px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+    .drawer-row:hover { background: #edf2ef; }
+    .drawer-row.active { color: #244b40; background: var(--accent-soft); font-weight: 700; }
+    .drawer-row.child { padding-left: 52px; }
+    .drawer-row .count { margin-left: auto; color: var(--muted); font-size: 13px; }
+    .drawer-divider { height: 1px; margin: 10px 18px 0; background: var(--line); }
+    .context-menu-row { width: 100%; min-height: 51px; display: flex; align-items: center; gap: 12px; padding: 0 16px; border: 0; border-bottom: 1px solid #edf0ed; background: transparent; text-align: left; cursor: pointer; }
+    .context-menu-row:last-child { border-bottom: 0; }
+    .context-menu-row:hover { background: #f0f3f1; }
+    .setting-row { width: 100%; min-height: 58px; display: flex; align-items: center; gap: 11px; padding: 0 2px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
+    .setting-row .row-main { flex: 1; min-width: 0; }
+    .setting-row strong { display: block; font-size: 15px; }
+    .setting-row small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+
+    /* Android */
+    .phone { position: relative; overflow: hidden; width: min(390px, calc(100vw - 34px)); height: min(790px, calc(100vh - 190px)); min-height: 630px; border: 9px solid #161a18; border-radius: 39px; background: #f7f8f6; box-shadow: var(--shadow); }
+    .phone::before { content: ""; position: absolute; z-index: 20; top: 7px; left: 50%; width: 94px; height: 24px; transform: translateX(-50%); border-radius: 0 0 16px 16px; background: #161a18; }
+    .phone-status { height: 41px; display: flex; align-items: center; justify-content: space-between; padding: 0 17px; font-size: 12px; font-weight: 650; }
+    .phone-page { height: calc(100% - 41px); display: flex; flex-direction: column; }
+    .phone-appbar { min-height: 62px; display: grid; grid-template-columns: 48px 1fr 48px; align-items: center; padding: 4px 10px; }
+    .phone-appbar h2 { margin: 0; font-size: 25px; letter-spacing: -.03em; }
+    .phone-contextline { display: flex; align-items: center; gap: 8px; padding: 0 18px 11px; color: var(--muted); font-size: 13px; }
+    .phone-contextline .context-count { margin-left: auto; }
+    .phone-content { flex: 1; min-height: 0; overflow: auto; padding: 0 18px 88px; }
+    .phone .capsule-row { padding: 15px 2px; }
+    .phone .capsule-row strong { display: -webkit-box; margin-right: 18px; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; font-size: 16px; line-height: 1.42; }
+    .day-label { margin: 7px 0 4px; color: #797f7a; font-size: 12px; font-weight: 650; }
+    .record-fab { position: absolute; z-index: 6; right: 20px; bottom: 20px; width: 62px; height: 62px; display: grid; place-items: center; border: 0; border-radius: 50%; color: white; background: var(--accent); box-shadow: 0 10px 24px rgba(20,24,22,.22); cursor: pointer; }
+    .record-fab::before { content: ""; width: 23px; height: 12px; border: 3px solid white; border-radius: 9px; }
+    .record-fab::after { content: ""; position: absolute; width: 5px; height: 5px; right: 17px; border-radius: 50%; background: #b9d7cc; }
+    .status-strip { display: flex; align-items: center; gap: 9px; margin: 3px 0 10px; padding: 10px 12px; border-radius: 11px; color: #684a1c; background: #f3eee4; font-size: 13px; }
+    .status-strip strong { margin-left: auto; color: #684a1c; }
+    .phone-drawer-layer, .phone-overflow, .phone-detail, .phone-organize, .phone-batch, .phone-settings-screen { display: none; position: absolute; }
+    .phone-drawer-layer { z-index: 13; inset: 41px 0 0; background: rgba(18,25,21,.28); }
+    .phone-drawer-layer.open { display: block; }
+    .phone-drawer { width: 83%; height: 100%; display: flex; flex-direction: column; background: white; box-shadow: 16px 0 32px rgba(20,25,22,.16); }
+    .phone-drawer-head { padding: 22px 18px 15px; border-bottom: 1px solid var(--line); }
+    .phone-drawer-head strong { display: block; font-size: 21px; }
+    .phone-drawer-head span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .phone-drawer-scroll { flex: 1; overflow: auto; padding-bottom: 12px; }
+    .phone-drawer-foot { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
+    .phone-drawer-foot button { min-height: 56px; border: 0; border-right: 1px solid var(--line); background: white; font-weight: 650; }
+    .phone-drawer-foot button:last-child { border-right: 0; }
+    .phone-overflow { z-index: 12; top: 96px; right: 14px; width: 245px; overflow: hidden; border-radius: 16px; background: white; box-shadow: 0 18px 42px rgba(20,25,22,.2); }
+    .phone-overflow.open { display: block; }
+    .phone-detail, .phone-settings-screen { z-index: 14; inset: 41px 0 0; background: #f7f8f6; }
+    .phone-detail.open, .phone-settings-screen.open { display: flex; flex-direction: column; }
+    .phone-detail-scroll, .phone-settings-scroll { flex: 1; overflow: auto; padding: 4px 20px 30px; }
+    .phone-back { width: 48px; height: 48px; border: 0; background: transparent; cursor: pointer; font-size: 25px; text-align: center; }
+    .phone-detail h2 { margin: 7px 0 0; font-size: 24px; line-height: 1.35; }
+    .phone-detail .player { margin-top: 20px; }
+    .phone-detail .final-copy { font-size: 17px; line-height: 1.68; }
+    .phone-organize { z-index: 16; inset: 41px 0 0; }
+    .phone-organize.open { display: flex; flex-direction: column; justify-content: end; background: rgba(20,26,22,.28); }
+    .sheet { padding: 22px 20px 28px; border-radius: 24px 24px 0 0; background: #fff; box-shadow: 0 -16px 35px rgba(20,25,22,.12); }
+    .sheet h3 { margin: 0 0 18px; font-size: 21px; }
+    .sheet-row { display: flex; align-items: center; min-height: 52px; border-bottom: 1px solid #edf0ed; }
+    .sheet-row span:first-child { flex: 1; }
+    .sheet-row strong { color: var(--accent); font-size: 14px; }
+    .phone-batch { z-index: 15; inset: 41px 0 0; background: #f7f8f6; }
+    .phone-batch.open { display: flex; flex-direction: column; }
+    .batch-head { display: flex; align-items: center; gap: 12px; min-height: 62px; padding: 4px 12px; border-bottom: 1px solid var(--line); }
+    .batch-head strong { flex: 1; }
+    .batch-actions-grid { margin-top: auto; display: grid; grid-template-columns: repeat(5,1fr); gap: 3px; padding: 9px; border-top: 1px solid var(--line); background: white; }
+    .batch-actions-grid button { min-height: 58px; display: grid; place-items: center; border: 0; border-radius: 9px; background: #eef1ee; font-size: 12px; }
+    .settings-title { margin: 18px 0 4px; color: var(--muted); font-size: 13px; font-weight: 700; }
+
+    /* Poke */
+    .poke-device { position: relative; width: min(520px, calc(100vw - 30px)); padding: 18px 20px 28px; border: 12px solid #282828; border-bottom-width: 34px; border-radius: 13px; background: #eee; box-shadow: 0 15px 40px rgba(0,0,0,.22); filter: grayscale(1); }
+    .poke-screen { position: relative; overflow: hidden; height: min(720px, calc(100vh - 210px)); min-height: 610px; border: 1px solid #666; background: #f7f7f2; }
+    .poke-status { height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 13px; border-bottom: 1px solid #999; font-size: 12px; }
+    .poke-header { display: grid; grid-template-columns: 52px 1fr 52px; align-items: center; min-height: 70px; border-bottom: 2px solid #222; }
+    .poke-header button { width: 52px; min-height: 52px; border: 0; background: #f7f7f2; font-size: 24px; }
+    .poke-heading h2 { margin: 0; font-size: 24px; }
+    .poke-heading .meta { margin-top: 3px; color: #444; }
+    .poke-main { height: calc(100% - 104px); overflow: auto; padding: 0 13px 76px; }
+    .poke-list { overflow: auto; }
+    .poke-list .capsule-row { padding: 14px 1px; border-color: #777; }
+    .poke-list .capsule-row:hover, .poke-list .capsule-row.active { background: #e4e4df; }
+    .poke-list .capsule-row strong { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; font-size: 16px; line-height: 1.4; }
+    .poke-list .row-meta { color: #333; }
+    .poke-record { position: absolute; z-index: 5; right: 14px; bottom: 17px; width: 58px; height: 58px; border: 2px solid #222; border-radius: 50%; background: #f7f7f2; cursor: pointer; }
+    .poke-record::before { content: ""; position: absolute; width: 24px; height: 12px; left: 14px; top: 19px; border: 3px solid #222; border-radius: 10px; }
+    .poke-record::after { content: ""; position: absolute; width: 5px; height: 5px; right: 12px; top: 24px; border-radius: 50%; background: #222; }
+    .poke-drawer-layer, .poke-overflow, .poke-selection, .poke-detail, .poke-settings-screen { display: none; position: absolute; background: #f7f7f2; }
+    .poke-drawer-layer { z-index: 9; inset: 34px 0 0; }
+    .poke-drawer-layer.open { display: block; }
+    .poke-drawer { width: 84%; height: 100%; display: flex; flex-direction: column; border-right: 3px solid #222; background: #f7f7f2; }
+    .poke-drawer-head { min-height: 74px; padding: 14px; border-bottom: 2px solid #222; }
+    .poke-drawer-head strong { display: block; font-size: 21px; }
+    .poke-drawer-head span { display: block; margin-top: 5px; font-size: 13px; }
+    .poke-drawer-scroll { flex: 1; overflow: auto; }
+    .poke-drawer .drawer-section-title { color: #333; }
+    .poke-drawer .drawer-row { min-height: 48px; border-bottom: 1px solid #777; font-size: 15px; }
+    .poke-drawer .drawer-row.active { color: white; background: #222; }
+    .poke-drawer-foot { display: grid; grid-template-columns: 1fr 1fr; border-top: 2px solid #222; }
+    .poke-drawer-foot button { min-height: 54px; border: 0; border-right: 1px solid #333; background: #eee; font-weight: 700; }
+    .poke-overflow { z-index: 8; top: 104px; right: 10px; width: 255px; border: 2px solid #222; }
+    .poke-overflow.open { display: block; }
+    .poke-overflow .context-menu-row { min-height: 50px; border-color: #666; background: #f7f7f2; font-weight: 650; }
+    .poke-selection { z-index: 10; inset: 34px 0 0; }
+    .poke-selection.open { display: flex; flex-direction: column; }
+    .poke-selection-head { display: flex; align-items: center; min-height: 64px; padding: 0 14px; border-bottom: 2px solid #222; }
+    .poke-selection-head strong { flex: 1; font-size: 19px; }
+    .poke-selection .poke-list { flex: 1; height: auto; padding: 0 13px; }
+    .poke-batch-actions { display: grid; grid-template-columns: repeat(5,1fr); border-top: 2px solid #222; }
+    .poke-batch-actions button { min-height: 54px; border: 0; border-right: 1px solid #555; background: #eee; font-size: 13px; font-weight: 700; }
+    .poke-batch-actions button:last-child { border-right: 0; }
+    .poke-detail, .poke-settings-screen { z-index: 11; inset: 34px 0 0; overflow: auto; padding: 13px 15px 30px; }
+    .poke-detail.open, .poke-settings-screen.open { display: block; }
+    .poke-back { min-height: 44px; padding: 0 11px; border: 1px solid #333; border-radius: 6px; background: #eee; font-weight: 650; }
+    .poke-detail h2 { margin: 17px 0 7px; font-size: 24px; line-height: 1.35; }
+    .poke-player { display: grid; grid-template-columns: 120px 1fr; gap: 10px; margin-top: 18px; }
+    .poke-player button { min-height: 48px; border: 2px solid #222; border-radius: 6px; background: #eee; font-weight: 650; }
+    .poke-wave { display: flex; align-items: center; justify-content: space-around; border: 1px solid #555; }
+    .poke-wave i { width: 8px; background: #333; }
+    .poke-wave i:nth-child(odd){height:8px}.poke-wave i:nth-child(even){height:20px}
+    .poke-detail section { margin-top: 24px; }
+    .poke-detail h3 { margin: 0 0 8px; font-size: 18px; }
+    .poke-detail p { margin: 0; font-size: 16px; line-height: 1.7; }
+    .poke-versions { width: 100%; min-height: 48px; margin-top: 22px; border: 1px solid #444; border-radius: 6px; background: #eee; font-weight: 650; text-align: left; padding: 0 12px; }
+    .poke-error { display: none; margin: 13px 0 4px; padding: 12px; border: 2px solid #333; }
+    .poke-error.show { display: block; }
+    .poke-error strong { display: block; }
+    .poke-error p { margin: 5px 0 10px; font-size: 13px; line-height: 1.5; }
+    .poke-error button { min-height: 40px; border: 1px solid #222; border-radius: 6px; background: #ddd; font-weight: 650; }
+    .poke-section-title { margin: 18px 0 5px; padding-bottom: 6px; border-bottom: 2px solid #333; font-size: 15px; font-weight: 700; }
+    .poke-setting-row { width: 100%; min-height: 54px; display: flex; align-items: center; padding: 0 2px; border: 0; border-bottom: 1px solid #777; background: transparent; text-align: left; font-size: 16px; }
+    .poke-setting-row span:first-child { flex: 1; }
+
+    @media (max-width: 980px) {
+      .prototype-bar { grid-template-columns: 1fr; gap: 9px; padding: 12px 14px; position: relative; }
+      .switcher, .scenario-switcher { width: 100%; }
+      .switcher button, .scenario-switcher button { flex: 1; padding: 0 6px; }
+      .canvas { padding: 22px 10px 40px; }
+      .stage-note { align-items: start; flex-direction: column; padding: 0 6px; }
+      .mac-shell { height: 720px; overflow: auto; }
+      .mac-titlebar { min-width: 980px; }
+      .mac-grid { min-width: 980px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <header class="prototype-bar">
+    <div class="brandline">
+      <span class="brandmark" aria-hidden="true"></span>
+      <div><strong>PokeCapsule · 三端交互原型</strong><small>模拟数据，仅用于对齐信息架构</small></div>
+    </div>
+    <nav class="switcher" aria-label="平台">
+      <button class="active" data-platform="mac">Mac</button>
+      <button data-platform="android">安卓手机</button>
+      <button data-platform="poke">Poke3</button>
+    </nav>
+    <nav class="scenario-switcher" aria-label="场景">
+      <button class="active" data-scenario="normal">日常</button>
+      <button data-scenario="batch">批量</button>
+      <button data-scenario="issue">异常</button>
+    </nav>
+  </header>
+
+  <main class="canvas">
+    <div class="stage-note">
+      <div><h1 id="stage-title">Mac：资料库在左侧完整展开</h1><p id="stage-copy">收件箱状态、资料库、目录、标签和回收站各归其位；设备是工作上下文，设置固定在左下角，批量工具只在选择后出现。</p></div>
+      <div class="legend">可点：平台、场景、左上导航、右上菜单、胶囊；胶囊可长按</div>
+    </div>
+
+    <section class="platform active" id="platform-mac" aria-label="Mac 原型">
+      <div class="mac-shell">
+        <div class="mac-titlebar">
+          <div class="traffic"><i></i><i></i><i></i></div>
+          <div class="mac-title">PokeCapsule</div>
+          <div class="mac-tools"><button class="text-button" title="同步当前设备">↻ 同步</button><button class="text-button" id="mac-select">选择</button></div>
+        </div>
+        <div class="mac-grid">
+          <aside class="mac-sidebar">
+            <button class="device-select" id="device-select"><span class="device-glyph">▣</span><span><strong id="device-name">Poke3</strong><small id="device-state">已连接 · 刚刚同步</small></span><span>⌄</span></button>
+            <div class="device-menu" id="device-menu">
+              <button class="device-option" data-device="Poke3" data-state="已连接 · 刚刚同步">▣ Poke3　<small>USB 已连接</small></button>
+              <button class="device-option" data-device="Vivo X Fold3" data-state="离线 · 3 项等待同步">▯ Vivo X Fold3　<small>本地镜像</small></button>
+              <button class="device-option" data-device="全部设备" data-state="合并浏览 · 不可批量移动">▦ 全部设备　<small>只读汇总</small></button>
+            </div>
+            <div class="nav-section">
+              <div class="nav-section-title">收件箱</div>
+              <button class="nav-item active" data-mac-title="收件箱" data-mac-count="12" data-mac-scope="inbox"><span class="icon">▰</span>全部新胶囊<span class="count">12</span></button>
+              <button class="nav-item subtle" data-mac-title="待转写" data-mac-count="1" data-mac-scope="inbox"><span class="icon">◷</span>待转写<span class="count">1</span></button>
+              <button class="nav-item subtle" data-mac-title="转写失败" data-mac-count="1" data-mac-scope="inbox"><span class="icon">!</span>转写失败<span class="count">1</span></button>
+            </div>
+            <div class="nav-section">
+              <div class="nav-section-title">资料库</div>
+              <button class="nav-item" data-mac-title="全部胶囊" data-mac-count="48" data-mac-scope="library"><span class="icon">☷</span>全部胶囊<span class="count">48</span></button>
+              <button class="nav-item" data-mac-title="收藏" data-mac-count="7" data-mac-scope="library"><span class="icon">☆</span>收藏<span class="count">7</span></button>
+            </div>
+            <div class="nav-section">
+              <div class="nav-section-title"><span>目录</span><button class="text-button" title="新建目录">＋</button></div>
+              <button class="nav-item" data-mac-title="工作" data-mac-count="12" data-mac-scope="library"><span class="icon">⌑</span>工作<span class="count">12</span></button>
+              <button class="nav-item subtle" data-mac-title="Foster 提案" data-mac-count="5" data-mac-scope="library"><span class="icon">⌙</span>　Foster 提案<span class="count">5</span></button>
+              <button class="nav-item" data-mac-title="生活" data-mac-count="8" data-mac-scope="library"><span class="icon">⌑</span>生活<span class="count">8</span></button>
+              <button class="nav-item" data-mac-title="阅读笔记" data-mac-count="6" data-mac-scope="library"><span class="icon">⌑</span>阅读笔记<span class="count">6</span></button>
+            </div>
+            <div class="nav-section">
+              <div class="nav-section-title">标签</div>
+              <button class="nav-item" data-mac-title="#待确认" data-mac-count="3" data-mac-scope="library"><span class="icon">#</span>待确认<span class="count">3</span></button>
+              <button class="nav-item" data-mac-title="#灵感" data-mac-count="9" data-mac-scope="library"><span class="icon">#</span>灵感<span class="count">9</span></button>
+              <button class="nav-item" data-mac-title="#产品" data-mac-count="4" data-mac-scope="library"><span class="icon">#</span>产品<span class="count">4</span></button>
+            </div>
+            <div class="nav-section"><button class="nav-item" data-mac-title="回收站" data-mac-count="4" data-mac-scope="trash"><span class="icon">♲</span>回收站<span class="count">4</span></button></div>
+            <div class="mac-settings"><button class="nav-item" data-mac-title="设置" data-mac-count=""><span class="icon">⚙</span>设置</button></div>
+          </aside>
+
+          <section class="mac-list-panel">
+            <div class="list-head">
+              <div class="list-title-row"><h2><span id="mac-list-title">收件箱</span> <span class="meta" id="mac-list-count">12</span></h2><button class="text-button">最新在前⌄</button></div>
+              <div class="searchbox"><input aria-label="搜索" placeholder="搜索文字、标签或目录" /></div>
+              <div class="filterline" id="mac-filterline"><button class="text-button active">全部</button><button class="text-button">待转写 1</button><button class="text-button">转写失败 1</button></div>
+            </div>
+            <div class="capsule-list mac-capsules">
+              <button class="capsule-row active"><strong>把安卓和 Poke3 的入口统一成同一种心智模型。</strong><span class="row-meta"><span>今天 22:03</span><span>0:20</span><span>收件箱</span><span class="tag">#产品</span></span></button>
+              <button class="capsule-row"><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class="row-meta"><span>今天 20:18</span><span>0:08</span><span>收件箱</span><span class="tag">#工作</span></span></button>
+              <button class="capsule-row"><strong>保护套开孔以后，再测试一次 Poke3 的麦克风。</strong><span class="row-meta"><span>今天 19:47</span><span>0:10</span><span>收件箱</span></span></button>
+              <button class="capsule-row"><strong>录音已经保留，可以重新提交转写。</strong><span class="row-meta"><span>今天 19:44</span><span>1:00</span><span class="warning">转写失败</span></span></button>
+              <button class="capsule-row"><strong>周五前把商务提案中的股权安排盘清楚。</strong><span class="row-meta"><span>昨天 16:12</span><span>0:26</span><span>工作 / Foster 提案</span></span></button>
+              <button class="capsule-row"><strong>做一个更适合漫画阅读的书架封面视图。</strong><span class="row-meta"><span>昨天 09:30</span><span>0:17</span><span>阅读笔记</span><span class="tag">#灵感</span></span></button>
+            </div>
+            <div class="batch-bar" id="mac-batch"><strong>已选择 3 个胶囊</strong><button class="soft-button">移动</button><button class="soft-button">加标签</button><button class="soft-button">导出</button><button class="soft-button">删除</button></div>
+          </section>
+
+          <article class="mac-detail">
+            <div class="offline-banner" id="mac-offline">Vivo X Fold3 当前离线。你仍可编辑和整理；3 项操作会在设备重连后按顺序同步。</div>
+            <div class="detail-top">
+              <div><h2>把安卓和 Poke3 的入口统一成同一种心智模型。</h2><div class="detail-meta"><span>今天 22:03</span><span>20 秒</span><span>收件箱</span><span class="status">已转写</span></div></div>
+              <div class="detail-actions"><button class="soft-button">☆ 收藏</button><button class="soft-button" id="mac-organize">整理</button><button class="text-button">•••</button></div>
+            </div>
+            <div class="player"><button class="play-circle" aria-label="播放">▶</button><div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="meta">0:00 / 0:20</span></div>
+            <section class="text-section"><div class="section-heading"><h3>最终文字</h3><button class="text-button">编辑</button></div><p class="final-copy">安卓手机负责快速捕捉，Poke3 负责安静记录，Mac 负责集中整理。三端都从收件箱开始，目录和标签只在需要整理时出现，用户不用先理解文件结构。</p></section>
+            <div class="organize-line" id="mac-organize-line"><span class="label">整理到</span><button class="soft-button">收件箱⌄</button><span class="mini-tag">#产品</span><button class="text-button">＋ 标签</button></div>
+            <details class="versions"><summary>文字版本与原始录音</summary><div class="version-block"><small>原始转写 · 腾讯</small><p>安卓手机负责快速捕捉，Poke3 负责安静记录，Mac 负责集中整理……</p></div><div class="version-block"><small>模型校对 · 尚未运行</small><p>需要时再点击“DeepSeek 校对”，不会自动消耗接口。</p></div></details>
+          </article>
+          <section class="mac-settings-panel" id="mac-settings-panel">
+            <h2>设置</h2><p>PokeCapsule 的行为、连接和数据管理。</p>
+            <div class="mac-settings-columns">
+              <section class="mac-settings-block"><h3>录音</h3><button class="setting-row"><span class="row-main"><strong>录音与权限</strong><small>麦克风、最长录音时间</small></span><span>›</span></button></section>
+              <section class="mac-settings-block"><h3>转写</h3><button class="setting-row"><span class="row-main"><strong>自动转写</strong><small>设备打开应用并联网后运行</small></span><span>›</span></button><button class="setting-row"><span class="row-main"><strong>语音与校对服务</strong><small>腾讯转写、DeepSeek 手动校对</small></span><span>›</span></button></section>
+              <section class="mac-settings-block"><h3>与电脑连接</h3><button class="setting-row"><span class="row-main"><strong>设备与同步</strong><small>USB、设备名称、离线操作队列</small></span><span>›</span></button></section>
+              <section class="mac-settings-block"><h3>数据与恢复</h3><button class="setting-row"><span class="row-main"><strong>存储与备份</strong><small>导入、导出、空间和恢复</small></span><span>›</span></button><button class="setting-row"><span class="row-main"><strong>高级</strong><small>诊断、日志和版本</small></span><span>›</span></button></section>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="platform" id="platform-android" aria-label="安卓手机原型">
+      <div class="phone-wrap"><div class="phone">
+        <div class="phone-status"><span>22:58</span><span>5G　58%</span></div>
+        <div class="phone-page">
+          <header class="phone-appbar"><button class="mobile-menu-button" id="phone-menu" aria-label="打开导航">☰</button><h2 id="phone-heading">收件箱</h2><button class="mobile-menu-button" id="phone-overflow-button" aria-label="当前清单菜单">⋮</button></header>
+          <div class="phone-contextline"><span>Vivo X Fold3</span><span class="context-count" id="phone-context">12 个胶囊</span></div>
+          <main class="phone-content" id="phone-list-content">
+            <div class="status-strip" id="phone-status-strip"><span>◷</span><span>1 条待转写，1 条转写失败</span><strong>查看</strong></div>
+            <div class="day-label">今天</div>
+            <button class="capsule-row phone-open-detail"><strong>把安卓和 Poke3 的入口统一成同一种心智模型。</strong><span class="row-meta"><span>22:03</span><span>0:20</span><span class="tag">#产品</span></span></button>
+            <button class="capsule-row phone-open-detail"><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class="row-meta"><span>20:18</span><span>0:08</span><span>已转写</span></span></button>
+            <button class="capsule-row phone-open-detail"><strong>保护套开孔以后，再测试一次 Poke3 的麦克风。</strong><span class="row-meta"><span>19:47</span><span>0:10</span><span>收件箱</span></span></button>
+            <button class="capsule-row phone-open-detail"><strong>录音已经保留，可以重新提交转写。</strong><span class="row-meta"><span>19:44</span><span>1:00</span><span class="warning">转写失败</span></span></button>
+            <div class="day-label">昨天</div>
+            <button class="capsule-row phone-open-detail"><strong>周五前把商务提案中的股权安排盘清楚。</strong><span class="row-meta"><span>16:12</span><span>0:26</span><span>工作 / Foster 提案</span></span></button>
+          </main>
+          <button class="record-fab" aria-label="开始录音" title="开始录音"></button>
+        </div>
+
+        <section class="phone-drawer-layer" id="phone-drawer-layer" aria-label="胶囊导航">
+          <aside class="phone-drawer" id="phone-drawer">
+            <div class="phone-drawer-head"><strong>PokeCapsule</strong><span>Vivo X Fold3 · 本机资料</span></div>
+            <div class="phone-drawer-scroll">
+              <div class="drawer-section-title">胶囊</div>
+              <button class="drawer-row active" data-phone-scope="收件箱" data-count="12"><span>▰</span>收件箱<span class="count">12</span></button>
+              <button class="drawer-row" data-phone-scope="全部胶囊" data-count="48"><span>☷</span>全部胶囊<span class="count">48</span></button>
+              <button class="drawer-row" data-phone-scope="收藏" data-count="7"><span>☆</span>收藏<span class="count">7</span></button>
+              <button class="drawer-row" data-phone-scope="待转写" data-count="1"><span>◷</span>待转写<span class="count">1</span></button>
+              <button class="drawer-row" data-phone-scope="转写失败" data-count="1"><span>!</span>转写失败<span class="count">1</span></button>
+              <div class="drawer-divider"></div>
+              <div class="drawer-section-title">目录</div>
+              <button class="drawer-row" data-phone-scope="工作" data-count="12"><span>□</span>工作<span class="count">12</span></button>
+              <button class="drawer-row child" data-phone-scope="Foster 提案" data-count="5">Foster 提案<span class="count">5</span></button>
+              <button class="drawer-row" data-phone-scope="生活" data-count="8"><span>□</span>生活<span class="count">8</span></button>
+              <button class="drawer-row" data-phone-scope="阅读笔记" data-count="6"><span>□</span>阅读笔记<span class="count">6</span></button>
+              <div class="drawer-section-title">标签</div>
+              <button class="drawer-row" data-phone-scope="#灵感" data-count="9"><span>#</span>灵感<span class="count">9</span></button>
+              <button class="drawer-row" data-phone-scope="#待确认" data-count="3"><span>#</span>待确认<span class="count">3</span></button>
+              <button class="drawer-row" data-phone-scope="全部标签" data-count="">全部标签<span class="count">›</span></button>
+              <div class="drawer-divider"></div>
+              <button class="drawer-row" data-phone-scope="回收站" data-count="4"><span>♲</span>回收站<span class="count">4</span></button>
+            </div>
+            <div class="phone-drawer-foot"><button>＋ 新建目录</button><button id="phone-open-settings">⚙ 设置</button></div>
+          </aside>
+        </section>
+
+        <section class="phone-overflow" id="phone-overflow" aria-label="当前清单菜单">
+          <button class="context-menu-row"><span>⌕</span>搜索当前清单</button>
+          <button class="context-menu-row"><span>⇅</span>排序：最新在前</button>
+          <button class="context-menu-row"><span>≡</span>筛选状态</button>
+          <button class="context-menu-row" id="phone-select"><span>✓</span>批量选择</button>
+        </section>
+
+        <section class="phone-settings-screen" id="phone-settings-screen">
+          <header class="phone-appbar"><button class="phone-back" id="phone-settings-back">‹</button><h2>设置</h2><span></span></header>
+          <div class="phone-settings-scroll">
+            <div class="settings-title">录音</div><button class="setting-row"><span class="row-main"><strong>录音与权限</strong><small>麦克风、最长 60 秒</small></span><span>›</span></button>
+            <div class="settings-title">转写</div><button class="setting-row"><span class="row-main"><strong>自动转写</strong><small>应用打开并联网后运行</small></span><span>›</span></button><button class="setting-row"><span class="row-main"><strong>语音服务</strong><small>腾讯一句话识别</small></span><span>›</span></button>
+            <div class="settings-title">连接</div><button class="setting-row"><span class="row-main"><strong>与电脑连接</strong><small>USB 管理、设备名称、待同步操作</small></span><span>›</span></button>
+            <div class="settings-title">数据</div><button class="setting-row"><span class="row-main"><strong>存储与备份</strong><small>空间、导出和恢复</small></span><span>›</span></button><button class="setting-row"><span class="row-main"><strong>诊断信息</strong><small>日志、版本和故障排查</small></span><span>›</span></button>
+          </div>
+        </section>
+
+        <section class="phone-detail" id="phone-detail">
+          <header class="phone-appbar"><button class="phone-back" id="phone-back">‹</button><h2 style="font-size:18px">胶囊</h2><button class="circle-button" id="phone-more">•••</button></header>
+          <div class="phone-detail-scroll">
+            <h2>把安卓和 Poke3 的入口统一成同一种心智模型。</h2><div class="detail-meta"><span>今天 22:03</span><span>20 秒</span><span>收件箱</span></div>
+            <div class="player"><button class="play-circle">▶</button><div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="meta">0:20</span></div>
+            <section class="text-section"><div class="section-heading"><h3>最终文字</h3><button class="text-button">编辑</button></div><p class="final-copy">安卓手机负责快速捕捉，Poke3 负责安静记录，Mac 负责集中整理。三端都从收件箱开始，目录和标签只在需要整理时出现。</p></section>
+            <div class="organize-line"><span class="label">收件箱</span><span class="mini-tag">#产品</span><button class="text-button" id="phone-organize-open">整理</button></div>
+            <details class="versions"><summary>查看原始转写与校对版本</summary><div class="version-block"><small>原始转写</small><p>安卓手机负责快速捕捉，Poke3 负责安静记录……</p></div></details>
+          </div>
+        </section>
+        <section class="phone-organize" id="phone-organize"><div class="sheet"><h3>整理胶囊</h3><div class="sheet-row"><span>移动到目录</span><strong>收件箱 ›</strong></div><div class="sheet-row"><span>标签</span><strong>#产品 ›</strong></div><div class="sheet-row"><span>收藏</span><strong>未收藏 ›</strong></div><div style="display:flex;gap:8px;margin-top:18px"><button class="soft-button" id="phone-sheet-close" style="flex:1">取消</button><button class="primary-button" style="flex:1">完成</button></div></div></section>
+        <section class="phone-batch" id="phone-batch"><div class="batch-head"><button class="text-button" id="phone-batch-close">取消</button><strong>已选择 3 个</strong><button class="text-button">全选</button></div><div class="phone-list"><button class="capsule-row selected"><strong>把安卓和 Poke3 的入口统一成同一种心智模型。</strong><span class="row-meta"><span>22:03</span><span>0:20</span></span></button><button class="capsule-row selected"><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class="row-meta"><span>20:18</span><span>0:08</span></span></button><button class="capsule-row selected"><strong>保护套开孔以后，再测试一次 Poke3 的麦克风。</strong><span class="row-meta"><span>19:47</span><span>0:10</span></span></button></div><div class="batch-actions-grid"><button>移动</button><button>标签</button><button>收藏</button><button>复制</button><button>删除</button></div></section>
+      </div></div>
+    </section>
+
+    <section class="platform" id="platform-poke" aria-label="Poke3 原型">
+      <div class="poke-wrap"><div class="poke-device"><div class="poke-screen">
+        <div class="poke-status"><span>下午 10:58</span><span>Wi‑Fi　97%</span></div>
+        <header class="poke-header"><button id="poke-menu" aria-label="打开导航">☰</button><div class="poke-heading"><h2 id="poke-heading">收件箱</h2><div class="meta" id="poke-context">12 个胶囊</div></div><button id="poke-overflow-button" aria-label="当前清单菜单">⋮</button></header>
+        <main class="poke-main" id="poke-list-content">
+          <div class="poke-error" id="poke-error"><strong>有 1 条录音转写失败</strong><p>原始录音已经保留。可以重新提交转写。</p><button>查看并重试</button></div>
+          <div class="poke-list">
+            <button class="capsule-row poke-open-detail"><strong>把安卓和 Poke3 的入口统一成同一种心智模型。</strong><span class="row-meta"><span>今天 22:03</span><span>20秒</span><span>#产品</span></span></button>
+            <button class="capsule-row poke-open-detail"><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class="row-meta"><span>今天 20:18</span><span>8秒</span><span>已转写</span></span></button>
+            <button class="capsule-row poke-open-detail"><strong>保护套开孔以后，再测试一次 Poke3 的麦克风。</strong><span class="row-meta"><span>今天 19:47</span><span>10秒</span></span></button>
+            <button class="capsule-row poke-open-detail"><strong>录音已经保留，可以重新提交转写。</strong><span class="row-meta"><span>今天 19:44</span><span>60秒</span><span>转写失败</span></span></button>
+            <button class="capsule-row poke-open-detail"><strong>周五前把商务提案中的股权安排盘清楚。</strong><span class="row-meta"><span>昨天 16:12</span><span>26秒</span><span>工作</span></span></button>
+          </div>
+        </main>
+        <button class="poke-record" aria-label="录音"></button>
+
+        <section class="poke-drawer-layer" id="poke-drawer-layer" aria-label="胶囊导航">
+          <aside class="poke-drawer" id="poke-drawer">
+            <div class="poke-drawer-head"><strong>PokeCapsule</strong><span>Poke3 · 本机资料</span></div>
+            <div class="poke-drawer-scroll">
+              <div class="drawer-section-title">胶囊</div>
+              <button class="drawer-row active" data-poke-scope="收件箱" data-count="12"><span>■</span>收件箱<span class="count">12</span></button>
+              <button class="drawer-row" data-poke-scope="全部胶囊" data-count="48"><span>☷</span>全部胶囊<span class="count">48</span></button>
+              <button class="drawer-row" data-poke-scope="收藏" data-count="7"><span>☆</span>收藏<span class="count">7</span></button>
+              <button class="drawer-row" data-poke-scope="待转写" data-count="1"><span>◷</span>待转写<span class="count">1</span></button>
+              <button class="drawer-row" data-poke-scope="转写失败" data-count="1"><span>!</span>转写失败<span class="count">1</span></button>
+              <div class="drawer-section-title">目录</div>
+              <button class="drawer-row" data-poke-scope="工作" data-count="12"><span>□</span>工作<span class="count">12</span></button>
+              <button class="drawer-row child" data-poke-scope="Foster 提案" data-count="5">Foster 提案<span class="count">5</span></button>
+              <button class="drawer-row" data-poke-scope="生活" data-count="8"><span>□</span>生活<span class="count">8</span></button>
+              <button class="drawer-row" data-poke-scope="阅读笔记" data-count="6"><span>□</span>阅读笔记<span class="count">6</span></button>
+              <div class="drawer-section-title">标签</div>
+              <button class="drawer-row" data-poke-scope="#灵感" data-count="9"><span>#</span>灵感<span class="count">9</span></button>
+              <button class="drawer-row" data-poke-scope="#待确认" data-count="3"><span>#</span>待确认<span class="count">3</span></button>
+              <button class="drawer-row" data-poke-scope="全部标签" data-count="">全部标签<span class="count">›</span></button>
+              <button class="drawer-row" data-poke-scope="回收站" data-count="4"><span>♲</span>回收站<span class="count">4</span></button>
+            </div>
+            <div class="poke-drawer-foot"><button>＋ 新建目录</button><button id="poke-open-settings">设置</button></div>
+          </aside>
+        </section>
+
+        <section class="poke-overflow" id="poke-overflow" aria-label="当前清单菜单">
+          <button class="context-menu-row"><span>⌕</span>搜索当前清单</button>
+          <button class="context-menu-row"><span>⇅</span>排序：最新在前</button>
+          <button class="context-menu-row"><span>≡</span>筛选状态</button>
+          <button class="context-menu-row" id="poke-select"><span>✓</span>批量选择</button>
+        </section>
+
+        <section class="poke-settings-screen" id="poke-settings-screen">
+          <button class="poke-back" id="poke-settings-back">‹ 返回</button><h2>设置</h2>
+          <div class="poke-section-title">录音</div><button class="poke-setting-row"><span>录音与权限</span><span>›</span></button>
+          <div class="poke-section-title">转写</div><button class="poke-setting-row"><span>自动转写</span><span>应用打开且联网　›</span></button><button class="poke-setting-row"><span>语音服务</span><span>腾讯　›</span></button>
+          <div class="poke-section-title">连接</div><button class="poke-setting-row"><span>与电脑连接</span><span>USB　›</span></button>
+          <div class="poke-section-title">数据</div><button class="poke-setting-row"><span>存储与备份</span><span>›</span></button><button class="poke-setting-row"><span>诊断信息</span><span>›</span></button>
+        </section>
+
+        <section class="poke-selection" id="poke-selection"><div class="poke-selection-head"><strong>已选择 3 个</strong><button class="poke-back" id="poke-selection-close">取消</button></div><div class="poke-list"><button class="capsule-row selected"><strong>把安卓和 Poke3 的入口统一成同一种心智模型。</strong><span class="row-meta"><span>今天 22:03</span><span>20秒</span></span></button><button class="capsule-row selected"><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class="row-meta"><span>今天 20:18</span><span>8秒</span></span></button><button class="capsule-row selected"><strong>保护套开孔以后，再测试一次 Poke3 的麦克风。</strong><span class="row-meta"><span>今天 19:47</span><span>10秒</span></span></button></div><div class="poke-batch-actions"><button>移动</button><button>标签</button><button>收藏</button><button>复制</button><button>删除</button></div></section>
+        <article class="poke-detail" id="poke-detail"><button class="poke-back" id="poke-back">‹ 返回收件箱</button><h2>把安卓和 Poke3 的入口统一成同一种心智模型。</h2><div class="meta">今天 22:03 · 20秒 · 收件箱 · 已转写</div><div class="poke-player"><button>播放录音</button><div class="poke-wave"><i></i><i></i><i></i><i></i><i></i><i></i></div></div><section><h3>最终文字</h3><p>安卓手机负责快速捕捉，Poke3 负责安静记录，Mac 负责集中整理。三端都从收件箱开始，目录和标签只在需要整理时出现。</p></section><button class="poke-versions">整理：收件箱　#产品　›</button><button class="poke-versions">文字版本与原始录音　›</button></article>
+      </div></div></div>
+    </section>
+  </main>
+
+  <script type="text/plain" id="legacy-prototype-script">
+    const descriptions = {
+      mac: ["Mac：资料库在左侧完整展开", "收件箱状态、资料库、目录、标签和回收站各归其位；设备是工作上下文，设置固定在左下角，批量工具只在选择后出现。"],
+      android: ["安卓：一张主清单，操作按范围归位", "左上角切换收件箱、目录和标签；右上角只管理当前清单；长按进入批量模式；设置固定在侧边栏底部。"],
+      poke: ["Poke3：同一语义，使用墨水屏交互", "侧边导航与菜单瞬时出现，取消底部页签、透明遮罩和连续动画；列表、录音和批量操作保持高对比。"]
+    };
+    let currentPlatform = "mac";
+    const $ = (q, root=document) => root.querySelector(q);
+    const $$ = (q, root=document) => [...root.querySelectorAll(q)];
+
+    $$("[data-platform]").forEach(button => button.addEventListener("click", () => {
+      currentPlatform = button.dataset.platform;
+      $$("[data-platform]").forEach(x => x.classList.toggle("active", x === button));
+      $$(".platform").forEach(x => x.classList.toggle("active", x.id === `platform-${currentPlatform}`));
+      $("#stage-title").textContent = descriptions[currentPlatform][0];
+      $("#stage-copy").textContent = descriptions[currentPlatform][1];
+      setScenario("normal");
+      if (currentPlatform === "android") setPhoneScope("收件箱", "12");
+      if (currentPlatform === "poke") setPokeScope("收件箱", "12");
+      if (currentPlatform === "mac") $("#mac-settings-panel").classList.remove("show");
+    }));
+
+    function closeTransient() {
+      $("#mac-batch").classList.remove("show");
+      $$(".mac-capsules .capsule-row").forEach((r, i) => r.classList.toggle("selected", false));
+      $("#phone-batch").classList.remove("open");
+      $("#phone-detail").classList.remove("open");
+      $("#phone-organize").classList.remove("open");
+      $("#phone-drawer-layer").classList.remove("open");
+      $("#phone-overflow").classList.remove("open");
+      $("#phone-settings-screen").classList.remove("open");
+      $("#poke-selection").classList.remove("open");
+      $("#poke-detail").classList.remove("open");
+      $("#poke-drawer-layer").classList.remove("open");
+      $("#poke-overflow").classList.remove("open");
+      $("#poke-settings-screen").classList.remove("open");
+      $("#poke-error").classList.remove("show");
+      $("#mac-offline").classList.remove("show");
+    }
+    function setScenario(scenario) {
+      $$("[data-scenario]").forEach(x => x.classList.toggle("active", x.dataset.scenario === scenario));
+      closeTransient();
+      if (scenario === "batch") {
+        if (currentPlatform === "mac") showMacBatch();
+        if (currentPlatform === "android") $("#phone-batch").classList.add("open");
+        if (currentPlatform === "poke") $("#poke-selection").classList.add("open");
+      }
+      if (scenario === "issue") {
+        if (currentPlatform === "mac") $("#mac-offline").classList.add("show");
+        if (currentPlatform === "android") { setPhoneScope("收件箱", "12"); $("#phone-status-strip").scrollIntoView({block:"center"}); }
+        if (currentPlatform === "poke") { setPokeScope("收件箱", "12"); $("#poke-error").classList.add("show"); }
+      }
+    }
+    $$("[data-scenario]").forEach(button => button.addEventListener("click", () => setScenario(button.dataset.scenario)));
+
+    $("#device-select").addEventListener("click", () => $("#device-menu").classList.toggle("open"));
+    $$(".device-option").forEach(button => button.addEventListener("click", event => {
+      event.stopPropagation();
+      $("#device-name").textContent = button.dataset.device;
+      $("#device-state").textContent = button.dataset.state;
+      $("#device-menu").classList.remove("open");
+      $("#mac-offline").classList.toggle("show", button.dataset.device === "Vivo X Fold3");
+    }));
+    const macOriginalRows = $$(".mac-capsules .capsule-row").map(row => row.innerHTML);
+    function renderMacCollection(scope, title) {
+      const rows = $$(".mac-capsules .capsule-row");
+      rows.forEach((row, index) => { row.innerHTML = macOriginalRows[index]; row.style.display = "block"; });
+      $("#mac-filterline").style.display = scope === "inbox" ? "flex" : "none";
+      $(".searchbox input").placeholder = scope === "inbox" ? "搜索文字、标签或目录" : `在“${title}”中搜索`;
+      if (scope === "trash") {
+        rows[0].innerHTML = "<strong>已删除：给 Poke3 做一个更安静的首页。</strong><span class='row-meta'><span>昨天删除</span><span>原位置：收件箱</span><span class='tag'>可恢复</span></span>";
+        rows[1].innerHTML = "<strong>已删除：漫画书架的封面视图草稿。</strong><span class='row-meta'><span>3 天前删除</span><span>原位置：阅读笔记</span><span class='tag'>可恢复</span></span>";
+        rows.slice(2).forEach(row => row.style.display = "none");
+      } else if (title === "Foster 提案") {
+        rows[0].innerHTML = "<strong>周五前把商务提案中的股权安排盘清楚。</strong><span class='row-meta'><span>昨天 16:12</span><span>0:26</span><span>工作 / Foster 提案</span></span>";
+        rows[1].innerHTML = "<strong>福斯特建筑事务所商务提案英文翻译。</strong><span class='row-meta'><span>今天 20:18</span><span>0:08</span><span>#工作</span></span>";
+        rows.slice(2).forEach(row => row.style.display = "none");
+      }
+    }
+    $$(".mac-sidebar .nav-item").forEach(button => button.addEventListener("click", () => {
+      $$(".mac-sidebar .nav-item").forEach(x => x.classList.remove("active"));
+      button.classList.add("active");
+      const isSettings = button.dataset.macTitle === "设置";
+      $("#mac-settings-panel").classList.toggle("show", isSettings);
+      if (!isSettings && button.dataset.macTitle) {
+        $("#mac-list-title").textContent = button.dataset.macTitle;
+        $("#mac-list-count").textContent = button.dataset.macCount || "";
+        renderMacCollection(button.dataset.macScope || "library", button.dataset.macTitle);
+      }
+    }));
+    $$(".mac-capsules .capsule-row").forEach(button => button.addEventListener("click", () => {
+      if ($("#mac-batch").classList.contains("show")) button.classList.toggle("selected");
+      else { $$(".mac-capsules .capsule-row").forEach(x => x.classList.remove("active")); button.classList.add("active"); }
+    }));
+    function showMacBatch() { $("#mac-batch").classList.add("show"); $$(".mac-capsules .capsule-row").slice(0,3).forEach(x => x.classList.add("selected")); }
+    $("#mac-select").addEventListener("click", () => { showMacBatch(); setScenario("batch"); });
+    $("#mac-organize").addEventListener("click", () => $("#mac-organize-line").scrollIntoView({behavior:"smooth",block:"center"}));
+
+    $$(".phone-open-detail").forEach(x => x.addEventListener("click", () => $("#phone-detail").classList.add("open")));
+    $("#phone-back").addEventListener("click", () => $("#phone-detail").classList.remove("open"));
+    $("#phone-select").addEventListener("click", () => { $("#phone-batch").classList.add("open"); setScenario("batch"); });
+    $("#phone-batch-close").addEventListener("click", () => { $("#phone-batch").classList.remove("open"); setScenario("normal"); });
+    $("#phone-more").addEventListener("click", () => $("#phone-organize").classList.add("open"));
+    $("#phone-organize-open").addEventListener("click", () => $("#phone-organize").classList.add("open"));
+    $("#phone-sheet-close").addEventListener("click", () => $("#phone-organize").classList.remove("open"));
+    function mobileCollectionHtml(name, poke) {
+      if (name === "回收站") {
+        return poke
+          ? "<button class='capsule-row'><strong>已删除：给 Poke3 做一个更安静的首页。</strong><span class='row-meta'><span>昨天删除</span><span>原位置：收件箱</span><span>恢复</span></span></button><button class='capsule-row'><strong>已删除：漫画书架的封面视图草稿。</strong><span class='row-meta'><span>3 天前删除</span><span>原位置：阅读笔记</span><span>恢复</span></span></button>"
+          : "<div class='capsule-row'><strong>已删除：给 Poke3 做一个更安静的首页。</strong><span class='row-meta'><span>昨天删除</span><span>原位置：收件箱</span></span><button class='restore-button'>恢复</button></div><div class='capsule-row'><strong>已删除：漫画书架的封面视图草稿。</strong><span class='row-meta'><span>3 天前删除</span><span>原位置：阅读笔记</span></span><button class='restore-button'>恢复</button></div>";
+      }
+      return "<button class='capsule-row collection-open-detail'><strong>周五前把商务提案中的股权安排盘清楚。</strong><span class='row-meta'><span>昨天 16:12</span><span>0:26</span><span>工作 / Foster 提案</span></span></button><button class='capsule-row collection-open-detail'><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class='row-meta'><span>今天 20:18</span><span>0:08</span><span>#工作</span></span></button>";
+    }
+    $$("[data-phone-collection]").forEach(button => button.addEventListener("click", () => {
+      const name = button.dataset.phoneCollection;
+      $("#phone-collection-title").textContent = name;
+      $("#phone-collection-breadcrumb").textContent = name === "回收站" ? "资料库 › 回收站" : `资料库 › ${name.startsWith("#") ? "标签 › " : "目录 › "}${name}`;
+      $("#phone-collection-items").innerHTML = mobileCollectionHtml(name, false);
+      $("#phone-collection").classList.add("open");
+    }));
+    $("#phone-collection-back").addEventListener("click", () => $("#phone-collection").classList.remove("open"));
+    $("#phone-collection-items").addEventListener("click", event => {
+      if (event.target.closest(".collection-open-detail")) $("#phone-detail").classList.add("open");
+    });
+    function setPhoneView(view) {
+      $("#phone-collection").classList.remove("open");
+      $$("[data-phone-nav]").forEach(x => x.classList.toggle("active", x.dataset.phoneNav === view));
+      $$("[data-phone-view]").forEach(x => x.classList.toggle("active", x.dataset.phoneView === view));
+      const labels = {inbox:"收件箱", library:"资料库", settings:"设置"};
+      const contexts = {inbox:"12 个新胶囊", library:"48 个胶囊", settings:"当前设备"};
+      $("#phone-heading").textContent = labels[view];
+      $("#phone-context").textContent = contexts[view];
+      $("#phone-select").style.visibility = view === "inbox" ? "visible" : "hidden";
+    }
+    $$("[data-phone-nav]").forEach(button => button.addEventListener("click", () => {
+      setPhoneView(button.dataset.phoneNav);
+    }));
+
+    $$(".poke-open-detail").forEach(x => x.addEventListener("click", () => $("#poke-detail").classList.add("open")));
+    $("#poke-back").addEventListener("click", () => $("#poke-detail").classList.remove("open"));
+    $("#poke-select").addEventListener("click", () => { $("#poke-selection").classList.add("open"); setScenario("batch"); });
+    $("#poke-selection-close").addEventListener("click", () => { $("#poke-selection").classList.remove("open"); setScenario("normal"); });
+    $$("[data-poke-collection]").forEach(button => button.addEventListener("click", () => {
+      const name = button.dataset.pokeCollection;
+      $("#poke-collection-title").textContent = name;
+      $("#poke-collection-breadcrumb").textContent = name === "回收站" ? "资料库 › 回收站" : `资料库 › ${name.startsWith("#") ? "标签 › " : "目录 › "}${name}`;
+      $("#poke-collection-items").innerHTML = mobileCollectionHtml(name, true);
+      $("#poke-collection").classList.add("open");
+    }));
+    $("#poke-collection-back").addEventListener("click", () => $("#poke-collection").classList.remove("open"));
+    $("#poke-collection-items").addEventListener("click", event => {
+      if (event.target.closest(".collection-open-detail")) $("#poke-detail").classList.add("open");
+    });
+    function setPokeView(view) {
+      $("#poke-collection").classList.remove("open");
+      $$("[data-poke-nav]").forEach(x => x.classList.toggle("active", x.dataset.pokeNav === view));
+      $$("[data-poke-view]").forEach(x => x.classList.toggle("active", x.dataset.pokeView === view));
+      const contexts = {inbox:"收件箱 · 12 个胶囊", library:"资料库 · 48 个胶囊", settings:"设置 · 当前设备"};
+      $(".poke-header .meta").textContent = contexts[view];
+      $("#poke-select").style.visibility = view === "inbox" ? "visible" : "hidden";
+    }
+    $$("[data-poke-nav]").forEach(button => button.addEventListener("click", () => setPokeView(button.dataset.pokeNav)));
+  </script>
+  <script>
+    const $ = (query, root = document) => root.querySelector(query);
+    const $$ = (query, root = document) => [...root.querySelectorAll(query)];
+    let currentPlatform = "mac";
+    const descriptions = {
+      mac: ["Mac：资料库在左侧完整展开", "设备、内容范围、胶囊列表和详情各有稳定位置；批量工具只在选中胶囊后出现。"],
+      android: ["安卓：一张主清单，操作按范围归位", "左上角切换收件箱、目录和标签；右上角管理当前清单；长按进入批量模式；设置固定在侧边栏底部。"],
+      poke: ["Poke3：同一语义，使用墨水屏交互", "侧边导航与菜单瞬时出现，取消底部页签、透明遮罩和连续动画；列表、录音和批量操作保持高对比。"]
+    };
+
+    const phoneInboxHtml = $("#phone-list-content").innerHTML;
+    const pokeInboxHtml = $("#poke-list-content").innerHTML;
+    const macOriginalRows = $$(".mac-capsules .capsule-row").map(row => row.innerHTML);
+
+    function closeTransient() {
+      $("#mac-batch").classList.remove("show");
+      $$(".mac-capsules .capsule-row").forEach(row => row.classList.remove("selected"));
+      ["phone-batch", "phone-detail", "phone-organize", "phone-drawer-layer", "phone-overflow", "phone-settings-screen",
+       "poke-selection", "poke-detail", "poke-drawer-layer", "poke-overflow", "poke-settings-screen"].forEach(id => $("#" + id)?.classList.remove("open"));
+      $("#poke-error").classList.remove("show");
+      $("#mac-offline").classList.remove("show");
+    }
+
+    function showMacBatch() {
+      $("#mac-batch").classList.add("show");
+      $$(".mac-capsules .capsule-row").slice(0, 3).forEach(row => row.classList.add("selected"));
+    }
+
+    function setScenario(scenario) {
+      $$("[data-scenario]").forEach(button => button.classList.toggle("active", button.dataset.scenario === scenario));
+      closeTransient();
+      if (scenario === "batch") {
+        if (currentPlatform === "mac") showMacBatch();
+        if (currentPlatform === "android") $("#phone-batch").classList.add("open");
+        if (currentPlatform === "poke") $("#poke-selection").classList.add("open");
+      }
+      if (scenario === "issue") {
+        if (currentPlatform === "mac") $("#mac-offline").classList.add("show");
+        if (currentPlatform === "android") setPhoneScope("收件箱", "12");
+        if (currentPlatform === "poke") { setPokeScope("收件箱", "12"); $("#poke-error").classList.add("show"); }
+      }
+    }
+
+    $$("[data-platform]").forEach(button => button.addEventListener("click", () => {
+      currentPlatform = button.dataset.platform;
+      $$("[data-platform]").forEach(item => item.classList.toggle("active", item === button));
+      $$(".platform").forEach(item => item.classList.toggle("active", item.id === `platform-${currentPlatform}`));
+      $("#stage-title").textContent = descriptions[currentPlatform][0];
+      $("#stage-copy").textContent = descriptions[currentPlatform][1];
+      setScenario("normal");
+      if (currentPlatform === "android") setPhoneScope("收件箱", "12");
+      if (currentPlatform === "poke") setPokeScope("收件箱", "12");
+      if (currentPlatform === "mac") $("#mac-settings-panel").classList.remove("show");
+    }));
+    $$("[data-scenario]").forEach(button => button.addEventListener("click", () => setScenario(button.dataset.scenario)));
+
+    $("#device-select").addEventListener("click", () => $("#device-menu").classList.toggle("open"));
+    $$(".device-option").forEach(button => button.addEventListener("click", event => {
+      event.stopPropagation();
+      $("#device-name").textContent = button.dataset.device;
+      $("#device-state").textContent = button.dataset.state;
+      $("#device-menu").classList.remove("open");
+      $("#mac-offline").classList.toggle("show", button.dataset.device === "Vivo X Fold3");
+    }));
+    function renderMacCollection(scope, title) {
+      const rows = $$(".mac-capsules .capsule-row");
+      rows.forEach((row, index) => { row.innerHTML = macOriginalRows[index]; row.style.display = "block"; });
+      $("#mac-filterline").style.display = scope === "inbox" ? "flex" : "none";
+      $(".searchbox input").placeholder = scope === "inbox" ? "搜索文字、标签或目录" : `在“${title}”中搜索`;
+      if (scope === "trash") {
+        rows[0].innerHTML = "<strong>给 Poke3 做一个更安静的首页。</strong><span class='row-meta'><span>昨天删除</span><span>原位置：收件箱</span><span class='tag'>可恢复</span></span>";
+        rows[1].innerHTML = "<strong>漫画书架的封面视图草稿。</strong><span class='row-meta'><span>3 天前删除</span><span>原位置：阅读笔记</span><span class='tag'>可恢复</span></span>";
+        rows.slice(2).forEach(row => row.style.display = "none");
+      } else if (title === "Foster 提案") {
+        rows[0].innerHTML = "<strong>周五前把商务提案中的股权安排盘清楚。</strong><span class='row-meta'><span>昨天 16:12</span><span>0:26</span><span>工作 / Foster 提案</span></span>";
+        rows[1].innerHTML = "<strong>福斯特建筑事务所商务提案英文翻译。</strong><span class='row-meta'><span>今天 20:18</span><span>0:08</span><span>#工作</span></span>";
+        rows.slice(2).forEach(row => row.style.display = "none");
+      }
+    }
+    $$(".mac-sidebar .nav-item").forEach(button => button.addEventListener("click", () => {
+      $$(".mac-sidebar .nav-item").forEach(item => item.classList.remove("active"));
+      button.classList.add("active");
+      const settings = button.dataset.macTitle === "设置";
+      $("#mac-settings-panel").classList.toggle("show", settings);
+      if (!settings && button.dataset.macTitle) {
+        $("#mac-list-title").textContent = button.dataset.macTitle;
+        $("#mac-list-count").textContent = button.dataset.macCount || "";
+        renderMacCollection(button.dataset.macScope || "library", button.dataset.macTitle);
+      }
+    }));
+    $$(".mac-capsules .capsule-row").forEach(button => button.addEventListener("click", () => {
+      if ($("#mac-batch").classList.contains("show")) button.classList.toggle("selected");
+      else { $$(".mac-capsules .capsule-row").forEach(item => item.classList.remove("active")); button.classList.add("active"); }
+    }));
+    $("#mac-select").addEventListener("click", () => { currentPlatform = "mac"; setScenario("batch"); });
+    $("#mac-organize").addEventListener("click", () => $("#mac-organize-line").scrollIntoView({behavior: "smooth", block: "center"}));
+
+    function scopedListHtml(name, poke) {
+      if (name === "回收站") return `<div class="day-label">最近删除</div><button class="capsule-row"><strong>给 Poke3 做一个更安静的首页。</strong><span class="row-meta"><span>昨天删除</span><span>原位置：收件箱</span><span>可恢复</span></span></button><button class="capsule-row"><strong>漫画书架的封面视图草稿。</strong><span class="row-meta"><span>3 天前删除</span><span>原位置：阅读笔记</span><span>可恢复</span></span></button>`;
+      if (name === "待转写") return `<button class="capsule-row"><strong>等待联网后自动转写。</strong><span class="row-meta"><span>今天 21:58</span><span>${poke ? "9秒" : "0:09"}</span><span>待转写</span></span></button>`;
+      if (name === "转写失败") return `<button class="capsule-row"><strong>录音已经保留，可以重新提交转写。</strong><span class="row-meta"><span>今天 19:44</span><span>${poke ? "60秒" : "1:00"}</span><span>转写失败</span></span></button>`;
+      if (name === "全部标签") return `<div class="day-label">标签</div><button class="capsule-row"><strong>#灵感</strong><span class="row-meta"><span>9 个胶囊</span></span></button><button class="capsule-row"><strong>#待确认</strong><span class="row-meta"><span>3 个胶囊</span></span></button><button class="capsule-row"><strong>#产品</strong><span class="row-meta"><span>4 个胶囊</span></span></button>`;
+      return `<button class="capsule-row mobile-open-detail"><strong>周五前把商务提案中的股权安排盘清楚。</strong><span class="row-meta"><span>昨天 16:12</span><span>${poke ? "26秒" : "0:26"}</span><span>工作 / Foster 提案</span></span></button><button class="capsule-row mobile-open-detail"><strong>福斯特建筑事务所商务提案英文翻译。</strong><span class="row-meta"><span>今天 20:18</span><span>${poke ? "8秒" : "0:08"}</span><span>#工作</span></span></button>`;
+    }
+    function setPhoneScope(name, count) {
+      $("#phone-heading").textContent = name;
+      $("#phone-context").textContent = count ? `${count} 个胶囊` : "";
+      $("#phone-list-content").innerHTML = name === "收件箱" ? phoneInboxHtml : scopedListHtml(name, false);
+      $$("[data-phone-scope]").forEach(item => item.classList.toggle("active", item.dataset.phoneScope === name));
+      $("#phone-drawer-layer").classList.remove("open");
+    }
+    $("#phone-menu").addEventListener("click", () => { $("#phone-overflow").classList.remove("open"); $("#phone-drawer-layer").classList.add("open"); });
+    $("#phone-drawer-layer").addEventListener("click", event => { if (event.target === $("#phone-drawer-layer")) $("#phone-drawer-layer").classList.remove("open"); });
+    $("#phone-drawer").addEventListener("click", event => event.stopPropagation());
+    $$("[data-phone-scope]").forEach(button => button.addEventListener("click", () => setPhoneScope(button.dataset.phoneScope, button.dataset.count)));
+    $("#phone-overflow-button").addEventListener("click", () => { $("#phone-drawer-layer").classList.remove("open"); $("#phone-overflow").classList.toggle("open"); });
+    $$("#phone-overflow .context-menu-row").forEach(button => button.addEventListener("click", () => $("#phone-overflow").classList.remove("open")));
+    $("#phone-open-settings").addEventListener("click", () => { $("#phone-drawer-layer").classList.remove("open"); $("#phone-settings-screen").classList.add("open"); });
+    $("#phone-settings-back").addEventListener("click", () => $("#phone-settings-screen").classList.remove("open"));
+    $("#phone-list-content").addEventListener("click", event => { if (event.target.closest(".phone-open-detail,.mobile-open-detail")) $("#phone-detail").classList.add("open"); });
+    $("#phone-back").addEventListener("click", () => $("#phone-detail").classList.remove("open"));
+    $("#phone-select").addEventListener("click", () => { currentPlatform = "android"; setScenario("batch"); });
+    $("#phone-batch-close").addEventListener("click", () => setScenario("normal"));
+    $("#phone-more").addEventListener("click", () => $("#phone-organize").classList.add("open"));
+    $("#phone-organize-open").addEventListener("click", () => $("#phone-organize").classList.add("open"));
+    $("#phone-sheet-close").addEventListener("click", () => $("#phone-organize").classList.remove("open"));
+
+    function setPokeScope(name, count) {
+      $("#poke-heading").textContent = name;
+      $("#poke-context").textContent = count ? `${count} 个胶囊` : "";
+      $("#poke-list-content").innerHTML = name === "收件箱" ? pokeInboxHtml : `<div class="poke-list">${scopedListHtml(name, true)}</div>`;
+      $$("[data-poke-scope]").forEach(item => item.classList.toggle("active", item.dataset.pokeScope === name));
+      $("#poke-drawer-layer").classList.remove("open");
+    }
+    $("#poke-menu").addEventListener("click", () => { $("#poke-overflow").classList.remove("open"); $("#poke-drawer-layer").classList.add("open"); });
+    $("#poke-drawer-layer").addEventListener("click", event => { if (event.target === $("#poke-drawer-layer")) $("#poke-drawer-layer").classList.remove("open"); });
+    $("#poke-drawer").addEventListener("click", event => event.stopPropagation());
+    $$("[data-poke-scope]").forEach(button => button.addEventListener("click", () => setPokeScope(button.dataset.pokeScope, button.dataset.count)));
+    $("#poke-overflow-button").addEventListener("click", () => { $("#poke-drawer-layer").classList.remove("open"); $("#poke-overflow").classList.toggle("open"); });
+    $$("#poke-overflow .context-menu-row").forEach(button => button.addEventListener("click", () => $("#poke-overflow").classList.remove("open")));
+    $("#poke-open-settings").addEventListener("click", () => { $("#poke-drawer-layer").classList.remove("open"); $("#poke-settings-screen").classList.add("open"); });
+    $("#poke-settings-back").addEventListener("click", () => $("#poke-settings-screen").classList.remove("open"));
+    $("#poke-list-content").addEventListener("click", event => { if (event.target.closest(".poke-open-detail,.mobile-open-detail")) $("#poke-detail").classList.add("open"); });
+    $("#poke-back").addEventListener("click", () => $("#poke-detail").classList.remove("open"));
+    $("#poke-select").addEventListener("click", () => { currentPlatform = "poke"; setScenario("batch"); });
+    $("#poke-selection-close").addEventListener("click", () => setScenario("normal"));
+
+    function enableLongPress(container, platform) {
+      let timer;
+      container.addEventListener("pointerdown", event => {
+        if (!event.target.closest(".capsule-row")) return;
+        timer = window.setTimeout(() => { currentPlatform = platform; setScenario("batch"); }, 520);
+      });
+      ["pointerup", "pointercancel", "pointerleave"].forEach(type => container.addEventListener(type, () => window.clearTimeout(timer)));
+      container.addEventListener("contextmenu", event => { if (event.target.closest(".capsule-row")) { event.preventDefault(); currentPlatform = platform; setScenario("batch"); } });
+    }
+    enableLongPress($("#phone-list-content"), "android");
+    enableLongPress($("#poke-list-content"), "poke");
+  </script>
+</body>
+</html>

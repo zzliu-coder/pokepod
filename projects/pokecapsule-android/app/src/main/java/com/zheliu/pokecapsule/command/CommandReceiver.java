@@ -114,6 +114,7 @@ public final class CommandReceiver extends BroadcastReceiver {
     private static void execute(
             Context context, PokePaths paths, CapsuleStore store, JSONObject command) throws Exception {
         String operation = command.getString("operation");
+        CommandOperation.fromWire(operation);
         List<String> ids = ids(command.optJSONArray("capsuleIds"));
         if (command.optInt("schemaVersion", 1) == 1
                 && !allowsLegacyReadOrSetup(operation)) {
@@ -258,7 +259,7 @@ public final class CommandReceiver extends BroadcastReceiver {
                 return;
             case "requeueTranscription":
                 requireIds(ids);
-                store.requeueFailedTranscriptions(ids);
+                store.requeueFailedTranscriptions(ids, expected);
                 return;
             default:
                 throw new Exception("未知命令: " + operation);
@@ -330,7 +331,7 @@ public final class CommandReceiver extends BroadcastReceiver {
         for (int index = 0; index < array.length(); index++) {
             String id = array.getString(index);
             if (!Ids.isUuid(id)) throw new Exception("无效胶囊 UUID");
-            result.add(id);
+            result.add(Ids.normalized(id));
         }
         return result;
     }
@@ -347,6 +348,7 @@ public final class CommandReceiver extends BroadcastReceiver {
                 || "favorite".equals(operation) || "setFavorite".equals(operation)
                 || "tag_add".equals(operation) || "addTags".equals(operation)
                 || "tag_remove".equals(operation) || "removeTags".equals(operation)
+                || "requeueTranscription".equals(operation)
                 || "rmdir".equals(operation) || "deleteFolderToInbox".equals(operation)
                 || "tag_rename".equals(operation)
                 || "renameTag".equals(operation) || "mergeTag".equals(operation)

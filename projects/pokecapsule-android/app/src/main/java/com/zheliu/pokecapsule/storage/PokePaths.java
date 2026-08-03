@@ -72,14 +72,13 @@ public final class PokePaths {
 
     private File findRecursive(File folder, String id, int depth) throws IOException {
         if (depth > 3 || folder.getName().startsWith(".")) return null;
-        File direct = new File(folder, id);
-        if (direct.isDirectory()) {
-            assertInsideRoot(direct);
-            return direct;
-        }
         File[] children = folder.listFiles(File::isDirectory);
         if (children == null) return null;
         for (File child : children) {
+            if (Ids.isUuid(child.getName()) && child.getName().equalsIgnoreCase(id)) {
+                assertInsideRoot(child);
+                return child;
+            }
             if (child.getName().startsWith(".") || Ids.isUuid(child.getName())) continue;
             File found = findRecursive(child, id, depth + 1);
             if (found != null) return found;

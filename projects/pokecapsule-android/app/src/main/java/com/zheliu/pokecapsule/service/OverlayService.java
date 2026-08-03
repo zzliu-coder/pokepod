@@ -50,15 +50,12 @@ public final class OverlayService extends Service {
         }
     };
 
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override public void onCreate() {
         super.onCreate();
         Notifications.ensureChannels(this);
-        registerReceiver(
-                stateReceiver,
+        InternalBroadcasts.register(this, stateReceiver,
                 new IntentFilter(RecordingService.ACTION_STATE),
-                "com.zheliu.pokecapsule.permission.INTERNAL",
-                null);
+                "com.zheliu.pokecapsule.permission.INTERNAL");
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {

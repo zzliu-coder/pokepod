@@ -7,7 +7,7 @@ import android.provider.Settings;
 import android.util.Log;
 
 import com.zheliu.pokecapsule.service.OverlayService;
-import com.zheliu.pokecapsule.service.DeviceRuntimeProfile;
+import com.zheliu.pokecapsule.service.DeviceCapabilities;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.DeviceIdentity;
 import com.zheliu.pokecapsule.storage.PokePaths;
@@ -24,7 +24,7 @@ public final class PokeCapsuleApp extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
-        boolean lowPowerReader = DeviceRuntimeProfile.isLowPowerReader();
+        boolean lowPowerReader = DeviceCapabilities.current().eink;
         boolean overlayEnabled = getSharedPreferences("overlay", MODE_PRIVATE)
                 .getBoolean("enabled", false);
         if (lowPowerReader && overlayEnabled && Settings.canDrawOverlays(this)) {

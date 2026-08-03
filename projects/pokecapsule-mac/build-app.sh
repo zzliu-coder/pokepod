@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=${0:A:h}
 cd "$SCRIPT_DIR"
 
-swift build -c release
+swift build -c release --disable-sandbox --scratch-path "$SCRIPT_DIR/.build"
 
 APP="$SCRIPT_DIR/dist/PokeCapsule.app"
 CONTENTS="$APP/Contents"

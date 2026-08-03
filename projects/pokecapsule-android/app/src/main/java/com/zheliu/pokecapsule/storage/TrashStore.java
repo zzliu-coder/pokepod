@@ -60,7 +60,7 @@ public final class TrashStore {
                 for (String id : ids) {
                     File source = capsules.requireActiveCapsule(id);
                     CapsuleRecord record = capsules.readCapsule(source);
-                    File destination = new File(paths.trash(), id);
+                    File destination = new File(paths.trash(), source.getName());
                     if (destination.exists()) {
                         throw new IOException("回收站已存在同名胶囊: " + id);
                     }
@@ -97,7 +97,7 @@ public final class TrashStore {
                 File target = new File(
                         resolveRestoreFolder(
                                 trash.optString("originalFolder", PathPolicy.INBOX)),
-                        id);
+                        Ids.normalized(id));
                 if (target.exists()) throw new IOException("恢复目标已存在: " + id);
                 sources.add(source);
                 targets.add(target);
@@ -220,14 +220,11 @@ public final class TrashStore {
 
     private File requireTrash(String id) throws IOException {
         if (!Ids.isUuid(id)) throw new IOException("无效胶囊 UUID");
-        File directory = new File(paths.trash(), id);
-        paths.assertInsideRoot(directory);
-        if (!directory.isDirectory()) {
-            directory = findLegacyTrashDirectory(id);
-        }
+        File directory = findTrashDirectory(id);
         if (directory == null || !directory.isDirectory()) {
             throw new IOException("回收站中找不到胶囊: " + id);
         }
+        paths.assertInsideRoot(directory);
         JSONObject capsule = CapsuleStore.readJson(new File(directory, "capsule.json"));
         if (!id.equalsIgnoreCase(capsule.optString("id"))) {
             throw new IOException("回收站胶囊 UUID 不一致");
@@ -235,21 +232,27 @@ public final class TrashStore {
         return directory;
     }
 
-    private File findLegacyTrashDirectory(String id) {
+    private File findTrashDirectory(String id) {
         File[] children = paths.trash().listFiles(File::isDirectory);
         if (children == null) return null;
         for (File child : children) {
-            if (child.getName().startsWith(id + "-")) return child;
+            if (child.getName().equalsIgnoreCase(id)
+                    || child.getName().toLowerCase(java.util.Locale.ROOT)
+                            .startsWith(id.toLowerCase(java.util.Locale.ROOT) + "-")) {
+                return child;
+            }
         }
         return null;
     }
 
     private JSONObject ensureMetadata(File directory) throws IOException {
         File file = new File(directory, "trash.json");
-        if (file.isFile()) return CapsuleStore.readJson(file);
+        if (file.isFile()) return validateMetadata(directory, CapsuleStore.readJson(file));
         JSONObject capsule = CapsuleStore.readJson(new File(directory, "capsule.json"));
         String id = capsule.optString("id", "");
-        if (!Ids.isUuid(id)) throw new IOException("回收站胶囊缺少 UUID");
+        if (!Ids.isUuid(id) || !directoryNameMatchesId(directory.getName(), id)) {
+            throw new IOException("回收站胶囊目录与 UUID 不一致");
+        }
         JSONObject metadata = metadata(id, PathPolicy.INBOX,
                 capsule.optInt("revision", 1) + 1, TimeFormat.utcNow());
         AtomicFiles.writeUtf8(file, CapsuleStore.prettyJson(metadata));
@@ -258,12 +261,41 @@ public final class TrashStore {
 
     private JSONObject metadataForScan(File directory) throws IOException {
         File file = new File(directory, "trash.json");
-        if (file.isFile()) return CapsuleStore.readJson(file);
+        if (file.isFile()) return validateMetadata(directory, CapsuleStore.readJson(file));
         JSONObject capsule = CapsuleStore.readJson(new File(directory, "capsule.json"));
         String id = capsule.optString("id", "");
-        if (!Ids.isUuid(id)) throw new IOException("回收站胶囊缺少 UUID");
+        if (!Ids.isUuid(id) || !directoryNameMatchesId(directory.getName(), id)) {
+            throw new IOException("回收站胶囊目录与 UUID 不一致");
+        }
         return metadata(id, PathPolicy.INBOX,
                 capsule.optInt("revision", 1) + 1, TimeFormat.utcNow());
+    }
+
+    private JSONObject validateMetadata(File directory, JSONObject trash) throws IOException {
+        JSONObject capsule = CapsuleStore.readJson(new File(directory, "capsule.json"));
+        String id = capsule.optString("id", "");
+        String trashId = trash.optString("capsuleId", "");
+        int capsuleRevision = capsule.optInt("revision", -1);
+        int trashRevision = trash.optInt("revision", -1);
+        String originalFolder = trash.optString("originalFolder", "");
+        if (trash.optInt("schemaVersion", -1) != 1
+                || !Ids.isUuid(id)
+                || !directoryNameMatchesId(directory.getName(), id)
+                || !id.equalsIgnoreCase(trashId)
+                || trashRevision <= capsuleRevision
+                || trash.optString("trashedAt", "").trim().isEmpty()
+                || !(PathPolicy.INBOX.equals(originalFolder)
+                        || PathPolicy.ARCHIVE.equals(originalFolder)
+                        || PathPolicy.isSafeRelativeFolder(originalFolder))) {
+            throw new IOException("回收站元数据与胶囊不一致");
+        }
+        return trash;
+    }
+
+    static boolean directoryNameMatchesId(String directoryName, String id) {
+        String name = directoryName.toLowerCase(java.util.Locale.ROOT);
+        String normalized = id.toLowerCase(java.util.Locale.ROOT);
+        return name.equals(normalized) || name.startsWith(normalized + "-");
     }
 
     private JSONObject metadata(CapsuleRecord record, String originalFolder) throws IOException {

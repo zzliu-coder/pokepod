@@ -25,9 +25,12 @@ import java.util.Set;
 
 public final class CapsuleStore {
     private final PokePaths paths;
+    private final FolderTransactions folderTransactions;
+    private final TextVersionWriter textVersionWriter = new TextVersionWriter();
 
     public CapsuleStore(PokePaths paths) {
         this.paths = paths;
+        this.folderTransactions = new FolderTransactions(paths);
     }
 
     public PokePaths paths() {
@@ -68,11 +71,20 @@ public final class CapsuleStore {
             throw new IOException("胶囊目录名不是 UUID");
         }
         JSONObject capsule = readJson(new File(directory, "capsule.json"));
-        JSONObject processing = readJson(new File(directory, "processing.json"));
         String id = capsule.optString("id");
-        if (!id.equalsIgnoreCase(processing.optString("capsuleId"))
+        if (!Ids.isUuid(id)
                 || (requireUuidDirectory && !directory.getName().equalsIgnoreCase(id))) {
             throw new IOException("胶囊 UUID 与目录不一致");
+        }
+        JSONObject processing;
+        try {
+            processing = readJson(new File(directory, "processing.json"));
+            if (!id.equalsIgnoreCase(processing.optString("capsuleId"))) {
+                processing = damagedProcessing(
+                        processing, id, "转写状态 UUID 与胶囊不一致");
+            }
+        } catch (IOException error) {
+            processing = damagedProcessing(null, id, error.getMessage());
         }
         File parent = directory.getParentFile();
         String relativeFolder = parent == null ? "" :
@@ -90,7 +102,25 @@ public final class CapsuleStore {
                 readOptionalText(new File(directory, "final.md")),
                 trash != null,
                 trash == null ? "" : trash.optString("trashedAt", ""),
-                trash == null ? "" : trash.optString("originalFolder", ""));
+                trash == null ? "" : trash.optString("originalFolder", ""),
+                trash == null ? -1 : trash.optInt("revision", -1));
+    }
+
+    private static JSONObject damagedProcessing(
+            JSONObject source, String id, String reason) throws IOException {
+        JSONObject value = source == null ? new JSONObject() : source;
+        try {
+            value.put("schemaVersion", -1);
+            value.put("capsuleId", id);
+            if (!value.has("revision")) value.put("revision", -1);
+            if (!value.has("durationMs")) value.put("durationMs", 0);
+            value.put("status", ProcessingState.FAILED.wireValue());
+            value.put("error", reason == null || reason.trim().isEmpty()
+                    ? "处理状态文件损坏" : reason);
+            return value;
+        } catch (JSONException error) {
+            throw new IOException("无法生成只读恢复记录", error);
+        }
     }
 
     public synchronized File beginRecording(String id) throws IOException {
@@ -158,6 +188,11 @@ public final class CapsuleStore {
             }
         }
         for (CapsuleRecord record : scan()) {
+            // A recovery record represents processing metadata that was missing,
+            // malformed, from a newer schema, or bound to another capsule. Keep
+            // the original files untouched so startup can never turn a readable
+            // recovery view into an implicit repair.
+            if (record.readOnly) continue;
             if (record.status == ProcessingState.TRANSCRIBING) {
                 updateProcessing(record.directory, ProcessingState.QUEUED,
                         "transcription", "进程中断，已重新排队", false);
@@ -187,16 +222,8 @@ public final class CapsuleStore {
     }
 
     public synchronized void createFolder(String relative) throws IOException {
-        if (!PathPolicy.isSafeRelativeFolder(relative) || relative.isEmpty()) {
-            throw new IOException("目录名称不合法");
-        }
         try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
-            File folder = paths.resolveUserFolder(relative);
-            if (folder.exists()) throw new IOException("同级目录已存在");
-            File parent = folder.getParentFile();
-            if (parent == null || !parent.isDirectory() || !folder.mkdir()) {
-                throw new IOException("无法创建目录");
-            }
+            folderTransactions.create(relative);
         }
     }
 
@@ -231,18 +258,8 @@ public final class CapsuleStore {
     }
 
     public synchronized void renameFolder(String oldRelative, String newRelative) throws IOException {
-        if (!PathPolicy.isSafeRelativeFolder(oldRelative) || oldRelative.isEmpty()
-                || !PathPolicy.isSafeRelativeFolder(newRelative) || newRelative.isEmpty()) {
-            throw new IOException("目录名称不合法");
-        }
         try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
-            File source = paths.resolveUserFolder(oldRelative);
-            File target = paths.resolveUserFolder(newRelative);
-            if (!source.isDirectory()) throw new IOException("原目录不存在");
-            if (target.exists()) throw new IOException("目标目录已存在");
-            File parent = target.getParentFile();
-            if (parent == null || !parent.isDirectory()) throw new IOException("目标上级目录不存在");
-            if (!source.renameTo(target)) throw new IOException("无法重命名目录");
+            folderTransactions.rename(oldRelative, newRelative);
         }
     }
 
@@ -263,7 +280,7 @@ public final class CapsuleStore {
             ArrayList<String> originals = new ArrayList<>();
             for (String id : ids) {
                 File source = requireCapsule(id);
-                File destinationDirectory = new File(target, id);
+                File destinationDirectory = new File(target, source.getName());
                 if (source.getCanonicalFile().equals(destinationDirectory.getCanonicalFile())) continue;
                 sources.add(source);
                 destinations.add(destinationDirectory);
@@ -383,9 +400,19 @@ public final class CapsuleStore {
     }
 
     public synchronized void setTitle(String id, String input) throws IOException {
+        setTitle(id, input, -1);
+    }
+
+    public synchronized void setTitle(
+            String id, String input, int expectedRevision) throws IOException {
         String title = input == null ? "" : input.trim();
         if (title.isEmpty() || title.length() > 200) throw new IOException("标题长度不合法");
-        mutateCapsules(Collections.singletonList(id), capsule -> capsule.put("title", title));
+        Map<String, Integer> expected = expectedRevision < 0
+                ? null
+                : Collections.singletonMap(
+                        id.toLowerCase(java.util.Locale.ROOT), expectedRevision);
+        mutateCapsules(
+                Collections.singletonList(id), capsule -> capsule.put("title", title), expected);
     }
 
     public synchronized void addTag(List<String> ids, String input) throws IOException {
@@ -587,7 +614,6 @@ public final class CapsuleStore {
                 throw new IOException("胶囊状态已变化，请同步后重试");
             }
             String text = readUtf8(stagedText);
-            AtomicFiles.writeUtf8(new File(directory, "polished.md"), text);
             try {
                 processing.put("status", ProcessingState.READY.wireValue());
                 processing.put("revision", processing.optInt("revision", 0) + 1);
@@ -597,7 +623,24 @@ public final class CapsuleStore {
             } catch (JSONException error) {
                 throw new IOException("无法更新校对状态", error);
             }
-            AtomicFiles.writeUtf8(new File(directory, "processing.json"), pretty(processing));
+            File polishedFile = new File(directory, "polished.md");
+            boolean hadPolished = polishedFile.isFile();
+            String previousPolished = hadPolished ? readUtf8(polishedFile) : null;
+            AtomicFiles.writeUtf8(polishedFile, text);
+            try {
+                AtomicFiles.writeUtf8(
+                        new File(directory, "processing.json"), pretty(processing));
+            } catch (IOException error) {
+                try {
+                    if (hadPolished) AtomicFiles.writeUtf8(polishedFile, previousPolished);
+                    else if (polishedFile.exists() && !polishedFile.delete()) {
+                        throw new IOException("无法移除未提交的校对文字");
+                    }
+                } catch (IOException rollback) {
+                    error.addSuppressed(rollback);
+                }
+                throw error;
+            }
             deleteEmptyTree(stagedDirectory);
         }
     }
@@ -657,34 +700,7 @@ public final class CapsuleStore {
 
     private void writeFinalTextLocked(
             File directory, JSONObject capsule, String text) throws IOException {
-        File finalFile = new File(directory, "final.md");
-        File capsuleFile = new File(directory, "capsule.json");
-        boolean hadFinal = finalFile.isFile();
-        String oldFinal = hadFinal ? readUtf8(finalFile) : null;
-        String oldCapsule = readUtf8(capsuleFile);
-        try {
-            capsule.put("finalTextFile", "final.md");
-            capsule.put("revision", capsule.optInt("revision", 0) + 1);
-            capsule.put("updatedAt", TimeFormat.utcNow());
-        } catch (JSONException error) {
-            throw new IOException("无法更新最终文字元数据", error);
-        }
-        try {
-            AtomicFiles.writeUtf8(finalFile, text);
-            AtomicFiles.writeUtf8(capsuleFile, pretty(capsule));
-        } catch (IOException error) {
-            try {
-                if (hadFinal) {
-                    AtomicFiles.writeUtf8(finalFile, oldFinal);
-                } else if (finalFile.exists() && !finalFile.delete()) {
-                    throw new IOException("无法移除未提交的最终文字");
-                }
-                AtomicFiles.writeUtf8(capsuleFile, oldCapsule);
-            } catch (IOException rollbackError) {
-                error.addSuppressed(rollbackError);
-            }
-            throw error;
-        }
+        textVersionWriter.writeFinal(directory, capsule, text);
     }
 
     public synchronized void validateExpectedRevisions(
@@ -767,27 +783,60 @@ public final class CapsuleStore {
         AtomicFiles.writeUtf8(new File(directory, "processing.json"), pretty(processing));
     }
 
-    public synchronized void requeueFailedTranscriptions(List<String> ids) throws IOException {
-        for (String id : ids) {
-            File directory = requireCapsule(id);
-            JSONObject processing = readJson(new File(directory, "processing.json"));
-            ProcessingState current = ProcessingState.fromWire(
-                    processing.optString("status", "failed"));
-            if (current != ProcessingState.FAILED) {
-                throw new IOException("只有失败的胶囊可以重新排队");
+    public synchronized void requeueFailedTranscriptions(
+            List<String> ids, Map<String, Integer> expectedRevisions) throws IOException {
+        try (RootWriteLock ignored = RootWriteLock.acquire(paths, "android")) {
+            if (expectedRevisions == null || expectedRevisions.size() != ids.size()) {
+                throw new IOException("缺少完整的转写状态版本快照");
             }
+            ArrayList<File> files = new ArrayList<>();
+            ArrayList<String> originals = new ArrayList<>();
+            ArrayList<String> updates = new ArrayList<>();
+            for (String id : ids) {
+                File directory = requireCapsule(id);
+                File file = new File(directory, "processing.json");
+                String original = readUtf8(file);
+                JSONObject processing = readJson(file);
+                int actualRevision = processing.optInt("revision", -1);
+                Integer expectedRevision = expectedRevisions.get(
+                        id.toLowerCase(java.util.Locale.ROOT));
+                if (expectedRevision == null || actualRevision != expectedRevision) {
+                    throw new IOException("VERSION_CONFLICT " + id
+                            + " expected=" + expectedRevision + " actual=" + actualRevision);
+                }
+                ProcessingState current = ProcessingState.fromWire(
+                        processing.optString("status", "failed"));
+                if (current != ProcessingState.FAILED) {
+                    throw new IOException("只有失败的胶囊可以重新排队");
+                }
+                try {
+                    processing.put("status", ProcessingState.QUEUED.wireValue());
+                    processing.put("revision", actualRevision + 1);
+                    processing.put("errorStage", JSONObject.NULL);
+                    processing.put("error", JSONObject.NULL);
+                    processing.put("attempts", 0);
+                } catch (JSONException error) {
+                    throw new IOException("无法重置转写次数", error);
+                }
+                files.add(file);
+                originals.add(original);
+                updates.add(pretty(processing));
+            }
+            int written = 0;
             try {
-                processing.put("status", ProcessingState.QUEUED.wireValue());
-                processing.put("revision", processing.optInt("revision", 0) + 1);
-                processing.put("errorStage", JSONObject.NULL);
-                processing.put("error", JSONObject.NULL);
-                processing.put("attempts", 0);
-            } catch (JSONException error) {
-                throw new IOException("无法重置转写次数", error);
+                for (; written < files.size(); written++) {
+                    AtomicFiles.writeUtf8(files.get(written), updates.get(written));
+                }
+            } catch (IOException error) {
+                for (int index = written - 1; index >= 0; index--) {
+                    try {
+                        AtomicFiles.writeUtf8(files.get(index), originals.get(index));
+                    } catch (IOException rollbackError) {
+                        error.addSuppressed(rollbackError);
+                    }
+                }
+                throw error;
             }
-            AtomicFiles.writeUtf8(
-                    new File(directory, "processing.json"),
-                    pretty(processing));
         }
     }
 
