@@ -1,3 +1,4 @@
+import AppKit
 import PokeCapsuleCore
 import SwiftUI
 
@@ -14,6 +15,11 @@ struct SettingsView: View {
             Section("电脑连接") {
                 TextField("ADB 路径", text: $adbPath)
                 Text("每台设备拥有独立镜像、备份和离线操作队列。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("PokePod 有线语音输入") {
+                Button("打开听写设置") { openDictationSettings() }
+                Text("设备会直接向 Mac 发送 Option-Z 并启动听写，无需给 PokeCapsule 键盘监听或辅助功能权限。听写麦克风请选择 TinyUSB UAC1（PokeCapsule，48 kHz）。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("手动校对") {
@@ -36,7 +42,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
-        .frame(width: 580, height: 460)
+        .frame(width: 620, height: 530)
     }
 
     private func saveKey() {
@@ -45,6 +51,12 @@ struct SettingsView: View {
             apiKey = ""
             message = "密钥已保存"
         } catch { message = error.localizedDescription }
+    }
+
+    private func openDictationSettings() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Dictation") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func importKey() {

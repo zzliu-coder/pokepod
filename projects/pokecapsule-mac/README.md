@@ -18,6 +18,8 @@ PokeCapsule Mac 是 Poke3 与 Android 手机共用的 USB 管理器。每台设�
 - 默认使用 DeepSeek `https://api.deepseek.com/chat/completions`、`deepseek-v4-flash`，并显式关闭 thinking。
 - API 结果在写回失败时保存在本机待提交缓存，重试不会再次请求模型。
 - ADB 始终通过 `Process.arguments` 执行，目录名不会进入 shell。
+- PokePod AMOLED 直接通过 USB HID 发送 Option-Z，并同时作为 `TinyUSB UAC1` USB 麦克风使用。
+- 设置页提供听写设置入口；语音输入链路不需要 PokeCapsule 的辅助功能或输入监控权限。
 
 ## 构建和测试
 
@@ -76,9 +78,17 @@ Poke3 需要开启 USB 调试并接受 Mac 的 RSA 授权。管理器在事务�
 - SwiftUI 页面拆为应用壳、设备侧栏、胶囊列表、设置和批量操作组件；批量操作只在选中胶囊后出现。
 - DeepSeek 继续由用户手动触发，不参与设备端自动转写。
 
+## PokePod 语音输入
+
+1. 点击“打开听写设置”，把听写快捷键设为 Option-Z。
+2. 将听写的输入麦克风选为 `TinyUSB UAC1`（厂商 PokeCapsule，48 kHz）。
+
+PokePod 的 BOOT 键和屏幕按钮直接发送 Option-Z，macOS 将其作为普通 USB
+键盘快捷键处理。PokeCapsule 不监听键盘，因此不会触发相关隐私授权弹窗。
+
 ## 已完成的真机验收
 
-- 43 项 Swift 测试、Release 构建、应用打包和代码签名校验通过；响应文件尚未生成会继续等待，ADB 断线或其他读取错误会立即结束等待并进入连接状态复核。
+- 45 项 Swift 测试、Release 构建通过；应用打包和代码签名校验会在交付前复核。响应文件尚未生成会继续等待，ADB 断线或其他读取错误会立即结束等待并进入连接状态复核。
 - 已自动识别 USB 连接的 Poke3，并建立只读镜像。
 - 两条真机录音已从 `raw_ready` 自动调用 DeepSeek，写回 `polished.md` 后变为 `ready`。
 - 维护握手、目录创建、目录删除、校对提交和重复事务幂等已在真机通过。
