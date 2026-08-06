@@ -1,4 +1,4 @@
-# PokeCapsule 文件协议 1.0
+# PokeCapsule 文件协议 2.0
 
 PokeCapsule 把普通文件作为事实源。Android 与 Mac 端即使数据库损坏，也必须能够仅凭这些文件重建列表。
 
@@ -33,12 +33,13 @@ Inbox/
 └── 0d95b7c1-7ce9-4a91-aea2-b64707a05c9f/
     ├── capsule.json
     ├── processing.json
-    ├── audio.m4a
+    ├── audio.m4a 或 audio.wav
     ├── raw.txt
     └── polished.md
 ```
 
-- `capsule.json`、`processing.json` 与 `audio.m4a` 在录音成功后必须存在。
+- `capsule.json`、`processing.json` 与 `processing.audioFile` 指向的音频在录音成功后必须存在。
+- `processing.audioFile` 只允许安全 basename：`audio.m4a` 或 `audio.wav`，禁止路径分隔符和目录跳转。
 - `raw.txt` 在本地转写成功后出现。
 - `polished.md` 在校对成功后出现。
 - Android 先写临时文件，再在同一目录内原子改名。
@@ -49,6 +50,11 @@ Inbox/
 `capsule.json` 使用 UTF-8 JSON，字段见 `capsule.schema.json`。它只保存标题、标签、收藏等用户资料。
 
 `processing.json` 保存录音、转写和校对状态。两个文件均包含单调递增的 `revision`。处理任务不能覆盖 `capsule.json`，界面整理操作也不能覆盖 `processing.json`。
+
+- schema 1 是旧 Android/Poke3 的 M4A 记录，继续原样读取。
+- schema 2 新增 `audioFormat`、`sampleRateHz`、`channels`、`bitsPerSample`。Android/Poke3 新录音写 `m4a-aac-lc`；PokePod 写 `wav-pcm-s16le`。
+- 读取器同时支持 schema 1 和 2。未知 schema 可显示并导出，所有修改操作必须拒绝并提示只读。
+- 升级后不批量改写旧胶囊；只有新录音写 schema 2。
 
 时间均为 UTC ISO 8601，例如 `2026-07-28T08:30:00Z`。
 
@@ -61,7 +67,7 @@ raw_ready -> correcting -> ready
                      \-> failed
 ```
 
-校对失败不覆盖 `raw.txt`，转写失败不删除 `audio.m4a`。
+校对失败不覆盖 `raw.txt`，转写失败不删除原始音频。
 
 ## 并发约定
 

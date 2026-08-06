@@ -173,7 +173,7 @@ public enum USBDeviceProbe {
     }
 }
 
-public final class ADBTransport {
+public final class ADBTransport: DeviceTransport {
     public let executable: URL
     public let serial: String
     private let runner: ProcessExecuting
@@ -183,6 +183,8 @@ public final class ADBTransport {
         self.serial = serial
         self.runner = runner
     }
+
+    public var deviceIdentifier: String { serial }
 
     public static func discover(executable: URL, runner: ProcessExecuting = ProcessRunner()) -> [ADBDevice] {
         let result = runner.run(executable: executable, arguments: ["devices", "-l"])
@@ -315,48 +317,69 @@ public final class ADBTransport {
         throw PokeCapsuleError.adbFailure(
             result.combinedOutput.isEmpty ? "读取设备响应失败" : result.combinedOutput)
     }
+
+    public func fetchLibrary(to local: URL) throws {
+        _ = try pull(remote: ProtocolConstants.remoteRoot + "/.", local: local)
+    }
+
+    public func submitCommandFile(local: URL, transactionID: UUID) throws {
+        _ = try pushCommand(local: local, transactionID: transactionID)
+    }
+
+    public func stageImport(local: URL, transactionID: UUID, capsuleID: UUID) throws {
+        _ = try pushImport(local: local, transactionID: transactionID, capsuleID: capsuleID)
+    }
+
+    public func fetchCommandResult(transactionID: UUID, to local: URL) throws -> Bool {
+        try pullResponse(transactionID: transactionID, to: local)
+    }
+
+    public func beginHostSession() throws -> DeviceTransportSessionToken? {
+        let original = try readStayOnWhilePluggedIn()
+        let withUSB = original | 2
+        let changed = withUSB != original
+        if changed { try writeStayOnWhilePluggedIn(withUSB) }
+        return DeviceTransportSessionToken("\(original):\(changed ? 1 : 0)")
+    }
+
+    public func endHostSession(_ token: DeviceTransportSessionToken?) throws {
+        guard let value = token?.value else { return }
+        let fields = value.split(separator: ":", maxSplits: 1).map(String.init)
+        guard fields.count == 2, fields[1] == "1", let original = Int(fields[0]) else { return }
+        try writeStayOnWhilePluggedIn(original)
+    }
 }
 
 public final class StayAwakeSession {
-    private let transport: ADBTransport
-    private var originalValue: Int?
-    private var changed = false
+    private let transport: any DeviceTransport
+    private var token: DeviceTransportSessionToken?
+    private var began = false
 
-    public init(transport: ADBTransport) {
+    public init(transport: any DeviceTransport) {
         self.transport = transport
     }
 
     public func begin() throws {
-        guard originalValue == nil else { return }
-        let original = try transport.readStayOnWhilePluggedIn()
-        originalValue = original
-        let withUSB = original | 2
-        if withUSB != original {
-            try transport.writeStayOnWhilePluggedIn(withUSB)
-            changed = true
-        }
+        guard !began else { return }
+        token = try transport.beginHostSession()
+        began = true
     }
 
     public func restore() throws {
-        guard let originalValue else { return }
-        defer {
-            self.originalValue = nil
-            changed = false
-        }
-        if changed {
-            try transport.writeStayOnWhilePluggedIn(originalValue)
-        }
+        guard began else { return }
+        defer { token = nil; began = false }
+        try transport.endHostSession(token)
     }
 }
 
 public final class DeviceCommandClient {
-    private let transport: ADBTransport
+    private let transport: any DeviceTransport
     private let fileManager: FileManager
     private let waitInterval: TimeInterval
     private let timeout: TimeInterval
 
     public init(
-        transport: ADBTransport,
+        transport: any DeviceTransport,
         fileManager: FileManager = .default,
         waitInterval: TimeInterval = 0.5,
         timeout: TimeInterval = 20
@@ -374,13 +397,13 @@ public final class DeviceCommandClient {
         defer { try? fileManager.removeItem(at: temp) }
         let commandURL = temp.appendingPathComponent("command.json")
         try PokeJSON.encoder.encode(command).write(to: commandURL, options: .atomic)
-        try transport.pushCommand(local: commandURL, transactionID: command.transactionId)
+        try transport.submitCommandFile(local: commandURL, transactionID: command.transactionId)
         guard waitForResponse else { return nil }
 
         let responseURL = temp.appendingPathComponent("response.json")
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if try transport.pullResponse(transactionID: command.transactionId, to: responseURL),
+            if try transport.fetchCommandResult(transactionID: command.transactionId, to: responseURL),
                let data = try? Data(contentsOf: responseURL),
                let response = try? PokeJSON.decoder.decode(DeviceCommandResponse.self, from: data) {
                 guard response.transactionId == command.transactionId else {
@@ -454,7 +477,7 @@ public final class DeviceCommandClient {
             _ = try submit(DeviceCommand(
                 operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
-            try transport.pushImport(
+            try transport.stageImport(
                 local: package.directory,
                 transactionID: transactionID,
                 capsuleID: package.metadata.id
@@ -511,7 +534,7 @@ public final class DeviceCommandClient {
             _ = try submit(DeviceCommand(
                 operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
-            try transport.pushImport(
+            try transport.stageImport(
                 local: capsuleDirectory,
                 transactionID: transactionID,
                 capsuleID: capsuleID)
@@ -565,7 +588,7 @@ public final class DeviceCommandClient {
             _ = try submit(DeviceCommand(
                 operation: .beginMaintenance,
                 maintenanceId: maintenanceID))
-            try transport.pushImport(
+            try transport.stageImport(
                 local: capsuleDirectory,
                 transactionID: transactionID,
                 capsuleID: capsuleID)
@@ -602,12 +625,12 @@ public final class MirrorSynchronizer {
         self.fileManager = fileManager
     }
 
-    public func refresh(using transport: ADBTransport, mirror: URL) throws -> CapsuleIndex {
+    public func refresh(using transport: any DeviceTransport, mirror: URL) throws -> CapsuleIndex {
         let parent = mirror.deletingLastPathComponent()
         let staging = parent.appendingPathComponent(".mirror-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
         do {
-            try transport.pull(remote: ProtocolConstants.remoteRoot + "/.", local: staging)
+            try transport.fetchLibrary(to: staging)
             if fileManager.fileExists(atPath: mirror.path) {
                 let backup = parent.appendingPathComponent(".old-\(UUID().uuidString)", isDirectory: true)
                 try fileManager.moveItem(at: mirror, to: backup)

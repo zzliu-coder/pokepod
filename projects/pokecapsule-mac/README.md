@@ -1,12 +1,12 @@
 # PokeCapsule Mac
 
-PokeCapsule Mac 是 Poke3 与 Android 手机共用的 USB 管理器。每台设备拥有独立资料库、镜像、备份和离线队列；普通文件继续作为事实源，Mac 缓存损坏不会影响设备中的录音。
+PokeCapsule Mac 是 Poke3、Android 手机与 PokePod 共用的 USB 管理器。每台设备拥有独立资料库、镜像、备份和离线队列；普通文件继续作为事实源，Mac 缓存损坏不会影响设备中的录音。
 
 ## 当前能力
 
 - 自动寻找 ADB，识别未连接、未授权、离线和多设备状态，不硬编码设备序列号。
 - 当 macOS 已识别到 Android USB、但 ADB 暂不可用时，明确显示“已插入，等待 ADB”；App 在前台每 10 秒自动重试。离线镜像和待同步队列持续可用。
-- 将 `/sdcard/PokeCapsule/` 拉取为只读本地镜像。
+- ADB 与 PokePod USB CDC Link v2 共用 `DeviceTransport`，将设备资料库拉取为只读本地镜像。
 - 应用活跃且 Poke3 已连接时，每 5 秒读取一次轻量元数据指纹；只有检测到新录音、转写、标签或目录变化才重新同步完整镜像。
 - 设备选择器只切换独立资料库，不合并不同设备的数据。
 - 浏览 Inbox、资料库、收藏、待转写、转写失败、两级目录、标签、回收站和分层文字版本。
@@ -14,12 +14,16 @@ PokeCapsule Mac 是 Poke3 与 Android 手机共用的 USB 管理器。每台设�
 - 设备确认维护状态后才允许修改；超时保持只读。
 - 批量导出完整胶囊，并逐文件执行 SHA-256 校验。
 - 批量导入完整胶囊；同 UUID 同内容跳过，不同内容明确报冲突。
-- OpenAI 兼容校对适配器；endpoint、model、提示词和自动校对开关可配置。
+- OpenAI 兼容校对适配器；endpoint、model、提示词和自动校对开关可配置。手动和批量校对直接可用，自动校对默认关闭。
 - 默认使用 DeepSeek `https://api.deepseek.com/chat/completions`、`deepseek-v4-flash`，并显式关闭 thinking。
 - API 结果在写回失败时保存在本机待提交缓存，重试不会再次请求模型。
 - ADB 始终通过 `Process.arguments` 执行，目录名不会进入 shell。
 - PokePod AMOLED 直接通过 USB HID 发送 Option-Z，并同时作为 `TinyUSB UAC1` USB 麦克风使用。
 - 设置页提供听写设置入口；语音输入链路不需要 PokeCapsule 的辅助功能或输入监控权限。
+
+## PokePod Link v2
+
+Mac 通过 USB CDC 使用 `PPV2` 二进制帧：20 字节小端帧头、版本、类型、请求号、长度与 CRC32。控制消息使用 JSON，文件内容使用独立二进制数据帧。当前客户端覆盖 `hello`、`status`、`identity`、`fingerprint`、`read`、`stage-write`、`commit`、`command`、`result`、`configure`、`set-time`、`dictate` 与 `reboot`，设备 busy 时进行有上限的退避。
 
 ## 构建和测试
 
@@ -60,6 +64,13 @@ Poke3 需要开启 USB 调试并接受 Mac 的 RSA 授权。管理器在事务�
 
 动态目录名只存在 JSON 内容中。远端命令文件名全部由 UUID 生成。Android 端命令服务尚未安装或未响应时，Mac 在 20 秒后停止，设备文件不会被直接修改。
 
+## PokePod 语音输入
+
+1. 点击“打开听写设置”，把听写快捷键设为 Option-Z。
+2. 将听写的输入麦克风选为 `TinyUSB UAC1`（厂商 PokeCapsule，48 kHz）。
+
+PokePod 的 BOOT 键和屏幕按钮直接发送 Option-Z，macOS 将其作为普通 USB 键盘快捷键处理。PokeCapsule 不监听键盘，因此不会触发相关隐私授权弹窗。
+
 ## 数据安全
 
 - 未知 `schemaVersion` 的胶囊只读显示。
@@ -78,20 +89,14 @@ Poke3 需要开启 USB 调试并接受 Mac 的 RSA 授权。管理器在事务�
 - SwiftUI 页面拆为应用壳、设备侧栏、胶囊列表、设置和批量操作组件；批量操作只在选中胶囊后出现。
 - DeepSeek 继续由用户手动触发，不参与设备端自动转写。
 
-## PokePod 语音输入
-
-1. 点击“打开听写设置”，把听写快捷键设为 Option-Z。
-2. 将听写的输入麦克风选为 `TinyUSB UAC1`（厂商 PokeCapsule，48 kHz）。
-
-PokePod 的 BOOT 键和屏幕按钮直接发送 Option-Z，macOS 将其作为普通 USB
-键盘快捷键处理。PokeCapsule 不监听键盘，因此不会触发相关隐私授权弹窗。
-
 ## 已完成的真机验收
 
-- 45 项 Swift 测试、Release 构建通过；应用打包和代码签名校验会在交付前复核。响应文件尚未生成会继续等待，ADB 断线或其他读取错误会立即结束等待并进入连接状态复核。
+- 52 项 Swift 测试、Release 构建、原子应用打包和代码签名校验通过；其中包含 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/断线/busy、未知协议只读降级，以及共享协议中的 v1 M4A、v2 M4A/WAV 兼容夹具。
 - 已自动识别 USB 连接的 Poke3，并建立只读镜像。
 - 两条真机录音已从 `raw_ready` 自动调用 DeepSeek，写回 `polished.md` 后变为 `ready`。
 - 维护握手、目录创建、目录删除、校对提交和重复事务幂等已在真机通过。
 - 设备原有 `stay_on_while_plugged_in=7` 在事务前后保持不变。
 
 仍需长期或大样本验证：100 条真实胶囊批量整理、USB 在事务中途断开、长时间待机耗电和极端并发压力。
+
+PokePod CDC 的完整读写、设备身份、分页清单、原子提交和断线恢复需要与对应固件在真机联调。本轮只完成 Mac 实现、模拟传输契约和帧级自动测试，没有操作或刷写 PokePod。

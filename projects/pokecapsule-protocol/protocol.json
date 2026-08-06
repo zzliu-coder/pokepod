@@ -1,6 +1,6 @@
 {
   "name": "PokeCapsule",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "root": "/sdcard/PokeCapsule",
   "reservedFolders": [
     "Inbox",
@@ -10,8 +10,10 @@
   "capsuleFiles": {
     "metadata": "capsule.json",
     "processing": "processing.json",
-    "audio": "audio.m4a",
+    "defaultAudio": "audio.m4a",
+    "audioCandidates": ["audio.m4a", "audio.wav"],
     "rawText": "raw.txt",
-    "polishedText": "polished.md"
+    "polishedText": "polished.md",
+    "finalText": "final.md"
   }
 }

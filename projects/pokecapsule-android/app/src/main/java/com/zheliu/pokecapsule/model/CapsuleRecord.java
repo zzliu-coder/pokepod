@@ -1,6 +1,7 @@
 package com.zheliu.pokecapsule.model;
 
 import com.zheliu.pokecapsule.core.ProcessingState;
+import com.zheliu.pokecapsule.core.AudioFilePolicy;
 import com.zheliu.pokecapsule.core.PathPolicy;
 import com.zheliu.pokecapsule.core.TimeFormat;
 
@@ -24,6 +25,11 @@ public final class CapsuleRecord {
     public final ProcessingState status;
     public final int processingRevision;
     public final long durationMs;
+    public final String audioFile;
+    public final String audioFormat;
+    public final int sampleRateHz;
+    public final int channels;
+    public final int bitsPerSample;
     public final String error;
     public final boolean readOnly;
     public final String relativeFolder;
@@ -55,6 +61,39 @@ public final class CapsuleRecord {
             boolean trashed,
             String trashedAt,
             String originalFolder) {
+        this(directory, id, title, createdAt, updatedAt, revision, favorite, tags,
+                status, processingRevision, durationMs, AudioFilePolicy.ANDROID_AUDIO_FILE,
+                AudioFilePolicy.M4A_AAC_LC, 16_000, 1, 16, error, readOnly,
+                relativeFolder, rawText, polishedText, finalText, trashed, trashedAt,
+                originalFolder);
+    }
+
+    public CapsuleRecord(
+            File directory,
+            String id,
+            String title,
+            String createdAt,
+            String updatedAt,
+            int revision,
+            boolean favorite,
+            List<String> tags,
+            ProcessingState status,
+            int processingRevision,
+            long durationMs,
+            String audioFile,
+            String audioFormat,
+            int sampleRateHz,
+            int channels,
+            int bitsPerSample,
+            String error,
+            boolean readOnly,
+            String relativeFolder,
+            String rawText,
+            String polishedText,
+            String finalText,
+            boolean trashed,
+            String trashedAt,
+            String originalFolder) {
         this.directory = directory;
         this.id = id;
         this.title = title;
@@ -66,6 +105,11 @@ public final class CapsuleRecord {
         this.status = status;
         this.processingRevision = processingRevision;
         this.durationMs = durationMs;
+        this.audioFile = audioFile;
+        this.audioFormat = audioFormat;
+        this.sampleRateHz = sampleRateHz;
+        this.channels = channels;
+        this.bitsPerSample = bitsPerSample;
         this.error = error;
         this.readOnly = readOnly;
         this.relativeFolder = relativeFolder;
@@ -155,18 +199,34 @@ public final class CapsuleRecord {
         }
         int capsuleVersion = capsule.optInt("schemaVersion", -1);
         int processingVersion = processing.optInt("schemaVersion", -1);
+        String audioFile = processing.optString("audioFile", "");
+        String audioFormat = processingVersion == 1
+                ? AudioFilePolicy.M4A_AAC_LC
+                : processing.optString("audioFormat", "");
+        int sampleRateHz = processingVersion == 1
+                ? 16_000 : processing.optInt("sampleRateHz", -1);
+        int channels = processingVersion == 1
+                ? 1 : processing.optInt("channels", -1);
+        int bitsPerSample = processingVersion == 1
+                ? 16 : processing.optInt("bitsPerSample", -1);
         String wireStatus = processing.optString("status", "");
         int processingRevision = processing.optInt("revision", -1);
         long durationMs = processing.optLong("durationMs", -1);
-        boolean processingValid = hasValidProcessingState(
+        boolean stateValid = hasValidProcessingState(
                 wireStatus, processingRevision, durationMs);
-        ProcessingState state = processingValid
+        boolean audioValid = AudioFilePolicy.isSupportedMetadata(
+                processingVersion, audioFile, audioFormat,
+                sampleRateHz, channels, bitsPerSample);
+        boolean processingValid = stateValid && audioValid;
+        ProcessingState state = stateValid
                 ? ProcessingState.fromWire(wireStatus)
                 : ProcessingState.FAILED;
         String processingError = processing.isNull("error")
                 ? "" : processing.optString("error", "");
         if (!processingValid && processingError.isEmpty()) {
-            processingError = "处理状态文件损坏";
+            processingError = processingVersion != 1 && processingVersion != 2
+                    ? "处理协议版本 " + processingVersion + " 暂不支持，只能读取"
+                    : "处理状态文件损坏";
         }
         return new CapsuleRecord(
                 directory,
@@ -181,8 +241,14 @@ public final class CapsuleRecord {
                 state,
                 processingRevision,
                 Math.max(0, durationMs),
+                audioFile,
+                audioFormat,
+                sampleRateHz,
+                channels,
+                bitsPerSample,
                 processingError,
-                capsuleVersion != 1 || processingVersion != 1 || !processingValid,
+                capsuleVersion != 1 || (processingVersion != 1 && processingVersion != 2)
+                        || !processingValid,
                 relativeFolder,
                 rawText,
                 polishedText,

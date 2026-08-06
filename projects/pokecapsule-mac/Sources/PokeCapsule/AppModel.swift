@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
     @Published var connection: DeviceConnectionState = .noDevice
     @Published var devices: [ADBDevice] = []
     @Published var usbDevices: [USBPhysicalDevice] = []
+    @Published var pokePodPorts: [URL] = []
     @Published var registeredDevices: [RegisteredDevice] = []
     @Published var selectedDeviceID: String?
     @Published var selectedSerial: String?
@@ -24,7 +25,8 @@ final class AppModel: ObservableObject {
     @Published var pendingCommands: [PendingCommand] = []
 
     private var adbURL: URL?
-    private var transport: ADBTransport?
+    private var transport: (any DeviceTransport)?
+    private var selectedPokePodURL: URL?
     private let workspace = DeviceWorkspace()
     private let playback = CapsulePlaybackController()
     private var monitorTask: Task<Void, Never>?
@@ -82,6 +84,10 @@ final class AppModel: ObservableObject {
     }
 
     func connectionLabel(for registered: RegisteredDevice) -> String {
+        if registered.platform == "pokepod",
+           pokePodPorts.contains(where: { registered.serialAliases.contains($0.path) }) {
+            return "已连接"
+        }
         if connectedDevice(for: registered) != nil { return "已连接" }
         if usbDevices.contains(where: { device in
             guard let serial = device.serial else { return false }
@@ -119,28 +125,23 @@ final class AppModel: ObservableObject {
 
     func refreshDevices() {
         guard !isBusy else { return }
-        guard let adb = ADBLocator.locate() else {
-            stopMonitoring()
-            adbURL = nil
-            transport = nil
-            devices = []
-            connection = .noADB
-            status = connection.localizedDescription
-            scheduleMonitor(afterNanoseconds: reconnectIntervalNanoseconds)
-            return
-        }
+        let adb = ADBLocator.locate()
         adbURL = adb
-        devices = ADBTransport.discover(executable: adb)
+        devices = adb.map { ADBTransport.discover(executable: $0) } ?? []
+        pokePodPorts = PokePodTransport.discover()
         if devices.contains(where: { $0.state == "device" || $0.state == "unauthorized" || $0.state == "offline" }) {
             usbDevices = []
         } else {
             usbDevices = USBDeviceProbe.discover()
         }
-        connection = DeviceParser.state(
-            for: devices,
-            usbDevices: usbDevices,
+        connection = adb == nil ? .noADB : DeviceParser.state(
+            for: devices, usbDevices: usbDevices,
             preferredSerials: selectedRegisteredDevice?.serialAliases ?? [])
         if let selectedDevice = selectedRegisteredDevice,
+           selectedDevice.platform == "pokepod",
+           let port = pokePodPorts.first(where: { selectedDevice.serialAliases.contains($0.path) }) {
+            choosePokePod(port)
+        } else if let selectedDevice = selectedRegisteredDevice,
            let selected = connectedDevice(for: selectedDevice) {
             choose(selected)
         } else if case .connected(let device) = connection {
@@ -148,7 +149,10 @@ final class AppModel: ObservableObject {
         } else {
             stopMonitoring()
             transport = nil
-            status = connection.localizedDescription
+            selectedPokePodURL = nil
+            status = pokePodPorts.isEmpty
+                ? connection.localizedDescription
+                : "检测到 PokePod USB；请从设备菜单连接"
             scheduleMonitor(afterNanoseconds: reconnectIntervalNanoseconds)
         }
     }
@@ -171,6 +175,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(deviceID, forKey: "LastDeviceID")
         UserDefaults.standard.set(device.serial, forKey: "LastDeviceSerial")
         transport = candidateTransport
+        selectedPokePodURL = nil
         connection = .connected(device)
         status = "已连接：\(identity.displayName)"
         if changedDevice {
@@ -181,6 +186,41 @@ final class AppModel: ObservableObject {
         if !isBusy { sync() }
     }
 
+    func choosePokePod(_ port: URL) {
+        guard !isBusy else { return }
+        do {
+            let candidate = try PokePodTransport(deviceURL: port)
+            _ = try candidate.hello()
+            let identity = try candidate.readDeviceIdentity() ?? DeviceIdentity(
+                deviceId: "pokepod-\(port.lastPathComponent)",
+                displayName: "PokePod",
+                platform: "pokepod",
+                manufacturer: "PokePod",
+                model: "AMOLED")
+            let deviceID = workspace.register(
+                identity: identity, transportAlias: port.path,
+                fallbackModel: "AMOLED", devices: &registeredDevices)
+            let changedDevice = selectedDeviceID != deviceID
+            selectedDeviceID = deviceID
+            selectedSerial = nil
+            selectedPokePodURL = port
+            UserDefaults.standard.set(deviceID, forKey: "LastDeviceID")
+            transport = candidate
+            status = "已连接：\(identity.displayName)"
+            if changedDevice {
+                stopMonitoring()
+                lastRemoteFingerprint = nil
+                loadLocalState()
+            }
+            if !isBusy { sync() }
+        } catch {
+            transport = nil
+            selectedPokePodURL = nil
+            status = error.localizedDescription
+            scheduleMonitor(afterNanoseconds: reconnectIntervalNanoseconds)
+        }
+    }
+
     func selectRegisteredDevice(_ deviceID: String) {
         guard !isBusy, selectedDeviceID != deviceID else { return }
         stopMonitoring()
@@ -188,6 +228,12 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(deviceID, forKey: "LastDeviceID")
         lastRemoteFingerprint = nil
         if let registered = registeredDevices.first(where: { $0.deviceId == deviceID }),
+           registered.platform == "pokepod",
+           let port = pokePodPorts.first(where: { registered.serialAliases.contains($0.path) }) {
+            loadLocalState()
+            choosePokePod(port)
+            return
+        } else if let registered = registeredDevices.first(where: { $0.deviceId == deviceID }),
            let connected = connectedDevice(for: registered),
            let adbURL {
             selectedSerial = connected.serial
@@ -196,6 +242,7 @@ final class AppModel: ObservableObject {
             status = "已选择并连接：\(registered.displayName)"
         } else {
             selectedSerial = nil
+            selectedPokePodURL = nil
             transport = nil
             connection = DeviceParser.state(
                 for: devices,
@@ -231,7 +278,7 @@ final class AppModel: ObservableObject {
         let mirror = mirrorURL
         let queueFile = queueURL
         let backups = backupURL
-        let deviceKey = selectedDeviceID ?? transport.serial
+        let deviceKey = selectedDeviceID ?? transport.deviceIdentifier
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
@@ -255,7 +302,15 @@ final class AppModel: ObservableObject {
                     "\(syncStatus)；自动备份失败：\($0)"
                 } ?? syncStatus
                 self.isBusy = false
-                self.scheduleMonitor()
+                if UserDefaults.standard.bool(forKey: "AutomaticCorrectionEnabled"),
+                   let candidate = result.index.records.first(where: {
+                       $0.processing?.status == .rawReady
+                           && $0.polishedText == nil && !$0.readOnly
+                   }) {
+                    self.runCorrections([candidate], automatic: true)
+                } else {
+                    self.scheduleMonitor()
+                }
             } catch {
                 self.isBusy = false
                 if !self.selectedDeviceIsConnected() {
@@ -612,6 +667,19 @@ final class AppModel: ObservableObject {
     }
 
     func correct(_ record: CapsuleRecord) {
+        runCorrections([record], automatic: false)
+    }
+
+    func correctSelected() {
+        let records = selectedRecords.filter { $0.rawText != nil && !$0.readOnly }
+        guard !records.isEmpty else {
+            status = "选中的胶囊没有可校对的原始转写"
+            return
+        }
+        runCorrections(records, automatic: false)
+    }
+
+    private func runCorrections(_ records: [CapsuleRecord], automatic: Bool) {
         guard !isBusy else { return }
         guard let transport else {
             status = "设备未连接"
@@ -622,17 +690,20 @@ final class AppModel: ObservableObject {
             return
         }
         isBusy = true
-        status = "正在快速校对…"
+        status = automatic ? "正在自动校对一条新转写…" : "正在校对 \(records.count) 条转写…"
         Task {
             do {
-                try await CorrectionWorkflow().run(
-                    record: record,
-                    deviceID: deviceSerial,
-                    transport: transport,
-                    cacheRoot: workspace.applicationBase
-                        .appendingPathComponent("PendingCorrections", isDirectory: true))
-                self.status = "校对完成，已写回当前设备"
+                for record in records {
+                    try await CorrectionWorkflow().run(
+                        record: record,
+                        deviceID: deviceSerial,
+                        transport: transport,
+                        cacheRoot: workspace.applicationBase
+                            .appendingPathComponent("PendingCorrections", isDirectory: true))
+                }
+                self.status = "已校对 \(records.count) 条并写回当前设备"
                 self.isBusy = false
+                self.selection.removeAll()
                 self.sync()
             } catch {
                 self.status = error.localizedDescription
@@ -661,6 +732,9 @@ final class AppModel: ObservableObject {
     }
 
     private func selectedDeviceIsConnected() -> Bool {
+        if let selectedPokePodURL {
+            return PokePodTransport.discover().contains(selectedPokePodURL)
+        }
         guard let adbURL, let selectedSerial else { return false }
         return ADBTransport.discover(executable: adbURL).contains {
             $0.serial == selectedSerial && $0.state == "device"

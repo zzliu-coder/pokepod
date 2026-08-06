@@ -58,8 +58,21 @@ final class DeviceWorkspace {
         adbDevice: ADBDevice,
         devices: inout [RegisteredDevice]
     ) -> String {
+        register(
+            identity: identity,
+            transportAlias: adbDevice.serial,
+            fallbackModel: adbDevice.model,
+            devices: &devices)
+    }
+
+    func register(
+        identity: DeviceIdentity,
+        transportAlias: String,
+        fallbackModel: String? = nil,
+        devices: inout [RegisteredDevice]
+    ) -> String {
         let exactIndex = devices.firstIndex { $0.deviceId == identity.deviceId }
-        let aliasIndex = devices.firstIndex { $0.serialAliases.contains(adbDevice.serial) }
+        let aliasIndex = devices.firstIndex { $0.serialAliases.contains(transportAlias) }
         var record: RegisteredDevice
         if let exactIndex {
             record = devices.remove(at: exactIndex)
@@ -75,9 +88,9 @@ final class DeviceWorkspace {
         record.displayName = identity.displayName
         record.platform = identity.platform
         record.manufacturer = identity.manufacturer
-        record.model = identity.model ?? adbDevice.model
-        if !record.serialAliases.contains(adbDevice.serial) {
-            record.serialAliases.append(adbDevice.serial)
+        record.model = identity.model ?? fallbackModel
+        if !record.serialAliases.contains(transportAlias) {
+            record.serialAliases.append(transportAlias)
         }
         record.lastSeenAt = Date()
         devices.removeAll { $0.deviceId == record.deviceId }

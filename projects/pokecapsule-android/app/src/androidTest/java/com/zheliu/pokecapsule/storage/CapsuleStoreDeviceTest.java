@@ -69,6 +69,7 @@ public final class CapsuleStoreDeviceTest extends TestCase {
         paths.ensureBase();
         File active = createCapsule(paths, ID);
         write(active, "processing.json", processing(ID, "ready"));
+        Files.write(new File(active, "audio.m4a").toPath(), new byte[512]);
 
         CapsuleStore capsules = new CapsuleStore(paths);
         TrashStore trash = new TrashStore(paths, capsules);
@@ -79,6 +80,24 @@ public final class CapsuleStoreDeviceTest extends TestCase {
         trash.restore(Collections.singletonList(upper));
         assertTrue(new File(paths.inbox(), ID).isDirectory());
         assertFalse(new File(paths.inbox(), upper).exists());
+    }
+
+    public void testNewAndroidRecordingWritesProcessingV2M4aDescriptor() throws Exception {
+        PokePaths paths = new PokePaths(testRoot);
+        CapsuleStore store = new CapsuleStore(paths);
+        String id = "86a1d0e3-8b48-4980-a351-cc5ea9bd4ec8";
+        File staging = store.beginRecording(id);
+        Files.write(new File(staging, "audio.m4a").toPath(), new byte[512]);
+
+        File committed = store.commitRecording(staging, 1_000);
+        org.json.JSONObject processing = CapsuleStore.readJson(
+                new File(committed, "processing.json"));
+        assertEquals(2, processing.getInt("schemaVersion"));
+        assertEquals("audio.m4a", processing.getString("audioFile"));
+        assertEquals("m4a-aac-lc", processing.getString("audioFormat"));
+        assertEquals(16_000, processing.getInt("sampleRateHz"));
+        assertEquals(1, processing.getInt("channels"));
+        assertEquals(16, processing.getInt("bitsPerSample"));
     }
 
     private static File createCapsule(PokePaths paths, String id) throws Exception {

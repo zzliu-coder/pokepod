@@ -1,41 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pokecapsule.local/schema/processing-1.0.json",
+  "$id": "https://pokecapsule.local/schema/processing.json",
   "title": "PokeCapsule Processing State",
-  "type": "object",
-  "additionalProperties": true,
-  "required": [
-    "schemaVersion",
-    "capsuleId",
-    "revision",
-    "durationMs",
-    "status",
-    "audioFile"
-  ],
-  "properties": {
-    "schemaVersion": { "const": 1 },
-    "capsuleId": { "type": "string", "format": "uuid" },
-    "revision": { "type": "integer", "minimum": 1 },
-    "durationMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
-    "status": {
-      "enum": [
-        "recording",
-        "recorded",
-        "queued",
-        "transcribing",
-        "raw_ready",
-        "correcting",
-        "ready",
-        "failed"
-      ]
-    },
-    "audioFile": { "const": "audio.m4a" },
-    "rawTextFile": { "enum": ["raw.txt", null] },
-    "polishedTextFile": { "enum": ["polished.md", null] },
-    "errorStage": { "type": ["string", "null"] },
-    "error": { "type": ["string", "null"], "maxLength": 2000 },
-    "attempts": { "type": "integer", "minimum": 0 },
-    "engine": { "type": ["string", "null"] },
-    "model": { "type": ["string", "null"] }
-  }
+  "description": "Reader schema for legacy processing v1 and audio-aware processing v2.",
+  "oneOf": [
+    { "$ref": "processing-v1.schema.json" },
+    { "$ref": "processing-v2.schema.json" }
+  ]
 }

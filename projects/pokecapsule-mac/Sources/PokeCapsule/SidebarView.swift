@@ -126,6 +126,17 @@ struct SidebarView: View {
                     }
                 }
             }
+            let unregisteredPokePods = model.pokePodPorts.filter { port in
+                !model.registeredDevices.contains { $0.serialAliases.contains(port.path) }
+            }
+            if !unregisteredPokePods.isEmpty {
+                Divider()
+                ForEach(unregisteredPokePods, id: \.path) { port in
+                    Button("连接 PokePod · \(port.lastPathComponent)") {
+                        model.choosePokePod(port)
+                    }
+                }
+            }
             Divider()
             Button("检查连接") { model.refreshDevices() }
         } label: {
@@ -163,7 +174,8 @@ struct SidebarView: View {
     }
 
     private func deviceIcon(_ device: RegisteredDevice) -> String {
-        device.displayName.localizedCaseInsensitiveContains("poke")
+        if device.platform == "pokepod" { return "waveform.circle" }
+        return device.displayName.localizedCaseInsensitiveContains("poke")
             || device.model?.localizedCaseInsensitiveContains("poke") == true
             ? "book.closed" : "smartphone"
     }

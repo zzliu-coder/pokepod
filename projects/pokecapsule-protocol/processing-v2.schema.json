@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokecapsule.local/schema/processing-2.0.json",
+  "title": "PokeCapsule Processing State v2",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "capsuleId",
+    "revision",
+    "durationMs",
+    "status",
+    "audioFile",
+    "audioFormat",
+    "sampleRateHz",
+    "channels",
+    "bitsPerSample"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "capsuleId": { "type": "string", "format": "uuid" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "durationMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
+    "status": {
+      "enum": [
+        "recording",
+        "recorded",
+        "queued",
+        "transcribing",
+        "raw_ready",
+        "correcting",
+        "ready",
+        "failed"
+      ]
+    },
+    "audioFile": { "enum": ["audio.m4a", "audio.wav"] },
+    "audioFormat": { "enum": ["m4a-aac-lc", "wav-pcm-s16le"] },
+    "sampleRateHz": { "type": "integer", "minimum": 8000, "maximum": 192000 },
+    "channels": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "bitsPerSample": { "type": "integer", "minimum": 8, "maximum": 32 },
+    "rawTextFile": { "enum": ["raw.txt", null] },
+    "polishedTextFile": { "enum": ["polished.md", null] },
+    "errorStage": { "type": ["string", "null"] },
+    "error": { "type": ["string", "null"], "maxLength": 2000 },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "engine": { "type": ["string", "null"] },
+    "model": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "audioFile": { "const": "audio.m4a" } } },
+      "then": { "properties": { "audioFormat": { "const": "m4a-aac-lc" } } }
+    },
+    {
+      "if": { "properties": { "audioFile": { "const": "audio.wav" } } },
+      "then": {
+        "properties": {
+          "audioFormat": { "const": "wav-pcm-s16le" },
+          "bitsPerSample": { "const": 16 }
+        }
+      }
+    }
+  ]
+}

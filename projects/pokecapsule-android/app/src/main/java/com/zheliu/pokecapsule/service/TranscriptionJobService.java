@@ -5,6 +5,7 @@ import android.app.job.JobService;
 
 import com.zheliu.pokecapsule.PokeCapsuleApp;
 import com.zheliu.pokecapsule.core.ProcessingState;
+import com.zheliu.pokecapsule.core.AudioFilePolicy;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.storage.AtomicFiles;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
@@ -154,7 +155,7 @@ public final class TranscriptionJobService extends JobService {
                 SentenceAudioPreparer.PreparedAudio prepared;
                 try {
                     prepared = SentenceAudioPreparer.prepare(
-                            new File(record.directory, "audio.m4a"),
+                            AudioFilePolicy.resolve(record.directory, record.audioFile),
                             record.durationMs,
                             new File(getCacheDir(), "asr"));
                 } catch (IOException error) {

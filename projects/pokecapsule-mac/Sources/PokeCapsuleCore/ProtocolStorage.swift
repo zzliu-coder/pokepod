@@ -58,6 +58,43 @@ public enum PathPolicy {
     }
 }
 
+public enum AudioPathPolicy {
+    public static let m4aFile = "audio.m4a"
+    public static let wavFile = "audio.wav"
+    public static let m4aFormat = "m4a-aac-lc"
+    public static let wavFormat = "wav-pcm-s16le"
+
+    public static func isSafeBasename(_ value: String) -> Bool {
+        value == m4aFile || value == wavFile
+    }
+
+    public static func isSupported(_ metadata: ProcessingMetadata) -> Bool {
+        guard isSafeBasename(metadata.audioFile) else { return false }
+        if metadata.schemaVersion == 1 { return metadata.audioFile == m4aFile }
+        guard metadata.schemaVersion == 2,
+              let sampleRateHz = metadata.sampleRateHz,
+              let channels = metadata.channels,
+              let bitsPerSample = metadata.bitsPerSample,
+              (8_000...192_000).contains(sampleRateHz),
+              (1...8).contains(channels),
+              (8...32).contains(bitsPerSample) else { return false }
+        if metadata.audioFile == m4aFile { return metadata.audioFormat == m4aFormat }
+        return metadata.audioFormat == wavFormat && bitsPerSample == 16
+    }
+
+    public static func resolve(_ basename: String, in directory: URL) throws -> URL {
+        guard isSafeBasename(basename) else {
+            throw PokeCapsuleError.invalidRelativePath(basename)
+        }
+        let root = directory.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = root.appendingPathComponent(basename).resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.deletingLastPathComponent() == root else {
+            throw PokeCapsuleError.invalidRelativePath(basename)
+        }
+        return candidate
+    }
+}
+
 public struct CapsuleScanner {
     private let fileManager: FileManager
 
@@ -197,6 +234,11 @@ public struct CapsuleScanner {
                 if processing?.capsuleId != capsule.id {
                     localWarnings.append("processing.json 的 UUID 不一致")
                     processing = nil
+                } else if let value = processing,
+                          !ProtocolConstants.processingSchemaVersions.contains(value.schemaVersion) {
+                    localWarnings.append("processing.json 协议版本 \(value.schemaVersion) 暂不支持，胶囊已设为只读")
+                } else if let value = processing, !AudioPathPolicy.isSupported(value) {
+                    localWarnings.append("processing.json 的音频描述不受支持，胶囊已设为只读")
                 }
             } catch {
                 localWarnings.append("processing.json 无法解析")
@@ -205,8 +247,10 @@ public struct CapsuleScanner {
             localWarnings.append("缺少 processing.json")
         }
 
-        let audioURL = directory.appendingPathComponent("audio.m4a")
-        if !fileManager.fileExists(atPath: audioURL.path) {
+        let audioURL = processing.flatMap {
+            try? AudioPathPolicy.resolve($0.audioFile, in: directory)
+        }
+        if audioURL == nil || !fileManager.fileExists(atPath: audioURL!.path) {
             localWarnings.append("缺少原始音频")
         }
         let rawURL = directory.appendingPathComponent("raw.txt")
@@ -312,11 +356,16 @@ public struct CapsulePackage {
     public static func inspect(_ directory: URL, fileManager: FileManager = .default) throws -> CapsulePackage {
         let metadataURL = directory.appendingPathComponent("capsule.json")
         let processingURL = directory.appendingPathComponent("processing.json")
-        let audioURL = directory.appendingPathComponent("audio.m4a")
+        let processing = try PokeJSON.decoder.decode(
+            ProcessingMetadata.self, from: Data(contentsOf: processingURL))
+        guard AudioPathPolicy.isSupported(processing) else {
+            throw PokeCapsuleError.unsupportedSchema(processing.schemaVersion)
+        }
+        let audioURL = try AudioPathPolicy.resolve(processing.audioFile, in: directory)
         guard fileManager.fileExists(atPath: metadataURL.path),
               fileManager.fileExists(atPath: processingURL.path),
               fileManager.fileExists(atPath: audioURL.path) else {
-            throw PokeCapsuleError.malformedCapsule("导入目录必须包含 capsule.json、processing.json 和 audio.m4a")
+            throw PokeCapsuleError.malformedCapsule("导入目录必须包含 capsule.json、processing.json 和其声明的音频")
         }
         let metadata = try PokeJSON.decoder.decode(CapsuleMetadata.self, from: Data(contentsOf: metadataURL))
         guard metadata.schemaVersion == ProtocolConstants.schemaVersion else {

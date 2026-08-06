@@ -1,6 +1,7 @@
 package com.zheliu.pokecapsule.storage;
 
 import com.zheliu.pokecapsule.core.Ids;
+import com.zheliu.pokecapsule.core.AudioFilePolicy;
 import com.zheliu.pokecapsule.core.PathPolicy;
 import com.zheliu.pokecapsule.core.ProcessingState;
 import com.zheliu.pokecapsule.core.TimeFormat;
@@ -82,6 +83,12 @@ public final class CapsuleStore {
             if (!id.equalsIgnoreCase(processing.optString("capsuleId"))) {
                 processing = damagedProcessing(
                         processing, id, "转写状态 UUID 与胶囊不一致");
+            } else {
+                String audioFile = processing.optString("audioFile", "");
+                File audio = AudioFilePolicy.resolve(directory, audioFile);
+                if (!audio.isFile()) {
+                    processing = damagedProcessing(processing, id, "原始音频不存在");
+                }
             }
         } catch (IOException error) {
             processing = damagedProcessing(null, id, error.getMessage());
@@ -137,7 +144,9 @@ public final class CapsuleStore {
     public synchronized File commitRecording(File stagingDirectory, long durationMs) throws IOException {
         paths.assertInsideRoot(stagingDirectory);
         String id = stagingDirectory.getName();
-        File audio = new File(stagingDirectory, "audio.m4a");
+        JSONObject stagedProcessing = readJson(new File(stagingDirectory, "processing.json"));
+        File audio = AudioFilePolicy.resolve(
+                stagingDirectory, stagedProcessing.optString("audioFile", ""));
         if (!Ids.isUuid(id) || !audio.isFile() || audio.length() < 256 || durationMs <= 0) {
             throw new IOException("录音为空或未完整停止");
         }
@@ -180,8 +189,16 @@ public final class CapsuleStore {
                     }
                     continue;
                 }
-                File audio = new File(directory, "audio.m4a");
-                if (Ids.isUuid(directory.getName()) && audio.isFile() && audio.length() >= 256) {
+                File audio = null;
+                try {
+                    JSONObject processing = readJson(new File(directory, "processing.json"));
+                    audio = AudioFilePolicy.resolve(
+                            directory, processing.optString("audioFile", ""));
+                } catch (IOException ignored) {
+                    // Damaged staging metadata remains untouched for manual recovery.
+                }
+                if (Ids.isUuid(directory.getName()) && audio != null
+                        && audio.isFile() && audio.length() >= 256) {
                     File marker = new File(directory, "interrupted.txt");
                     AtomicFiles.writeUtf8(marker, "录音进程异常结束；请在应用内恢复或导出此音频。\n");
                 }
@@ -984,12 +1001,16 @@ public final class CapsuleStore {
             String id, long durationMs, ProcessingState status, int revision) throws IOException {
         try {
             JSONObject processing = new JSONObject();
-            processing.put("schemaVersion", 1);
+            processing.put("schemaVersion", 2);
             processing.put("capsuleId", id);
             processing.put("revision", revision);
             processing.put("durationMs", durationMs);
             processing.put("status", status.wireValue());
-            processing.put("audioFile", "audio.m4a");
+            processing.put("audioFile", AudioFilePolicy.ANDROID_AUDIO_FILE);
+            processing.put("audioFormat", AudioFilePolicy.M4A_AAC_LC);
+            processing.put("sampleRateHz", 16_000);
+            processing.put("channels", 1);
+            processing.put("bitsPerSample", 16);
             processing.put("rawTextFile", JSONObject.NULL);
             processing.put("polishedTextFile", JSONObject.NULL);
             processing.put("errorStage", JSONObject.NULL);

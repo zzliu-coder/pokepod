@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "capsuleId": "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f",
+  "revision": 2,
+  "durationMs": 8000,
+  "status": "queued",
+  "audioFile": "audio.m4a",
+  "rawTextFile": null,
+  "polishedTextFile": null,
+  "attempts": 0
+}

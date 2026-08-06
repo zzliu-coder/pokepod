@@ -7,6 +7,7 @@ struct SettingsView: View {
     @AppStorage("CorrectionModel") private var model = "deepseek-v4-flash"
     @AppStorage("CorrectionPrompt") private var prompt = "只校正识别错误和标点；不解释、不增删原意；无法判断时原样输出。只输出正文。"
     @AppStorage("ADBPath") private var adbPath = ""
+    @AppStorage("AutomaticCorrectionEnabled") private var automaticCorrection = false
     @State private var apiKey = ""
     @State private var message = ""
 
@@ -34,6 +35,9 @@ struct SettingsView: View {
                 }
                 Text("DeepSeek 只在点击校对按钮时调用，并关闭思考。密钥保存在当前 Mac 的受限本地文件中。")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("自动校对新转写", isOn: $automaticCorrection)
+                Text("默认关闭。开启后，Mac 每次同步只处理一条新转写，原始转写永远保留。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("存储与备份") {
                 Text("原始录音永久保留；删除先进入设备回收站。Mac 离线修改会进入当前设备的独立队列。")
@@ -42,7 +46,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
-        .frame(width: 620, height: 530)
+        .frame(width: 620, height: 560)
     }
 
     private func saveKey() {

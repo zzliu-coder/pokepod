@@ -17,6 +17,7 @@ import android.os.SystemClock;
 
 import com.zheliu.pokecapsule.core.Ids;
 import com.zheliu.pokecapsule.core.AudioLevel;
+import com.zheliu.pokecapsule.core.AudioFilePolicy;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.PokePaths;
 import com.zheliu.pokecapsule.transcription.SentenceAudioPolicy;
@@ -114,7 +115,7 @@ public final class RecordingService extends Service {
         try {
             lastRecordedDurationMs = 0;
             stagingDirectory = store.beginRecording(id);
-            File output = new File(stagingDirectory, "audio.m4a");
+            File output = new File(stagingDirectory, AudioFilePolicy.ANDROID_AUDIO_FILE);
             File original = new File(stagingDirectory, "audio.original.wav");
             recorder = new EnhancedAudioRecorder(
                     output, original, DeviceCapabilities.current().eink);

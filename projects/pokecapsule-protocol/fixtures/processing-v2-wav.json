@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "capsuleId": "86a1d0e3-8b48-4980-a351-cc5ea9bd4ec8",
+  "revision": 1,
+  "durationMs": 12340,
+  "status": "recorded",
+  "audioFile": "audio.wav",
+  "audioFormat": "wav-pcm-s16le",
+  "sampleRateHz": 16000,
+  "channels": 1,
+  "bitsPerSample": 16,
+  "rawTextFile": null,
+  "polishedTextFile": null,
+  "attempts": 0
+}

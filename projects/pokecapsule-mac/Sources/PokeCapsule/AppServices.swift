@@ -12,7 +12,7 @@ struct DeviceSyncResult {
 
 struct DeviceSyncEngine {
     func run(
-        transport: ADBTransport,
+        transport: any DeviceTransport,
         mirror: URL,
         queueFile: URL,
         backups: URL,
@@ -48,7 +48,9 @@ final class CapsulePlaybackController {
     private var player: AVAudioPlayer?
 
     func play(_ record: CapsuleRecord) throws {
-        let audio = record.localDirectory.appendingPathComponent("audio.m4a")
+        guard let audio = record.audioURL else {
+            throw PokeCapsuleError.malformedCapsule("原始音频路径无效")
+        }
         player = try AVAudioPlayer(contentsOf: audio)
         player?.play()
     }
@@ -58,7 +60,7 @@ struct CorrectionWorkflow {
     func run(
         record: CapsuleRecord,
         deviceID: String,
-        transport: ADBTransport,
+        transport: any DeviceTransport,
         cacheRoot: URL
     ) async throws {
         guard let raw = record.rawText?.trimmingCharacters(in: .whitespacesAndNewlines),

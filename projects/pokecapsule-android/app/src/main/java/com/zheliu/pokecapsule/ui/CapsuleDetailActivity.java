@@ -23,6 +23,7 @@ import com.zheliu.pokecapsule.service.DeviceCapabilities;
 import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
 import com.zheliu.pokecapsule.service.InternalBroadcasts;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
+import com.zheliu.pokecapsule.core.AudioFilePolicy;
 import com.zheliu.pokecapsule.service.TranscriptionScheduler;
 import com.zheliu.pokecapsule.storage.LibraryRepository;
 import com.zheliu.pokecapsule.transcription.TencentAsrConfig;
@@ -275,8 +276,8 @@ public final class CapsuleDetailActivity extends Activity {
             stopPlayback();
             return;
         }
-        File audio = new File(record.directory, "audio.m4a");
         try {
+            File audio = AudioFilePolicy.resolve(record.directory, record.audioFile);
             player = new MediaPlayer();
             player.setDataSource(audio.getAbsolutePath());
             player.setOnCompletionListener(value -> stopPlayback());

@@ -2,6 +2,7 @@ import Foundation
 
 public enum ProtocolConstants {
     public static let schemaVersion = 1
+    public static let processingSchemaVersions = Set([1, 2])
     public static let commandSchemaVersion = 2
     public static let remoteRoot = "/sdcard/PokeCapsule"
     public static let reservedFolders = ["Inbox", "Archive"]
@@ -77,6 +78,10 @@ public struct ProcessingMetadata: Codable, Hashable {
     public var durationMs: Int
     public var status: ProcessingStatus
     public var audioFile: String
+    public var audioFormat: String? = nil
+    public var sampleRateHz: Int? = nil
+    public var channels: Int? = nil
+    public var bitsPerSample: Int? = nil
     public var rawTextFile: String?
     public var polishedTextFile: String?
     public var errorStage: String?
@@ -123,7 +128,12 @@ public struct CapsuleRecord: Identifiable, Hashable {
     public var readOnly: Bool {
         capsule.schemaVersion != ProtocolConstants.schemaVersion
             || processing == nil
-            || processing?.schemaVersion != ProtocolConstants.schemaVersion
+            || !(processing.map(AudioPathPolicy.isSupported) ?? false)
+    }
+
+    public var audioURL: URL? {
+        guard let processing else { return nil }
+        return try? AudioPathPolicy.resolve(processing.audioFile, in: localDirectory)
     }
 
     public var displayTitle: String {

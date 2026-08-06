@@ -145,6 +145,9 @@ struct CapsuleListView: View {
                 Button("复制文字") { model.copySelectedText(markdown: false) }
                 Button("永久删除", role: .destructive) { dialog = .purge }
             } else {
+                if model.selectedRecords.contains(where: { $0.rawText != nil && !$0.readOnly }) {
+                    Button("校对") { model.correctSelected() }
+                }
                 Button("移动") { dialog = .move }
                 Button("标签") { dialog = .tag }
                 Button("收藏") { model.setFavorite(true) }

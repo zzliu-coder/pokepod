@@ -42,10 +42,12 @@ android {
 dependencies {
     // The workspace Gradle distribution already carries these test jars. Keeping
     // unit tests offline avoids depending on the Mac's optional HTTP proxy.
+    def gradleTestLib = System.getenv('POKECAPSULE_GRADLE_TEST_LIB')
+            ?: '../../../work/toolchains/gradle@8/8.14.5/libexec/lib'
     testImplementation files(
-            '../../../work/toolchains/gradle@8/8.14.5/libexec/lib/junit-4.13.2.jar',
-            '../../../work/toolchains/gradle@8/8.14.5/libexec/lib/hamcrest-core-1.3.jar')
+            "${gradleTestLib}/junit-4.13.2.jar",
+            "${gradleTestLib}/hamcrest-core-1.3.jar")
     androidTestImplementation files(
-            '../../../work/toolchains/gradle@8/8.14.5/libexec/lib/junit-4.13.2.jar',
-            '../../../work/toolchains/gradle@8/8.14.5/libexec/lib/hamcrest-core-1.3.jar')
+            "${gradleTestLib}/junit-4.13.2.jar",
+            "${gradleTestLib}/hamcrest-core-1.3.jar")
 }
