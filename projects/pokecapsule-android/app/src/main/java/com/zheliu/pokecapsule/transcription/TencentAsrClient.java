@@ -38,7 +38,7 @@ public final class TencentAsrClient {
         request.put("SubServiceType", 2);
         request.put("EngSerViceType", "16k_zh");
         request.put("SourceType", 1);
-        request.put("VoiceFormat", "m4a");
+        request.put("VoiceFormat", voiceFormatFor(audio));
         request.put("Data", Base64.encodeToString(bytes, Base64.NO_WRAP));
         request.put("DataLen", bytes.length);
         request.put("FilterDirty", 0);
@@ -99,6 +99,13 @@ public final class TencentAsrClient {
         String signature = hex(hmac(secretSigning, stringToSign));
         return "TC3-HMAC-SHA256 Credential=" + credentials.secretId + "/" + scope
                 + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature;
+    }
+
+    static String voiceFormatFor(File audio) {
+        String name = audio.getName().toLowerCase(Locale.ROOT);
+        if (name.endsWith(".m4a")) return "m4a";
+        if (name.endsWith(".wav")) return "wav";
+        throw new IllegalArgumentException("腾讯一句话识别不支持此音频格式");
     }
 
     private static String utcDate(long timestamp) {

@@ -68,6 +68,14 @@ final class PokePodTransportTests: XCTestCase {
         }
     }
 
+    func testClientRejectsDuplicateResponseRequestIDInReceivePath() throws {
+        let channel = DuplicateResponseLinkChannel()
+        let client = PokePodLinkClient(channel: channel)
+        XCTAssertThrowsError(try client.call(.status)) {
+            XCTAssertEqual($0 as? LinkV2Error, .duplicateRequestID(1))
+        }
+    }
+
     func testV1AndV2AudioMetadataAndSafeBasename() throws {
         let id = UUID()
         let legacy = ProcessingMetadata(
@@ -205,6 +213,28 @@ private final class DisconnectingLinkChannel: LinkV2ByteChannel {
     func write(_ data: Data) throws {}
     func read(maxLength: Int, timeout: TimeInterval) throws -> Data {
         throw LinkV2Error.disconnected
+    }
+}
+
+private final class DuplicateResponseLinkChannel: LinkV2ByteChannel {
+    private var parser = LinkV2FrameParser()
+    private var response = Data()
+
+    func write(_ data: Data) throws {
+        for frame in try parser.append(data) where frame.type == .requestJSON {
+            let payload = try JSONSerialization.data(
+                withJSONObject: ["status": "ok"], options: [.sortedKeys])
+            let encoded = try LinkV2Frame(
+                type: .responseJSON, requestID: frame.requestID, payload: payload).encoded()
+            response.append(encoded)
+            response.append(encoded)
+        }
+    }
+
+    func read(maxLength: Int, timeout: TimeInterval) throws -> Data {
+        guard !response.isEmpty else { throw LinkV2Error.timedOut }
+        defer { response.removeAll() }
+        return response
     }
 }
 

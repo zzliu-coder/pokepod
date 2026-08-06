@@ -58,7 +58,7 @@ Debug APK：
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-当前 46 项本地单测覆盖共享展示 fixture、智能清单、搜索排序、设备能力、命令兼容、协议 UUID 规范化、音频 basename 与 v1/v2 描述、路径规则、损坏转写状态保护、回收站目录绑定、状态跳转、XML 自定义控件构造和 100 次复制 UUID 唯一性。另有 4 项 Android 仪器测试，其中新增“新录音写 schema 2 M4A 描述”用例。测试依赖使用工作区 Gradle 发行包自带的 JUnit，避免依赖本机代理。
+当前 48 项本地单测覆盖共享展示 fixture、智能清单、搜索排序、设备能力、命令兼容、协议 UUID 规范化、音频 basename 与 v1/v2 描述、腾讯 M4A/WAV 格式声明、路径规则、损坏转写状态保护、回收站目录绑定、状态跳转、XML 自定义控件构造和 100 次复制 UUID 唯一性。另有 4 项 Android 仪器测试，其中新增“新录音写 schema 2 M4A 描述”用例。测试依赖使用工作区 Gradle 发行包自带的 JUnit，避免依赖本机代理。
 
 ## Mac 命令入口
 
@@ -76,7 +76,7 @@ component: com.zheliu.pokecapsule/.command.CommandReceiver
 
 ## 当前验证
 
-- 1.7.0（versionCode 22）当前通过 46 项本地单元测试、资源编译、Java 全量编译、DEX 打包、Release/Debug 构建和 Lint `No issues found`。此前 3 项文件系统仪器测试已在 Vivo X Fold3 通过；新增的 schema 2 M4A 仪器用例仍需 Android/Poke3 真机复核。APK 内无 native Whisper/模型。
+- 1.7.0（versionCode 22）当前通过 48 项本地单元测试、资源编译、Java 全量编译、DEX 打包、Release/Debug 构建和 Lint `No issues found`。此前 3 项文件系统仪器测试已在 Vivo X Fold3 通过；新增的 schema 2 M4A 仪器用例仍需 Android/Poke3 真机复核。APK 内无 native Whisper/模型。
 - 1.7.0 将查询选择交给 `LibraryController`，异步扫描和写操作交给 `LibraryRepository`，侧栏与锚定菜单交给 `LibraryMenuCoordinator`，列表行交给 `CapsuleListAdapter`，设置与整理迁入独立页面；`CapsuleStore` 只作为稳定写入门面。
 - Release APK 1.4.6 已由用户在 Vivo X Fold3 真机确认录音结束后新胶囊会立即出现。
 - Poke3 1.4.6 真机诊断确认：电量 100%、Wi‑Fi 已连接且通过联网验证，但文石系统未给网络附加 `NOT_METERED` 标记，导致旧调度条件一直不满足。1.4.7 改为接受任意可联网网络；Poke3 无蜂窝数据，实际仍通过 Wi‑Fi 转写。

@@ -2,6 +2,8 @@ package com.zheliu.pokecapsule.transcription;
 
 import org.junit.Test;
 
+import java.io.File;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -28,5 +30,15 @@ public final class TencentAsrTest {
         assertTrue(first.contains("Credential=AKIDexample123/"));
         assertTrue(first.contains("SignedHeaders=content-type;host;x-tc-action"));
         assertFalse(first.contains("exampleSecret456"));
+    }
+
+    @Test public void voiceFormatFollowsPreparedAudioFile() {
+        assertEquals("m4a", TencentAsrClient.voiceFormatFor(new File("audio.m4a")));
+        assertEquals("wav", TencentAsrClient.voiceFormatFor(new File("audio.wav")));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsUnknownAudioFormat() {
+        TencentAsrClient.voiceFormatFor(new File("audio.bin"));
     }
 }

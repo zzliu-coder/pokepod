@@ -91,7 +91,7 @@ PokePod 的 BOOT 键和屏幕按钮直接发送 Option-Z，macOS 将其作为普
 
 ## 已完成的真机验收
 
-- 52 项 Swift 测试、Release 构建、原子应用打包和代码签名校验通过；其中包含 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/断线/busy、未知协议只读降级，以及共享协议中的 v1 M4A、v2 M4A/WAV 兼容夹具。
+- 53 项 Swift 测试、Release 构建、原子应用打包和代码签名校验通过；其中包含 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/重复响应/断线/busy、未知协议只读降级，以及共享协议中的 v1 M4A、v2 M4A/WAV 兼容夹具。
 - 已自动识别 USB 连接的 Poke3，并建立只读镜像。
 - 两条真机录音已从 `raw_ready` 自动调用 DeepSeek，写回 `polished.md` 后变为 `ready`。
 - 维护握手、目录创建、目录删除、校对提交和重复事务幂等已在真机通过。

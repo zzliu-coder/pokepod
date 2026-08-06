@@ -133,6 +133,10 @@ public final class LinkRequestRegistry {
         }
         if completed.count > 4_096 { completed.removeAll(keepingCapacity: true) }
     }
+
+    public func isCompleted(_ requestID: UInt32) -> Bool {
+        completed.contains(requestID)
+    }
 }
 
 public protocol LinkV2ByteChannel: AnyObject {
@@ -285,9 +289,18 @@ public final class PokePodLinkClient {
             let incoming = try channel.read(
                 maxLength: LinkV2Frame.headerLength + LinkV2Frame.maxDataLength,
                 timeout: max(0.01, deadline.timeIntervalSinceNow))
-            for frame in try parser.append(incoming) where frame.requestID == requestID {
+            for frame in try parser.append(incoming) {
+                if frame.requestID != requestID {
+                    if registry.isCompleted(frame.requestID) {
+                        throw LinkV2Error.duplicateRequestID(frame.requestID)
+                    }
+                    continue
+                }
                 switch frame.type {
                 case .responseJSON:
+                    guard response == nil else {
+                        throw LinkV2Error.duplicateRequestID(requestID)
+                    }
                     guard let object = try JSONSerialization.jsonObject(with: frame.payload) as? [String: Any] else {
                         throw LinkV2Error.malformedResponse("JSON 顶层必须为对象")
                     }
