@@ -14,6 +14,13 @@ constexpr uint32_t kAudioSampleRate = 48000;
 constexpr uint16_t kAudioChannels = 2;
 constexpr uint16_t kUsbAudioChannels = 1;
 constexpr uint16_t kAudioBitsPerSample = 16;
+constexpr uint32_t kCapsuleSampleRate = 16000;
+constexpr uint16_t kCapsuleChannels = 1;
+constexpr uint16_t kCapsuleBitsPerSample = 16;
+constexpr size_t kCapsuleBytesPerSample = kCapsuleBitsPerSample / 8;
+constexpr size_t kCapsuleByteRate =
+    kCapsuleSampleRate * kCapsuleChannels * kCapsuleBytesPerSample;
+constexpr uint32_t kMaxCapsuleDurationMs = 58500;
 constexpr uint32_t kUsbAudioIntervalsPerSecond = 1000;
 constexpr size_t kAudioBytesPerSample = kAudioBitsPerSample / 8;
 constexpr size_t kAudioByteRate =

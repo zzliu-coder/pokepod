@@ -35,6 +35,6 @@ constexpr uint8_t kIoExpanderAddress = 0x20;
 constexpr uint8_t kTouchV2Address = 0x15;
 constexpr uint8_t kTouchV1Address = 0x38;
 
-constexpr uint32_t kMaxRecordingMs = 60000;
+constexpr uint32_t kMaxRecordingMs = kMaxCapsuleDurationMs;
 
 }  // namespace pokepod

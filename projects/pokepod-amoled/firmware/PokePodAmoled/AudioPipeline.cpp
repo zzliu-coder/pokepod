@@ -4,6 +4,8 @@
 #include <esp_check.h>
 #include <es8311.h>
 
+#include "WavFormat.h"
+
 namespace pokepod {
 
 bool AudioPipeline::begin(Print &log) {
@@ -11,7 +13,7 @@ bool AudioPipeline::begin(Print &log) {
   // Waveshare's ES8311 example enables the board audio power path before
   // starting I2S. USB exposes a microphone-only UAC interface, so no host
   // playback samples are routed to this TX channel.
-  digitalWrite(kSpeakerAmpPin, HIGH);
+  digitalWrite(kSpeakerAmpPin, LOW);
   i2s_.setPins(kI2sBclk, kI2sWordSelect, kI2sDataOut, kI2sDataIn, kI2sMclk);
   if (!i2s_.begin(I2S_MODE_STD, kAudioSampleRate, I2S_DATA_BIT_WIDTH_16BIT,
                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
@@ -40,6 +42,7 @@ bool AudioPipeline::begin(Print &log) {
                                            clock.sample_frequency);
   }
   if (error == ESP_OK) error = es8311_microphone_config(codec, false);
+  if (error == ESP_OK) error = es8311_voice_volume_set(codec, 82, nullptr);
   if (error == ESP_OK) error = es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_30DB);
   if (error != ESP_OK) {
     log.printf("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_init\",\"error\":%d}\n", error);
@@ -63,6 +66,63 @@ size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
   const uint16_t peak = pcm16PeakLittleEndian(buffer, bytes);
   if (peak > peakSample_) peakSample_ = peak;
   return bytes;
+}
+
+bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
+  if (!ready_ || playing_) return false;
+  File file = fs.open(path, FILE_READ);
+  uint8_t header[kWavHeaderBytes];
+  uint32_t dataBytes = 0;
+  if (!file || file.isDirectory() ||
+      file.read(header, sizeof(header)) != sizeof(header) ||
+      !validCapsuleWavHeader(header, sizeof(header), file.size(), dataBytes)) {
+    if (file) file.close();
+    log.println("{\"event\":\"playback_error\",\"stage\":\"wav_header\"}");
+    return false;
+  }
+  playbackFile_ = file;
+  playbackRemaining_ = dataBytes;
+  playing_ = true;
+  digitalWrite(kSpeakerAmpPin, HIGH);
+  log.printf("{\"event\":\"playback_started\",\"bytes\":%lu}\n",
+             static_cast<unsigned long>(dataBytes));
+  return true;
+}
+
+void AudioPipeline::pumpPlayback(Print &log) {
+  if (!playing_) return;
+  const size_t wanted = playbackRemaining_ < sizeof(playbackInput_)
+      ? playbackRemaining_ : sizeof(playbackInput_);
+  const size_t count = playbackFile_.read(playbackInput_, wanted);
+  if (count == 0 || count % 2 != 0) {
+    stopPlayback(log);
+    return;
+  }
+  size_t output = 0;
+  for (size_t offset = 0; offset < count; offset += 2) {
+    for (uint8_t repeat = 0; repeat < 3; ++repeat) {
+      playbackOutput_[output++] = playbackInput_[offset];
+      playbackOutput_[output++] = playbackInput_[offset + 1];
+      playbackOutput_[output++] = playbackInput_[offset];
+      playbackOutput_[output++] = playbackInput_[offset + 1];
+    }
+  }
+  if (i2s_.write(playbackOutput_, output) != output) {
+    log.println("{\"event\":\"playback_error\",\"stage\":\"i2s_write\"}");
+    stopPlayback(log);
+    return;
+  }
+  playbackRemaining_ -= count;
+  if (playbackRemaining_ == 0) stopPlayback(log);
+}
+
+void AudioPipeline::stopPlayback(Print &log) {
+  if (!playing_) return;
+  playbackFile_.close();
+  playbackRemaining_ = 0;
+  playing_ = false;
+  digitalWrite(kSpeakerAmpPin, LOW);
+  log.println("{\"event\":\"playback_stopped\"}");
 }
 
 }  // namespace pokepod

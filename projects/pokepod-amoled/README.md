@@ -1,71 +1,113 @@
 # PokePod AMOLED
 
-PokePod AMOLED turns the Waveshare ESP32-S3-Touch-AMOLED-1.8 into a small
-PokeCapsule companion:
+PokePod 把 Waveshare ESP32-S3-Touch-AMOLED-1.8 做成两种设备：
 
-- USB microphone for macOS Dictation
-- direct USB Option-Z dictation trigger from the BOOT button or touch screen
-- diagnostic USB serial commands
-- local 48 kHz, stereo, 16-bit WAV recording to microSD
-- display, touch, RTC, IMU, battery/PMU and SD status dashboard
+- 独立语音胶囊：录制 `16 kHz / 16 bit / mono WAV`，保存为 PokeCapsule
+  schema v2，联网后由腾讯云一句话识别生成 `raw.txt`。
+- Mac 有线语音终端：USB 同时提供 48 kHz 单声道麦克风、Option+Z
+  键盘触发和 PokePod Link v2 数据同步。
 
-The firmware electronically detects the board revision at startup:
+固件在启动时通过触摸控制器地址自动识别硬件：
 
-- I2C `0x15`: V2, CO5300 display and CST820-compatible touch
-- I2C `0x38`: V1, SH8601 display and FT3168 touch
+- I2C `0x38`：V1，SH8601 + FT3168。
+- I2C `0x15`：V2，CO5300 + CST820。
 
-The same firmware image supports both revisions. Detection results are printed
-as JSON on the diagnostic USB serial port and shown on the AMOLED.
+同一份固件支持 V1/V2。代码使用 AMOLED、触摸、ES8311 麦克风和扬声器、
+SD、RTC、QMI8658、AXP2101、Wi-Fi、USB CDC/UAC/HID；BLE 暂未启用。
 
-## Build
+## 日常使用
 
-Run:
+设备有三个横向页面：胶囊列表、首页、设置与设备详情。
+
+- 首页点“语音胶囊”开始/停止录音；录音最长 58.5 秒。
+- 未连接 Mac 时，BOOT 短按开始/停止胶囊。
+- 连接 Mac 时，BOOT 短按发送 Option+Z，长按开始/停止胶囊。
+- 胶囊详情可阅读 `final.md > polished.md > raw.txt > title`、播放 WAV、
+  收藏、归档和重新转写。
+- PWR 短按亮屏/息屏，长按安全关机。
+- 设置页可开关 Wi-Fi 自动工作、启动五分钟 WPA2 手机配网页、开关抬起亮屏。
+
+Wi-Fi 平时关闭。录音、待转写或充电产生网络需求时自动连接，最后一项工作
+结束三分钟后关闭。失败按 10 秒、30 秒、2 分钟重试，随后保留队列等待下次
+录音、手动开启或充电唤醒。
+
+## 存储和密钥
+
+逻辑根目录为 SD 卡 `/PokeCapsule`。新录音先进入 `.staging`，WAV 头、
+`capsule.json` 和 `processing.json` 完成后通过目录改名提交到 `Inbox`。
+掉电后会恢复可验证的完整 WAV；现有胶囊不会被批量迁移。
+
+手机配网页保存 Wi-Fi 和腾讯 SecretId/SecretKey 到 ESP32 NVS。已保存的
+SecretKey 不会在网页、Link 状态、日志或 SD 中读回。Link v2 的 `configure`
+操作可作为 USB 救援配置通道。首版接受物理拆机读取 Flash 的个人设备风险，
+建议使用权限受限、可随时吊销的腾讯云子账号密钥。
+
+腾讯请求使用 TLS 证书校验和 TC3-HMAC-SHA256。WAV 以两遍流式方式完成
+签名与 Base64 上传，不在内存中保存完整音频或完整请求体。转写在后台任务中
+运行，屏幕、按键和 Link 主循环保持响应；录音、转写或 UAC 工作期间，Mac 的
+SD 操作会收到可重试的 `busy`。
+
+## PokePod Link v2
+
+CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32。调试日志写入
+调试串口，避免污染 CDC。设备实现：
+
+- hello、状态、身份、元数据指纹；
+- 分页文件清单和分块读取；
+- 分块暂存写入、原子提交、共享管理命令和结果查询；
+- 配置、UTC 校时、录音、停止、Option+Z、重启；
+- 路径穿越拦截、重复请求拦截、传输超时和忙碌重试。
+
+Mac 端通过 `DeviceTransport` 共用镜像、离线队列和 DeepSeek 回写逻辑；
+PokePod 使用 `PokePodTransport`，Android/Poke3 使用 `ADBTransport`。设备不启用
+USB Mass Storage，避免 Mac 与固件同时写 SD。
+
+首次准备 SD 卡时，把完整中文字库通过 Link v2 安装到设备：
 
 ```sh
-./firmware/build.sh
+./cdc-status.py --install-font assets/cjk16.bin
+./cdc-status.py --command reboot
 ```
 
-The build is pinned to the Waveshare source commit recorded in the script and
-uses Arduino-ESP32 3.3.8 plus the locally installed Arduino GFX 1.6.5 compatibility
-library. Artifacts are written under `work/pokepod-build/output`.
+固件会校验 PKF1 文件头、字形数量和总长度，再原子替换
+`/PokeCapsule/.system/fonts/cjk16.bin`。Flash 内始终保留固定界面汉字；完整字库
+负责显示腾讯云和 DeepSeek 返回的任意中文正文。
 
-Run the complete software gate with `./verify.sh`. It executes the firmware
-host tests, a clean firmware compile, all Mac tests, a release Mac build and
-artifact checks. After flashing, `./device-acceptance.sh` queries the device's
-own I2S/USB counters and records three seconds from the USB microphone. That
-test does not require a person to speak or inspect the screen.
+## 构建和自动测试
 
-`./end-to-end-acceptance.sh` asks the device to emit Option-Z and verifies that
-macOS Dictation opens the device's USB microphone. PokeCapsule keyboard privacy
-permissions and a physical button press are not part of this gate.
+```sh
+./firmware/run-host-tests.sh
+./firmware/build.sh
+./verify.sh
+```
 
-## Device controls
+`build.sh` 固定 Waveshare 源码版本，并使用 Arduino-ESP32 3.3.8。产物位于
+`work/pokepod-build/output`。`verify.sh` 运行固件主机测试、干净固件编译、
+Mac 测试和 release build、脚本语法检查及 diff 检查。
 
-- BOOT short press: send Option-Z to the Mac
-- `MAC DICTATION`: send Option-Z from the touch screen
-- `CAPSULE RECORD`: start or stop a WAV recording on microSD
-- USB serial commands: `status`, `dictate`, `record`, `stop`
+真机连接后：
 
-The diagnostic serial interface also enables the standard 1200-baud reboot
-path, so firmware updates after the first diagnostic build can enter the ROM
-loader from the Mac without holding BOOT.
+```sh
+./device-acceptance.sh
+./end-to-end-acceptance.sh
+```
 
-Recordings are staged under `/PokePod/recordings/<id>` and committed with a
-rename only after their WAV header and metadata have been finalized. They stay
-separate from the PokeCapsule device library until the Mac converts/imports them.
+`cdc-status.py` 使用真实 Link v2 帧读取设备状态。真机门检查 V1 硬件状态、
+UAC 48 kHz 单声道连续采集、麦克风非静音和 USB/I2S 计数器。端到端门发送
+Option+Z 并确认 macOS 打开 UAC。第三方微信输入法没有状态回执，最终文字进入
+真实输入框仍保留一次人工确认。
 
-## Mac setup
+## Mac 设置
 
-1. Set the macOS Dictation shortcut to Option-Z.
-2. Select **TinyUSB UAC1** (manufacturer **PokeCapsule**, 48 kHz) as the Dictation/input microphone. macOS uses the USB audio interface name here; the parent USB/HID device is named **PokePod V1 Voice** or **PokePod V2 Voice** after hardware detection.
+1. 把微信语音输入法快捷键设为 Option+Z。
+2. 选择 **TinyUSB UAC1**（制造商 **PokeCapsule**，48 kHz）作为输入麦克风。
 
-The device sends Option-Z directly as a standard USB keyboard. PokeCapsule does
-not monitor or synthesize keyboard input, so Accessibility and Input Monitoring
-permissions are not required for dictation.
+Option+Z 由 PokePod HID 直接发送，PokeCapsule 不参与快捷键中转，不需要辅助
+功能或输入监控权限。
 
-## Recovery boundary
+## 恢复边界
 
-Flashing must only happen after two complete 16 MB reads of the original flash
-match byte-for-byte and the security state has been recorded. The merged image is
-written at flash offset `0x0`. The original image can be restored at the same
-offset while the device is in ROM BOOT mode.
+正式刷写前必须保留两次逐字节一致的原始 16 MB Flash 备份，并记录安全状态。
+合并固件从偏移 `0x0` 写入；设备进入 ROM BOOT 模式后可从同一偏移恢复原镜像。
+主机测试和 clean build 只能证明软件候选成立，不能替代真实 CDC、UAC、SD、
+腾讯返回、扬声器、触摸与电源管理验收。

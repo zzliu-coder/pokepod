@@ -65,21 +65,31 @@ int main() {
   assert(deadlinePending(UINT32_MAX - 2, 5));
   assert(!deadlinePending(6, 5));
 
-  constexpr uint32_t oneSecondBytes = 192000;
+  constexpr uint32_t oneSecondBytes = 32000;
   uint8_t header[kWavHeaderBytes];
   encodeWavHeader(header, oneSecondBytes);
   assert(std::memcmp(header, "RIFF", 4) == 0);
   assert(littleEndian32(header + 4) == 36 + oneSecondBytes);
   assert(std::memcmp(header + 8, "WAVEfmt ", 8) == 0);
   assert(littleEndian16(header + 20) == 1);
-  assert(littleEndian16(header + 22) == 2);
-  assert(littleEndian32(header + 24) == 48000);
+  assert(littleEndian16(header + 22) == 1);
+  assert(littleEndian32(header + 24) == 16000);
   assert(littleEndian32(header + 28) == oneSecondBytes);
-  assert(littleEndian16(header + 32) == 4);
+  assert(littleEndian16(header + 32) == 2);
   assert(littleEndian16(header + 34) == 16);
   assert(std::memcmp(header + 36, "data", 4) == 0);
   assert(littleEndian32(header + 40) == oneSecondBytes);
+  uint32_t validatedBytes = 0;
+  assert(validCapsuleWavHeader(header, sizeof(header),
+                               sizeof(header) + oneSecondBytes,
+                               validatedBytes));
+  assert(validatedBytes == oneSecondBytes);
+  header[22] = 2;
+  assert(!validCapsuleWavHeader(header, sizeof(header),
+                                sizeof(header) + oneSecondBytes,
+                                validatedBytes));
   assert(audioDurationMs(oneSecondBytes) == 1000);
-  assert(audioDurationMs(kAudioBytesPerChunk) == 1);
+  assert(audioDurationMs(32) == 1);
+  static_assert(kMaxCapsuleDurationMs == 58500);
   return 0;
 }

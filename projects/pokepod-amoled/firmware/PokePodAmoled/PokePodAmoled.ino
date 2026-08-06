@@ -7,9 +7,18 @@
 #include "BoardConfig.h"
 #include "BoardServices.h"
 #include "ButtonDebouncer.h"
+#include "ButtonPolicy.h"
+#include "CapsuleLibrary.h"
+#include "CapsulePolicy.h"
 #include "Dashboard.h"
+#include "DeviceConfig.h"
+#include "ProvisioningPortal.h"
+#include "PokePodLinkService.h"
+#include "RaiseToWakePolicy.h"
+#include "TencentWorker.h"
 #include "UsbVoiceBridge.h"
 #include "WavRecorder.h"
+#include "WifiController.h"
 
 using namespace pokepod;
 
@@ -19,25 +28,38 @@ BoardServices board;
 AudioPipeline audio;
 UsbVoiceBridge usb;
 WavRecorder recorder;
+CapsuleLibrary capsuleLibrary;
 Dashboard dashboard;
 ButtonDebouncer bootButton;
+DeviceConfig deviceConfig;
+WifiController wifi;
+TencentWorker tencentWorker;
+ProvisioningPortal provisioningPortal;
+PokePodLinkService linkService;
+RaiseToWakePolicy raiseToWake;
 
 uint8_t audioBuffer[kAudioBytesPerChunk];
 bool touchLatched = false;
+int16_t touchStartX = 0;
+int16_t touchStartY = 0;
+int16_t touchLastX = 0;
+int16_t touchLastY = 0;
 uint32_t lastTouchMs = 0;
 uint32_t lastDashboardMs = 0;
 uint32_t lastSensorMs = 0;
-String command;
+uint32_t bootPressedAtMs = 0;
+bool rtcSyncedFromNetwork = false;
 String transientMessage;
 uint32_t transientUntilMs = 0;
 
 String recordingId() {
-  uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  char value[48];
-  snprintf(value, sizeof(value), "%02x%02x%02x%02x%02x%02x-%08lx",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-           static_cast<unsigned long>(esp_random()));
+  uint8_t randomBytes[16];
+  for (size_t offset = 0; offset < sizeof(randomBytes); offset += 4) {
+    const uint32_t random = esp_random();
+    memcpy(randomBytes + offset, &random, sizeof(random));
+  }
+  char value[37];
+  formatUuidV4(randomBytes, value);
   return String(value);
 }
 
@@ -47,29 +69,50 @@ void showMessage(const char *message, uint32_t durationMs = 1800) {
 }
 
 void drawDashboard() {
-  const char *message = deadlinePending(millis(), transientUntilMs)
-      ? transientMessage.c_str() : nullptr;
-  dashboard.draw(board.status(), audio.ready(), usb.ready(), recorder.recording(),
-                 recorder.durationMs(), message);
+  DashboardView view;
+  view.board = &board.status();
+  view.library = &capsuleLibrary;
+  view.settings = &deviceConfig.settings();
+  view.audioReady = audio.ready();
+  view.usbReady = usb.ready();
+  view.hostConnected = usb.hostConnected();
+  view.recording = recorder.recording();
+  view.transcribing = tencentWorker.working();
+  view.playing = audio.playing();
+  view.provisioning = provisioningPortal.active();
+  view.recordingMs = recorder.durationMs();
+  view.audioPeak = audio.peakSample();
+  view.wifiPhase = provisioningPortal.active()
+      ? WifiPhase::provisioning : wifi.phase();
+  view.wifiRssi = wifi.rssi();
+  view.portalSsid = provisioningPortal.ssid();
+  view.portalPassword = provisioningPortal.password();
+  if (deadlinePending(millis(), transientUntilMs)) view.message = transientMessage;
+  dashboard.draw(view);
 }
 
 void triggerDictation() {
   const bool sent = usb.sendDictationTrigger();
-  showMessage(sent ? "Option-Z sent to macOS" : "USB HID is not ready");
+  showMessage(sent ? "已发送 Option+Z；按 BOOT 可再次触发"
+                   : "USB 键盘尚未就绪",
+              3000);
   drawDashboard();
 }
 
 void toggleRecording() {
   if (recorder.recording()) {
     const bool ok = recorder.stop(usb.log());
-    showMessage(ok ? "WAV committed on SD" : "Recording commit failed");
+    if (ok) capsuleLibrary.scan();
+    showMessage(ok ? "胶囊已进入转写队列" : "录音提交失败");
   } else if (!board.sdReady()) {
-    showMessage("Insert a microSD card");
+    showMessage("请插入 microSD 卡");
   } else if (!audio.ready()) {
-    showMessage("Microphone is not ready");
+    showMessage("麦克风尚未就绪");
   } else {
-    const bool ok = recorder.start(SD_MMC, usb.log(), recordingId());
-    showMessage(ok ? "Recording started" : "Recording start failed");
+    if (audio.playing()) audio.stopPlayback(usb.log());
+    tencentWorker.wake();
+    const bool ok = recorder.start(usb.log(), recordingId(), board.utcNow());
+    showMessage(ok ? "开始录音" : "录音启动失败");
   }
   drawDashboard();
 }
@@ -77,10 +120,11 @@ void toggleRecording() {
 void emitStatus() {
   const BoardStatus &s = board.status();
   usb.log().printf(
-      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"usb\":%s,\"mic_streaming\":%s,\"mic_open_count\":%lu,\"mic_close_count\":%lu,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"uac_attempted_bytes\":%llu,\"uac_accepted_bytes\":%llu,\"uac_short_writes\":%lu,\"uac_usb_bytes_sent\":%llu,\"uac_usb_packets_sent\":%lu,\"uac_usb_zero_packets\":%lu,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d}\n",
+      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"usb\":%s,\"host_connected\":%s,\"mic_streaming\":%s,\"mic_open_count\":%lu,\"mic_close_count\":%lu,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"uac_attempted_bytes\":%llu,\"uac_accepted_bytes\":%llu,\"uac_short_writes\":%lu,\"uac_usb_bytes_sent\":%llu,\"uac_usb_packets_sent\":%lu,\"uac_usb_zero_packets\":%lu,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s}\n",
       variantName(s.variant), s.display ? "true" : "false", s.touch ? "true" : "false",
       s.sdCard ? "true" : "false", audio.ready() ? "true" : "false",
-      usb.ready() ? "true" : "false", usb.microphoneStreaming() ? "true" : "false",
+      usb.ready() ? "true" : "false", usb.hostConnected() ? "true" : "false",
+      usb.microphoneStreaming() ? "true" : "false",
       static_cast<unsigned long>(usb.microphoneOpenCount()),
       static_cast<unsigned long>(usb.microphoneCloseCount()),
       static_cast<unsigned long long>(audio.bytesRead()),
@@ -92,31 +136,12 @@ void emitStatus() {
       static_cast<unsigned long>(usb.microphoneUsbPacketsSent()),
       static_cast<unsigned long>(usb.microphoneUsbZeroLengthPackets()),
       recorder.recording() ? "true" : "false",
-      static_cast<unsigned long>(recorder.durationMs()), s.batteryPercent);
-}
-
-void handleCommand(const String &line) {
-  String normalized = line;
-  normalized.trim();
-  normalized.toLowerCase();
-  if (normalized == "status") emitStatus();
-  else if (normalized == "dictate") triggerDictation();
-  else if (normalized == "record" && !recorder.recording()) toggleRecording();
-  else if (normalized == "stop" && recorder.recording()) toggleRecording();
-  else usb.log().println("{\"event\":\"command_error\",\"allowed\":[\"status\",\"dictate\",\"record\",\"stop\"]}");
-}
-
-void pollCommands() {
-  Stream &stream = usb.stream();
-  while (stream.available()) {
-    const char c = static_cast<char>(stream.read());
-    if (c == '\n' || c == '\r') {
-      if (!command.isEmpty()) handleCommand(command);
-      command = "";
-    } else if (command.length() < 80 && c >= 0x20 && c <= 0x7e) {
-      command += c;
-    }
-  }
+      static_cast<unsigned long>(recorder.durationMs()), s.batteryPercent,
+      s.charging ? "true" : "false", s.vbusPresent ? "true" : "false",
+      wifi.phaseName(), static_cast<long>(wifi.rssi()),
+      static_cast<unsigned>(capsuleLibrary.pendingCount()),
+      deviceConfig.hasTencent() ? "true" : "false",
+      tencentWorker.working() ? "true" : "false");
 }
 
 void pollTouch() {
@@ -125,13 +150,91 @@ void pollTouch() {
   const bool touched = board.readTouch(x, y);
   if (touched && !touchLatched) {
     touchLatched = true;
-    switch (dashboard.actionAt(x, y)) {
-      case TouchAction::dictation: triggerDictation(); break;
-      case TouchAction::recording: toggleRecording(); break;
-      default: break;
-    }
+    touchStartX = touchLastX = x;
+    touchStartY = touchLastY = y;
+  } else if (touched) {
+    touchLastX = x;
+    touchLastY = y;
   } else if (!touched) {
+    if (!touchLatched) return;
     touchLatched = false;
+    const int16_t deltaX = touchLastX - touchStartX;
+    const int16_t deltaY = touchLastY - touchStartY;
+    if (abs(deltaX) >= 60 && abs(deltaX) > abs(deltaY)) {
+      dashboard.swipeHorizontal(deltaX, recorder.recording());
+      drawDashboard();
+      return;
+    }
+    if (abs(deltaY) >= 45 && abs(deltaY) > abs(deltaX)) {
+      dashboard.swipeVertical(deltaY, capsuleLibrary);
+      drawDashboard();
+      return;
+    }
+    const UiAction action = dashboard.actionAt(
+        touchStartX, touchStartY, usb.hostConnected());
+    if (action == UiAction::capsuleRecord) toggleRecording();
+    else if (action == UiAction::wechatDictation) triggerDictation();
+    else if (action == UiAction::openCapsule) {
+      dashboard.openCapsuleAt(touchStartY, capsuleLibrary);
+      drawDashboard();
+    } else if (action == UiAction::back) {
+      dashboard.back();
+      drawDashboard();
+    } else if (action == UiAction::wifiToggle) {
+      const bool enabled = !deviceConfig.settings().wifiEnabled;
+      if (deviceConfig.setWifiEnabled(enabled, usb.log())) {
+        wifi.configurationChanged();
+        if (enabled) tencentWorker.wake();
+        showMessage(enabled ? "Wi-Fi 已开启" : "Wi-Fi 已关闭");
+      }
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (action == UiAction::openProvisioning) {
+      if (provisioningPortal.begin(deviceConfig, usb.log())) {
+        showMessage("手机连接屏幕上的热点");
+      } else {
+        showMessage("配网热点启动失败");
+      }
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (action == UiAction::raiseToWakeToggle) {
+      const bool enabled = !deviceConfig.settings().raiseToWake;
+      if (deviceConfig.setRaiseToWake(enabled, usb.log())) {
+        showMessage(enabled ? "抬起亮屏已开启" : "抬起亮屏已关闭");
+      }
+      dashboard.invalidate();
+      drawDashboard();
+    } else {
+      const CapsuleSummary *selected = dashboard.selected(capsuleLibrary);
+      if (selected == nullptr) return;
+      const String id = selected->id;
+      if (action == UiAction::favorite) {
+        capsuleLibrary.toggleFavorite(id);
+        dashboard.invalidate();
+      } else if (action == UiAction::archive) {
+        capsuleLibrary.archive(id);
+        dashboard.back();
+      } else if (action == UiAction::retry) {
+        capsuleLibrary.requeue(id);
+        tencentWorker.wake();
+        showMessage("已重新加入转写队列");
+      } else if (action == UiAction::play) {
+        if (audio.playing()) {
+          audio.stopPlayback(usb.log());
+          showMessage("已停止播放");
+        } else if (usb.microphoneStreaming() || recorder.recording()) {
+          showMessage("麦克风使用中，暂时无法播放");
+        } else if (!safeCapsuleFileName(selected->audioFile.c_str()) ||
+                   !audio.startPlayback(
+                       SD_MMC, selected->directory + "/" + selected->audioFile,
+                       usb.log())) {
+          showMessage("音频播放失败");
+        } else {
+          showMessage("正在播放");
+        }
+      }
+      drawDashboard();
+    }
   }
 }
 
@@ -145,47 +248,107 @@ void setup() {
   board.begin(Serial);
   audio.begin(Serial);
   const bool usbStarted = usb.begin(board.status().variant);
-  dashboard.begin(board.display());
-  showMessage(usbStarted ? "Tap BOOT for Mac dictation" : "USB startup failed", 3000);
+  deviceConfig.begin(usb.log());
+  if (board.sdReady() && recorder.begin(SD_MMC, usb.log())) {
+    recorder.recoverInterrupted(usb.log(), board.utcNow());
+    capsuleLibrary.begin(SD_MMC, usb.log());
+    tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
+  }
+  wifi.begin(deviceConfig, usb.log());
+  linkService.begin(usb.stream(), SD_MMC, board, audio, usb, capsuleLibrary, recorder,
+                    deviceConfig, wifi, tencentWorker, usb.log());
+  dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
+  showMessage(usbStarted ? "BOOT 可录胶囊；连接 Mac 后可语音输入"
+                         : "USB 启动失败",
+              3000);
   drawDashboard();
   emitStatus();
 }
 
 void loop() {
   const uint32_t now = millis();
-  if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now) && bootButton.pressedEdge()) {
-    triggerDictation();
+  if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
+    if (bootButton.pressedEdge()) {
+      bootPressedAtMs = now;
+    } else if (bootButton.releasedEdge()) {
+      const BootGestureAction action = bootGestureAction(
+          usb.hostConnected(), now - bootPressedAtMs);
+      if (action == BootGestureAction::dictationToggle) triggerDictation();
+      if (action == BootGestureAction::capsuleToggle) toggleRecording();
+    }
   }
 
   // Keep I2S sampling for health diagnostics, but only feed TinyUSB while the
   // host has selected the microphone streaming alternate interface. TinyUSB
   // clears its IN FIFO whenever that interface closes; writing concurrently
   // with the clear can leave CoreAudio receiving an endless series of ZLPs.
-  if (audio.ready() || recorder.recording()) {
+  if (usb.microphoneStreaming() && audio.playing()) {
+    audio.stopPlayback(usb.log());
+  }
+  if (audio.playing()) {
+    audio.pumpPlayback(usb.log());
+  } else if (audio.ready() || recorder.recording()) {
     size_t bytes = audio.read(audioBuffer, sizeof(audioBuffer));
     if (bytes > 0) {
       if (usb.microphoneStreaming()) {
         usb.writeMicrophone(audioBuffer, static_cast<uint16_t>(bytes));
       }
-      if (recorder.recording()) recorder.append(audioBuffer, bytes, usb.log());
+      if (recorder.recording()) {
+        const bool wasRecording = recorder.recording();
+        recorder.append(audioBuffer, bytes, usb.log());
+        if (wasRecording && !recorder.recording()) capsuleLibrary.scan();
+      }
     }
   }
 
-  pollCommands();
+  linkService.poll(now);
 
   // The ESP32-S3 full-speed USB controller is sensitive to interrupt latency
   // during isochronous microphone transfers. Touch, sensor and display I/O are
   // user-interface work, so defer them while CoreAudio owns the mic stream.
   // Audio capture and CDC diagnostics remain active.
   const bool microphoneStreaming = usb.microphoneStreaming();
+  if (!microphoneStreaming) {
+    provisioningPortal.loop(now);
+    if (provisioningPortal.takeConfigurationChanged()) {
+      wifi.configurationChanged();
+      tencentWorker.wake();
+      dashboard.invalidate();
+    }
+    const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
+        deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
+    wifi.loop(now, recorder.recording(), networkWork,
+              board.status().charging, provisioningPortal.active());
+    if (!rtcSyncedFromNetwork && wifi.networkTimeSynchronized()) {
+      rtcSyncedFromNetwork = board.setUtcEpoch(time(nullptr));
+    }
+    tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
+                       recorder.recording(), board.status().charging);
+  }
   if (!microphoneStreaming && now - lastTouchMs >= 10) {
     lastTouchMs = now;
     pollTouch();
   }
 
-  if (!microphoneStreaming && now - lastSensorMs >= 1000) {
+  const uint32_t sensorIntervalMs = board.status().screenOn ? 500 : 100;
+  if (!microphoneStreaming && now - lastSensorMs >= sensorIntervalMs) {
     lastSensorMs = now;
     board.refreshSensors();
+    const BoardStatus &status = board.status();
+    if (raiseToWake.update(now, deviceConfig.settings().raiseToWake,
+                           status.screenOn, status.accelerationX,
+                           status.accelerationY, status.accelerationZ)) {
+      board.setScreenOn(true);
+      dashboard.invalidate();
+    }
+    const PowerKeyEvent powerKey = board.pollPowerKey();
+    if (powerKey == PowerKeyEvent::shortPress) {
+      board.setScreenOn(!board.status().screenOn);
+    } else if (powerKey == PowerKeyEvent::longPress) {
+      if (recorder.recording()) recorder.stop(usb.log());
+      if (audio.playing()) audio.stopPlayback(usb.log());
+      board.safeShutdown();
+    }
   }
   if (!microphoneStreaming && now - lastDashboardMs >= 1000) {
     lastDashboardMs = now;

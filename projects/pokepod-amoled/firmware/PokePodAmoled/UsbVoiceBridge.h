@@ -18,9 +18,12 @@ class UsbVoiceBridge {
   bool begin(BoardVariant variant);
   bool sendDictationTrigger();
   uint16_t writeMicrophone(const uint8_t *data, uint16_t length);
-  Print &log() { return diagnostics_; }
+  // Link v2 owns the CDC byte stream. Diagnostics must never be written to
+  // that stream because one printable log line would corrupt a framed reply.
+  Print &log() { return Serial; }
   Stream &stream() { return diagnostics_; }
   bool ready() const { return started_; }
+  bool hostConnected() const;
   bool microphoneStreaming() const { return microphoneStreaming_.load(); }
   uint32_t microphoneOpenCount() const { return microphoneOpenCount_.load(); }
   uint32_t microphoneCloseCount() const { return microphoneCloseCount_.load(); }

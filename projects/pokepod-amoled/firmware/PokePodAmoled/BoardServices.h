@@ -22,8 +22,20 @@ struct BoardStatus {
   bool rtc = false;
   bool imu = false;
   bool pmu = false;
+  bool charging = false;
+  bool vbusPresent = false;
+  bool screenOn = true;
   int batteryPercent = -1;
   float imuTemperatureC = NAN;
+  float accelerationX = NAN;
+  float accelerationY = NAN;
+  float accelerationZ = NAN;
+};
+
+enum class PowerKeyEvent {
+  none,
+  shortPress,
+  longPress,
 };
 
 class BoardServices {
@@ -31,6 +43,11 @@ class BoardServices {
   bool begin(Print &log);
   void refreshSensors();
   bool readTouch(int16_t &x, int16_t &y);
+  PowerKeyEvent pollPowerKey();
+  void setScreenOn(bool enabled);
+  void safeShutdown();
+  String utcNow();
+  bool setUtcEpoch(time_t epoch);
 
   Arduino_GFX *display() const { return display_; }
   const BoardStatus &status() const { return status_; }
@@ -43,6 +60,7 @@ class BoardServices {
   bool beginTouch(Print &log);
   bool beginSd(Print &log);
   void beginSensors(Print &log);
+  void ensureRtcTime(Print &log);
   bool probe(uint8_t address);
 
   BoardStatus status_;

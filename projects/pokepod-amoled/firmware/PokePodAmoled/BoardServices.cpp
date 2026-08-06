@@ -2,6 +2,8 @@
 
 #include <SD_MMC.h>
 #include <Wire.h>
+#include <sys/time.h>
+#include <time.h>
 
 namespace pokepod {
 namespace {
@@ -12,6 +14,23 @@ void touchInterrupt() {
   if (gTouch != nullptr) {
     gTouch->IIC_Interrupt_Flag = true;
   }
+}
+
+bool setSystemClock(const RTC_DateTime &value) {
+  if (value.getYear() < 2024 || value.getYear() > 2099) return false;
+  struct tm timeInfo = {};
+  timeInfo.tm_year = value.getYear() - 1900;
+  timeInfo.tm_mon = value.getMonth() - 1;
+  timeInfo.tm_mday = value.getDay();
+  timeInfo.tm_hour = value.getHour();
+  timeInfo.tm_min = value.getMinute();
+  timeInfo.tm_sec = value.getSecond();
+  setenv("TZ", "UTC0", 1);
+  tzset();
+  const time_t epoch = mktime(&timeInfo);
+  if (epoch < 1704067200) return false;
+  timeval systemTime = {.tv_sec = epoch, .tv_usec = 0};
+  return settimeofday(&systemTime, nullptr) == 0;
 }
 
 }  // namespace
@@ -139,17 +158,40 @@ void BoardServices::beginSensors(Print &log) {
   if (status_.pmu) {
     pmu_.enableBattDetection();
     pmu_.enableBattVoltageMeasure();
+    pmu_.enableVbusVoltageMeasure();
     pmu_.disableTSPinMeasure();
+    pmu_.disableLongPressShutdown();
+    pmu_.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
+    pmu_.clearIrqStatus();
+    pmu_.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ |
+                   XPOWERS_AXP2101_PKEY_LONG_IRQ);
   }
+  if (status_.imu) {
+    imu_.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
+                             SensorQMI8658::ACC_ODR_125Hz,
+                             SensorQMI8658::LPF_MODE_0);
+    imu_.enableAccelerometer();
+  }
+  ensureRtcTime(log);
   refreshSensors();
-  log.printf("{\"event\":\"sensors\",\"rtc\":%s,\"imu\":%s,\"pmu\":%s,\"battery\":%d}\n",
+  log.printf("{\"event\":\"sensors\",\"rtc\":%s,\"imu\":%s,\"pmu\":%s,\"battery\":%d,\"charging\":%s,\"vbus\":%s}\n",
              status_.rtc ? "true" : "false", status_.imu ? "true" : "false",
-             status_.pmu ? "true" : "false", status_.batteryPercent);
+             status_.pmu ? "true" : "false", status_.batteryPercent,
+             status_.charging ? "true" : "false",
+             status_.vbusPresent ? "true" : "false");
 }
 
 void BoardServices::refreshSensors() {
-  if (status_.pmu) status_.batteryPercent = pmu_.getBatteryPercent();
-  if (status_.imu) status_.imuTemperatureC = imu_.getTemperature_C();
+  if (status_.pmu) {
+    status_.batteryPercent = pmu_.getBatteryPercent();
+    status_.charging = pmu_.isCharging();
+    status_.vbusPresent = pmu_.isVbusIn();
+  }
+  if (status_.imu) {
+    status_.imuTemperatureC = imu_.getTemperature_C();
+    imu_.getAccelerometer(status_.accelerationX, status_.accelerationY,
+                          status_.accelerationZ);
+  }
 }
 
 bool BoardServices::readTouch(int16_t &x, int16_t &y) {
@@ -162,6 +204,87 @@ bool BoardServices::readTouch(int16_t &x, int16_t &y) {
   y = static_cast<int16_t>(touch_->IIC_Read_Device_Value(
       touch_->Arduino_IIC_Touch::Value_Information::TOUCH_COORDINATE_Y));
   return x >= 0 && x < kLcdWidth && y >= 0 && y < kLcdHeight;
+}
+
+PowerKeyEvent BoardServices::pollPowerKey() {
+  if (!status_.pmu) return PowerKeyEvent::none;
+  pmu_.getIrqStatus();
+  PowerKeyEvent result = PowerKeyEvent::none;
+  if (pmu_.isPekeyLongPressIrq()) result = PowerKeyEvent::longPress;
+  else if (pmu_.isPekeyShortPressIrq()) result = PowerKeyEvent::shortPress;
+  if (result != PowerKeyEvent::none) pmu_.clearIrqStatus();
+  return result;
+}
+
+void BoardServices::setScreenOn(bool enabled) {
+  if (!status_.display || status_.screenOn == enabled) return;
+  status_.screenOn = enabled;
+  const uint8_t brightness = enabled ? 180 : 0;
+  if (status_.variant == BoardVariant::v1Sh8601Ft3168) {
+    static_cast<Arduino_SH8601 *>(display_)->setBrightness(brightness);
+  } else if (status_.variant == BoardVariant::v2Co5300Cst820) {
+    static_cast<Arduino_CO5300 *>(display_)->setBrightness(brightness);
+  }
+}
+
+void BoardServices::safeShutdown() {
+  setScreenOn(false);
+  if (status_.pmu) pmu_.shutdown();
+}
+
+String BoardServices::utcNow() {
+  struct tm timeInfo = {};
+  const time_t systemTime = time(nullptr);
+  if (systemTime >= 1704067200 && gmtime_r(&systemTime, &timeInfo) != nullptr) {
+    char value[24];
+    strftime(value, sizeof(value), "%Y-%m-%dT%H:%M:%SZ", &timeInfo);
+    return String(value);
+  }
+  if (!status_.rtc || !rtc_.isClockIntegrityGuaranteed()) return String();
+  const RTC_DateTime current = rtc_.getDateTime();
+  if (current.getYear() < 2024 || current.getYear() > 2099 ||
+      current.getMonth() < 1 || current.getMonth() > 12 ||
+      current.getDay() < 1 || current.getDay() > 31) {
+    return String();
+  }
+  char value[24];
+  snprintf(value, sizeof(value), "%04u-%02u-%02uT%02u:%02u:%02uZ",
+           current.getYear(), current.getMonth(), current.getDay(),
+           current.getHour(), current.getMinute(), current.getSecond());
+  return String(value);
+}
+
+bool BoardServices::setUtcEpoch(time_t epoch) {
+  if (epoch < 1704067200) return false;
+  timeval value = {.tv_sec = epoch, .tv_usec = 0};
+  settimeofday(&value, nullptr);
+  if (!status_.rtc) return true;
+  struct tm timeInfo = {};
+  if (gmtime_r(&epoch, &timeInfo) == nullptr) return false;
+  rtc_.setDateTime(timeInfo);
+  return true;
+}
+
+void BoardServices::ensureRtcTime(Print &log) {
+  if (!status_.rtc) return;
+  const RTC_DateTime current = rtc_.getDateTime();
+  if (rtc_.isClockIntegrityGuaranteed() && current.getYear() >= 2024 &&
+      current.getYear() <= 2099) {
+    setSystemClock(current);
+    return;
+  }
+  static const char *months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  const char *match = strstr(months, String(__DATE__).substring(0, 3).c_str());
+  const uint8_t month = match == nullptr ? 1 :
+      static_cast<uint8_t>((match - months) / 3 + 1);
+  const uint8_t day = static_cast<uint8_t>(atoi(__DATE__ + 4));
+  const uint16_t year = static_cast<uint16_t>(atoi(__DATE__ + 7));
+  const uint8_t hour = static_cast<uint8_t>(atoi(__TIME__));
+  const uint8_t minute = static_cast<uint8_t>(atoi(__TIME__ + 3));
+  const uint8_t second = static_cast<uint8_t>(atoi(__TIME__ + 6));
+  rtc_.setDateTime(year, month, day, hour, minute, second);
+  setSystemClock(RTC_DateTime(year, month, day, hour, minute, second));
+  log.println("{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_time\"}");
 }
 
 }  // namespace pokepod

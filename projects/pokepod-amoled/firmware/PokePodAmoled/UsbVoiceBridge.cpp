@@ -71,7 +71,7 @@ void UsbVoiceBridge::onAudioEvent(void *, esp_event_base_t eventBase,
 }
 
 bool UsbVoiceBridge::sendDictationTrigger() {
-  if (!started_) return false;
+  if (!hostConnected()) return false;
   if (keyboard_.press(KEY_LEFT_ALT) == 0 || keyboard_.press('z') == 0) {
     keyboard_.releaseAll();
     return false;
@@ -80,6 +80,10 @@ bool UsbVoiceBridge::sendDictationTrigger() {
   keyboard_.releaseAll();
   Serial.println("{\"event\":\"dictation_trigger\",\"shortcut\":\"OPTION_Z\"}");
   return true;
+}
+
+bool UsbVoiceBridge::hostConnected() const {
+  return started_ && static_cast<bool>(USB);
 }
 
 uint16_t UsbVoiceBridge::writeMicrophone(const uint8_t *data, uint16_t length) {
