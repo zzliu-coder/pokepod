@@ -225,18 +225,21 @@ public final class PokePodLinkClient {
     private let timeout: TimeInterval
     private let maxBusyRetries: Int
     private var parser = LinkV2FrameParser()
-    private var nextRequestID: UInt32 = 1
+    private var nextRequestID: UInt32
     private let registry = LinkRequestRegistry()
     private let lock = NSLock()
 
     public init(
         channel: LinkV2ByteChannel,
         timeout: TimeInterval = 5,
-        maxBusyRetries: Int = 3
+        maxBusyRetries: Int = 3,
+        initialRequestID: UInt32? = nil
     ) {
         self.channel = channel
         self.timeout = timeout
         self.maxBusyRetries = maxBusyRetries
+        self.nextRequestID = initialRequestID.flatMap { $0 == 0 ? nil : $0 }
+            ?? UInt32.random(in: 1...UInt32.max)
     }
 
     public func call(
@@ -368,6 +371,7 @@ public final class PokePodTransport: DeviceTransport {
         return DeviceIdentity(
             deviceId: deviceID,
             displayName: value["displayName"] as? String ?? "PokePod",
+            platform: value["platform"] as? String ?? "pokepod",
             manufacturer: value["manufacturer"] as? String ?? "PokePod",
             model: value["model"] as? String ?? "AMOLED")
     }
@@ -481,6 +485,26 @@ public final class PokePodTransport: DeviceTransport {
             throw PokeCapsuleError.invalidRelativePath(value)
         }
         return normalized
+    }
+}
+
+public enum PokePodPortMatcher {
+    public static func match(
+        registered: RegisteredDevice,
+        discoveredPorts: [URL],
+        identify: (URL) throws -> DeviceIdentity?
+    ) -> URL? {
+        guard registered.isPokePod else { return nil }
+        if let exact = discoveredPorts.first(where: {
+            registered.serialAliases.contains($0.path)
+        }) {
+            return exact
+        }
+        for port in discoveredPorts {
+            guard let identity = try? identify(port) else { continue }
+            if identity.deviceId == registered.deviceId { return port }
+        }
+        return nil
     }
 }
 

@@ -84,7 +84,7 @@ final class AppModel: ObservableObject {
     }
 
     func connectionLabel(for registered: RegisteredDevice) -> String {
-        if registered.platform == "pokepod",
+        if registered.isPokePod,
            pokePodPorts.contains(where: { registered.serialAliases.contains($0.path) }) {
             return "已连接"
         }
@@ -138,8 +138,7 @@ final class AppModel: ObservableObject {
             for: devices, usbDevices: usbDevices,
             preferredSerials: selectedRegisteredDevice?.serialAliases ?? [])
         if let selectedDevice = selectedRegisteredDevice,
-           selectedDevice.platform == "pokepod",
-           let port = pokePodPorts.first(where: { selectedDevice.serialAliases.contains($0.path) }) {
+           let port = matchingPokePodPort(for: selectedDevice) {
             choosePokePod(port)
         } else if let selectedDevice = selectedRegisteredDevice,
            let selected = connectedDevice(for: selectedDevice) {
@@ -228,8 +227,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(deviceID, forKey: "LastDeviceID")
         lastRemoteFingerprint = nil
         if let registered = registeredDevices.first(where: { $0.deviceId == deviceID }),
-           registered.platform == "pokepod",
-           let port = pokePodPorts.first(where: { registered.serialAliases.contains($0.path) }) {
+           let port = matchingPokePodPort(for: registered) {
             loadLocalState()
             choosePokePod(port)
             return
@@ -738,6 +736,17 @@ final class AppModel: ObservableObject {
         guard let adbURL, let selectedSerial else { return false }
         return ADBTransport.discover(executable: adbURL).contains {
             $0.serial == selectedSerial && $0.state == "device"
+        }
+    }
+
+    private func matchingPokePodPort(for registered: RegisteredDevice) -> URL? {
+        PokePodPortMatcher.match(
+            registered: registered,
+            discoveredPorts: pokePodPorts
+        ) { port in
+            let candidate = try PokePodTransport(deviceURL: port)
+            _ = try candidate.hello()
+            return try candidate.readDeviceIdentity()
         }
     }
 

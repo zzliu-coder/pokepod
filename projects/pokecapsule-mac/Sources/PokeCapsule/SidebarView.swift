@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var dialog: ActionDialog?
     @Binding var actionTarget: String
 
@@ -147,6 +148,7 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.selectedRegisteredDevice?.displayName ?? "选择设备")
                         .fontWeight(.semibold)
+                        .foregroundColor(colorScheme == .dark ? .white : .black)
                     Text(model.selectedRegisteredDevice.map(model.connectionLabel) ?? model.connection.localizedDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -160,6 +162,7 @@ struct SidebarView: View {
             .padding(.vertical, 5)
         }
         .menuStyle(.borderlessButton)
+        .tint(.primary)
     }
 
     private func scopeRow(_ title: String, systemImage: String, scope: LibraryScope) -> some View {
@@ -174,7 +177,7 @@ struct SidebarView: View {
     }
 
     private func deviceIcon(_ device: RegisteredDevice) -> String {
-        if device.platform == "pokepod" { return "waveform.circle" }
+        if device.isPokePod { return "waveform.circle" }
         return device.displayName.localizedCaseInsensitiveContains("poke")
             || device.model?.localizedCaseInsensitiveContains("poke") == true
             ? "book.closed" : "smartphone"

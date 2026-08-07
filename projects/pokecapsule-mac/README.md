@@ -7,6 +7,7 @@ PokeCapsule Mac 是 Poke3、Android 手机与 PokePod 共用的 USB 管理器。
 - 自动寻找 ADB，识别未连接、未授权、离线和多设备状态，不硬编码设备序列号。
 - 当 macOS 已识别到 Android USB、但 ADB 暂不可用时，明确显示“已插入，等待 ADB”；App 在前台每 10 秒自动重试。离线镜像和待同步队列持续可用。
 - ADB 与 PokePod USB CDC Link v2 共用 `DeviceTransport`，将设备资料库拉取为只读本地镜像。
+- PokePod 插入后由前台监视器自动完成 Link 身份匹配和旧注册修复；串口路径变化时按永久 `deviceId` 重新绑定，无需手工注册或重启应用。
 - 应用活跃且 Poke3 已连接时，每 5 秒读取一次轻量元数据指纹；只有检测到新录音、转写、标签或目录变化才重新同步完整镜像。
 - 设备选择器只切换独立资料库，不合并不同设备的数据。
 - 浏览 Inbox、资料库、收藏、待转写、转写失败、两级目录、标签、回收站和分层文字版本。
@@ -23,7 +24,7 @@ PokeCapsule Mac 是 Poke3、Android 手机与 PokePod 共用的 USB 管理器。
 
 ## PokePod Link v2
 
-Mac 通过 USB CDC 使用 `PPV2` 二进制帧：20 字节小端帧头、版本、类型、请求号、长度与 CRC32。控制消息使用 JSON，文件内容使用独立二进制数据帧。当前客户端覆盖 `hello`、`status`、`identity`、`fingerprint`、`read`、`stage-write`、`commit`、`command`、`result`、`configure`、`set-time`、`dictate-start`、`dictate-stop` 与 `reboot`，设备 busy 时进行有上限的退避。微信语音输入按“按住说话、松开结束”发送 start/stop；旧 `dictate` 仅保留协议兼容，不进入产品调用路径。
+Mac 通过 USB CDC 使用 `PPV2` 二进制帧：20 字节小端帧头、版本、类型、请求号、长度与 CRC32。每次连接使用随机非零请求号起点，避免设备跨连接去重时误判新会话。控制消息使用 JSON，文件内容使用独立二进制数据帧。当前客户端覆盖 `hello`、`status`、`identity`、`fingerprint`、`read`、`stage-write`、`commit`、`command`、`result`、`configure`、`set-time`、`dictate-start`、`dictate-stop` 与 `reboot`，设备 busy 时进行有上限的退避。微信语音输入按“按住说话、松开结束”发送 start/stop；旧 `dictate` 仅保留协议兼容，不进入产品调用路径。
 
 ## 构建和测试
 
@@ -91,7 +92,7 @@ PokePod 的 BOOT 键和屏幕按钮在按住期间保持 Option-Z 按下、松�
 
 ## 已完成的真机验收
 
-- 54 项 Swift 测试、Release 构建、原子应用打包和代码签名校验通过；其中包含 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/重复响应/断线/busy、按住听写 start/stop、未知协议只读降级，以及共享协议中的 v1 M4A、v2 M4A/WAV 兼容夹具。
+- 58 项 Swift 测试（默认 1 项只读真机测试跳过）、Release 构建、原子应用打包和代码签名校验通过；其中包含 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/重复响应/断线/busy、随机会话请求号、自动设备匹配、按住听写 start/stop、未知协议只读降级，以及共享协议中的 v1 M4A、v2 M4A/WAV 兼容夹具。
 - 已自动识别 USB 连接的 Poke3，并建立只读镜像。
 - 两条真机录音已从 `raw_ready` 自动调用 DeepSeek，写回 `polished.md` 后变为 `ready`。
 - 维护握手、目录创建、目录删除、校对提交和重复事务幂等已在真机通过。

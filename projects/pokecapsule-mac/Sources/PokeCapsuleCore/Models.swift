@@ -393,6 +393,12 @@ public struct DeviceIdentity: Codable, Hashable, Identifiable {
         self.androidVersion = androidVersion
         self.createdAt = createdAt
     }
+
+    public var isPokePodIdentity: Bool {
+        [platform, deviceId, displayName, manufacturer, model]
+            .compactMap { $0?.lowercased() }
+            .contains { $0.contains("pokepod") }
+    }
 }
 
 public struct RegisteredDevice: Codable, Hashable, Identifiable {
@@ -421,6 +427,12 @@ public struct RegisteredDevice: Codable, Hashable, Identifiable {
         self.model = model
         self.serialAliases = serialAliases
         self.lastSeenAt = lastSeenAt
+    }
+
+    public var isPokePod: Bool {
+        let values = [platform, deviceId, displayName, manufacturer, model]
+            .compactMap { $0?.lowercased() }
+        return values.contains { $0.contains("pokepod") }
     }
 }
 

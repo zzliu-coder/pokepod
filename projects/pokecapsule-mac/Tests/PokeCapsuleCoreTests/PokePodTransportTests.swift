@@ -3,6 +3,25 @@ import XCTest
 @testable import PokeCapsuleCore
 
 final class PokePodTransportTests: XCTestCase {
+    func testLivePokePodReadOnlyHandshakeWhenRequested() throws {
+        guard let path = ProcessInfo.processInfo.environment["POKEPOD_LIVE_PORT"],
+              !path.isEmpty else {
+            throw XCTSkip("设置 POKEPOD_LIVE_PORT 后运行只读真机验收")
+        }
+        let transport = try PokePodTransport(deviceURL: URL(fileURLWithPath: path))
+        let hello = try transport.hello()
+        let status = try transport.status()
+        let identity = try XCTUnwrap(transport.readDeviceIdentity())
+        let fingerprint = try transport.metadataFingerprint()
+
+        XCTAssertEqual(hello["status"] as? String, "ok")
+        XCTAssertEqual(status["status"] as? String, "ok")
+        XCTAssertEqual(status["host_connected"] as? Bool, true)
+        XCTAssertTrue(identity.isPokePodIdentity)
+        XCTAssertFalse(fingerprint.isEmpty)
+        print("LIVE_POKEPOD identity=\(identity.deviceId) platform=\(identity.platform) host_connected=true fingerprint=\(fingerprint)")
+    }
+
     func testFrameRoundTripAndStreamingParser() throws {
         let frame = LinkV2Frame(
             type: .requestJSON, flags: 3, requestID: 0x1020_3040,
@@ -68,9 +87,16 @@ final class PokePodTransportTests: XCTestCase {
         }
     }
 
+    func testClientSupportsNonzeroSessionRequestIDSeed() throws {
+        let channel = ScriptedLinkChannel()
+        let client = PokePodLinkClient(channel: channel, initialRequestID: 0x1234_5678)
+        _ = try client.call(.status)
+        XCTAssertEqual(channel.requestIDs, [0x1234_5678])
+    }
+
     func testClientRejectsDuplicateResponseRequestIDInReceivePath() throws {
         let channel = DuplicateResponseLinkChannel()
-        let client = PokePodLinkClient(channel: channel)
+        let client = PokePodLinkClient(channel: channel, initialRequestID: 1)
         XCTAssertThrowsError(try client.call(.status)) {
             XCTAssertEqual($0 as? LinkV2Error, .duplicateRequestID(1))
         }
@@ -87,6 +113,56 @@ final class PokePodTransportTests: XCTestCase {
 
         XCTAssertEqual(channel.operations, ["dictate-start", "dictate-stop"])
         XCTAssertFalse(channel.operations.contains("dictate"))
+    }
+
+    func testPokePodIdentityPreservesPlatformAndMatchesLegacyRegistration() throws {
+        let channel = ScriptedLinkChannel()
+        let transport = try PokePodTransport(
+            deviceURL: URL(fileURLWithPath: "/dev/cu.usbmodem-new"),
+            channel: channel)
+        let identity = try XCTUnwrap(transport.readDeviceIdentity())
+        XCTAssertEqual(identity.platform, "pokepod")
+
+        let legacy = RegisteredDevice(
+            deviceId: "POKEPOD-CONTRACT",
+            displayName: "PokePod",
+            platform: "android",
+            serialAliases: ["/dev/cu.usbmodem-old"])
+        XCTAssertTrue(legacy.isPokePod)
+        let match = PokePodPortMatcher.match(
+            registered: legacy,
+            discoveredPorts: [URL(fileURLWithPath: "/dev/cu.usbmodem-new")]
+        ) { _ in identity }
+        XCTAssertEqual(match?.path, "/dev/cu.usbmodem-new")
+    }
+
+    func testPokePodMatcherUsesExactAliasWithoutProbingAndIgnoresAndroid() throws {
+        let current = URL(fileURLWithPath: "/dev/cu.usbmodem-current")
+        let legacy = RegisteredDevice(
+            deviceId: "pokepod-serial",
+            displayName: "PokePod",
+            platform: "android",
+            serialAliases: [current.path])
+        var probeCount = 0
+        XCTAssertEqual(PokePodPortMatcher.match(
+            registered: legacy,
+            discoveredPorts: [current]
+        ) { _ in
+            probeCount += 1
+            return nil
+        }, current)
+        XCTAssertEqual(probeCount, 0)
+
+        let phone = RegisteredDevice(
+            deviceId: "phone", displayName: "Android", serialAliases: [current.path])
+        XCTAssertNil(PokePodPortMatcher.match(
+            registered: phone,
+            discoveredPorts: [current]
+        ) { _ in
+            probeCount += 1
+            return nil
+        })
+        XCTAssertEqual(probeCount, 0)
     }
 
     func testV1AndV2AudioMetadataAndSafeBasename() throws {
@@ -257,6 +333,7 @@ private final class ScriptedLinkChannel: LinkV2ByteChannel {
     private var busyRemaining: Int
     private(set) var requestCount = 0
     private(set) var operations: [String] = []
+    private(set) var requestIDs: [UInt32] = []
 
     init(busyResponses: Int = 0) {
         busyRemaining = busyResponses
@@ -265,6 +342,7 @@ private final class ScriptedLinkChannel: LinkV2ByteChannel {
     func write(_ data: Data) throws {
         for frame in try parser.append(data) where frame.type == .requestJSON {
             requestCount += 1
+            requestIDs.append(frame.requestID)
             guard let request = try JSONSerialization.jsonObject(with: frame.payload) as? [String: Any],
                   let operation = request["operation"] as? String else {
                 throw LinkV2Error.malformedResponse("测试请求缺少 operation")
