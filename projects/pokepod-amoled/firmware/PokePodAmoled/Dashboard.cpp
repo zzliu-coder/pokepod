@@ -362,30 +362,28 @@ void Dashboard::drawDevice(const DashboardView &view) {
                      health.ready() ? ui::kAccent : ui::kError,
                      ui::kBackground);
 
-  drawSettingRow(ui::kDeviceWifiTop, UiIcon::wifi, "无线网络",
-                 wifiLabel(view.wifiPhase), wifiColor(view.wifiPhase));
   const bool wifiEnabled = view.settings != nullptr &&
       view.settings->wifiEnabled;
-  drawToggle(*display_, 302, ui::kDeviceWifiTop + 18, wifiEnabled,
-             ui::kAccent, ui::kDisabled, ui::kBackground);
+  drawSettingRow(ui::kDeviceWifiTop, UiIcon::wifi, "无线网络",
+                 wifiLabel(view.wifiPhase), wifiColor(view.wifiPhase),
+                 SettingAccessory::toggle, wifiEnabled);
   drawSettingRow(ui::kDeviceMacTop, UiIcon::mac, "Mac 连接",
                  view.hostConnected ? "已连接" : "未连接",
-                 view.hostConnected ? ui::kDictation : ui::kMuted);
+                 view.hostConnected ? ui::kDictation : ui::kMuted,
+                 SettingAccessory::value);
   drawSettingRow(ui::kDeviceStorageTop, UiIcon::storage, "存储与字库",
                  !view.board->sdCard ? "SD 需要检查" :
                  (renderer_.sdFontReady() ? "可用" : "字库未安装"),
                  view.board->sdCard && renderer_.sdFontReady()
-                     ? ui::kAccent : ui::kError);
-  drawSettingRow(ui::kDeviceRaiseTop, UiIcon::raise, "抬起亮屏",
-                 "", ui::kMuted);
+                     ? ui::kAccent : ui::kError,
+                 SettingAccessory::value);
   const bool raiseEnabled = view.settings != nullptr &&
       view.settings->raiseToWake;
-  drawToggle(*display_, 302, ui::kDeviceRaiseTop + 18, raiseEnabled,
-             ui::kAccent, ui::kDisabled, ui::kBackground);
+  drawSettingRow(ui::kDeviceRaiseTop, UiIcon::raise, "抬起亮屏",
+                 "", raiseEnabled ? ui::kAccent : ui::kMuted,
+                 SettingAccessory::toggle, raiseEnabled);
   drawSettingRow(ui::kDeviceProvisionTop, UiIcon::phone, "手机配网",
-                 "", ui::kMuted);
-  drawUiIcon(*display_, UiIcon::chevron, 324,
-             ui::kDeviceProvisionTop + 20, ui::kMuted);
+                 "", ui::kMuted, SettingAccessory::chevron);
 }
 
 void Dashboard::drawProvisioning(const DashboardView &view) {
@@ -441,18 +439,46 @@ void Dashboard::drawCenteredText(const String &text, int16_t y,
 }
 
 void Dashboard::drawSettingRow(int16_t top, UiIcon icon,
-                               const String &title, const String &value,
-                               uint16_t valueColor) {
-  drawUiIcon(*display_, icon, 20, top + 20, valueColor);
-  renderer_.drawText(title, 58, top + 10, 206, 1,
+                               const String &title, const String &detail,
+                               uint16_t detailColor,
+                               SettingAccessory accessory,
+                               bool toggleEnabled) {
+  const bool twoLines = accessory == SettingAccessory::toggle &&
+      !detail.isEmpty();
+  drawUiIcon(*display_, icon, ui::kSettingIconLeft,
+             top + ui::kSettingIconTopOffset, detailColor);
+  renderer_.drawText(
+      title, ui::kSettingTextLeft,
+      top + (twoLines ? ui::kSettingTwoLineTitleTopOffset
+                      : ui::kSettingSingleTitleTopOffset),
+      accessory == SettingAccessory::value
+          ? ui::kSettingTitleWithValueWidth : ui::kSettingTitleWidth, 1,
                      ui::kInk, ui::kBackground, 0, false,
                      UiTextSize::body, true);
-  if (!value.isEmpty()) {
-    const int16_t width = renderer_.measureTextWidth(value);
-    renderer_.drawText(value, 344 - width, top + 14, width, 1,
-                       valueColor, ui::kBackground);
+  if (twoLines) {
+    renderer_.drawText(detail, ui::kSettingTextLeft,
+                       top + ui::kSettingDetailTopOffset,
+                       ui::kSettingTitleWidth, 1,
+                       detailColor, ui::kBackground);
+  } else if (accessory == SettingAccessory::value && !detail.isEmpty()) {
+    const int16_t width = renderer_.measureTextWidth(detail);
+    renderer_.drawText(detail, ui::kSettingValueRight - width,
+                       top + ui::kSettingValueTopOffset, width, 1,
+                       detailColor, ui::kBackground);
   }
-  display_->drawFastHLine(58, top + 63, 290, ui::kDivider);
+  if (accessory == SettingAccessory::toggle) {
+    drawToggle(*display_, ui::kSettingTrailingLeft,
+               top + ui::kSettingIconTopOffset, toggleEnabled,
+               ui::kAccent, ui::kDisabled, ui::kBackground);
+  } else if (accessory == SettingAccessory::chevron) {
+    drawUiIcon(*display_, UiIcon::chevron,
+               ui::kSettingValueRight - ui::kActionIconSize,
+               top + ui::kSettingIconTopOffset, ui::kMuted);
+  }
+  display_->drawFastHLine(ui::kSettingTextLeft, top + 63,
+                          ui::kScreenWidth - ui::kPageMargin -
+                              ui::kSettingTextLeft,
+                          ui::kDivider);
 }
 
 void Dashboard::drawDetailAction(int16_t left, UiIcon icon,

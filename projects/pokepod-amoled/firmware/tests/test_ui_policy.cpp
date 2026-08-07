@@ -15,6 +15,39 @@ int main() {
   assert(swipedPage(RootPage::device, 80, false) == RootPage::home);
   assert(swipedPage(RootPage::device, -80, false) == RootPage::device);
   assert(swipedPage(RootPage::home, -100, true) == RootPage::home);
+  assert(touchTapEligible(0, 0));
+  assert(touchTapEligible(ui::kTouchTapSlop, -ui::kTouchTapSlop));
+  assert(!touchTapEligible(ui::kTouchTapSlop + 1, 0));
+  assert(!touchTapEligible(0, -(ui::kTouchTapSlop + 1)));
+  assert(touchHorizontalSwipe(ui::kTouchSwipeThreshold, 10));
+  assert(touchHorizontalSwipe(-ui::kTouchSwipeThreshold, 10));
+  assert(!touchHorizontalSwipe(ui::kTouchSwipeThreshold - 1, 0));
+  assert(!touchHorizontalSwipe(ui::kTouchSwipeThreshold, 80));
+  assert(touchVerticalSwipe(10, ui::kTouchVerticalThreshold));
+  assert(!touchVerticalSwipe(0, ui::kTouchVerticalThreshold - 1));
+  assert(!dictationHoldReady(ui::kDictationHoldDelayMs - 1, 0, 0));
+  assert(dictationHoldReady(ui::kDictationHoldDelayMs, 0, 0));
+  assert(!dictationHoldReady(ui::kDictationHoldDelayMs,
+                             ui::kTouchTapSlop + 1, 0));
+
+  TouchGestureTracker gesture;
+  gesture.begin(180, 300, 1000);
+  gesture.update(184, 303);
+  assert(gesture.tapEligible());
+  assert(!gesture.dictationReady(1000 + ui::kDictationHoldDelayMs - 1));
+  assert(gesture.dictationReady(1000 + ui::kDictationHoldDelayMs));
+  gesture.update(180 - ui::kTouchSwipeThreshold, 304);
+  assert(gesture.horizontalSwipe());
+  assert(!gesture.tapEligible());
+  assert(!gesture.dictationReady(2000));
+  gesture.reset();
+  assert(!gesture.active);
+
+  gesture.begin(180, 180, 2000);
+  gesture.update(180 + ui::kTouchTapSlop + 1, 180);
+  gesture.update(180, 180);
+  assert(!gesture.tapEligible());
+  assert(!gesture.horizontalSwipe());
   assert(isBackEdgeSwipe(0, 61));
   assert(isBackEdgeSwipe(ui::kBackEdgeWidth - 1, 100));
   assert(!isBackEdgeSwipe(ui::kBackEdgeWidth, 100));

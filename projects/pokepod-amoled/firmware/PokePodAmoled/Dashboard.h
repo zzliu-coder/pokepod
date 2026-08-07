@@ -61,6 +61,8 @@ class Dashboard {
   bool animationBufferReady() const { return frame_ != nullptr; }
 
  private:
+  enum class SettingAccessory : uint8_t { value, toggle, chevron };
+
   void drawBody(const DashboardView &view);
   void drawTopBar(const DashboardView &view);
   void drawPageIndicator();
@@ -79,7 +81,8 @@ class Dashboard {
                         uint16_t color, bool bold = false,
                         int16_t maxWidth = 336);
   void drawSettingRow(int16_t top, UiIcon icon, const String &title,
-                      const String &value, uint16_t valueColor);
+                      const String &detail, uint16_t detailColor,
+                      SettingAccessory accessory, bool toggleEnabled = false);
   void drawDetailAction(int16_t left, UiIcon icon, const String &label,
                         bool emphasized, uint16_t accent);
   void drawRecordingDynamic(const DashboardView &view, bool presentPartial);

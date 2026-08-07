@@ -68,6 +68,18 @@ constexpr int16_t kDeviceStorageTop = 216;
 constexpr int16_t kDeviceRaiseTop = 280;
 constexpr int16_t kDeviceProvisionTop = 344;
 constexpr int16_t kDeviceRowsBottom = 416;
+constexpr int16_t kSettingIconLeft = 20;
+constexpr int16_t kSettingTextLeft = 58;
+constexpr int16_t kSettingTrailingLeft = 302;
+constexpr int16_t kSettingValueRight = 344;
+constexpr int16_t kSettingIconTopOffset = 20;
+constexpr int16_t kSettingSingleTitleTopOffset = 22;
+constexpr int16_t kSettingTwoLineTitleTopOffset = 6;
+constexpr int16_t kSettingDetailTopOffset = 38;
+constexpr int16_t kSettingValueTopOffset = 24;
+constexpr int16_t kSettingTitleWidth = 220;
+constexpr int16_t kSettingTitleWithValueWidth = 178;
+constexpr int16_t kSettingToggleWidth = 42;
 
 constexpr int16_t kDetailActionsTop = 352;
 constexpr int16_t kDetailActionsBottom = 424;
@@ -78,6 +90,10 @@ constexpr uint32_t kRecordingFrameIntervalMs = 80;
 constexpr int16_t kStatusIconSize = 20;
 constexpr int16_t kActionIconSize = 24;
 constexpr int16_t kMinimumTouchHeight = 56;
+constexpr int16_t kTouchTapSlop = 12;
+constexpr int16_t kTouchSwipeThreshold = 60;
+constexpr int16_t kTouchVerticalThreshold = 45;
+constexpr uint32_t kDictationHoldDelayMs = 160;
 
 }  // namespace ui
 }  // namespace pokepod

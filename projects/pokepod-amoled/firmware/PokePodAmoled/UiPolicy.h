@@ -47,8 +47,85 @@ struct DeviceHealthState {
   }
 };
 
+inline int16_t touchMagnitude(int16_t value) {
+  return value < 0 ? -value : value;
+}
+
+inline bool touchTapEligible(int16_t maximumDeltaX,
+                             int16_t maximumDeltaY) {
+  return touchMagnitude(maximumDeltaX) <= ui::kTouchTapSlop &&
+      touchMagnitude(maximumDeltaY) <= ui::kTouchTapSlop;
+}
+
+inline bool touchHorizontalSwipe(int16_t deltaX, int16_t deltaY) {
+  return touchMagnitude(deltaX) >= ui::kTouchSwipeThreshold &&
+      touchMagnitude(deltaX) > touchMagnitude(deltaY);
+}
+
+inline bool touchVerticalSwipe(int16_t deltaX, int16_t deltaY) {
+  return touchMagnitude(deltaY) >= ui::kTouchVerticalThreshold &&
+      touchMagnitude(deltaY) > touchMagnitude(deltaX);
+}
+
+inline bool dictationHoldReady(uint32_t elapsedMs, int16_t maximumDeltaX,
+                               int16_t maximumDeltaY) {
+  return elapsedMs >= ui::kDictationHoldDelayMs &&
+      touchTapEligible(maximumDeltaX, maximumDeltaY);
+}
+
+struct TouchGestureTracker {
+  bool active = false;
+  int16_t startX = 0;
+  int16_t startY = 0;
+  int16_t lastX = 0;
+  int16_t lastY = 0;
+  int16_t maximumDeltaX = 0;
+  int16_t maximumDeltaY = 0;
+  uint32_t startedAtMs = 0;
+
+  void begin(int16_t x, int16_t y, uint32_t nowMs) {
+    active = true;
+    startX = lastX = x;
+    startY = lastY = y;
+    maximumDeltaX = 0;
+    maximumDeltaY = 0;
+    startedAtMs = nowMs;
+  }
+
+  void update(int16_t x, int16_t y) {
+    if (!active) return;
+    lastX = x;
+    lastY = y;
+    const int16_t currentDeltaX = deltaX();
+    const int16_t currentDeltaY = deltaY();
+    if (touchMagnitude(currentDeltaX) > touchMagnitude(maximumDeltaX)) {
+      maximumDeltaX = currentDeltaX;
+    }
+    if (touchMagnitude(currentDeltaY) > touchMagnitude(maximumDeltaY)) {
+      maximumDeltaY = currentDeltaY;
+    }
+  }
+
+  int16_t deltaX() const { return lastX - startX; }
+  int16_t deltaY() const { return lastY - startY; }
+  bool tapEligible() const {
+    return touchTapEligible(maximumDeltaX, maximumDeltaY);
+  }
+  bool horizontalSwipe() const {
+    return touchHorizontalSwipe(deltaX(), deltaY());
+  }
+  bool verticalSwipe() const {
+    return touchVerticalSwipe(deltaX(), deltaY());
+  }
+  bool dictationReady(uint32_t nowMs) const {
+    return active && dictationHoldReady(nowMs - startedAtMs,
+                                        maximumDeltaX, maximumDeltaY);
+  }
+  void reset() { active = false; }
+};
+
 inline RootPage swipedPage(RootPage page, int16_t deltaX, bool locked) {
-  if (locked || (deltaX > -60 && deltaX < 60)) return page;
+  if (locked || touchMagnitude(deltaX) < ui::kTouchSwipeThreshold) return page;
   int value = static_cast<int>(page);
   value += deltaX < 0 ? 1 : -1;
   if (value < static_cast<int>(RootPage::capsules)) {
@@ -61,7 +138,8 @@ inline RootPage swipedPage(RootPage page, int16_t deltaX, bool locked) {
 }
 
 inline bool isBackEdgeSwipe(int16_t startX, int16_t deltaX) {
-  return startX >= 0 && startX < ui::kBackEdgeWidth && deltaX > 60;
+  return startX >= 0 && startX < ui::kBackEdgeWidth &&
+      deltaX > ui::kTouchSwipeThreshold;
 }
 
 inline uint16_t scrolledOffset(uint16_t current, int16_t deltaY,

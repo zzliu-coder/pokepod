@@ -253,22 +253,147 @@ void ProvisioningPortal::redirectPortal() {
 
 String ProvisioningPortal::pageHtml() const {
   String html;
-  html.reserve(14000);
-  html += F(R"HTML(<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#000000'><title>PokePod 设置</title><style>
-*{box-sizing:border-box}html{min-height:100%;overflow-x:hidden;overflow-y:auto;background:#000;-webkit-text-size-adjust:100%}body{min-height:100%;margin:0;overflow-x:hidden;background:#000;color:#f4faf7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;-webkit-overflow-scrolling:touch;touch-action:pan-y}button,input,select{font:inherit}.shell{width:100%;max-width:520px;min-height:100vh;min-height:100svh;margin:0 auto;padding:calc(22px + env(safe-area-inset-top)) 18px calc(42px + env(safe-area-inset-bottom))}.top{display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:10px;color:#91a69f;font-size:13px;font-weight:750;letter-spacing:.08em}.mark{position:relative;width:32px;height:20px;border:2px solid #69e0b6;border-radius:999px}.mark:after{content:"";position:absolute;left:15px;top:2px;width:1px;height:12px;background:#69e0b6}.progress{display:flex;gap:7px}.progress i{display:block;width:18px;height:3px;border-radius:9px;background:#34413c}.progress i.on{background:#69e0b6}.hero{padding:25px 2px 18px}.hero h1{margin:0;font-size:30px;line-height:1.12;letter-spacing:-.035em}.hero p{margin:9px 0 0;color:#91a69f;font-size:15px;line-height:1.5}.status{display:flex;gap:10px;margin:0 0 16px;padding:12px 14px;border:1px solid #1a2a25;border-radius:14px;background:#0b1311;color:#cbd9d4;font-size:14px;line-height:1.45}.status:before{content:"";flex:0 0 auto;width:8px;height:8px;margin-top:6px;border-radius:50%;background:#f0c45b;box-shadow:0 0 14px rgba(240,196,91,.42)}.screen[hidden]{display:none}.card{padding:20px 17px;border:1px solid #1a2a25;border-radius:22px;background:#0b1311}.card-head{display:flex;align-items:center;gap:12px;margin-bottom:19px}.number{display:grid;place-items:center;width:38px;height:38px;border-radius:13px;background:#12372c;color:#69e0b6;font-size:14px;font-weight:850}.card h2{margin:0;font-size:22px;line-height:1.2}.saved{display:inline-flex;margin:0 0 15px;padding:6px 10px;border-radius:999px;background:#12372c;color:#69e0b6;font-size:13px;font-weight:750}.field{display:block;margin-top:16px}.field:first-of-type{margin-top:0}.field-name{display:block;margin-bottom:8px;color:#cbd9d4;font-size:14px;font-weight:700}.optional{color:#91a69f;font-weight:500}input,select{display:block;width:100%;min-height:52px;padding:13px 14px;border:1px solid #294038;border-radius:14px;outline:0;background:#030706;color:#f4faf7;font-size:16px;line-height:1.4}input::placeholder{color:#60756d}input:focus,select:focus{border-color:#69e0b6;box-shadow:0 0 0 3px rgba(105,224,182,.12)}select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg,transparent 50%,#91a69f 50%),linear-gradient(135deg,#91a69f 50%,transparent 50%);background-position:calc(100% - 19px) 23px,calc(100% - 14px) 23px;background-size:5px 5px;background-repeat:no-repeat}.scan-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}.scan-help{color:#91a69f;font-size:12px}.secondary{min-height:42px;padding:9px 14px;border:1px solid #2c4a40;border-radius:13px;background:#101a17;color:#69e0b6;font-size:14px;font-weight:750}.secondary:disabled{opacity:.45}.manual{margin-top:14px;border-top:1px solid #1a2a25;padding-top:13px}.manual summary{cursor:pointer;color:#91a69f;font-size:14px;list-style:none}.manual summary::-webkit-details-marker{display:none}.manual summary:after{content:"＋";float:right;color:#69e0b6}.manual[open] summary:after{content:"－"}.actions{display:grid;grid-template-columns:1fr;gap:10px;margin-top:16px}.actions.two{grid-template-columns:1fr 1.6fr}.primary,.back{min-height:56px;border-radius:17px;font-size:17px;font-weight:820}.primary{border:0;background:#69e0b6;color:#07110d}.back{border:1px solid #294038;background:#101a17;color:#cbd9d4}.danger{margin-top:16px;padding-top:14px;border-top:1px solid #1a2a25}.check{display:flex;align-items:flex-start;gap:10px;color:#91a69f;font-size:13px;line-height:1.45}.check input{width:20px;min-height:20px;height:20px;margin:0;accent-color:#ff786d}.privacy{margin:15px 4px 0;color:#91a69f;font-size:12px;line-height:1.55}.footer{margin:22px 0 0;text-align:center;color:#52655e;font-size:12px}@media(min-width:600px){.shell{padding-left:24px;padding-right:24px}.card{padding:24px}}
-</style></head><body><main class='shell'><div class='top'><div class='brand'><span class='mark' aria-hidden='true'></span><span>POKEPOD</span></div><div class='progress' aria-hidden='true'><i id='p1' class='on'></i><i id='p2'></i></div></div><header class='hero'><h1 id='title'>连接网络</h1><p id='subtitle'>选择附近的 2.4 GHz Wi-Fi</p></header><div id='status' class='status' role='status' aria-live='polite'>)HTML");
+  html.reserve(16000);
+  html += F(R"HTML(<!doctype html>
+<html lang='zh-CN'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<meta name='theme-color' content='#000000'>
+<title>PokePod 设置</title>
+<style>
+:root{color-scheme:dark;--viewport-height:100dvh}
+*{box-sizing:border-box}
+html{width:100%;min-height:100%;background:#000;-webkit-text-size-adjust:100%;scroll-behavior:auto}
+body{width:100%;min-height:100%;margin:0;background:#000;color:#f4faf7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;overflow-wrap:anywhere}
+button,input,select{font:inherit}
+button{touch-action:manipulation}
+.shell{width:100%;max-width:520px;min-height:100vh;min-height:var(--viewport-height);margin:0 auto;padding:calc(20px + env(safe-area-inset-top)) 18px calc(34px + env(safe-area-inset-bottom))}
+.top{display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px;color:#91a69f;font-size:13px;font-weight:750;letter-spacing:.08em}
+.mark{position:relative;width:32px;height:20px;border:2px solid #69e0b6;border-radius:999px}
+.mark:after{content:"";position:absolute;left:15px;top:2px;width:1px;height:12px;background:#69e0b6}
+.progress{display:flex;gap:7px}
+.progress i{display:block;width:18px;height:3px;border-radius:9px;background:#34413c}
+.progress i.on{background:#69e0b6}
+.hero{padding:22px 2px 16px}
+.hero h1{margin:0;font-size:30px;line-height:1.12;letter-spacing:-.03em}
+.hero p{margin:8px 0 0;color:#91a69f;font-size:15px;line-height:1.45}
+.status{display:flex;gap:10px;margin:0 0 14px;padding:11px 13px;border:1px solid #1a2a25;border-radius:14px;background:#0b1311;color:#cbd9d4;font-size:14px;line-height:1.45}
+.status:before{content:"";flex:0 0 auto;width:8px;height:8px;margin-top:6px;border-radius:50%;background:#f0c45b;box-shadow:0 4px 14px rgba(240,196,91,.28)}
+.screen[hidden]{display:none}
+.card{padding:18px 16px;border:1px solid #1a2a25;border-radius:18px;background:#0b1311}
+.card-head{display:flex;align-items:center;gap:12px;margin-bottom:17px}
+.number{display:grid;place-items:center;width:38px;height:38px;border-radius:13px;background:#12372c;color:#69e0b6;font-size:14px;font-weight:850}
+.card h2{margin:0;font-size:22px;line-height:1.2}
+.saved{display:inline-flex;margin:0;padding:6px 10px;border-radius:999px;background:#12372c;color:#69e0b6;font-size:13px;font-weight:750}
+.saved-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}
+.saved-copy{color:#91a69f;font-size:13px}
+.field{display:block;margin-top:16px;scroll-margin:96px 0 120px}
+.field:first-child{margin-top:0}
+.field-name{display:block;margin-bottom:8px;color:#cbd9d4;font-size:14px;font-weight:700}
+.optional{color:#91a69f;font-weight:500}
+input,select{display:block;width:100%;min-height:52px;padding:13px 14px;border:1px solid #294038;border-radius:14px;outline:0;background:#030706;color:#f4faf7;font-size:16px;line-height:1.4}
+input::placeholder{color:#60756d}
+input:focus,select:focus{border-color:#69e0b6;box-shadow:0 0 0 3px rgba(105,224,182,.12)}
+select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg,transparent 50%,#91a69f 50%),linear-gradient(135deg,#91a69f 50%,transparent 50%);background-position:calc(100% - 19px) 23px,calc(100% - 14px) 23px;background-size:5px 5px;background-repeat:no-repeat}
+.scan-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}
+.scan-help{color:#91a69f;font-size:12px}
+.secondary{min-height:44px;padding:9px 14px;border:1px solid #2c4a40;border-radius:13px;background:#101a17;color:#69e0b6;font-size:14px;font-weight:750}
+.secondary:disabled{opacity:.45}
+.disclosure{margin-top:16px;border-top:1px solid #1a2a25;padding-top:14px}
+.disclosure summary{min-height:44px;padding:11px 0;cursor:pointer;color:#cbd9d4;font-size:15px;font-weight:700;list-style:none}
+.disclosure summary::-webkit-details-marker{display:none}
+.disclosure summary:after{content:"＋";float:right;color:#69e0b6}
+.disclosure[open] summary:after{content:"－"}
+.disclosure-body{padding-top:4px}
+.manual{margin-top:14px}
+.credential-fields{padding-top:2px}
+.actions{position:sticky;bottom:0;z-index:4;display:grid;grid-template-columns:1fr;gap:10px;margin:16px -4px 0;padding:12px 4px max(12px,env(safe-area-inset-bottom));background:#000;border-top:1px solid #101a17}
+.actions.two{grid-template-columns:1fr 1.6fr}
+.primary,.back{min-height:56px;border-radius:16px;font-size:17px;font-weight:820}
+.primary{border:0;background:#69e0b6;color:#07110d}
+.back{border:1px solid #294038;background:#101a17;color:#cbd9d4}
+.danger{margin-top:16px;padding-top:14px;border-top:1px solid #1a2a25}
+.check{display:flex;align-items:flex-start;gap:10px;color:#91a69f;font-size:13px;line-height:1.45}
+.check input{flex:0 0 auto;width:20px;min-height:20px;height:20px;margin:0;accent-color:#ff786d}
+.privacy{margin:16px 0 0;color:#91a69f;font-size:12px;line-height:1.55}
+.footer{margin:18px 0 0;text-align:center;color:#52655e;font-size:12px}
+@media(min-width:600px){.shell{padding-left:24px;padding-right:24px}.card{padding:22px}}
+</style>
+</head>
+<body>
+<main class='shell'>
+<div class='top'><div class='brand'><span class='mark' aria-hidden='true'></span><span>POKEPOD</span></div><div class='progress' aria-hidden='true'><i id='p1' class='on'></i><i id='p2'></i></div></div>
+<header class='hero'><h1 id='title'>连接网络</h1><p id='subtitle'>选择附近的 2.4 GHz Wi-Fi</p></header>
+<div id='status' class='status' role='status' aria-live='polite'>)HTML");
   html += htmlEscape(statusMessage_);
-  html += F(R"HTML(</div><form id='form' method='post' action='/save'><section id='wifi-step' class='screen'><div class='card' aria-labelledby='wifi-title'><div class='card-head'><span class='number'>01</span><h2 id='wifi-title'>Wi-Fi</h2></div><label class='field'><span class='field-name'>附近网络</span><select id='ssid' name='ssid' data-current=')HTML");
+  html += F(R"HTML(</div>
+<form id='form' method='post' action='/save'>
+<section id='wifi-step' class='screen'>
+<div class='card' aria-labelledby='wifi-title'>
+<div class='card-head'><span class='number'>01</span><h2 id='wifi-title'>Wi-Fi</h2></div>
+<label class='field'><span class='field-name'>附近网络</span><select id='ssid' name='ssid' data-current=')HTML");
   html += htmlEscape(candidate_.wifiSsid);
-  html += F(R"HTML('><option value=''>正在读取附近网络…</option></select></label><div class='scan-row'><span class='scan-help'>按信号强度排列</span><button id='rescan' class='secondary' type='button'>重新扫描</button></div><details class='manual'><summary>手工输入网络名称</summary><label class='field'><span class='field-name'>网络名称</span><input id='manual' name='ssidManual' maxlength='32' autocomplete='off' autocapitalize='none' spellcheck='false' placeholder='Wi-Fi 名称'></label></details><label class='field'><span class='field-name'>Wi-Fi 密码</span><input id='wifi-password' name='wifiPassword' type='password' maxlength='63' autocomplete='current-password' autocapitalize='none' spellcheck='false' placeholder='网络密码'></label></div><div class='actions'><button id='next' class='primary' type='button'>下一步</button></div></section><section id='tencent-step' class='screen' hidden><div class='card' aria-labelledby='tencent-title'><div class='card-head'><span class='number'>02</span><h2 id='tencent-title'>腾讯云转写</h2></div>)HTML");
+  html += F(R"HTML('><option value=''>正在读取附近网络…</option></select></label>
+<div class='scan-row'><span class='scan-help'>按信号强度排列</span><button id='rescan' class='secondary' type='button'>重新扫描</button></div>
+<details class='disclosure manual'><summary>手工输入网络名称</summary><div class='disclosure-body'><label class='field'><span class='field-name'>网络名称</span><input id='manual' name='ssidManual' maxlength='32' autocomplete='off' autocapitalize='none' spellcheck='false' placeholder='Wi-Fi 名称'></label></div></details>
+<label class='field'><span class='field-name'>Wi-Fi 密码</span><input id='wifi-password' name='wifiPassword' type='password' maxlength='63' autocomplete='current-password' autocapitalize='none' spellcheck='false' placeholder='网络密码'></label>
+</div>
+<div class='actions'><button id='next' class='primary' type='button'>下一步</button></div>
+</section>
+<section id='tencent-step' class='screen' hidden>
+<div class='card' aria-labelledby='tencent-title'>
+<div class='card-head'><span class='number'>02</span><h2 id='tencent-title'>腾讯云转写</h2></div>)HTML");
   if (config_ != nullptr && config_->hasTencent()) {
-    html += F("<span class='saved'>✓ 已保存密钥</span>");
+    html += F(R"HTML(<div class='saved-row'><span class='saved'>✓ 密钥已保存</span><span class='saved-copy'>可以直接保存</span></div>
+<details id='credential-editor' class='disclosure'><summary>更换腾讯云密钥</summary><div class='disclosure-body'>)HTML");
+  } else {
+    html += F("<div id='credential-editor' class='credential-fields'>");
   }
-  html += F(R"HTML(<label class='field'><span class='field-name'>SecretId</span><input name='secretId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' placeholder='留空会保留已有值'></label><label class='field'><span class='field-name'>SecretKey</span><input name='secretKey' type='password' maxlength='128' autocomplete='new-password' autocapitalize='none' spellcheck='false' placeholder='留空会保留已有值'></label><label class='field'><span class='field-name'>热词 ID <span class='optional'>可选</span></span><input name='hotwordId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' value=')HTML");
+  html += F(R"HTML(<label class='field'><span class='field-name'>SecretId</span><input name='secretId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' placeholder='腾讯云 SecretId'></label>
+<label class='field'><span class='field-name'>SecretKey</span><input name='secretKey' type='password' maxlength='128' autocomplete='new-password' autocapitalize='none' spellcheck='false' placeholder='腾讯云 SecretKey'></label>
+</div>)HTML");
+  if (config_ != nullptr && config_->hasTencent()) {
+    html += F("</details>");
+  }
+  html += F(R"HTML(<details class='disclosure'><summary>高级设置</summary><div class='disclosure-body'>
+<label class='field'><span class='field-name'>热词 ID <span class='optional'>可选</span></span><input name='hotwordId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' value=')HTML");
   html += htmlEscape(candidate_.hotwordId);
-  html += F(R"HTML('></label><div class='danger'><label class='check'><input type='checkbox' name='clearTencent'><span>清除设备上保存的腾讯密钥</span></label></div></div><p class='privacy'>SecretKey 保存后不会显示，也不会通过 USB 或日志读回。</p><div class='actions two'><button id='back' class='back' type='button'>上一步</button><button class='primary' type='submit'>保存并连接</button></div></section></form><p class='footer'>热点 5 分钟后自动关闭</p></main><script>
-const s=document.getElementById('ssid'),b=document.getElementById('rescan'),status=document.getElementById('status'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2');let preferred=s.dataset.current;function strength(r){return r>=-55?'强':r>=-70?'中':'弱'}function render(d){const chosen=s.value||preferred;s.textContent='';for(const n of d.networks){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' · '+strength(n.rssi)+(n.secured?' · 加密':' · 开放');s.appendChild(o)}if(chosen&&![...s.options].some(o=>o.value===chosen)){const o=document.createElement('option');o.value=chosen;o.textContent=chosen+' · 已保存';s.prepend(o)}if(!s.options.length){const o=document.createElement('option');o.value='';o.textContent=d.scanning?'正在扫描…':'没有发现网络';s.appendChild(o)}if([...s.options].some(o=>o.value===chosen))s.value=chosen;if(d.message)status.textContent=d.message;b.textContent=d.scanning?'扫描中…':'重新扫描';b.disabled=d.scanning;if(d.scanning)setTimeout(()=>load(false),800)}async function load(rescan){try{const r=await fetch(rescan?'/scan':'/networks',{method:rescan?'POST':'GET',cache:'no-store'});render(await r.json())}catch(e){b.textContent='重新扫描';b.disabled=false}}function blurKeyboard(){const a=document.activeElement;if(a&&a.blur)a.blur()}function showTencent(){const manual=document.getElementById('manual').value;if(!s.value&&!manual){status.textContent='请选择网络或手工输入名称';s.focus();return}blurKeyboard();setTimeout(()=>{wifi.hidden=true;tencent.hidden=false;title.textContent='腾讯云转写';subtitle.textContent='保存语音转写凭证';p1.classList.remove('on');p2.classList.add('on');window.scrollTo(0,0)},60)}function showWifi(){blurKeyboard();tencent.hidden=true;wifi.hidden=false;title.textContent='连接网络';subtitle.textContent='选择附近的 2.4 GHz Wi-Fi';p2.classList.remove('on');p1.classList.add('on');window.scrollTo(0,0)}b.addEventListener('click',()=>load(true));document.getElementById('next').addEventListener('click',showTencent);document.getElementById('back').addEventListener('click',showWifi);document.getElementById('form').addEventListener('submit',blurKeyboard);load(false);
-</script></body></html>)HTML");
+  html += F("'></label>");
+  if (config_ != nullptr && config_->hasTencent()) {
+    html += F(R"HTML(<div class='danger'><label class='check'><input type='checkbox' name='clearTencent'><span>清除设备上保存的腾讯密钥</span></label></div>)HTML");
+  }
+  html += F(R"HTML(</div></details>
+<p class='privacy'>SecretKey 保存后不会显示，也不会通过 USB 或日志读回。</p>
+</div>
+<div class='actions two'><button id='back' class='back' type='button'>上一步</button><button class='primary' type='submit'>保存并连接</button></div>
+</section>
+</form>
+<p class='footer'>热点 5 分钟后自动关闭</p>
+</main>
+<script>
+const s=document.getElementById('ssid'),b=document.getElementById('rescan'),status=document.getElementById('status'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2');
+let preferred=s.dataset.current;
+function strength(r){return r>=-55?'强':r>=-70?'中':'弱'}
+function syncViewport(){const viewport=window.visualViewport;const height=viewport?viewport.height:window.innerHeight;document.documentElement.style.setProperty('--viewport-height',Math.round(height)+'px')}
+function resetScroll(){requestAnimationFrame(()=>{const root=document.scrollingElement||document.documentElement;root.scrollTop=0;document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>{root.scrollTop=0})})}
+function render(d){const chosen=s.value||preferred;s.textContent='';for(const n of d.networks){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' · '+strength(n.rssi)+(n.secured?' · 加密':' · 开放');s.appendChild(o)}if(chosen&&![...s.options].some(o=>o.value===chosen)){const o=document.createElement('option');o.value=chosen;o.textContent=chosen+' · 已保存';s.prepend(o)}if(!s.options.length){const o=document.createElement('option');o.value='';o.textContent=d.scanning?'正在扫描…':'没有发现网络';s.appendChild(o)}if([...s.options].some(o=>o.value===chosen))s.value=chosen;if(d.message)status.textContent=d.message;b.textContent=d.scanning?'扫描中…':'重新扫描';b.disabled=d.scanning;if(d.scanning)setTimeout(()=>load(false),800)}
+async function load(rescan){try{const r=await fetch(rescan?'/scan':'/networks',{method:rescan?'POST':'GET',cache:'no-store'});render(await r.json())}catch(e){b.textContent='重新扫描';b.disabled=false}}
+function blurKeyboard(){const active=document.activeElement;if(active&&active.blur)active.blur()}
+function showTencent(){const manual=document.getElementById('manual').value;if(!s.value&&!manual){status.textContent='请选择网络或手工输入名称';try{s.focus({preventScroll:true})}catch(e){s.focus()}return}blurKeyboard();setTimeout(()=>{wifi.hidden=true;tencent.hidden=false;title.textContent='腾讯云转写';subtitle.textContent='保存语音转写凭证';p1.classList.remove('on');p2.classList.add('on');syncViewport();resetScroll()},180)}
+function showWifi(){blurKeyboard();tencent.hidden=true;wifi.hidden=false;title.textContent='连接网络';subtitle.textContent='选择附近的 2.4 GHz Wi-Fi';p2.classList.remove('on');p1.classList.add('on');syncViewport();resetScroll()}
+b.addEventListener('click',()=>load(true));
+document.getElementById('next').addEventListener('click',showTencent);
+document.getElementById('back').addEventListener('click',showWifi);
+document.getElementById('form').addEventListener('submit',blurKeyboard);
+window.addEventListener('resize',syncViewport);
+if(window.visualViewport){window.visualViewport.addEventListener('resize',syncViewport)}
+syncViewport();
+load(false);
+</script>
+</body>
+</html>)HTML");
   return html;
 }
 

@@ -39,14 +39,12 @@ PokePodLinkService linkService;
 RaiseToWakePolicy raiseToWake;
 
 uint8_t audioBuffer[kAudioBytesPerChunk];
-bool touchLatched = false;
+TouchGestureTracker touchGesture;
 bool touchDictationHolding = false;
+bool touchDictationAttempted = false;
 bool bootDictationHolding = false;
 bool dictationUiActive = false;
-int16_t touchStartX = 0;
-int16_t touchStartY = 0;
-int16_t touchLastX = 0;
-int16_t touchLastY = 0;
+UiAction touchAction = UiAction::none;
 uint32_t lastTouchMs = 0;
 uint32_t lastDashboardMs = 0;
 uint32_t lastSensorMs = 0;
@@ -176,52 +174,59 @@ void emitStatus() {
 }
 
 void pollTouch() {
+  const uint32_t now = millis();
   int16_t x = 0;
   int16_t y = 0;
   const bool touched = board.readTouch(x, y);
-  if (touched && !touchLatched) {
-    touchLatched = true;
-    touchStartX = touchLastX = x;
-    touchStartY = touchLastY = y;
-    if (dashboard.actionAt(x, y, usb.hostConnected()) ==
-        UiAction::wechatDictation) {
+  if (touched && !touchGesture.active) {
+    touchGesture.begin(x, y, now);
+    touchDictationAttempted = false;
+    touchAction = dashboard.actionAt(x, y, usb.hostConnected());
+  } else if (touched) {
+    touchGesture.update(x, y);
+    if (touchAction == UiAction::wechatDictation &&
+        !touchDictationAttempted &&
+        touchGesture.dictationReady(now)) {
+      touchDictationAttempted = true;
       touchDictationHolding = startDictationHold();
     }
-  } else if (touched) {
-    touchLastX = x;
-    touchLastY = y;
   } else if (!touched) {
-    if (!touchLatched) return;
-    touchLatched = false;
+    if (!touchGesture.active) return;
+    const int16_t deltaX = touchGesture.deltaX();
+    const int16_t deltaY = touchGesture.deltaY();
+    const int16_t startX = touchGesture.startX;
+    const int16_t startY = touchGesture.startY;
+    const bool horizontalSwipe = touchGesture.horizontalSwipe();
+    const bool verticalSwipe = touchGesture.verticalSwipe();
+    const bool tapEligible = touchGesture.tapEligible();
+    touchGesture.reset();
     if (touchDictationHolding) {
       touchDictationHolding = false;
       stopDictationHold();
       return;
     }
-    const int16_t deltaX = touchLastX - touchStartX;
-    const int16_t deltaY = touchLastY - touchStartY;
-    if (abs(deltaX) >= 60 && abs(deltaX) > abs(deltaY)) {
+    if (horizontalSwipe) {
       if (provisioningPortal.active() &&
-          isBackEdgeSwipe(touchStartX, deltaX)) {
+          isBackEdgeSwipe(startX, deltaX)) {
         provisioningPortal.stop();
         dashboard.back();
       } else {
-        dashboard.swipeHorizontal(deltaX, recorder.recording(), touchStartX);
+        dashboard.swipeHorizontal(deltaX, recorder.recording(), startX);
       }
       drawDashboard();
       return;
     }
-    if (abs(deltaY) >= 45 && abs(deltaY) > abs(deltaX)) {
+    if (verticalSwipe) {
       dashboard.swipeVertical(deltaY, capsuleLibrary);
       drawDashboard();
       return;
     }
-    const UiAction action = dashboard.actionAt(
-        touchStartX, touchStartY, usb.hostConnected());
+    if (!tapEligible) return;
+    const UiAction action = touchAction;
     if (action == UiAction::capsuleRecord) toggleRecording();
     else if (action == UiAction::wechatDictation) return;
     else if (action == UiAction::openCapsule) {
-      dashboard.openCapsuleAt(touchStartY, capsuleLibrary);
+      dashboard.openCapsuleAt(startY, capsuleLibrary);
       drawDashboard();
     } else if (action == UiAction::back) {
       if (provisioningPortal.active()) provisioningPortal.stop();
