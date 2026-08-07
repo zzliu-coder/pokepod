@@ -76,6 +76,19 @@ final class PokePodTransportTests: XCTestCase {
         }
     }
 
+    func testPokePodDictationHoldSendsStartThenStopOperations() throws {
+        let channel = ScriptedLinkChannel()
+        let transport = try PokePodTransport(
+            deviceURL: URL(fileURLWithPath: "/dev/cu.PokePod-contract"),
+            channel: channel)
+
+        try transport.beginDictationHold()
+        try transport.endDictationHold()
+
+        XCTAssertEqual(channel.operations, ["dictate-start", "dictate-stop"])
+        XCTAssertFalse(channel.operations.contains("dictate"))
+    }
+
     func testV1AndV2AudioMetadataAndSafeBasename() throws {
         let id = UUID()
         let legacy = ProcessingMetadata(
@@ -243,6 +256,7 @@ private final class ScriptedLinkChannel: LinkV2ByteChannel {
     private var responses: [Data] = []
     private var busyRemaining: Int
     private(set) var requestCount = 0
+    private(set) var operations: [String] = []
 
     init(busyResponses: Int = 0) {
         busyRemaining = busyResponses
@@ -255,6 +269,7 @@ private final class ScriptedLinkChannel: LinkV2ByteChannel {
                   let operation = request["operation"] as? String else {
                 throw LinkV2Error.malformedResponse("测试请求缺少 operation")
             }
+            operations.append(operation)
             if busyRemaining > 0 {
                 busyRemaining -= 1
                 try enqueue(["status": "busy", "retryAfterMs": 1], requestID: frame.requestID)

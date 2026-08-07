@@ -20,7 +20,7 @@ struct SettingsView: View {
             }
             Section("PokePod 有线语音输入") {
                 Button("打开听写设置") { openDictationSettings() }
-                Text("设备会直接向 Mac 发送 Option-Z 并启动听写，无需给 PokeCapsule 键盘监听或辅助功能权限。听写麦克风请选择 TinyUSB UAC1（PokeCapsule，48 kHz）。")
+                Text("按住设备按键时会保持 Option-Z 按下并开始听写，松手时释放并结束；无需给 PokeCapsule 键盘监听或辅助功能权限。听写麦克风请选择 TinyUSB UAC1（PokeCapsule，48 kHz）。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("手动校对") {

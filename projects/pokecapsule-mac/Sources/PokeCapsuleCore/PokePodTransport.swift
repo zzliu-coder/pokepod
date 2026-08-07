@@ -209,6 +209,8 @@ public enum PokePodLinkOperation: String, CaseIterable {
     case result
     case configure
     case setTime = "set-time"
+    case dictateStart = "dictate-start"
+    case dictateStop = "dictate-stop"
     case dictate
     case reboot
 }
@@ -464,6 +466,10 @@ public final class PokePodTransport: DeviceTransport {
         _ = try client.call(.setTime, fields: ["unixTimeMs": Int64(date.timeIntervalSince1970 * 1_000)])
     }
 
+    public func beginDictationHold() throws { _ = try client.call(.dictateStart) }
+    public func endDictationHold() throws { _ = try client.call(.dictateStop) }
+
+    @available(*, deprecated, message: "Use beginDictationHold()/endDictationHold() for press-and-hold dictation")
     public func dictate() throws { _ = try client.call(.dictate) }
     public func reboot() throws { _ = try client.call(.reboot) }
 
