@@ -11,14 +11,18 @@ sh -n "$SCRIPT_DIR/firmware/build.sh" \
   "$SCRIPT_DIR/usb-audio-smoke.sh" \
   "$SCRIPT_DIR/device-acceptance.sh" \
   "$SCRIPT_DIR/end-to-end-acceptance.sh" \
+  "$SCRIPT_DIR/flash.sh" \
+  "$SCRIPT_DIR/hid-shortcut-smoke.sh" \
   "$SCRIPT_DIR/mac-bridge-diagnostics.sh" \
   "$SCRIPT_DIR/mac-dictation-diagnostics.sh"
-/usr/bin/python3 - "$SCRIPT_DIR/cdc-status.py" <<'PY'
+/usr/bin/python3 - "$SCRIPT_DIR/cdc-status.py" \
+  "$SCRIPT_DIR/sd-capsule-acceptance.py" <<'PY'
 import pathlib
 import sys
 
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-compile(source, sys.argv[1], "exec")
+for name in sys.argv[1:]:
+    source = pathlib.Path(name).read_text(encoding="utf-8")
+    compile(source, name, "exec")
 PY
 zsh -n "$MAC_PROJECT/build-app.sh"
 "$SCRIPT_DIR/firmware/build.sh"

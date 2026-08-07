@@ -1,15 +1,51 @@
 #!/bin/sh
 set -eu
 
-DICTATION_ENABLED=$(defaults read com.apple.HIToolbox AppleDictationAutoEnable 2>/dev/null || printf '0')
-if [ "$DICTATION_ENABLED" != "1" ]; then
-  printf 'FAIL macos_dictation_disabled\n'
+USER_HOME=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+HOTKEY_PLIST="$USER_HOME/Library/Preferences/com.apple.symbolichotkeys.plist"
+HITOOLBOX_PLIST=$(mktemp "${TMPDIR:-/tmp}/pokepod-hitoolbox.XXXXXX")
+AUDIO_JSON=$(mktemp "${TMPDIR:-/tmp}/pokepod-audio.XXXXXX")
+trap 'rm -f "$HITOOLBOX_PLIST" "$AUDIO_JSON"' EXIT
+defaults export com.apple.HIToolbox "$HITOOLBOX_PLIST"
+
+if ! /usr/bin/python3 - "$HITOOLBOX_PLIST" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    settings = plistlib.load(source)
+selected = settings.get("AppleSelectedInputSources", [])
+if not any(item.get("Bundle ID") == "com.tencent.inputmethod.wetype"
+           for item in selected if isinstance(item, dict)):
+    raise SystemExit(1)
+PY
+then
+  printf 'FAIL wetype_not_selected_input_source\n'
   exit 42
 fi
 
-USER_HOME=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
-HOTKEY_PLIST="$USER_HOME/Library/Preferences/com.apple.symbolichotkeys.plist"
-if ! /usr/bin/python3 - "$HOTKEY_PLIST" <<'PY'
+if ! pgrep -x WeType >/dev/null; then
+  printf 'FAIL wetype_process_not_running\n'
+  exit 43
+fi
+
+WETYPE_SETTINGS="$USER_HOME/Library/Application Support/WeType/mmkv/wetype.settings"
+if ! /usr/bin/python3 - "$WETYPE_SETTINGS" <<'PY'
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    payload = source.read()
+marker = b"voicePTTShortcut_keyCodes"
+offset = payload.find(marker)
+if offset < 0 or b"[58,6]" not in payload[offset:offset + 128]:
+    raise SystemExit(1)
+PY
+then
+  printf 'FAIL wetype_ptt_shortcut_expected_option_z\n'
+  exit 44
+fi
+
+if /usr/bin/python3 - "$HOTKEY_PLIST" <<'PY'
 import plistlib
 import sys
 
@@ -17,16 +53,14 @@ with open(sys.argv[1], "rb") as source:
     settings = plistlib.load(source)
 hotkey = settings.get("AppleSymbolicHotKeys", {}).get("164", {})
 parameters = hotkey.get("value", {}).get("parameters", [])
-if hotkey.get("enabled") is not True or parameters != [122, 6, 524288]:
-    raise SystemExit(1)
+raise SystemExit(0 if hotkey.get("enabled") is True and
+                 parameters == [122, 6, 524288] else 1)
 PY
 then
-  printf 'FAIL dictation_shortcut_expected_option_z\n'
-  exit 43
+  printf 'FAIL apple_dictation_conflicts_with_wetype_option_z\n'
+  exit 45
 fi
 
-AUDIO_JSON=$(mktemp "${TMPDIR:-/tmp}/pokepod-audio.XXXXXX")
-trap 'rm -f "$AUDIO_JSON"' EXIT
 system_profiler SPAudioDataType -json >"$AUDIO_JSON"
 if ! /usr/bin/python3 - "$AUDIO_JSON" <<'PY'
 import json
@@ -55,7 +89,7 @@ if not any(item.get("coreaudio_default_audio_input_device") == "spaudio_yes"
 PY
 then
   printf 'FAIL tinyusb_uac1_not_default_input\n'
-  exit 44
+  exit 46
 fi
 
-printf 'PASS mac_dictation shortcut=option_z microphone=tinyusb_uac1 permissions=not_required\n'
+printf 'PASS mac_wetype_voice shortcut=hold_option_z microphone=tinyusb_uac1 input=wetype\n'

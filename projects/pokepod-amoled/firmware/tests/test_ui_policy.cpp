@@ -31,8 +31,10 @@ int main() {
   assert(uiActionAt(state, 180, 370, false) == UiAction::raiseToWakeToggle);
 
   assert(bootGestureAction(false, 100) == BootGestureAction::capsuleToggle);
-  assert(bootGestureAction(true, 100) == BootGestureAction::dictationToggle);
-  assert(bootGestureAction(true, 900) == BootGestureAction::capsuleToggle);
+  assert(bootGestureAction(true, 100) == BootGestureAction::dictationRelease);
+  assert(bootGestureAction(true, 900) == BootGestureAction::dictationRelease);
   assert(bootGestureAction(true, 10) == BootGestureAction::none);
+  assert(!bootPressStartsDictation(false));
+  assert(bootPressStartsDictation(true));
   return 0;
 }

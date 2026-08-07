@@ -19,8 +19,11 @@ String processingJson(const String &id, uint32_t durationMs, const char *status,
   value += durationMs;
   value += ",\n  \"status\": \"";
   value += status;
-  value += "\",\n  \"audioFile\": \"audio.wav\",\n";
-  value += "  \"audioFormat\": \"wav_pcm_s16le\",\n";
+  value += "\",\n  \"audioFile\": \"";
+  value += kCapsuleWavFile;
+  value += "\",\n  \"audioFormat\": \"";
+  value += kCapsuleWavFormat;
+  value += "\",\n";
   value += "  \"sampleRateHz\": 16000,\n  \"channels\": 1,\n";
   value += "  \"bitsPerSample\": 16,\n  \"rawTextFile\": null,\n";
   value += "  \"polishedTextFile\": null,\n  \"errorStage\": ";

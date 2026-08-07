@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Small PokePod Link v2 probe used by the hardware acceptance scripts."""
 
+from __future__ import annotations
+
 import argparse
 import binascii
 import glob
@@ -18,9 +20,12 @@ VERSION = 2
 REQUEST_JSON = 1
 RESPONSE_JSON = 2
 DATA = 3
+EVENT_JSON = 4
 HEADER = struct.Struct("<4sBBHIII")
 MAX_CONTROL = 4096
 MAX_DATA = 16384
+OUTGOING_CHUNK = 128
+OUTGOING_PACE_SECONDS = 0.001
 
 
 def configure(fd: int) -> None:
@@ -99,14 +104,18 @@ def read_frame(fd: int, deadline: float):
 
 
 def query(port: str, operation: str, timeout: float,
-          outgoing_binary: bytes | None = None):
+          outgoing_binary: bytes | None = None,
+          fields: dict[str, object] | None = None):
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
         configure(fd)
         request_id = (time.monotonic_ns() & 0xFFFFFFFF) or 1
-        request = {"operation": operation, "version": VERSION}
+        request = dict(fields or {})
+        request["operation"] = operation
+        request["version"] = VERSION
         if outgoing_binary is not None:
             request["binaryLength"] = len(outgoing_binary)
+            request["chunkAcks"] = True
         control = json.dumps(
             request,
             separators=(",", ":"),
@@ -114,14 +123,45 @@ def query(port: str, operation: str, timeout: float,
         ).encode("utf-8")
         write_all(fd, encode_frame(REQUEST_JSON, request_id, control))
         if outgoing_binary is not None:
+            # Give the 256-byte TinyUSB CDC RX window one poll cycle before
+            # the first data frame. Each framed chunk then remains below that
+            # window as well.
+            time.sleep(0.010)
             offset = 0
             while offset < len(outgoing_binary):
-                chunk = outgoing_binary[offset:offset + MAX_DATA]
+                # macOS can buffer CDC writes much faster than the ESP32 can
+                # persist them to SD.  Keep Link v2 frames comfortably below
+                # the TinyUSB RX window and pace them so the device never has
+                # to recover from a silently dropped frame.
+                chunk = outgoing_binary[offset:offset + OUTGOING_CHUNK]
                 offset += len(chunk)
                 write_all(fd, encode_frame(
                     DATA, request_id, chunk,
                     flags=1 if offset == len(outgoing_binary) else 0,
                 ))
+                termios.tcdrain(fd)
+                time.sleep(OUTGOING_PACE_SECONDS)
+                ack_deadline = time.monotonic() + max(5.0, timeout)
+                while True:
+                    frame_type, _, incoming_id, ack_payload = read_frame(
+                        fd, ack_deadline
+                    )
+                    if incoming_id != request_id:
+                        continue
+                    if frame_type == RESPONSE_JSON:
+                        rejected = json.loads(ack_payload.decode("utf-8"))
+                        raise ValueError(rejected.get(
+                            "message", "binary transfer rejected"
+                        ))
+                    if frame_type != EVENT_JSON:
+                        continue
+                    ack = json.loads(ack_payload.decode("utf-8"))
+                    if (ack.get("event") != "binary_ack" or
+                            int(ack.get("received", -1)) != offset):
+                        raise ValueError(
+                            "invalid Link v2 binary acknowledgement"
+                        )
+                    break
             if not outgoing_binary:
                 write_all(fd, encode_frame(DATA, request_id, b"", flags=1))
         deadline = time.monotonic() + timeout
@@ -142,6 +182,8 @@ def query(port: str, operation: str, timeout: float,
             if response is not None and len(binary) >= expected_binary:
                 if len(binary) != expected_binary:
                     raise ValueError("Link v2 binary length mismatch")
+                if expected_binary:
+                    response["_binary_payload"] = bytes(binary)
                 response["host_port"] = port
                 return response
         raise TimeoutError("PokePod Link v2 response timed out")
@@ -153,7 +195,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("ports", nargs="*")
     parser.add_argument("--command", default="status",
-                        choices=("hello", "status", "dictate", "record", "stop",
+                        choices=("hello", "status", "dictate", "dictate-start",
+                                 "dictate-stop", "record", "stop",
                                  "reboot"))
     parser.add_argument(
         "--install-font", metavar="PATH",

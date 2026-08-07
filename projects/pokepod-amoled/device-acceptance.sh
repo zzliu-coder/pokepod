@@ -35,8 +35,12 @@ with open(sys.argv[2], encoding="utf-8") as source:
 
 required = {
     "variant": "V1 SH8601/FT3168",
+    "ioExpander": True,
     "display": True,
     "touch": True,
+    "rtc": True,
+    "imu": True,
+    "pmu": True,
     "audio": True,
     "usb": True,
 }

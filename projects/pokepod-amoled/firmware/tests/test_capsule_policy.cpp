@@ -18,5 +18,7 @@ int main() {
   assert(!safeCapsuleFileName("../audio.wav"));
   assert(!safeCapsuleFileName("folder/audio.wav"));
   assert(!safeCapsuleFileName(""));
+  assert(std::strcmp(kCapsuleWavFile, "audio.wav") == 0);
+  assert(std::strcmp(kCapsuleWavFormat, "wav-pcm-s16le") == 0);
   return 0;
 }

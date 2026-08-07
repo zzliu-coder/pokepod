@@ -16,7 +16,9 @@ class UsbVoiceBridge {
   UsbVoiceBridge();
 
   bool begin(BoardVariant variant);
-  bool sendDictationTrigger();
+  bool beginDictationHold();
+  bool endDictationHold();
+  bool dictationHeld() const { return dictationHeld_; }
   uint16_t writeMicrophone(const uint8_t *data, uint16_t length);
   // Link v2 owns the CDC byte stream. Diagnostics must never be written to
   // that stream because one printable log line would corrupt a framed reply.
@@ -43,6 +45,7 @@ class UsbVoiceBridge {
   USBAudioCard microphone_;
   USBCDC diagnostics_;
   bool started_ = false;
+  bool dictationHeld_ = false;
   std::atomic<bool> microphoneStreaming_{false};
   std::atomic<uint32_t> microphoneOpenCount_{0};
   std::atomic<uint32_t> microphoneCloseCount_{0};

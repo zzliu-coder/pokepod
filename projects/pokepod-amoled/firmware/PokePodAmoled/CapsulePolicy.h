@@ -11,6 +11,8 @@ constexpr const char *kCapsuleArchive = "/PokeCapsule/Archive";
 constexpr const char *kCapsuleStaging = "/PokeCapsule/.staging";
 constexpr const char *kCapsuleTrash = "/PokeCapsule/.trash";
 constexpr const char *kCapsuleSystem = "/PokeCapsule/.system";
+constexpr const char *kCapsuleWavFile = "audio.wav";
+constexpr const char *kCapsuleWavFormat = "wav-pcm-s16le";
 
 constexpr bool isHexDigit(char value) {
   return (value >= '0' && value <= '9') ||

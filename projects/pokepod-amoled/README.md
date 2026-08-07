@@ -4,8 +4,8 @@ PokePod 把 Waveshare ESP32-S3-Touch-AMOLED-1.8 做成两种设备：
 
 - 独立语音胶囊：录制 `16 kHz / 16 bit / mono WAV`，保存为 PokeCapsule
   schema v2，联网后由腾讯云一句话识别生成 `raw.txt`。
-- Mac 有线语音终端：USB 同时提供 48 kHz 单声道麦克风、Option+Z
-  键盘触发和 PokePod Link v2 数据同步。
+- Mac 有线语音终端：USB 同时提供 48 kHz 单声道麦克风、长按 Option+Z
+  键盘输入和 PokePod Link v2 数据同步。
 
 固件在启动时通过触摸控制器地址自动识别硬件：
 
@@ -21,7 +21,8 @@ SD、RTC、QMI8658、AXP2101、Wi-Fi、USB CDC/UAC/HID；BLE 暂未启用。
 
 - 首页点“语音胶囊”开始/停止录音；录音最长 58.5 秒。
 - 未连接 Mac 时，BOOT 短按开始/停止胶囊。
-- 连接 Mac 时，BOOT 短按发送 Option+Z，长按开始/停止胶囊。
+- 连接 Mac 时，按住 BOOT 使用微信语音输入，松开结束；胶囊录音使用屏幕按钮。
+- 屏幕“微信语音输入”同样是按住说话、松开结束。
 - 胶囊详情可阅读 `final.md > polished.md > raw.txt > title`、播放 WAV、
   收藏、归档和重新转写。
 - PWR 短按亮屏/息屏，长按安全关机。
@@ -55,7 +56,8 @@ CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32�
 - hello、状态、身份、元数据指纹；
 - 分页文件清单和分块读取；
 - 分块暂存写入、原子提交、共享管理命令和结果查询；
-- 配置、UTC 校时、录音、停止、Option+Z、重启；
+- 配置、UTC 校时、录音、停止、Option+Z 按下/释放、重启；
+- 可选逐块确认，防止大文件超过 TinyUSB CDC 接收窗口；
 - 路径穿越拦截、重复请求拦截、传输超时和忙碌重试。
 
 Mac 端通过 `DeviceTransport` 共用镜像、离线队列和 DeepSeek 回写逻辑；
@@ -85,6 +87,17 @@ USB Mass Storage，避免 Mac 与固件同时写 SD。
 `work/pokepod-build/output`。`verify.sh` 运行固件主机测试、干净固件编译、
 Mac 测试和 release build、脚本语法检查及 diff 检查。
 
+设备正常运行并通过 USB 连接时，刷写只需一个命令：
+
+```sh
+./flash.sh
+```
+
+脚本会通过 CDC 自动进入 ESP32-S3 ROM 下载器，只刷新 `0x10000` 的应用分区，
+验证 Flash 内容后回到应用。它不会覆盖 NVS、分区表、SD 卡或原始 16 MB 备份。
+若旧固件已损坏，脚本会提示唯一的人工恢复动作：按住 BOOT，短按一次 RESET，
+松开 BOOT，再重跑脚本。
+
 真机连接后：
 
 ```sh
@@ -92,17 +105,19 @@ Mac 测试和 release build、脚本语法检查及 diff 检查。
 ./end-to-end-acceptance.sh
 ```
 
-`cdc-status.py` 使用真实 Link v2 帧读取设备状态。真机门检查 V1 硬件状态、
-UAC 48 kHz 单声道连续采集、麦克风非静音和 USB/I2S 计数器。端到端门发送
-Option+Z 并确认 macOS 打开 UAC。第三方微信输入法没有状态回执，最终文字进入
+`cdc-status.py` 使用真实 Link v2 帧读取设备状态。真机门检查 V1 显示、触摸、
+IO 扩展器、RTC、IMU、PMU、SD、音频和 USB 状态，
+UAC 48 kHz 单声道连续采集、麦克风非静音和 USB/I2S 计数器。端到端门长按
+Option+Z，确认微信输入法在按住期间打开 UAC，并在释放后关闭。最终文字进入
 真实输入框仍保留一次人工确认。
 
 ## Mac 设置
 
-1. 把微信语音输入法快捷键设为 Option+Z。
+1. 把微信语音输入法“按住说话”快捷键设为 Option+Z。
 2. 选择 **TinyUSB UAC1**（制造商 **PokeCapsule**，48 kHz）作为输入麦克风。
+3. macOS 系统听写使用另一组快捷键，例如连按两下 Control，避免抢占 Option+Z。
 
-Option+Z 由 PokePod HID 直接发送，PokeCapsule 不参与快捷键中转，不需要辅助
+Option+Z 的按下和释放由 PokePod HID 直接发送，PokeCapsule 不参与快捷键中转，不需要辅助
 功能或输入监控权限。
 
 ## 恢复边界

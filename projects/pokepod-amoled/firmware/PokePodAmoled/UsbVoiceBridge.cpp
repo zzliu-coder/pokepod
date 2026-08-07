@@ -70,15 +70,33 @@ void UsbVoiceBridge::onAudioEvent(void *, esp_event_base_t eventBase,
   }
 }
 
-bool UsbVoiceBridge::sendDictationTrigger() {
+bool UsbVoiceBridge::beginDictationHold() {
   if (!hostConnected()) return false;
-  if (keyboard_.press(KEY_LEFT_ALT) == 0 || keyboard_.press('z') == 0) {
-    keyboard_.releaseAll();
-    return false;
-  }
+  if (dictationHeld_) return true;
+
+  // Send the chord as one boot-keyboard report. Building it through separate
+  // press() calls caused macOS to receive only the modifier transitions on
+  // this composite HID/UAC/CDC device.
+  KeyReport released = {};
+  KeyReport optionZ = {};
+  optionZ.modifiers = 1U << 2;  // HID left Alt/Option modifier.
+  optionZ.keys[0] = 0x1d;      // HID keyboard Z usage.
+  keyboard_.sendReport(&released);
   delay(20);
-  keyboard_.releaseAll();
-  Serial.println("{\"event\":\"dictation_trigger\",\"shortcut\":\"OPTION_Z\"}");
+  keyboard_.sendReport(&optionZ);
+  delay(40);
+  dictationHeld_ = true;
+  Serial.println("{\"event\":\"dictation_started\",\"shortcut\":\"OPTION_Z\"}");
+  return true;
+}
+
+bool UsbVoiceBridge::endDictationHold() {
+  KeyReport released = {};
+  keyboard_.sendReport(&released);
+  delay(40);
+  const bool wasHeld = dictationHeld_;
+  dictationHeld_ = false;
+  if (wasHeld) Serial.println("{\"event\":\"dictation_stopped\"}");
   return true;
 }
 

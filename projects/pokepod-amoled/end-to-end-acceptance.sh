@@ -4,6 +4,15 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RUN_ROOT=${1:-"$SCRIPT_DIR/work/end-to-end-acceptance/$(date +%Y%m%d-%H%M%S)"}
 mkdir -p "$RUN_ROOT"
+HOLD_ACTIVE=0
+
+cleanup() {
+  if [ "$HOLD_ACTIVE" -eq 1 ]; then
+    "$SCRIPT_DIR/cdc-status.py" --command dictate-stop \
+      --event dictation_stopped --timeout 5 >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT HUP INT TERM
 
 json_field() {
   /usr/bin/python3 - "$1" "$2" <<'PY'
@@ -31,12 +40,13 @@ if [ "$(json_field "$RUN_ROOT/status-before.json" mic_streaming)" = "true" ]; th
 fi
 BEFORE_OPEN=$(json_field "$RUN_ROOT/status-before.json" mic_open_count)
 
-if ! "$SCRIPT_DIR/cdc-status.py" --command dictate --event dictation_trigger \
-  >"$RUN_ROOT/dictation-trigger.json"; then
-  printf 'FAIL dictation_hid_trigger_unavailable evidence=%s\n' "$RUN_ROOT" | tee "$RUN_ROOT/result.txt"
+if ! "$SCRIPT_DIR/cdc-status.py" --command dictate-start --event dictation_started \
+  >"$RUN_ROOT/dictation-start.json"; then
+  printf 'FAIL wetype_hid_hold_unavailable evidence=%s\n' "$RUN_ROOT" | tee "$RUN_ROOT/result.txt"
   exit 52
 fi
-if [ "$(json_field "$RUN_ROOT/dictation-trigger.json" shortcut)" != "OPTION_Z" ]; then
+HOLD_ACTIVE=1
+if [ "$(json_field "$RUN_ROOT/dictation-start.json" shortcut)" != "OPTION_Z" ]; then
   printf 'FAIL unexpected_hid_shortcut evidence=%s\n' "$RUN_ROOT" | tee "$RUN_ROOT/result.txt"
   exit 53
 fi
@@ -46,21 +56,24 @@ OPENED=false
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   if "$SCRIPT_DIR/cdc-status.py" --timeout 0.8 >"$RUN_ROOT/status-dictating.json" 2>/dev/null; then
     AFTER_OPEN=$(json_field "$RUN_ROOT/status-dictating.json" mic_open_count)
-    if [ "${AFTER_OPEN:-0}" -gt "${BEFORE_OPEN:-0}" ]; then
+    if [ "${AFTER_OPEN:-0}" -gt "${BEFORE_OPEN:-0}" ] &&
+       [ "$(json_field "$RUN_ROOT/status-dictating.json" mic_streaming)" = "true" ] &&
+       [ "$(json_field "$RUN_ROOT/status-dictating.json" dictation_holding)" = "true" ]; then
       OPENED=true
       break
     fi
   fi
 done
 if [ "$OPENED" != "true" ]; then
-  printf 'FAIL macos_dictation_did_not_open_microphone evidence=%s\n' "$RUN_ROOT" | tee "$RUN_ROOT/result.txt"
+  printf 'FAIL wetype_voice_did_not_open_pokepod_microphone evidence=%s\n' "$RUN_ROOT" | tee "$RUN_ROOT/result.txt"
   exit 54
 fi
 
-if [ "$(json_field "$RUN_ROOT/status-dictating.json" mic_streaming)" = "true" ]; then
-  "$SCRIPT_DIR/cdc-status.py" --command dictate --event dictation_trigger \
-    >"$RUN_ROOT/dictation-stop.json"
-fi
+"$SCRIPT_DIR/cdc-status.py" --command dictate-stop --event dictation_stopped \
+  >"$RUN_ROOT/dictation-stop.json"
+HOLD_ACTIVE=0
 
-printf 'PASS end_to_end_acceptance shortcut=option_z permissions=not_required evidence=%s\n' \
+"$SCRIPT_DIR/hid-shortcut-smoke.sh" "$RUN_ROOT/hid"
+
+printf 'PASS end_to_end_acceptance input=wetype shortcut=hold_option_z evidence=%s\n' \
   "$RUN_ROOT" | tee "$RUN_ROOT/result.txt"

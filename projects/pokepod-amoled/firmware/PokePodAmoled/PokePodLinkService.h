@@ -27,6 +27,7 @@ class PokePodLinkService {
              WifiController &wifi, TencentWorker &tencent, Print &log);
   void poll(uint32_t nowMs);
   bool active() const { return sessionActive_; }
+  bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
 
  private:
   enum class ReceivePhase : uint8_t { magic, header, payload };
@@ -53,6 +54,7 @@ class PokePodLinkService {
   void sendBusy(uint32_t requestId, uint32_t retryAfterMs = 150);
   void sendError(uint32_t requestId, const char *message);
   bool sendJson(uint32_t requestId, const String &json);
+  bool sendEvent(uint32_t requestId, const String &json);
   bool sendFile(uint32_t requestId, const String &path);
   bool sendFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                  const uint8_t *payload, size_t size);
@@ -60,7 +62,8 @@ class PokePodLinkService {
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
                      uint32_t expectedBytes, const String &temporaryPath,
-                     const String &finalPath, const String &transactionId);
+                     const String &finalPath, const String &transactionId,
+                     bool chunkAcks);
   bool ensureDirectoryTree(const String &path);
   bool writeTextAtomic(const String &path, const String &text);
   bool validFontFile(const String &path) const;
@@ -87,6 +90,7 @@ class PokePodLinkService {
                       const std::vector<String> &ids, String &message);
   bool folderOperation(void *jsonRoot, const char *operation,
                        String &message);
+  bool cleanupPurgeStaging();
   bool removeTree(const String &path);
   bool copyTree(const String &source, const String &target, uint8_t depth = 0);
   bool rewriteCopiedMetadata(const String &directory, const String &id);
@@ -118,6 +122,7 @@ class PokePodLinkService {
   uint32_t incomingRequestId_ = 0;
   uint32_t incomingExpected_ = 0;
   uint32_t incomingReceived_ = 0;
+  bool incomingChunkAcks_ = false;
   File incomingFile_;
   String incomingTemporaryPath_;
   String incomingFinalPath_;

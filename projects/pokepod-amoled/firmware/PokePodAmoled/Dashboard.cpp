@@ -99,7 +99,10 @@ void Dashboard::drawHome(const DashboardView &view) {
   }
   drawButton(24, 150, 320, 112, kGreen, "语音胶囊", "录音并自动转写");
   if (view.hostConnected) {
-    drawButton(24, 286, 320, 100, kBlue, "微信语音输入", "发送 Option+Z");
+    drawButton(24, 286, 320, 100,
+               view.dictationHolding ? kRed : kBlue,
+               view.dictationHolding ? "正在说话" : "微信语音输入",
+               view.dictationHolding ? "松开结束" : "按住说话，松开结束");
   } else {
     renderer_.drawText("连接 Mac 后显示语音输入", 52, 318, 280, 2,
                        kMuted, RGB565_BLACK);
@@ -242,6 +245,8 @@ String Dashboard::signature(const DashboardView &view) const {
   value += view.playing;
   value += ':';
   value += view.hostConnected;
+  value += ':';
+  value += view.dictationHolding;
   value += ':';
   value += static_cast<int>(view.wifiPhase);
   value += ':';

@@ -13,6 +13,14 @@ int main() {
   assert(!safeLinkRelativePath("Inbox\\a"));
   assert(!safeLinkRelativePath(".staging/a", false));
 
+  assert(purgeOutcome(false, false) == PurgeOutcome::rejected);
+  assert(purgeOutcome(true, true) == PurgeOutcome::committed);
+  assert(purgeOutcome(true, false) ==
+         PurgeOutcome::committedCleanupDeferred);
+  assert(purgeStagingDirectoryName("purge-1234"));
+  assert(!purgeStagingDirectoryName("purge-"));
+  assert(!purgeStagingDirectoryName("recording-1234"));
+
   LinkRequestHistory history;
   assert(!history.contains(7));
   assert(history.complete(7));

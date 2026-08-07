@@ -20,6 +20,7 @@ struct DashboardView {
   bool audioReady = false;
   bool usbReady = false;
   bool hostConnected = false;
+  bool dictationHolding = false;
   bool recording = false;
   bool transcribing = false;
   bool playing = false;

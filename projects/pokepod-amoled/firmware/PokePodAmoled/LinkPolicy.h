@@ -8,6 +8,23 @@ namespace pokepod {
 
 constexpr size_t kLinkRecentRequestCount = 32;
 
+enum class PurgeOutcome : uint8_t {
+  rejected,
+  committed,
+  committedCleanupDeferred,
+};
+
+inline PurgeOutcome purgeOutcome(bool staged, bool removed) {
+  if (!staged) return PurgeOutcome::rejected;
+  return removed ? PurgeOutcome::committed
+                 : PurgeOutcome::committedCleanupDeferred;
+}
+
+inline bool purgeStagingDirectoryName(const char *value) {
+  return value != nullptr && strncmp(value, "purge-", 6) == 0 &&
+      value[6] != '\0';
+}
+
 inline bool safeLinkRelativePath(const char *value, bool allowHiddenRoot = false) {
   if (value == nullptr || value[0] == '\0' || value[0] == '/' ||
       strlen(value) > 240) {

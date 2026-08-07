@@ -107,8 +107,14 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   wifi_ = &wifi;
   tencent_ = &tencent;
   log_ = &log;
-  return ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") &&
-         ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming");
+  if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
+      !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
+    return false;
+  }
+  if (!cleanupPurgeStaging()) {
+    log_->println("{\"event\":\"purge_cleanup_deferred\"}");
+  }
+  return true;
 }
 
 void PokePodLinkService::poll(uint32_t nowMs) {
@@ -118,8 +124,11 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     const int value = stream_->read();
     if (value >= 0) consumeByte(static_cast<uint8_t>(value));
   }
+  // A request can start after the caller captured nowMs. Subtracting that
+  // older timestamp from the freshly recorded byte time underflows uint32_t
+  // and used to reject every upload immediately on some loop iterations.
   if (incomingKind_ != IncomingKind::none &&
-      static_cast<uint32_t>(nowMs - incomingLastByteMs_) > 5000) {
+      static_cast<uint32_t>(millis() - incomingLastByteMs_) > 5000) {
     failIncoming("binary transfer timed out");
   }
   if (rebootAtMs_ != 0 && static_cast<int32_t>(nowMs - rebootAtMs_) >= 0) {
@@ -209,6 +218,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   }
 
   const int64_t binaryLength = jsonInt64(root, "binaryLength", 0);
+  const bool chunkAcks = jsonBool(root, "chunkAcks");
   if (strcmp(operation, "font-write") == 0) {
     cJSON_Delete(root);
     const String finalPath = String(kCapsuleSystem) + "/fonts/cjk16.bin";
@@ -220,7 +230,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
                !ensureDirectoryTree(parentPath(finalPath)) ||
                !beginIncoming(IncomingKind::systemFont, requestId,
                               static_cast<uint32_t>(binaryLength),
-                              temporaryPath, finalPath, "")) {
+                              temporaryPath, finalPath, "", chunkAcks)) {
       sendError(requestId, "invalid font transfer");
       rememberCompleted(requestId);
     }
@@ -259,7 +269,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       if (!ensureDirectoryTree(parentPath(finalPath)) ||
           !beginIncoming(IncomingKind::stagedFile, requestId,
                          static_cast<uint32_t>(binaryLength), temporaryPath,
-                         finalPath, transactionId)) {
+                         finalPath, transactionId, chunkAcks)) {
         sendError(requestId, "cannot open staged file");
         rememberCompleted(requestId);
       }
@@ -277,7 +287,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
     cJSON_Delete(root);
     if (!beginIncoming(IncomingKind::command, requestId,
                        static_cast<uint32_t>(binaryLength), temporaryPath,
-                       finalPath, transactionId)) {
+                       finalPath, transactionId, chunkAcks)) {
       sendError(requestId, "cannot open command file");
       rememberCompleted(requestId);
     }
@@ -293,7 +303,8 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
                                        uint32_t expectedBytes,
                                        const String &temporaryPath,
                                        const String &finalPath,
-                                       const String &transactionId) {
+                                       const String &transactionId,
+                                       bool chunkAcks) {
   if (fs_->exists(temporaryPath)) fs_->remove(temporaryPath);
   File output = fs_->open(temporaryPath, FILE_WRITE);
   if (!output) return false;
@@ -301,6 +312,7 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
   incomingRequestId_ = requestId;
   incomingExpected_ = expectedBytes;
   incomingReceived_ = 0;
+  incomingChunkAcks_ = chunkAcks;
   incomingFile_ = output;
   incomingTemporaryPath_ = temporaryPath;
   incomingFinalPath_ = finalPath;
@@ -327,6 +339,10 @@ void PokePodLinkService::processData(uint32_t requestId, uint16_t flags,
     failIncoming("binary length mismatch");
     return;
   }
+  if (incomingChunkAcks_) {
+    sendEvent(requestId, "{\"event\":\"binary_ack\",\"received\":" +
+        String(incomingReceived_) + "}");
+  }
   if (last) finishIncoming();
 }
 
@@ -342,6 +358,7 @@ void PokePodLinkService::finishIncoming() {
   incomingKind_ = IncomingKind::none;
   incomingRequestId_ = 0;
   incomingExpected_ = incomingReceived_ = 0;
+  incomingChunkAcks_ = false;
   incomingTemporaryPath_ = incomingFinalPath_ = incomingTransactionId_ = "";
   incomingLastByteMs_ = 0;
   if (!writeOk || (kind == IncomingKind::systemFont && !validFontFile(temporary)) ||
@@ -371,6 +388,7 @@ void PokePodLinkService::failIncoming(const char *message) {
   incomingKind_ = IncomingKind::none;
   incomingRequestId_ = 0;
   incomingExpected_ = incomingReceived_ = 0;
+  incomingChunkAcks_ = false;
   incomingTemporaryPath_ = incomingFinalPath_ = incomingTransactionId_ = "";
   incomingLastByteMs_ = 0;
   sendError(requestId, message);
@@ -382,7 +400,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     sendOk(requestId,
-           "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"dictate\",\"record\",\"stop\",\"font-write\",\"reboot\"]");
+           "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"dictate-start\",\"dictate-stop\",\"record\",\"stop\",\"font-write\",\"reboot\"]");
   } else if (strcmp(operation, "status") == 0) {
     const BoardStatus &status = board_->status();
     String extra = "\"recording\":";
@@ -397,12 +415,19 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"sdReady\":";
     extra += status.sdCard ? "true" : "false";
     extra += ",\"variant\":\"" + String(variantName(status.variant)) + "\"";
+    extra += ",\"ioExpander\":" + String(status.ioExpander ? "true" : "false");
     extra += ",\"display\":" + String(status.display ? "true" : "false");
     extra += ",\"touch\":" + String(status.touch ? "true" : "false");
+    extra += ",\"rtc\":" + String(status.rtc ? "true" : "false");
+    extra += ",\"imu\":" + String(status.imu ? "true" : "false");
+    extra += ",\"pmu\":" + String(status.pmu ? "true" : "false");
+    extra += ",\"vbusPresent\":" + String(status.vbusPresent ? "true" : "false");
+    extra += ",\"screenOn\":" + String(status.screenOn ? "true" : "false");
     extra += ",\"audio\":" + String(audio_ != nullptr && audio_->ready() ? "true" : "false");
     extra += ",\"usb\":" + String(usb_->ready() ? "true" : "false");
     extra += ",\"host_connected\":" + String(usb_->hostConnected() ? "true" : "false");
     extra += ",\"mic_streaming\":" + String(usb_->microphoneStreaming() ? "true" : "false");
+    extra += ",\"dictation_holding\":" + String(usb_->dictationHeld() ? "true" : "false");
     extra += ",\"mic_open_count\":" + String(usb_->microphoneOpenCount());
     extra += ",\"mic_close_count\":" + String(usb_->microphoneCloseCount());
     extra += ",\"audio_read_bytes\":" + String(static_cast<unsigned long>(audio_->bytesRead()));
@@ -457,11 +482,22 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     if (unixTimeMs < 1704067200000LL || !board_->setUtcEpoch(unixTimeMs / 1000)) {
       sendError(requestId, "invalid UTC time");
     } else sendOk(requestId);
+  } else if (strcmp(operation, "dictate-start") == 0) {
+    if (usb_->beginDictationHold()) {
+      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_started\",\"shortcut\":\"OPTION_Z\"");
+    } else sendError(requestId, "USB HID is not ready");
+  } else if (strcmp(operation, "dictate-stop") == 0) {
+    if (usb_->endDictationHold()) {
+      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_stopped\",\"shortcut\":\"OPTION_Z\"");
+    } else sendError(requestId, "USB HID is not ready");
   } else if (strcmp(operation, "dictate") == 0) {
-    if (usb_->sendDictationTrigger()) {
-      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_trigger\",\"shortcut\":\"OPTION_Z\"");
-    }
-    else sendError(requestId, "USB HID is not ready");
+    // Compatibility pulse for an older host. Product interaction uses the
+    // explicit hold pair above so speech lasts exactly as long as the button.
+    if (usb_->beginDictationHold()) {
+      delay(800);
+      usb_->endDictationHold();
+      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_pulse\",\"shortcut\":\"OPTION_Z\"");
+    } else sendError(requestId, "USB HID is not ready");
   } else if (strcmp(operation, "record") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
     else if (audio_ == nullptr || !audio_->ready() || !board_->sdReady()) {
@@ -885,11 +921,19 @@ bool PokePodLinkService::trashOperation(void *jsonRoot, const char *operation,
         return false;
       }
       const String staged = transaction + "/" + id;
-      if (!fs_->rename(source, staged) || !removeTree(staged)) {
+      const bool stagedForDeletion = fs_->rename(source, staged);
+      const bool removed = stagedForDeletion && removeTree(staged);
+      const PurgeOutcome outcome = purgeOutcome(stagedForDeletion, removed);
+      if (outcome == PurgeOutcome::rejected) {
         message = "purge failed";
         return false;
       }
-      fs_->rmdir(transaction);
+      if (outcome == PurgeOutcome::committedCleanupDeferred) {
+        log_->printf("{\"event\":\"purge_cleanup_deferred\",\"capsuleId\":\"%s\"}\n",
+                     id.c_str());
+      } else {
+        fs_->rmdir(transaction);
+      }
     }
   }
   message = "committed";
@@ -948,6 +992,34 @@ bool PokePodLinkService::folderOperation(void *jsonRoot,
   return true;
 }
 
+bool PokePodLinkService::cleanupPurgeStaging() {
+  if (fs_ == nullptr) return false;
+  File root = fs_->open(kCapsuleStaging);
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return true;
+  }
+  std::vector<String> purgeDirectories;
+  File entry = root.openNextFile();
+  while (entry) {
+    const String full = entry.name();
+    const bool isDirectory = entry.isDirectory();
+    entry.close();
+    const int slash = full.lastIndexOf('/');
+    const String name = slash >= 0 ? full.substring(slash + 1) : full;
+    if (isDirectory && purgeStagingDirectoryName(name.c_str())) {
+      purgeDirectories.push_back(String(kCapsuleStaging) + "/" + name);
+    }
+    entry = root.openNextFile();
+  }
+  root.close();
+  bool ok = true;
+  for (const String &directory : purgeDirectories) {
+    if (!removeTree(directory)) ok = false;
+  }
+  return ok;
+}
+
 bool PokePodLinkService::removeTree(const String &path) {
   File root = fs_->open(path);
   if (!root) return true;
@@ -955,17 +1027,20 @@ bool PokePodLinkService::removeTree(const String &path) {
     root.close();
     return fs_->remove(path);
   }
+  std::vector<String> children;
   File entry = root.openNextFile();
   while (entry) {
-    const String child = entry.name();
+    const String full = entry.name();
     entry.close();
-    if (!removeTree(child)) {
-      root.close();
-      return false;
-    }
+    const int slash = full.lastIndexOf('/');
+    const String name = slash >= 0 ? full.substring(slash + 1) : full;
+    children.push_back(path + "/" + name);
     entry = root.openNextFile();
   }
   root.close();
+  for (const String &child : children) {
+    if (!removeTree(child)) return false;
+  }
   return fs_->rmdir(path);
 }
 
@@ -1325,6 +1400,12 @@ void PokePodLinkService::sendError(uint32_t requestId, const char *message) {
 bool PokePodLinkService::sendJson(uint32_t requestId, const String &json) {
   if (json.length() > kLinkMaxControlBytes) return false;
   return sendFrame(LinkFrameType::responseJson, 0, requestId,
+                   reinterpret_cast<const uint8_t *>(json.c_str()), json.length());
+}
+
+bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
+  if (json.length() > kLinkMaxControlBytes) return false;
+  return sendFrame(LinkFrameType::eventJson, 0, requestId,
                    reinterpret_cast<const uint8_t *>(json.c_str()), json.length());
 }
 

@@ -4,19 +4,20 @@
 
 namespace pokepod {
 
-constexpr uint32_t kLongPressMs = 800;
-
 enum class BootGestureAction {
   none,
   capsuleToggle,
-  dictationToggle,
+  dictationRelease,
 };
 
 inline BootGestureAction bootGestureAction(bool macConnected, uint32_t heldMs) {
   if (heldMs < 25) return BootGestureAction::none;
-  if (heldMs >= kLongPressMs) return BootGestureAction::capsuleToggle;
-  return macConnected ? BootGestureAction::dictationToggle
+  return macConnected ? BootGestureAction::dictationRelease
                       : BootGestureAction::capsuleToggle;
+}
+
+inline bool bootPressStartsDictation(bool macConnected) {
+  return macConnected;
 }
 
 }  // namespace pokepod

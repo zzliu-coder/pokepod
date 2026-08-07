@@ -40,6 +40,9 @@ RaiseToWakePolicy raiseToWake;
 
 uint8_t audioBuffer[kAudioBytesPerChunk];
 bool touchLatched = false;
+bool touchDictationHolding = false;
+bool bootDictationHolding = false;
+bool dictationUiActive = false;
 int16_t touchStartX = 0;
 int16_t touchStartY = 0;
 int16_t touchLastX = 0;
@@ -76,6 +79,7 @@ void drawDashboard() {
   view.audioReady = audio.ready();
   view.usbReady = usb.ready();
   view.hostConnected = usb.hostConnected();
+  view.dictationHolding = dictationUiActive;
   view.recording = recorder.recording();
   view.transcribing = tencentWorker.working();
   view.playing = audio.playing();
@@ -91,11 +95,31 @@ void drawDashboard() {
   dashboard.draw(view);
 }
 
-void triggerDictation() {
-  const bool sent = usb.sendDictationTrigger();
-  showMessage(sent ? "已发送 Option+Z；按 BOOT 可再次触发"
-                   : "USB 键盘尚未就绪",
-              3000);
+bool startDictationHold() {
+  if (!usb.hostConnected()) {
+    showMessage("USB 键盘尚未就绪");
+    drawDashboard();
+    return false;
+  }
+  dictationUiActive = true;
+  showMessage("按住说话，松开结束", 60000);
+  dashboard.invalidate();
+  drawDashboard();
+  const bool sent = usb.beginDictationHold();
+  if (!sent) {
+    dictationUiActive = false;
+    showMessage("USB 键盘尚未就绪");
+    dashboard.invalidate();
+    drawDashboard();
+  }
+  return sent;
+}
+
+void stopDictationHold() {
+  usb.endDictationHold();
+  dictationUiActive = false;
+  showMessage("微信语音输入已结束");
+  dashboard.invalidate();
   drawDashboard();
 }
 
@@ -152,12 +176,21 @@ void pollTouch() {
     touchLatched = true;
     touchStartX = touchLastX = x;
     touchStartY = touchLastY = y;
+    if (dashboard.actionAt(x, y, usb.hostConnected()) ==
+        UiAction::wechatDictation) {
+      touchDictationHolding = startDictationHold();
+    }
   } else if (touched) {
     touchLastX = x;
     touchLastY = y;
   } else if (!touched) {
     if (!touchLatched) return;
     touchLatched = false;
+    if (touchDictationHolding) {
+      touchDictationHolding = false;
+      stopDictationHold();
+      return;
+    }
     const int16_t deltaX = touchLastX - touchStartX;
     const int16_t deltaY = touchLastY - touchStartY;
     if (abs(deltaX) >= 60 && abs(deltaX) > abs(deltaY)) {
@@ -173,7 +206,7 @@ void pollTouch() {
     const UiAction action = dashboard.actionAt(
         touchStartX, touchStartY, usb.hostConnected());
     if (action == UiAction::capsuleRecord) toggleRecording();
-    else if (action == UiAction::wechatDictation) triggerDictation();
+    else if (action == UiAction::wechatDictation) return;
     else if (action == UiAction::openCapsule) {
       dashboard.openCapsuleAt(touchStartY, capsuleLibrary);
       drawDashboard();
@@ -267,13 +300,29 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+
+  // A CDC upload can otherwise overrun TinyUSB while a full-screen AMOLED
+  // redraw or an SD/network task owns the main loop. Once a binary request has
+  // started, drain it before doing any optional UI or sensor work.
+  if (linkService.receivingBinary()) {
+    linkService.poll(now);
+    return;
+  }
   if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
     if (bootButton.pressedEdge()) {
       bootPressedAtMs = now;
+      if (bootPressStartsDictation(usb.hostConnected())) {
+        bootDictationHolding = startDictationHold();
+      }
     } else if (bootButton.releasedEdge()) {
+      if (bootDictationHolding) {
+        bootDictationHolding = false;
+        stopDictationHold();
+        return;
+      }
       const BootGestureAction action = bootGestureAction(
           usb.hostConnected(), now - bootPressedAtMs);
-      if (action == BootGestureAction::dictationToggle) triggerDictation();
+      if (action == BootGestureAction::dictationRelease) stopDictationHold();
       if (action == BootGestureAction::capsuleToggle) toggleRecording();
     }
   }
@@ -302,6 +351,7 @@ void loop() {
   }
 
   linkService.poll(now);
+  if (linkService.receivingBinary()) return;
 
   // The ESP32-S3 full-speed USB controller is sensitive to interrupt latency
   // during isochronous microphone transfers. Touch, sensor and display I/O are
@@ -325,7 +375,8 @@ void loop() {
     tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                        recorder.recording(), board.status().charging);
   }
-  if (!microphoneStreaming && now - lastTouchMs >= 10) {
+  if ((!microphoneStreaming || touchDictationHolding) &&
+      now - lastTouchMs >= 10) {
     lastTouchMs = now;
     pollTouch();
   }
