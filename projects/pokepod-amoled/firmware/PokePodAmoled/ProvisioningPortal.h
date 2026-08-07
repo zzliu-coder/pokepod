@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <DNSServer.h>
 #include <WebServer.h>
+#include <vector>
 
 #include "DeviceConfig.h"
 
@@ -20,12 +21,24 @@ class ProvisioningPortal {
   bool takeConfigurationChanged();
 
  private:
+  struct ScannedNetwork {
+    String ssid;
+    int32_t rssi = -127;
+    bool secured = true;
+  };
+
   void installRoutes();
+  void startScan();
+  void pollScan();
+  void showNetworks();
+  void scanRequest();
   void showPortal();
   void saveRequest();
   void redirectPortal();
   String pageHtml() const;
+  String networksJson() const;
   static String htmlEscape(const String &value);
+  static String jsonEscape(const String &value);
 
   DNSServer dns_;
   WebServer server_;
@@ -35,12 +48,15 @@ class ProvisioningPortal {
   String ssid_;
   String password_;
   String statusMessage_;
+  std::vector<ScannedNetwork> networks_;
   bool routesInstalled_ = false;
   bool active_ = false;
   bool validating_ = false;
+  bool scanning_ = false;
   bool changed_ = false;
   uint32_t startedMs_ = 0;
   uint32_t validatingSinceMs_ = 0;
+  uint32_t scanStartedMs_ = 0;
   uint32_t closeAtMs_ = 0;
 };
 
