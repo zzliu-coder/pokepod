@@ -101,6 +101,11 @@ Mac 测试和 release build、脚本语法检查及 diff 检查。
 ./flash.sh
 ```
 
+应用 CDC 在线时，脚本会用 1200 波特率自动进入 ROM 下载器；写入和校验后使用
+ESP32-S3 原生 USB 所需的 watchdog 系统复位自动回到应用。日常刷写无需按键。
+只有应用 CDC 与 ROM 端口都未出现时，才使用一次 `按住 BOOT → 短按 RESET → 松开
+BOOT` 作为救援入口，然后重新运行同一个脚本。
+
 从一台已通过 ADB 连接、且 Android PokeCapsule 已配置腾讯云的设备安全迁移密钥：
 
 ```bash

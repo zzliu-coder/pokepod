@@ -65,8 +65,13 @@ fi
   --before no-reset --after no-reset write-flash 0x10000 "$FIRMWARE_BIN"
 "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 460800 \
   --before no-reset --after no-reset verify-flash 0x10000 "$FIRMWARE_BIN"
+# ESP32-S3's native USB Serial/JTAG RTS reset only resets the cores.  A chip
+# that entered the ROM downloader through USB would keep the sampled BOOT
+# strap and remain in download mode.  The watchdog reset is a full system
+# reset, so the strap is sampled again and the application starts without a
+# manual RESET press.
 "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" \
-  --before no-reset --after hard-reset run >/dev/null
+  --before no-reset --after watchdog-reset run >/dev/null
 
 DEADLINE=$(( $(date +%s) + 10 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do

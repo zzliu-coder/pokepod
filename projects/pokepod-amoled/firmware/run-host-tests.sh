@@ -16,3 +16,4 @@ done
 
 python3 "$SCRIPT_DIR/../tools/test-provisioning-page.py"
 python3 "$SCRIPT_DIR/../tools/test-cjk-font.py"
+python3 "$SCRIPT_DIR/../tools/test-flash-policy.py"
