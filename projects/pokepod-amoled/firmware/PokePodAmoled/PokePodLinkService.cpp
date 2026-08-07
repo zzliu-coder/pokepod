@@ -114,6 +114,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   startDictation_ = startDictation;
   stopDictation_ = stopDictation;
   log_ = &log;
+  activeMaintenance_ = "";
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
     return false;
@@ -419,6 +420,10 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += status.charging ? "true" : "false";
     extra += ",\"wifi\":\"" + String(wifi_->phaseName()) + "\"";
     extra += ",\"pendingCapsules\":" + String(library_->pendingCount());
+    extra += ",\"asr_hash_ms\":" + String(tencent_->lastHashElapsedMs());
+    extra += ",\"asr_connect_ms\":" + String(tencent_->lastConnectElapsedMs());
+    extra += ",\"asr_upload_ms\":" + String(tencent_->lastUploadElapsedMs());
+    extra += ",\"asr_total_ms\":" + String(tencent_->lastTotalElapsedMs());
     extra += ",\"sdReady\":";
     extra += status.sdCard ? "true" : "false";
     extra += ",\"variant\":\"" + String(variantName(status.variant)) + "\"";
@@ -1176,26 +1181,25 @@ bool PokePodLinkService::executeCommand(const String &path,
       // unsupported high-level organization commands fail explicitly and never
       // partially mutate the SD card.
       const char *maintenanceId = jsonString(root, "maintenanceId");
-      static String activeMaintenance;
       if (strcmp(operation, "beginMaintenance") == 0) {
         if (!isUuid(maintenanceId)) message = "invalid maintenanceId";
-        else if (!activeMaintenance.isEmpty() && !activeMaintenance.equalsIgnoreCase(maintenanceId)) {
+        else if (!activeMaintenance_.isEmpty() && !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
           message = "another maintenance session is active";
         } else {
-          activeMaintenance = maintenanceId;
+          activeMaintenance_ = maintenanceId;
           success = true;
           message = "committed";
         }
       } else if (strcmp(operation, "endMaintenance") == 0) {
-        if (activeMaintenance.isEmpty() || !activeMaintenance.equalsIgnoreCase(maintenanceId)) {
+        if (activeMaintenance_.isEmpty() || !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
           message = "maintenance session does not own the device";
         } else {
-          activeMaintenance = "";
+          activeMaintenance_ = "";
           success = true;
           message = "committed";
         }
-      } else if (activeMaintenance.isEmpty() ||
-                 !activeMaintenance.equalsIgnoreCase(maintenanceId)) {
+      } else if (activeMaintenance_.isEmpty() ||
+                 !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
         message = "maintenance session does not own the device";
       } else {
         std::vector<String> commandIds;
@@ -1614,8 +1618,9 @@ String PokePodLinkService::deviceId() const {
 }
 
 bool PokePodLinkService::foregroundBusy() const {
-  return recorder_ == nullptr || tencent_ == nullptr || recorder_->recording() ||
-         tencent_->working() || (usb_ != nullptr && usb_->microphoneStreaming());
+  if (recorder_ == nullptr || tencent_ == nullptr) return true;
+  return linkStorageBusy(recorder_->recording(), tencent_->working(),
+                         usb_ != nullptr && usb_->microphoneStreaming());
 }
 
 }  // namespace pokepod

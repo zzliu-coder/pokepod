@@ -25,6 +25,17 @@ inline bool purgeStagingDirectoryName(const char *value) {
       value[6] != '\0';
 }
 
+constexpr bool linkStorageBusy(bool recording, bool transcribing,
+                               bool uacStreaming) {
+  (void)uacStreaming;
+  return recording || transcribing;
+}
+
+constexpr bool transcriptionDispatchBusy(bool recording,
+                                         bool maintenanceActive) {
+  return recording || maintenanceActive;
+}
+
 inline bool safeLinkRelativePath(const char *value, bool allowHiddenRoot = false) {
   if (value == nullptr || value[0] == '\0' || value[0] == '/' ||
       strlen(value) > 240) {

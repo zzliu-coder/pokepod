@@ -17,6 +17,11 @@ int main() {
   assert(safeCapsuleFileName("audio.wav"));
   assert(!safeCapsuleFileName("../audio.wav"));
   assert(!safeCapsuleFileName("folder/audio.wav"));
+
+  assert(capsuleStatusNeedsStartupRequeue("transcribing"));
+  assert(!capsuleStatusNeedsStartupRequeue("queued"));
+  assert(!capsuleStatusNeedsStartupRequeue("transcribing-old"));
+  assert(!capsuleStatusNeedsStartupRequeue(nullptr));
   assert(!safeCapsuleFileName(""));
   assert(std::strcmp(kCapsuleWavFile, "audio.wav") == 0);
   assert(std::strcmp(kCapsuleWavFormat, "wav-pcm-s16le") == 0);

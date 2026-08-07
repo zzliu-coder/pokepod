@@ -16,6 +16,7 @@ SYSTEM_AUDIO="$RUN_ROOT/system-audio.txt"
 DEVICE_LIST="$RUN_ROOT/avfoundation-devices.txt"
 CAPTURE_LOG="$RUN_ROOT/capture.log"
 WAV_FILE="$RUN_ROOT/tinyusb-uac1.wav"
+LINK_PROBE="$RUN_ROOT/link-during-uac.json"
 RESULT_FILE="$RUN_ROOT/result.txt"
 
 system_profiler SPAudioDataType >"$SYSTEM_AUDIO"
@@ -37,6 +38,45 @@ fi
   -f avfoundation -i ":$AUDIO_INDEX" -t 3 \
   -c:a pcm_s16le "$WAV_FILE" >"$CAPTURE_LOG" 2>&1 &
 CAPTURE_PID=$!
+sleep 0.5
+set +e
+/usr/bin/python3 - "$SCRIPT_DIR/cdc-status.py" "$LINK_PROBE" <<'PY'
+import glob
+import importlib.util
+import json
+import sys
+import time
+
+spec = importlib.util.spec_from_file_location("pokepod_link", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+ports = sorted(glob.glob("/dev/cu.usbmodem*"))
+for port in ports:
+    try:
+        status = module.query(port, "status", 3)
+        if status.get("status") != "ok":
+            continue
+        for _ in range(10):
+            if status.get("mic_streaming"):
+                break
+            time.sleep(0.1)
+            status = module.query(port, "status", 3)
+        if not status.get("mic_streaming"):
+            continue
+        fingerprint = module.query(port, "fingerprint", 3)
+        if fingerprint.get("status") != "ok" or not fingerprint.get("fingerprint"):
+            continue
+        with open(sys.argv[2], "w", encoding="utf-8") as output:
+            json.dump({"port": port, "status": status,
+                       "fingerprint": fingerprint}, output,
+                      ensure_ascii=False, sort_keys=True)
+        raise SystemExit(0)
+    except (OSError, ValueError, TimeoutError, ConnectionError):
+        continue
+raise SystemExit(1)
+PY
+LINK_RESULT=$?
+set -e
 STARTED_AT=$(date +%s)
 while kill -0 "$CAPTURE_PID" 2>/dev/null; do
   NOW=$(date +%s)
@@ -51,6 +91,10 @@ done
 if ! wait "$CAPTURE_PID"; then
   printf 'FAIL capture_process_error\n' | tee "$RESULT_FILE"
   exit 31
+fi
+if [ "$LINK_RESULT" -ne 0 ]; then
+  printf 'FAIL cdc_blocked_during_uac evidence=%s\n' "$RUN_ROOT" | tee "$RESULT_FILE"
+  exit 36
 fi
 if [ ! -s "$WAV_FILE" ]; then
   printf 'FAIL wav_missing_or_empty\n' | tee "$RESULT_FILE"
@@ -92,7 +136,7 @@ if [ -z "$MAX_VOLUME" ] || [ "$MAX_VOLUME" = "-inf" ] ||
   exit 35
 fi
 
-printf 'PASS audio_frames sample_rate=%s channels=%s duration=%s mean_db=%s max_db=%s evidence=%s\n' \
+printf 'PASS audio_frames sample_rate=%s channels=%s duration=%s mean_db=%s max_db=%s cdc=concurrent evidence=%s\n' \
   "$SAMPLE_RATE" "$CHANNELS" "$DURATION" "${MEAN_VOLUME:-unknown}" \
   "$MAX_VOLUME" "$RUN_ROOT" |
   tee "$RESULT_FILE"

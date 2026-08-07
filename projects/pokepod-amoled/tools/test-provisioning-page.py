@@ -45,6 +45,14 @@ assert "sendSaveJson(202, true);" in save_handler
 portal_loop = "if (provisioningPortal.active()) provisioningPortal.loop(now);"
 assert portal_loop in main_source
 assert main_source.index(portal_loop) < main_source.index(
-    "if (!microphoneStreaming) {", main_source.index(portal_loop))
+    "wifi.loop(now", main_source.index(portal_loop))
+network_section = main_source[
+    main_source.index(portal_loop):main_source.index(
+        "if ((!microphoneStreaming", main_source.index(portal_loop)
+    )
+]
+assert "wifi.loop(now" in network_section
+assert "tencentWorker.loop(now" in network_section
+assert "if (!microphoneStreaming)" not in network_section
 assert source.index("id='wifi-step'") < source.index("id='tencent-step'")
 print("PASS test_provisioning_page")

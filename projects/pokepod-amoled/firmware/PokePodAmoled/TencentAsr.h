@@ -16,6 +16,10 @@ struct TencentAsrResult {
   String message;
   String requestId;
   uint32_t audioDurationMs = 0;
+  uint32_t hashElapsedMs = 0;
+  uint32_t connectElapsedMs = 0;
+  uint32_t uploadElapsedMs = 0;
+  uint32_t totalElapsedMs = 0;
 };
 
 class TencentAsr {

@@ -34,6 +34,7 @@ class PokePodLinkService {
   void poll(uint32_t nowMs);
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
+  bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
 
  private:
   enum class ReceivePhase : uint8_t { magic, header, payload };
@@ -138,6 +139,7 @@ class PokePodLinkService {
   String incomingTransactionId_;
   uint32_t incomingLastByteMs_ = 0;
   uint32_t rebootAtMs_ = 0;
+  String activeMaintenance_;
 };
 
 }  // namespace pokepod

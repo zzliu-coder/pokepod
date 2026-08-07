@@ -74,6 +74,10 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
   working_.store(false, std::memory_order_release);
   const String id = taskCapsuleId_;
   const TencentAsrResult result = taskResult_;
+  lastHashElapsedMs_ = result.hashElapsedMs;
+  lastConnectElapsedMs_ = result.connectElapsedMs;
+  lastUploadElapsedMs_ = result.uploadElapsedMs;
+  lastTotalElapsedMs_ = result.totalElapsedMs;
   if (result.ok) {
     if (!library_->commitRawText(id, result.text)) {
       library_->markFailure(id, "storage", "转写成功但 raw.txt 提交失败");

@@ -60,4 +60,12 @@ constexpr bool safeCapsuleFileName(const char *value) {
   return true;
 }
 
+constexpr bool capsuleStatusNeedsStartupRequeue(const char *value) {
+  if (value == nullptr) return false;
+  constexpr char interrupted[] = "transcribing";
+  size_t index = 0;
+  while (interrupted[index] != '\0' && value[index] == interrupted[index]) ++index;
+  return interrupted[index] == '\0' && value[index] == '\0';
+}
+
 }  // namespace pokepod

@@ -53,7 +53,22 @@ void replaceStringOrNull(cJSON *root, const char *name, const String &value) {
 bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
   fs_ = &fs;
   log_ = &log;
-  return scan();
+  if (!scan()) return false;
+
+  std::vector<String> interrupted;
+  for (const CapsuleSummary &record : records_) {
+    if (capsuleStatusNeedsStartupRequeue(statusName(record.status))) {
+      interrupted.push_back(record.id);
+    }
+  }
+  for (const String &id : interrupted) {
+    if (log_ != nullptr) {
+      log_->printf("{\"event\":\"asr_startup_requeue\",\"capsule_id\":\"%s\"}\n",
+                   id.c_str());
+    }
+    if (!requeue(id)) return false;
+  }
+  return true;
 }
 
 bool CapsuleLibrary::scan() {

@@ -21,10 +21,18 @@ constexpr char kVersion[] = "2019-06-14";
 constexpr char kService[] = "asr";
 constexpr size_t kMaxEncodedAudioBytes = 3UL * 1024UL * 1024UL;
 constexpr size_t kMaxResponseBytes = 32768;
+constexpr uint32_t kSocketIoTimeoutMs = 8000;
+constexpr uint32_t kUploadDeadlineMs = 20000;
 
-bool writeAll(NetworkClientSecure &client, const uint8_t *data, size_t length) {
+bool deadlineExpired(uint32_t deadlineMs) {
+  return static_cast<int32_t>(millis() - deadlineMs) >= 0;
+}
+
+bool writeAll(NetworkClientSecure &client, const uint8_t *data, size_t length,
+              uint32_t deadlineMs) {
   size_t written = 0;
   while (written < length) {
+    if (deadlineExpired(deadlineMs)) return false;
     const size_t chunk = client.write(data + written, length - written);
     if (chunk == 0) return false;
     written += chunk;
@@ -73,6 +81,7 @@ String readLine(NetworkClientSecure &client, uint32_t deadlineMs) {
 bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
                             const DeviceSettings &settings,
                             TencentAsrResult &result, Print &log) {
+  const uint32_t startedAtMs = millis();
   result = TencentAsrResult();
   if (settings.secretId.isEmpty() || settings.secretKey.isEmpty()) {
     result.code = "CONFIG_MISSING";
@@ -120,6 +129,10 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     result.message = "读取音频失败";
     return false;
   }
+  result.hashElapsedMs = millis() - startedAtMs;
+  log.printf("{\"event\":\"tencent_asr_stage\",\"stage\":\"hashed\",\"elapsed_ms\":%lu,\"audio_bytes\":%lu}\n",
+             static_cast<unsigned long>(millis() - startedAtMs),
+             static_cast<unsigned long>(audioBytes));
   const String auth = authorization(settings, timestamp, payloadHash);
   if (auth.isEmpty() || !audio.seek(0)) {
     audio.close();
@@ -131,7 +144,7 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   NetworkClientSecure client;
   client.setCACert(kTencentRootCa);
   client.setHandshakeTimeout(15);
-  client.setTimeout(30000);
+  client.setTimeout(kSocketIoTimeoutMs);
   if (!client.connect(kHost, 443, 15000)) {
     audio.close();
     result.transient = true;
@@ -139,6 +152,9 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     result.message = "腾讯云 TLS 连接失败";
     return false;
   }
+  result.connectElapsedMs = millis() - startedAtMs;
+  log.printf("{\"event\":\"tencent_asr_stage\",\"stage\":\"connected\",\"elapsed_ms\":%lu}\n",
+             static_cast<unsigned long>(millis() - startedAtMs));
   const size_t contentLength = prefix.length() + encodedBytes + suffix.length();
   String headers;
   headers.reserve(768);
@@ -158,24 +174,38 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   headers += contentLength;
   headers += "\r\nConnection: close\r\n\r\n";
 
+  const uint32_t uploadDeadlineMs = millis() + kUploadDeadlineMs;
   bool sent = writeAll(client,
-      reinterpret_cast<const uint8_t *>(headers.c_str()), headers.length()) &&
+      reinterpret_cast<const uint8_t *>(headers.c_str()), headers.length(),
+      uploadDeadlineMs) &&
       writeAll(client, reinterpret_cast<const uint8_t *>(prefix.c_str()),
-               prefix.length());
+               prefix.length(), uploadDeadlineMs);
+  struct ClientSinkContext {
+    NetworkClientSecure *client;
+    uint32_t deadlineMs;
+  } sinkContext = {&client, uploadDeadlineMs};
   auto clientSink = [](void *context, const uint8_t *data, size_t length) {
-    return writeAll(*static_cast<NetworkClientSecure *>(context), data, length);
+    ClientSinkContext *sink = static_cast<ClientSinkContext *>(context);
+    return writeAll(*sink->client, data, length, sink->deadlineMs);
   };
-  if (sent) sent = streamBase64(audio, clientSink, &client);
+  if (sent) sent = streamBase64(audio, clientSink, &sinkContext);
   if (sent) sent = writeAll(client,
-      reinterpret_cast<const uint8_t *>(suffix.c_str()), suffix.length());
+      reinterpret_cast<const uint8_t *>(suffix.c_str()), suffix.length(),
+      uploadDeadlineMs);
   audio.close();
   if (!sent) {
     client.stop();
     result.transient = true;
-    result.code = "NETWORK_WRITE_FAILED";
-    result.message = "上传音频中断";
+    result.code = deadlineExpired(uploadDeadlineMs)
+        ? "NETWORK_WRITE_TIMEOUT" : "NETWORK_WRITE_FAILED";
+    result.message = deadlineExpired(uploadDeadlineMs)
+        ? "上传音频超时" : "上传音频中断";
     return false;
   }
+  result.uploadElapsedMs = millis() - startedAtMs;
+  log.printf("{\"event\":\"tencent_asr_stage\",\"stage\":\"uploaded\",\"elapsed_ms\":%lu,\"encoded_bytes\":%lu}\n",
+             static_cast<unsigned long>(millis() - startedAtMs),
+             static_cast<unsigned long>(encodedBytes));
 
   int httpStatus = 0;
   String body;
@@ -187,6 +217,9 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     return false;
   }
   client.stop();
+  result.totalElapsedMs = millis() - startedAtMs;
+  log.printf("{\"event\":\"tencent_asr_stage\",\"stage\":\"responded\",\"elapsed_ms\":%lu,\"http_status\":%d}\n",
+             static_cast<unsigned long>(millis() - startedAtMs), httpStatus);
 
   cJSON *root = cJSON_ParseWithLength(body.c_str(), body.length());
   cJSON *response = root == nullptr ? nullptr :

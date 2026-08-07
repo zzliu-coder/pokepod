@@ -51,15 +51,20 @@ class Device:
 
     def call(self, operation: str, *, binary: bytes | None = None,
              fields: dict[str, object] | None = None):
-        response = LINK.query(
-            self.port, operation, self.timeout,
-            outgoing_binary=binary, fields=fields,
-        )
-        if response.get("status") != "ok":
-            raise RuntimeError(
-                f"{operation} failed: {response.get('message', response)}"
+        deadline = time.monotonic() + self.timeout
+        while True:
+            response = LINK.query(
+                self.port, operation, self.timeout,
+                outgoing_binary=binary, fields=fields,
             )
-        return response
+            if response.get("status") == "ok":
+                return response
+            if response.get("status") != "busy" or time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"{operation} failed: {response.get('message', response)}"
+                )
+            retry_ms = max(20, min(1000, int(response.get("retryAfterMs", 150))))
+            time.sleep(retry_ms / 1000)
 
     def read(self, path: str) -> bytes:
         response = self.call("read", fields={"path": path})

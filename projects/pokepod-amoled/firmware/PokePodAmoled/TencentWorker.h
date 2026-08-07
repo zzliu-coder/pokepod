@@ -23,6 +23,10 @@ class TencentWorker {
             bool foregroundBusy, bool charging);
   bool working() const { return working_.load(); }
   bool waitingForWake() const { return waitingForWake_; }
+  uint32_t lastHashElapsedMs() const { return lastHashElapsedMs_; }
+  uint32_t lastConnectElapsedMs() const { return lastConnectElapsedMs_; }
+  uint32_t lastUploadElapsedMs() const { return lastUploadElapsedMs_; }
+  uint32_t lastTotalElapsedMs() const { return lastTotalElapsedMs_; }
 
  private:
   static void taskEntry(void *context);
@@ -45,6 +49,10 @@ class TencentWorker {
   bool previousCharging_ = false;
   uint8_t transientFailures_ = 0;
   uint32_t nextAttemptMs_ = 0;
+  uint32_t lastHashElapsedMs_ = 0;
+  uint32_t lastConnectElapsedMs_ = 0;
+  uint32_t lastUploadElapsedMs_ = 0;
+  uint32_t lastTotalElapsedMs_ = 0;
 };
 
 }  // namespace pokepod

@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../PokePodAmoled/Base64Stream.h"
 
@@ -25,5 +26,20 @@ int main() {
                         input.size() - 5, sink));
   assert(encoder.finish(sink));
   assert(output == "UG9rZVBvZCBzdHJlYW0gdGVzdA==");
+
+  std::vector<uint8_t> bulkInput(6144, 0x5a);
+  size_t writes = 0;
+  size_t writtenBytes = 0;
+  Base64StreamEncoder bulkEncoder;
+  auto countingSink = [&writes, &writtenBytes](const uint8_t *, size_t length) {
+    ++writes;
+    writtenBytes += length;
+    assert(length <= kBase64OutputChunkBytes);
+    return true;
+  };
+  assert(bulkEncoder.append(bulkInput.data(), bulkInput.size(), countingSink));
+  assert(bulkEncoder.finish(countingSink));
+  assert(writtenBytes == base64EncodedLength(bulkInput.size()));
+  assert(writes == 2);
   return 0;
 }

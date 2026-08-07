@@ -402,17 +402,21 @@ void loop() {
     tencentWorker.wake();
     dashboard.invalidate();
   }
-  if (!microphoneStreaming) {
-    const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
-        deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
-    wifi.loop(now, recorder.recording(), networkWork,
-              board.status().charging, provisioningPortal.active());
-    if (!rtcSyncedFromNetwork && wifi.networkTimeSynchronized()) {
-      rtcSyncedFromNetwork = board.setUtcEpoch(time(nullptr));
-    }
-    tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
-                       recorder.recording(), board.status().charging);
+  // macOS can keep the UAC alternate interface open even when dictation is
+  // idle. Network and CDC work must continue in that state or queued capsules
+  // and the desktop mirror would remain blocked indefinitely. Display and
+  // sensor work below still yields to isochronous audio.
+  const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
+      deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
+  wifi.loop(now, recorder.recording(), networkWork,
+            board.status().charging, provisioningPortal.active());
+  if (!rtcSyncedFromNetwork && wifi.networkTimeSynchronized()) {
+    rtcSyncedFromNetwork = board.setUtcEpoch(time(nullptr));
   }
+  tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
+                     transcriptionDispatchBusy(recorder.recording(),
+                                               linkService.maintenanceActive()),
+                     board.status().charging);
   if ((!microphoneStreaming || touchDictationHolding ||
        provisioningPortal.active()) &&
       now - lastTouchMs >= 10) {
