@@ -80,6 +80,8 @@ constexpr int16_t kSettingValueTopOffset = 24;
 constexpr int16_t kSettingTitleWidth = 220;
 constexpr int16_t kSettingTitleWithValueWidth = 178;
 constexpr int16_t kSettingToggleWidth = 42;
+constexpr int16_t kProvisionExitTop = 360;
+constexpr int16_t kProvisionExitBottom = 424;
 
 constexpr int16_t kDetailActionsTop = 352;
 constexpr int16_t kDetailActionsBottom = 424;

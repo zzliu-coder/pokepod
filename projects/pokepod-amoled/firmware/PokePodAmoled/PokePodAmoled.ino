@@ -43,6 +43,7 @@ TouchGestureTracker touchGesture;
 bool touchDictationHolding = false;
 bool touchDictationAttempted = false;
 bool bootDictationHolding = false;
+bool bootProvisioningExitArmed = false;
 bool dictationUiActive = false;
 UiAction touchAction = UiAction::none;
 uint32_t lastTouchMs = 0;
@@ -335,11 +336,24 @@ void loop() {
   }
   if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
     if (bootButton.pressedEdge()) {
+      if (provisioningPortal.active()) {
+        bootProvisioningExitArmed = true;
+        return;
+      }
       bootPressedAtMs = now;
       if (bootPressStartsDictation(usb.hostConnected())) {
         bootDictationHolding = startDictationHold();
       }
     } else if (bootButton.releasedEdge()) {
+      if (bootProvisioningExitArmed) {
+        bootProvisioningExitArmed = false;
+        if (provisioningPortal.active()) provisioningPortal.stop();
+        dashboard.back();
+        dashboard.invalidate();
+        showMessage("已退出手机配网");
+        drawDashboard();
+        return;
+      }
       if (bootDictationHolding) {
         bootDictationHolding = false;
         stopDictationHold();
@@ -378,18 +392,17 @@ void loop() {
   linkService.poll(now);
   if (linkService.receivingBinary()) return;
 
-  // The ESP32-S3 full-speed USB controller is sensitive to interrupt latency
-  // during isochronous microphone transfers. Touch, sensor and display I/O are
-  // user-interface work, so defer them while CoreAudio owns the mic stream.
-  // Audio capture and CDC diagnostics remain active.
+  // Captive-portal HTTP and DNS must remain responsive even if macOS keeps the
+  // UAC microphone interface open. These handlers are the active setup path;
+  // other network and display work can still yield to isochronous audio.
   const bool microphoneStreaming = usb.microphoneStreaming();
+  if (provisioningPortal.active()) provisioningPortal.loop(now);
+  if (provisioningPortal.takeConfigurationChanged()) {
+    wifi.configurationChanged();
+    tencentWorker.wake();
+    dashboard.invalidate();
+  }
   if (!microphoneStreaming) {
-    provisioningPortal.loop(now);
-    if (provisioningPortal.takeConfigurationChanged()) {
-      wifi.configurationChanged();
-      tencentWorker.wake();
-      dashboard.invalidate();
-    }
     const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
         deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
     wifi.loop(now, recorder.recording(), networkWork,
@@ -400,7 +413,8 @@ void loop() {
     tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                        recorder.recording(), board.status().charging);
   }
-  if ((!microphoneStreaming || touchDictationHolding) &&
+  if ((!microphoneStreaming || touchDictationHolding ||
+       provisioningPortal.active()) &&
       now - lastTouchMs >= 10) {
     lastTouchMs = now;
     pollTouch();

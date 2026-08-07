@@ -171,8 +171,11 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
   }
   const UiScreen screen = state.screen();
   if (screen == UiScreen::provisioning) {
-    return x < ui::kBackTargetSize && y < ui::kBackTargetSize
-        ? UiAction::back : UiAction::none;
+    const bool backButton = x < ui::kBackTargetSize &&
+        y < ui::kBackTargetSize;
+    const bool exitButton = y >= ui::kProvisionExitTop &&
+        y < ui::kProvisionExitBottom;
+    return backButton || exitButton ? UiAction::back : UiAction::none;
   }
   if (screen == UiScreen::capsuleDetail) {
     if (x < ui::kBackTargetSize && y < ui::kBackTargetSize) {

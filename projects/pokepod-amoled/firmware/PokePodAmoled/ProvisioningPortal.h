@@ -34,6 +34,7 @@ class ProvisioningPortal {
   void scanRequest();
   void showPortal();
   void saveRequest();
+  void sendSaveJson(int statusCode, bool accepted);
   void redirectPortal();
   String pageHtml() const;
   String networksJson() const;
@@ -54,6 +55,7 @@ class ProvisioningPortal {
   bool validating_ = false;
   bool scanning_ = false;
   bool changed_ = false;
+  bool saved_ = false;
   uint32_t startedMs_ = 0;
   uint32_t validatingSinceMs_ = 0;
   uint32_t scanStartedMs_ = 0;

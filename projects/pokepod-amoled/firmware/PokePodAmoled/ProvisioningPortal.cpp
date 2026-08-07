@@ -31,6 +31,7 @@ bool ProvisioningPortal::begin(DeviceConfig &config, Print &log) {
   validating_ = false;
   scanning_ = false;
   changed_ = false;
+  saved_ = false;
   closeAtMs_ = 0;
   WiFi.mode(WIFI_AP_STA);
   if (!WiFi.softAP(ssid_.c_str(), password_.c_str())) {
@@ -58,14 +59,17 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
       validating_ = false;
       if (config_->save(candidate_, *log_)) {
         changed_ = true;
+        saved_ = true;
         statusMessage_ = "保存成功；热点即将关闭";
         closeAtMs_ = nowMs + 1800;
       } else {
+        saved_ = false;
         statusMessage_ = "写入配置失败，请重试";
       }
     } else if (static_cast<uint32_t>(nowMs - validatingSinceMs_) >=
                kValidationTimeoutMs) {
       validating_ = false;
+      saved_ = false;
       WiFi.disconnect(false, false);
       statusMessage_ = "无法连接该 Wi-Fi，请检查名称和密码";
     }
@@ -202,12 +206,12 @@ void ProvisioningPortal::showPortal() {
 void ProvisioningPortal::saveRequest() {
   if (validating_) {
     statusMessage_ = "正在验证 Wi-Fi，请稍候";
-    showPortal();
+    sendSaveJson(409, false);
     return;
   }
   if (scanning_) {
     statusMessage_ = "正在扫描附近网络，请稍候";
-    showPortal();
+    sendSaveJson(409, false);
     return;
   }
   DeviceSettings next = config_->settings();
@@ -225,7 +229,7 @@ void ProvisioningPortal::saveRequest() {
   } else if (!secretId.isEmpty() || !secretKey.isEmpty()) {
     if (secretId.isEmpty() || secretKey.isEmpty()) {
       statusMessage_ = "SecretId 和 SecretKey 必须同时填写";
-      showPortal();
+      sendSaveJson(400, false);
       return;
     }
     next.secretId = secretId;
@@ -235,15 +239,30 @@ void ProvisioningPortal::saveRequest() {
       (!next.wifiPassword.isEmpty() &&
        (next.wifiPassword.length() < 8 || next.wifiPassword.length() > 63))) {
     statusMessage_ = "Wi-Fi 名称或密码长度不正确";
-    showPortal();
+    sendSaveJson(400, false);
     return;
   }
   candidate_ = next;
+  saved_ = false;
   statusMessage_ = "正在连接并验证 Wi-Fi";
   validating_ = true;
   validatingSinceMs_ = millis();
   WiFi.begin(candidate_.wifiSsid.c_str(), candidate_.wifiPassword.c_str());
-  showPortal();
+  sendSaveJson(202, true);
+}
+
+void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
+  String json;
+  json.reserve(statusMessage_.length() + 80);
+  json += "{\"accepted\":";
+  json += accepted ? "true" : "false";
+  json += ",\"validating\":";
+  json += validating_ ? "true" : "false";
+  json += ",\"saved\":";
+  json += saved_ ? "true" : "false";
+  json += ",\"message\":\"" + jsonEscape(statusMessage_) + "\"}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(statusCode, "application/json; charset=utf-8", json);
 }
 
 void ProvisioningPortal::redirectPortal() {
@@ -314,6 +333,10 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
 .primary,.back{min-height:56px;border-radius:16px;font-size:17px;font-weight:820}
 .primary{border:0;background:#69e0b6;color:#07110d}
 .back{border:1px solid #294038;background:#101a17;color:#cbd9d4}
+.primary:disabled,.back:disabled{opacity:.5}
+.result{min-height:300px;display:grid;place-items:center;text-align:center;padding:32px 20px}
+.result-mark{display:grid;place-items:center;width:72px;height:72px;margin:0 auto 20px;border-radius:50%;background:#12372c;color:#69e0b6;font-size:34px;font-weight:850}
+.result h2{margin:0;font-size:24px}.result p{margin:10px 0 0;color:#91a69f;font-size:15px;line-height:1.55}
 .danger{margin-top:16px;padding-top:14px;border-top:1px solid #1a2a25}
 .check{display:flex;align-items:flex-start;gap:10px;color:#91a69f;font-size:13px;line-height:1.45}
 .check input{flex:0 0 auto;width:20px;min-height:20px;height:20px;margin:0;accent-color:#ff786d}
@@ -367,14 +390,16 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
   html += F(R"HTML(</div></details>
 <p class='privacy'>SecretKey 保存后不会显示，也不会通过 USB 或日志读回。</p>
 </div>
-<div class='actions two'><button id='back' class='back' type='button'>上一步</button><button class='primary' type='submit'>保存并连接</button></div>
+<div class='actions two'><button id='back' class='back' type='button'>上一步</button><button id='save' class='primary' type='submit'>保存并连接</button></div>
 </section>
+<section id='success-step' class='screen' hidden><div class='card result'><div><div class='result-mark'>✓</div><h2>设备已配置</h2><p>Wi-Fi 已验证，设置已安全保存。<br>热点即将自动关闭。</p></div></div></section>
 </form>
 <p class='footer'>热点 5 分钟后自动关闭</p>
 </main>
 <script>
-const s=document.getElementById('ssid'),b=document.getElementById('rescan'),status=document.getElementById('status'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2');
+const s=document.getElementById('ssid'),b=document.getElementById('rescan'),form=document.getElementById('form'),save=document.getElementById('save'),status=document.getElementById('status'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),success=document.getElementById('success-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2');
 let preferred=s.dataset.current;
+let validationTimer=0;
 function strength(r){return r>=-55?'强':r>=-70?'中':'弱'}
 function syncViewport(){const viewport=window.visualViewport;const height=viewport?viewport.height:window.innerHeight;document.documentElement.style.setProperty('--viewport-height',Math.round(height)+'px')}
 function resetScroll(){requestAnimationFrame(()=>{const root=document.scrollingElement||document.documentElement;root.scrollTop=0;document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>{root.scrollTop=0})})}
@@ -383,10 +408,13 @@ async function load(rescan){try{const r=await fetch(rescan?'/scan':'/networks',{
 function blurKeyboard(){const active=document.activeElement;if(active&&active.blur)active.blur()}
 function showTencent(){const manual=document.getElementById('manual').value;if(!s.value&&!manual){status.textContent='请选择网络或手工输入名称';try{s.focus({preventScroll:true})}catch(e){s.focus()}return}blurKeyboard();setTimeout(()=>{wifi.hidden=true;tencent.hidden=false;title.textContent='腾讯云转写';subtitle.textContent='保存语音转写凭证';p1.classList.remove('on');p2.classList.add('on');syncViewport();resetScroll()},180)}
 function showWifi(){blurKeyboard();tencent.hidden=true;wifi.hidden=false;title.textContent='连接网络';subtitle.textContent='选择附近的 2.4 GHz Wi-Fi';p2.classList.remove('on');p1.classList.add('on');syncViewport();resetScroll()}
+function showSuccess(){clearTimeout(validationTimer);wifi.hidden=true;tencent.hidden=true;success.hidden=false;status.textContent='保存成功；热点即将关闭';title.textContent='设置完成';subtitle.textContent='PokePod 已连接到网络';save.disabled=true;syncViewport();resetScroll()}
+async function pollValidation(){try{const r=await fetch('/networks',{cache:'no-store'});const d=await r.json();if(d.message)status.textContent=d.message;if(d.saved){showSuccess();return}if(d.validating){validationTimer=setTimeout(pollValidation,500);return}save.disabled=false;save.textContent='重新保存';document.getElementById('back').disabled=false}catch(e){status.textContent='设备正在切换网络，请查看 PokePod 屏幕';validationTimer=setTimeout(pollValidation,700)}}
+async function submitForm(event){event.preventDefault();blurKeyboard();save.disabled=true;document.getElementById('back').disabled=true;save.textContent='正在连接…';status.textContent='正在连接并验证 Wi-Fi';try{const r=await fetch('/save',{method:'POST',body:new FormData(form),cache:'no-store'});const d=await r.json();status.textContent=d.message||'正在连接并验证 Wi-Fi';if(!r.ok){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='保存并连接';return}pollValidation()}catch(e){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='重新保存';status.textContent='提交失败，请保持连接 PokePod 热点后重试'}}
 b.addEventListener('click',()=>load(true));
 document.getElementById('next').addEventListener('click',showTencent);
 document.getElementById('back').addEventListener('click',showWifi);
-document.getElementById('form').addEventListener('submit',blurKeyboard);
+form.addEventListener('submit',submitForm);
 window.addEventListener('resize',syncViewport);
 if(window.visualViewport){window.visualViewport.addEventListener('resize',syncViewport)}
 syncViewport();
@@ -402,6 +430,10 @@ String ProvisioningPortal::networksJson() const {
   json.reserve(2048);
   json += "{\"scanning\":";
   json += scanning_ ? "true" : "false";
+  json += ",\"validating\":";
+  json += validating_ ? "true" : "false";
+  json += ",\"saved\":";
+  json += saved_ ? "true" : "false";
   json += ",\"message\":\"" + jsonEscape(statusMessage_) + "\",\"networks\":[";
   for (size_t index = 0; index < networks_.size(); ++index) {
     if (index != 0) json += ',';

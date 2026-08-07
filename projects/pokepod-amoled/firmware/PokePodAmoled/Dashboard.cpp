@@ -401,8 +401,14 @@ void Dashboard::drawProvisioning(const DashboardView &view) {
   renderer_.drawText(view.portalPassword, 38, 286, 292, 1,
                      ui::kWaiting, ui::kSurface, 0, false,
                      UiTextSize::display, true);
-  drawCenteredText("手机连接热点后会打开配置页", 382,
-                   UiTextSize::compact, ui::kMuted);
+  display_->fillRoundRect(20, ui::kProvisionExitTop, 328,
+                          ui::kProvisionExitBottom - ui::kProvisionExitTop,
+                          18, ui::kSurfaceRaised);
+  display_->drawRoundRect(20, ui::kProvisionExitTop, 328,
+                          ui::kProvisionExitBottom - ui::kProvisionExitTop,
+                          18, ui::kDivider);
+  drawCenteredText("退出配网", ui::kProvisionExitTop + 20,
+                   UiTextSize::body, ui::kInk, true);
 }
 
 void Dashboard::drawCapsuleOrb(int16_t centerY, uint16_t accent,

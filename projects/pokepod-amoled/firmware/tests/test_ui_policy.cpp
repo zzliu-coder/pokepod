@@ -97,7 +97,12 @@ int main() {
   state.provisioning = true;
   assert(state.screen() == UiScreen::provisioning);
   assert(uiActionAt(state, 20, 20, true) == UiAction::back);
-  assert(uiActionAt(state, 180, 370, true) == UiAction::none);
+  assert(uiActionAt(state, 180, ui::kProvisionExitTop - 1, true) ==
+         UiAction::none);
+  assert(uiActionAt(state, 180, ui::kProvisionExitTop, true) ==
+         UiAction::back);
+  assert(uiActionAt(state, 180, ui::kProvisionExitBottom - 1, true) ==
+         UiAction::back);
   state.provisioning = false;
   state.detailRetryEnabled = false;
   state.capsuleDetail = false;

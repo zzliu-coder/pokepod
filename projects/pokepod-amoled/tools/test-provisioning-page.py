@@ -4,11 +4,13 @@
 from pathlib import Path
 
 
-source = (Path(__file__).parents[1] / "firmware" / "PokePodAmoled" /
-          "ProvisioningPortal.cpp").read_text(encoding="utf-8")
+firmware_dir = Path(__file__).parents[1] / "firmware" / "PokePodAmoled"
+source = (firmware_dir / "ProvisioningPortal.cpp").read_text(encoding="utf-8")
+main_source = (firmware_dir / "PokePodAmoled.ino").read_text(encoding="utf-8")
 
 assert "id='wifi-step'" in source
 assert "id='tencent-step'" in source
+assert "id='success-step'" in source
 assert "function blurKeyboard()" in source
 assert "document.activeElement" in source
 assert "document.scrollingElement" in source
@@ -26,8 +28,23 @@ assert "--viewport-height:100dvh" in source
 assert "window.visualViewport" in source
 assert "position:sticky" in source
 assert "class='actions two'" in source
+assert "id='save'" in source
 assert "id='credential-editor'" in source
 assert "更换腾讯云密钥" in source
 assert "高级设置" in source
+assert "form.addEventListener('submit',submitForm)" in source
+assert "fetch('/save'" in source
+assert "function pollValidation()" in source
+assert "function showSuccess()" in source
+assert r'\"validating\":' in source
+assert r'\"saved\":' in source
+save_handler = source[source.index("void ProvisioningPortal::saveRequest()"):
+                      source.index("void ProvisioningPortal::redirectPortal()")]
+assert "showPortal();" not in save_handler
+assert "sendSaveJson(202, true);" in save_handler
+portal_loop = "if (provisioningPortal.active()) provisioningPortal.loop(now);"
+assert portal_loop in main_source
+assert main_source.index(portal_loop) < main_source.index(
+    "if (!microphoneStreaming) {", main_source.index(portal_loop))
 assert source.index("id='wifi-step'") < source.index("id='tencent-step'")
 print("PASS test_provisioning_page")
