@@ -12,6 +12,7 @@
 #include "CapsulePolicy.h"
 #include "DeviceConfig.h"
 #include "Dashboard.h"
+#include "FontPolicy.h"
 #include "TencentWorker.h"
 #include "UsbVoiceBridge.h"
 #include "WavRecorder.h"
@@ -450,6 +451,10 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"ui_full_redraws\":" + String(dashboard_->fullRedrawCount());
     extra += ",\"ui_body_redraws\":" + String(dashboard_->bodyRedrawCount());
     extra += ",\"ui_partial_redraws\":" + String(dashboard_->partialRedrawCount());
+    extra += ",\"ui_frame_buffer\":" +
+        String(dashboard_->frameBufferReady() ? "true" : "false");
+    extra += ",\"ui_animation_buffer\":" +
+        String(dashboard_->animationBufferReady() ? "true" : "false");
     sendOk(requestId, extra.c_str());
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
@@ -1528,10 +1533,9 @@ bool PokePodLinkService::validFontFile(const String &path) const {
   }
   const uint32_t count = linkGet32(header + 8);
   const uint32_t entrySize = linkGet32(header + 12);
-  const uint64_t expected = 16ULL + static_cast<uint64_t>(count) * entrySize;
   const bool ok = memcmp(header, "PKF1", 4) == 0 &&
-      linkGet16(header + 4) == 16 && linkGet16(header + 6) == 16 &&
-      count > 0 && entrySize == 36 && expected == file.size();
+      validFontLayout(linkGet16(header + 4), linkGet16(header + 6),
+                      count, entrySize, file.size());
   file.close();
   return ok;
 }

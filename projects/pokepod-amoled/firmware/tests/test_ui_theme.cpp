@@ -1,0 +1,51 @@
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+
+#include "../PokePodAmoled/UiTheme.h"
+
+namespace {
+
+double channel(uint8_t value) {
+  const double normalized = value / 255.0;
+  return normalized <= 0.04045
+      ? normalized / 12.92
+      : std::pow((normalized + 0.055) / 1.055, 2.4);
+}
+
+double luminance(uint32_t rgb) {
+  return 0.2126 * channel(static_cast<uint8_t>(rgb >> 16)) +
+      0.7152 * channel(static_cast<uint8_t>(rgb >> 8)) +
+      0.0722 * channel(static_cast<uint8_t>(rgb));
+}
+
+double contrast(uint32_t left, uint32_t right) {
+  const double a = luminance(left);
+  const double b = luminance(right);
+  const double lighter = a > b ? a : b;
+  const double darker = a > b ? b : a;
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+}  // namespace
+
+int main() {
+  using namespace pokepod::ui;
+  assert(contrast(kInkRgb, kBackgroundRgb) >= 4.5);
+  assert(contrast(kMutedRgb, kBackgroundRgb) >= 4.5);
+  assert(contrast(kAccentRgb, kBackgroundRgb) >= 4.5);
+  assert(contrast(kDictationRgb, kBackgroundRgb) >= 4.5);
+  assert(contrast(kWaitingRgb, kBackgroundRgb) >= 4.5);
+  assert(contrast(kErrorRgb, kBackgroundRgb) >= 4.5);
+
+  assert(kBottomNavTop + kBottomNavHeight == kScreenHeight);
+  assert(kDictationBottom < kBottomNavTop);
+  assert(kCapsuleListBottom < kBottomNavTop);
+  assert(kDeviceRowsBottom < kBottomNavTop);
+  assert(kHomeRecordTop < kHomeRecordBottom);
+  assert(kCapsuleListTop >= kTopBarHeight + 76);
+  assert(kCapsuleListBottom == 392);
+  assert(kRecordingFrameIntervalMs >= 80);
+  assert(kRecordingFrameIntervalMs <= 125);
+  return 0;
+}

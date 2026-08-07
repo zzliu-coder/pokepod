@@ -43,6 +43,8 @@ required = {
     "pmu": True,
     "audio": True,
     "usb": True,
+    "ui_frame_buffer": True,
+    "ui_animation_buffer": True,
 }
 for key, expected in required.items():
     if after.get(key) != expected:

@@ -64,7 +64,7 @@ size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
 
   bytesRead_ += bytes;
   const uint16_t peak = pcm16PeakLittleEndian(buffer, bytes);
-  if (peak > peakSample_) peakSample_ = peak;
+  peakWindow_.observe(peak);
   return bytes;
 }
 

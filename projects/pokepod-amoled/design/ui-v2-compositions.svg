@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1216" height="560" viewBox="0 0 1216 560">
+  <rect width="1216" height="560" fill="#E9ECE9"/>
+  <style>
+    .label{font:700 18px -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;fill:#171A18}
+    .ui{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}
+    .title{font-size:28px;font-weight:700;fill:#F4FAF7}
+    .body{font-size:17px;font-weight:600;fill:#F4FAF7}
+    .meta{font-size:13px;fill:#8EA39C}
+    .mini{font-size:12px;font-weight:600;fill:#B8C6C1}
+  </style>
+
+  <text class="label" x="24" y="34">A · 中央呼吸体（采用）</text>
+  <g transform="translate(24 54)">
+    <rect width="368" height="448" rx="54" fill="#000"/>
+    <g class="ui">
+      <text class="mini" x="28" y="32">100%</text>
+      <path d="M310 21h22v12h-22zM333 25h3v4h-3" fill="none" stroke="#B8C6C1" stroke-width="2"/>
+      <circle cx="294" cy="27" r="4" fill="#69E0B6"/>
+      <text class="meta" x="28" y="78">随手说一句</text>
+      <text class="title" x="28" y="112">语音胶囊</text>
+      <ellipse cx="184" cy="229" rx="106" ry="78" fill="none" stroke="#102D25" stroke-width="2"/>
+      <ellipse cx="184" cy="229" rx="86" ry="62" fill="none" stroke="#1B5545" stroke-width="2"/>
+      <rect x="130" y="201" width="108" height="56" rx="28" fill="#0E201B" stroke="#69E0B6" stroke-width="3"/>
+      <path d="M184 204v50" stroke="#69E0B6" stroke-width="2"/>
+      <text class="body" x="108" y="326">轻触开始录音</text>
+      <text class="meta" x="132" y="350">最长 58 秒</text>
+      <rect x="26" y="371" width="316" height="48" rx="16" fill="#101520"/>
+      <circle cx="52" cy="395" r="8" fill="none" stroke="#9AAEFF" stroke-width="2"/>
+      <path d="M48 395h8M52 391v8" stroke="#9AAEFF" stroke-width="2"/>
+      <text class="body" x="72" y="401" fill="#DCE2FF">按住，微信语音输入</text>
+      <circle cx="162" cy="434" r="3" fill="#69E0B6"/>
+      <circle cx="184" cy="434" r="3" fill="#34413C"/>
+      <circle cx="206" cy="434" r="3" fill="#34413C"/>
+    </g>
+  </g>
+
+  <text class="label" x="424" y="34">B · 上下任务轴</text>
+  <g transform="translate(424 54)">
+    <rect width="368" height="448" rx="54" fill="#000"/>
+    <g class="ui">
+      <text class="mini" x="28" y="32">100%　● Mac</text>
+      <text class="title" x="28" y="90">说下这一刻</text>
+      <text class="meta" x="28" y="116">声音会成为一颗胶囊</text>
+      <path d="M50 170h268" stroke="#16231F"/>
+      <rect x="58" y="151" width="252" height="112" rx="56" fill="#0E201B" stroke="#69E0B6" stroke-width="3"/>
+      <path d="M184 155v104" stroke="#69E0B6" stroke-width="2"/>
+      <text class="body" x="113" y="305">开始语音胶囊</text>
+      <path d="M28 341h312" stroke="#16231F"/>
+      <text class="meta" x="28" y="373">MAC</text>
+      <text class="body" x="84" y="378">按住进行语音输入</text>
+      <path d="M28 410h312" stroke="#16231F"/>
+      <circle cx="162" cy="434" r="3" fill="#69E0B6"/>
+      <circle cx="184" cy="434" r="3" fill="#34413C"/>
+      <circle cx="206" cy="434" r="3" fill="#34413C"/>
+    </g>
+  </g>
+
+  <text class="label" x="824" y="34">C · 录音仪表盘</text>
+  <g transform="translate(824 54)">
+    <rect width="368" height="448" rx="54" fill="#000"/>
+    <g class="ui">
+      <text class="mini" x="28" y="32">100%　Wi-Fi　Mac</text>
+      <text class="meta" x="28" y="78">POKECAPSULE</text>
+      <text class="title" x="28" y="112">准备记录</text>
+      <circle cx="184" cy="220" r="92" fill="#07100D" stroke="#1B5545" stroke-width="2"/>
+      <circle cx="184" cy="220" r="70" fill="none" stroke="#69E0B6" stroke-width="3" stroke-dasharray="7 8"/>
+      <rect x="144" y="200" width="80" height="40" rx="20" fill="none" stroke="#69E0B6" stroke-width="3"/>
+      <path d="M184 202v36" stroke="#69E0B6" stroke-width="2"/>
+      <text class="body" x="116" y="335">轻触开始</text>
+      <rect x="28" y="363" width="148" height="54" rx="16" fill="#112B24"/>
+      <text class="body" x="62" y="396">语音胶囊</text>
+      <rect x="192" y="363" width="148" height="54" rx="16" fill="#121726"/>
+      <text class="body" x="212" y="396" fill="#DCE2FF">微信语音输入</text>
+    </g>
+  </g>
+</svg>

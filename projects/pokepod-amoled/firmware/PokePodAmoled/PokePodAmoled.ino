@@ -85,7 +85,7 @@ void drawDashboard() {
   view.playing = audio.playing();
   view.provisioning = provisioningPortal.active();
   view.recordingMs = recorder.durationMs();
-  view.audioPeak = audio.peakSample();
+  view.audioPeak = audio.consumePeakWindow();
   view.wifiPhase = provisioningPortal.active()
       ? WifiPhase::provisioning : wifi.phase();
   view.wifiRssi = wifi.rssi();
@@ -102,7 +102,8 @@ bool startDictationHold() {
     return false;
   }
   dictationUiActive = true;
-  showMessage("按住说话，松开结束", 60000);
+  transientMessage = "";
+  transientUntilMs = 0;
   drawDashboard();
   const bool sent = usb.beginDictationHold();
   if (!sent) {
@@ -116,7 +117,8 @@ bool startDictationHold() {
 bool stopDictationHold() {
   const bool sent = usb.endDictationHold();
   dictationUiActive = false;
-  showMessage("微信语音输入已结束");
+  transientMessage = "";
+  transientUntilMs = 0;
   drawDashboard();
   return sent;
 }
@@ -134,6 +136,7 @@ void toggleRecording() {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
     const bool ok = recorder.start(usb.log(), recordingId(), board.utcNow());
+    if (ok) audio.resetPeakWindow();
     showMessage(ok ? "开始录音" : "录音启动失败");
   }
   drawDashboard();
@@ -203,7 +206,14 @@ void pollTouch() {
     }
     const UiAction action = dashboard.actionAt(
         touchStartX, touchStartY, usb.hostConnected());
-    if (action == UiAction::capsuleRecord) toggleRecording();
+    if (action == UiAction::goHome ||
+        action == UiAction::goCapsules ||
+        action == UiAction::goDevice) {
+      dashboard.navigate(action == UiAction::goHome ? RootPage::home :
+                         (action == UiAction::goCapsules
+                              ? RootPage::capsules : RootPage::device));
+      drawDashboard();
+    } else if (action == UiAction::capsuleRecord) toggleRecording();
     else if (action == UiAction::wechatDictation) return;
     else if (action == UiAction::openCapsule) {
       dashboard.openCapsuleAt(touchStartY, capsuleLibrary);
@@ -246,9 +256,13 @@ void pollTouch() {
         capsuleLibrary.archive(id);
         dashboard.back();
       } else if (action == UiAction::retry) {
-        capsuleLibrary.requeue(id);
-        tencentWorker.wake();
-        showMessage("已重新加入转写队列");
+        if (selected->status != CapsuleStatus::failed) return;
+        if (capsuleLibrary.requeue(id)) {
+          tencentWorker.wake();
+          showMessage("已重新加入转写队列");
+        } else {
+          showMessage("重新转写失败");
+        }
       } else if (action == UiAction::play) {
         if (audio.playing()) {
           audio.stopPlayback(usb.log());
@@ -291,7 +305,7 @@ void setup() {
                     deviceConfig, wifi, tencentWorker,
                     startDictationHold, stopDictationHold, usb.log());
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
-  showMessage(usbStarted ? "BOOT 可录胶囊；连接 Mac 后可语音输入"
+  showMessage(usbStarted ? "BOOT 可录胶囊  连接 Mac 可语音输入"
                          : "USB 启动失败",
               3000);
   drawDashboard();
@@ -401,7 +415,10 @@ void loop() {
       board.safeShutdown();
     }
   }
-  if (!microphoneStreaming && now - lastDashboardMs >= 1000) {
+  const uint32_t dashboardIntervalMs =
+      recorder.recording() ? ui::kRecordingFrameIntervalMs : 1000;
+  if (!microphoneStreaming &&
+      now - lastDashboardMs >= dashboardIntervalMs) {
     lastDashboardMs = now;
     drawDashboard();
   }

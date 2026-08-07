@@ -5,6 +5,7 @@
 #include <FS.h>
 
 #include "BoardConfig.h"
+#include "PeakWindow.h"
 
 namespace pokepod {
 
@@ -19,14 +20,16 @@ class AudioPipeline {
   bool playing() const { return playing_; }
   uint64_t bytesRead() const { return bytesRead_; }
   uint32_t readFailures() const { return readFailures_; }
-  uint16_t peakSample() const { return peakSample_; }
+  uint16_t peakSample() const { return peakWindow_.latest(); }
+  uint16_t consumePeakWindow() { return peakWindow_.consume(); }
+  void resetPeakWindow() { peakWindow_.reset(); }
 
  private:
   I2SClass i2s_;
   bool ready_ = false;
   uint64_t bytesRead_ = 0;
   uint32_t readFailures_ = 0;
-  uint16_t peakSample_ = 0;
+  PeakWindow peakWindow_;
   File playbackFile_;
   uint32_t playbackRemaining_ = 0;
   bool playing_ = false;
