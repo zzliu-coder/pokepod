@@ -5,6 +5,10 @@
 
 int main() {
   using namespace pokepod;
+  static_assert(tencentUploadDeadlineMs(0) == 20000);
+  static_assert(tencentUploadDeadlineMs(230400) == 20000);
+  static_assert(tencentUploadDeadlineMs(2496000) == 107000);
+  static_assert(tencentUploadDeadlineMs(3 * 1024 * 1024) == 120000);
   const std::string payloadHash =
       "35e9c5b0e3ae67532d3c9f17ead6c90222632e5b1ff7f6e89887f1398934f064";
   const std::string canonical = tc3CanonicalRequest<std::string>(

@@ -1,6 +1,19 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 namespace pokepod {
+
+constexpr uint32_t tencentUploadDeadlineMs(size_t encodedBytes) {
+  constexpr size_t conservativeBytesPerSecond = 24 * 1024;
+  const size_t transferSeconds =
+      (encodedBytes + conservativeBytesPerSecond - 1) /
+      conservativeBytesPerSecond;
+  const size_t estimatedMs = transferSeconds * 1000 + 5000;
+  if (estimatedMs < 20000) return 20000;
+  return estimatedMs > 120000 ? 120000 : static_cast<uint32_t>(estimatedMs);
+}
 
 template <typename Text>
 Text tc3CanonicalRequest(const char *method, const char *uri,

@@ -22,7 +22,6 @@ constexpr char kService[] = "asr";
 constexpr size_t kMaxEncodedAudioBytes = 3UL * 1024UL * 1024UL;
 constexpr size_t kMaxResponseBytes = 32768;
 constexpr uint32_t kSocketIoTimeoutMs = 8000;
-constexpr uint32_t kUploadDeadlineMs = 20000;
 
 bool deadlineExpired(uint32_t deadlineMs) {
   return static_cast<int32_t>(millis() - deadlineMs) >= 0;
@@ -174,7 +173,8 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   headers += contentLength;
   headers += "\r\nConnection: close\r\n\r\n";
 
-  const uint32_t uploadDeadlineMs = millis() + kUploadDeadlineMs;
+  const uint32_t uploadDeadlineMs = millis() +
+      tencentUploadDeadlineMs(encodedBytes);
   bool sent = writeAll(client,
       reinterpret_cast<const uint8_t *>(headers.c_str()), headers.length(),
       uploadDeadlineMs) &&
