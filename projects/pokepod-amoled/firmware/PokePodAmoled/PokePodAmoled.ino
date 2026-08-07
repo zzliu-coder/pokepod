@@ -103,24 +103,22 @@ bool startDictationHold() {
   }
   dictationUiActive = true;
   showMessage("按住说话，松开结束", 60000);
-  dashboard.invalidate();
   drawDashboard();
   const bool sent = usb.beginDictationHold();
   if (!sent) {
     dictationUiActive = false;
     showMessage("USB 键盘尚未就绪");
-    dashboard.invalidate();
     drawDashboard();
   }
   return sent;
 }
 
-void stopDictationHold() {
-  usb.endDictationHold();
+bool stopDictationHold() {
+  const bool sent = usb.endDictationHold();
   dictationUiActive = false;
   showMessage("微信语音输入已结束");
-  dashboard.invalidate();
   drawDashboard();
+  return sent;
 }
 
 void toggleRecording() {
@@ -288,8 +286,10 @@ void setup() {
     tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
   }
   wifi.begin(deviceConfig, usb.log());
-  linkService.begin(usb.stream(), SD_MMC, board, audio, usb, capsuleLibrary, recorder,
-                    deviceConfig, wifi, tencentWorker, usb.log());
+  linkService.begin(usb.stream(), SD_MMC, board, audio, usb, dashboard,
+                    capsuleLibrary, recorder,
+                    deviceConfig, wifi, tencentWorker,
+                    startDictationHold, stopDictationHold, usb.log());
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
   showMessage(usbStarted ? "BOOT 可录胶囊；连接 Mac 后可语音输入"
                          : "USB 启动失败",

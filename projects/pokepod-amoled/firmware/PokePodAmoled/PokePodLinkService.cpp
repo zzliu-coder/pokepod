@@ -11,6 +11,7 @@
 #include "CapsuleLibrary.h"
 #include "CapsulePolicy.h"
 #include "DeviceConfig.h"
+#include "Dashboard.h"
 #include "TencentWorker.h"
 #include "UsbVoiceBridge.h"
 #include "WavRecorder.h"
@@ -92,20 +93,25 @@ bool sameUuid(const char *left, const char *right) {
 
 bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                BoardServices &board, AudioPipeline &audio,
-                               UsbVoiceBridge &usb,
+                               UsbVoiceBridge &usb, Dashboard &dashboard,
                                CapsuleLibrary &library, WavRecorder &recorder,
                                DeviceConfig &config, WifiController &wifi,
-                               TencentWorker &tencent, Print &log) {
+                               TencentWorker &tencent,
+                               DictationCallback startDictation,
+                               DictationCallback stopDictation, Print &log) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
   audio_ = &audio;
   usb_ = &usb;
+  dashboard_ = &dashboard;
   library_ = &library;
   recorder_ = &recorder;
   config_ = &config;
   wifi_ = &wifi;
   tencent_ = &tencent;
+  startDictation_ = startDictation;
+  stopDictation_ = stopDictation;
   log_ = &log;
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
@@ -439,6 +445,11 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"uac_usb_bytes_sent\":" + String(static_cast<unsigned long>(usb_->microphoneUsbBytesSent()));
     extra += ",\"uac_usb_packets_sent\":" + String(usb_->microphoneUsbPacketsSent());
     extra += ",\"uac_usb_zero_packets\":" + String(usb_->microphoneUsbZeroLengthPackets());
+    extra += ",\"tencentConfigured\":" +
+        String(config_->hasTencent() ? "true" : "false");
+    extra += ",\"ui_full_redraws\":" + String(dashboard_->fullRedrawCount());
+    extra += ",\"ui_body_redraws\":" + String(dashboard_->bodyRedrawCount());
+    extra += ",\"ui_partial_redraws\":" + String(dashboard_->partialRedrawCount());
     sendOk(requestId, extra.c_str());
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
@@ -483,19 +494,26 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendError(requestId, "invalid UTC time");
     } else sendOk(requestId);
   } else if (strcmp(operation, "dictate-start") == 0) {
-    if (usb_->beginDictationHold()) {
+    const bool sent = startDictation_ != nullptr
+        ? startDictation_() : usb_->beginDictationHold();
+    if (sent) {
       sendOk(requestId, "\"sent\":true,\"event\":\"dictation_started\",\"shortcut\":\"OPTION_Z\"");
     } else sendError(requestId, "USB HID is not ready");
   } else if (strcmp(operation, "dictate-stop") == 0) {
-    if (usb_->endDictationHold()) {
+    const bool sent = stopDictation_ != nullptr
+        ? stopDictation_() : usb_->endDictationHold();
+    if (sent) {
       sendOk(requestId, "\"sent\":true,\"event\":\"dictation_stopped\",\"shortcut\":\"OPTION_Z\"");
     } else sendError(requestId, "USB HID is not ready");
   } else if (strcmp(operation, "dictate") == 0) {
     // Compatibility pulse for an older host. Product interaction uses the
     // explicit hold pair above so speech lasts exactly as long as the button.
-    if (usb_->beginDictationHold()) {
+    const bool sent = startDictation_ != nullptr
+        ? startDictation_() : usb_->beginDictationHold();
+    if (sent) {
       delay(800);
-      usb_->endDictationHold();
+      if (stopDictation_ != nullptr) stopDictation_();
+      else usb_->endDictationHold();
       sendOk(requestId, "\"sent\":true,\"event\":\"dictation_pulse\",\"shortcut\":\"OPTION_Z\"");
     } else sendError(requestId, "USB HID is not ready");
   } else if (strcmp(operation, "record") == 0) {

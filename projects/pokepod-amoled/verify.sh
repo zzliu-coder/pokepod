@@ -16,7 +16,8 @@ sh -n "$SCRIPT_DIR/firmware/build.sh" \
   "$SCRIPT_DIR/mac-bridge-diagnostics.sh" \
   "$SCRIPT_DIR/mac-dictation-diagnostics.sh"
 /usr/bin/python3 - "$SCRIPT_DIR/cdc-status.py" \
-  "$SCRIPT_DIR/sd-capsule-acceptance.py" <<'PY'
+  "$SCRIPT_DIR/sd-capsule-acceptance.py" \
+  "$SCRIPT_DIR/provision-pokepod.py" <<'PY'
 import pathlib
 import sys
 

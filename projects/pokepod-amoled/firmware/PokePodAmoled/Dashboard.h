@@ -47,8 +47,12 @@ class Dashboard {
   const UiState &state() const { return state_; }
   const CapsuleSummary *selected(const CapsuleLibrary &library) const;
   bool sdFontReady() const { return renderer_.sdFontReady(); }
+  uint32_t fullRedrawCount() const { return fullRedrawCount_; }
+  uint32_t bodyRedrawCount() const { return bodyRedrawCount_; }
+  uint32_t partialRedrawCount() const { return partialRedrawCount_; }
 
  private:
+  void drawBody(const DashboardView &view);
   void drawTopBar(const DashboardView &view);
   void drawHome(const DashboardView &view);
   void drawCapsules(const DashboardView &view);
@@ -58,14 +62,23 @@ class Dashboard {
   void drawButton(int16_t x, int16_t y, int16_t width, int16_t height,
                   uint16_t color, const String &title, const String &subtitle = "");
   void drawRecordingDynamic(const DashboardView &view);
+  void drawDynamicRegions(const DashboardView &view);
   String signature(const DashboardView &view) const;
+  String topBarSignature(const DashboardView &view) const;
 
   Arduino_GFX *display_ = nullptr;
   ChineseRenderer renderer_;
   UiState state_;
   bool invalidated_ = true;
   String lastSignature_;
+  String lastTopBarSignature_;
+  String lastMessage_;
+  RootPage lastMessagePage_ = RootPage::home;
+  bool lastDictationHolding_ = false;
   uint32_t lastRecordingSecond_ = UINT32_MAX;
+  uint32_t fullRedrawCount_ = 0;
+  uint32_t bodyRedrawCount_ = 0;
+  uint32_t partialRedrawCount_ = 0;
   uint8_t listOffset_ = 0;
   uint16_t detailLineOffset_ = 0;
 };

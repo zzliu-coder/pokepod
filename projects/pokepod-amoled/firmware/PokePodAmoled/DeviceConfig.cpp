@@ -26,7 +26,9 @@ bool DeviceConfig::save(const DeviceSettings &settings, Print &log) {
       settings.secretKey.length() > 128 || settings.hotwordId.length() > 128) {
     return false;
   }
-  bool ok = preferences_.putString("wifi_ssid", settings.wifiSsid) > 0;
+  bool ok = true;
+  if (settings.wifiSsid.isEmpty()) preferences_.remove("wifi_ssid");
+  else ok = preferences_.putString("wifi_ssid", settings.wifiSsid) > 0 && ok;
   if (settings.wifiPassword.isEmpty()) preferences_.remove("wifi_pass");
   else ok = preferences_.putString("wifi_pass", settings.wifiPassword) > 0 && ok;
   if (settings.secretId.isEmpty()) preferences_.remove("secret_id");

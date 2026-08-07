@@ -14,6 +14,7 @@ target/
 .platformio-venv/
 .DS_Store
 .codeprinter/runs/
+.agent-printer/runs/
 .env
 .env.*
 *.pem

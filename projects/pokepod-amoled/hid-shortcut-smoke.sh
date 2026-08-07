@@ -174,13 +174,21 @@ opened = int(held.get("mic_open_count", 0)) > int(before.get("mic_open_count", 0
 closed = int(stopped.get("mic_close_count", 0)) > int(before.get("mic_close_count", 0))
 held_ok = opened and held.get("mic_streaming") and held.get("dictation_holding")
 stopped_ok = closed and not stopped.get("mic_streaming") and not stopped.get("dictation_holding")
-if not contains([option_down]) or not held_ok or not stopped_ok:
+full_redraws_stable = (
+    int(held.get("ui_full_redraws", -1)) == int(before.get("ui_full_redraws", -2))
+    and int(stopped.get("ui_full_redraws", -1)) == int(before.get("ui_full_redraws", -2))
+)
+partial_redraws_used = int(stopped.get("ui_partial_redraws", 0)) > int(
+    before.get("ui_partial_redraws", 0)
+)
+if (not contains([option_down]) or not held_ok or not stopped_ok
+        or not full_redraws_stable or not partial_redraws_used):
     raise SystemExit(1)
 PY
 then
-  printf 'FAIL incomplete_option_z_hid_report evidence=%s\n' "$RUN_ROOT" |
+  printf 'FAIL hid_or_flicker_regression evidence=%s\n' "$RUN_ROOT" |
     tee "$RESULT"
   exit 63
 fi
 
-printf 'PASS hid_option_z_hold_complete evidence=%s\n' "$RUN_ROOT" | tee "$RESULT"
+printf 'PASS hid_option_z_hold_and_partial_refresh evidence=%s\n' "$RUN_ROOT" | tee "$RESULT"

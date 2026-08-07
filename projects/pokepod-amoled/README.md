@@ -93,6 +93,14 @@ Mac 测试和 release build、脚本语法检查及 diff 检查。
 ./flash.sh
 ```
 
+从一台已通过 ADB 连接、且 Android PokeCapsule 已配置腾讯云的设备安全迁移密钥：
+
+```bash
+./provision-pokepod.py --port /dev/cu.usbmodemXXXXXXXX
+```
+
+迁移过程只在内存和 Android 临时暂存文件中处理密钥，完成后立即删除暂存文件，终端只输出配置状态。若同时配置 Wi-Fi，使用 `--wifi-ssid`，密码通过交互输入或 `POKEPOD_WIFI_PASSWORD` 环境变量提供，避免密码进入命令历史。
+
 脚本会通过 CDC 自动进入 ESP32-S3 ROM 下载器，只刷新 `0x10000` 的应用分区，
 验证 Flash 内容后回到应用。它不会覆盖 NVS、分区表、SD 卡或原始 16 MB 备份。
 若旧固件已损坏，脚本会提示唯一的人工恢复动作：按住 BOOT，短按一次 RESET，

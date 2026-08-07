@@ -51,23 +51,46 @@ void Dashboard::draw(const DashboardView &view) {
   state_.homeMode = view.recording ? HomeMode::recording :
       (view.transcribing ? HomeMode::transcribing : HomeMode::idle);
   const String currentSignature = signature(view);
-  if (invalidated_ || currentSignature != lastSignature_) {
+  if (invalidated_) {
     display_->fillScreen(RGB565_BLACK);
-    if (state_.capsuleDetail) drawCapsuleDetail(view);
-    else {
-      drawTopBar(view);
-      if (state_.page == RootPage::home) drawHome(view);
-      else if (state_.page == RootPage::capsules) drawCapsules(view);
-      else drawDevice(view);
-      drawPageDots();
-    }
+    if (!state_.capsuleDetail) drawTopBar(view);
+    drawBody(view);
+    ++fullRedrawCount_;
     lastSignature_ = currentSignature;
+    lastTopBarSignature_ = topBarSignature(view);
+    lastDictationHolding_ = view.dictationHolding;
+    lastMessage_ = view.message;
+    lastMessagePage_ = state_.page;
     lastRecordingSecond_ = UINT32_MAX;
     invalidated_ = false;
+  } else if (currentSignature != lastSignature_) {
+    // A state transition within the current page should not black out the
+    // status bar or the whole AMOLED.  Clear only the page body and rebuild
+    // that region; page navigation still uses the explicit full invalidation.
+    display_->fillRect(0, 42, 368, 406, RGB565_BLACK);
+    drawBody(view);
+    ++bodyRedrawCount_;
+    lastSignature_ = currentSignature;
+    lastDictationHolding_ = view.dictationHolding;
+    lastMessage_ = view.message;
+    lastMessagePage_ = state_.page;
+    lastRecordingSecond_ = UINT32_MAX;
   }
+  drawDynamicRegions(view);
   if (!state_.capsuleDetail && state_.page == RootPage::home && view.recording) {
     drawRecordingDynamic(view);
   }
+}
+
+void Dashboard::drawBody(const DashboardView &view) {
+  if (state_.capsuleDetail) {
+    drawCapsuleDetail(view);
+    return;
+  }
+  if (state_.page == RootPage::home) drawHome(view);
+  else if (state_.page == RootPage::capsules) drawCapsules(view);
+  else drawDevice(view);
+  drawPageDots();
 }
 
 void Dashboard::drawTopBar(const DashboardView &view) {
@@ -225,6 +248,42 @@ void Dashboard::drawRecordingDynamic(const DashboardView &view) {
   }
 }
 
+void Dashboard::drawDynamicRegions(const DashboardView &view) {
+  if (state_.capsuleDetail) return;
+  const String currentTopBar = topBarSignature(view);
+  if (currentTopBar != lastTopBarSignature_) {
+    display_->fillRect(0, 0, 368, 41, RGB565_BLACK);
+    drawTopBar(view);
+    lastTopBarSignature_ = currentTopBar;
+    ++partialRedrawCount_;
+  }
+
+  if (state_.page == RootPage::home && state_.homeMode == HomeMode::idle &&
+      view.hostConnected && view.dictationHolding != lastDictationHolding_) {
+    drawButton(24, 286, 320, 100,
+               view.dictationHolding ? kRed : kBlue,
+               view.dictationHolding ? "正在说话" : "微信语音输入",
+               view.dictationHolding ? "松开结束" : "按住说话，松开结束");
+    lastDictationHolding_ = view.dictationHolding;
+    ++partialRedrawCount_;
+  }
+
+  if ((state_.page == RootPage::home || state_.page == RootPage::device) &&
+      (view.message != lastMessage_ || state_.page != lastMessagePage_)) {
+    display_->fillRect(12, 402, 344, 34, RGB565_BLACK);
+    if (!view.message.isEmpty()) {
+      renderer_.drawText(view.message,
+                         state_.page == RootPage::home ? 18 : 22,
+                         state_.page == RootPage::home ? 410 : 408,
+                         state_.page == RootPage::home ? 330 : 324, 1,
+                         RGB565_YELLOW, RGB565_BLACK);
+    }
+    lastMessage_ = view.message;
+    lastMessagePage_ = state_.page;
+    ++partialRedrawCount_;
+  }
+}
+
 String Dashboard::signature(const DashboardView &view) const {
   String value;
   value.reserve(256);
@@ -245,24 +304,37 @@ String Dashboard::signature(const DashboardView &view) const {
   value += view.playing;
   value += ':';
   value += view.hostConnected;
-  value += ':';
-  value += view.dictationHolding;
-  value += ':';
-  value += static_cast<int>(view.wifiPhase);
-  value += ':';
+  if (state_.capsuleDetail || state_.page == RootPage::capsules) {
+    value += ':';
+    value += view.library == nullptr ? 0 : view.library->count();
+  }
+  if (state_.page == RootPage::device) {
+    value += ':';
+    value += static_cast<int>(view.wifiPhase);
+    value += ':';
+    value += view.provisioning;
+    value += ':';
+    value += view.portalSsid;
+    value += ':';
+    value += view.settings == nullptr ? false : view.settings->wifiEnabled;
+    value += ':';
+    value += view.settings == nullptr ? false : view.settings->raiseToWake;
+  }
+  return value;
+}
+
+String Dashboard::topBarSignature(const DashboardView &view) const {
+  String value;
+  value.reserve(64);
   value += view.board->batteryPercent;
   value += ':';
   value += view.board->charging;
   value += ':';
   value += view.board->sdCard;
   value += ':';
-  value += view.library == nullptr ? 0 : view.library->count();
+  value += view.hostConnected;
   value += ':';
-  value += view.provisioning;
-  value += ':';
-  value += view.portalSsid;
-  value += ':';
-  value += view.message;
+  value += static_cast<int>(view.wifiPhase);
   return value;
 }
 

@@ -13,6 +13,7 @@ class BoardServices;
 class AudioPipeline;
 class CapsuleLibrary;
 class DeviceConfig;
+class Dashboard;
 class TencentWorker;
 class UsbVoiceBridge;
 class WavRecorder;
@@ -20,11 +21,16 @@ class WifiController;
 
 class PokePodLinkService {
  public:
+  using DictationCallback = bool (*)();
+
   bool begin(Stream &stream, fs::FS &fs, BoardServices &board,
              AudioPipeline &audio,
-             UsbVoiceBridge &usb, CapsuleLibrary &library,
+             UsbVoiceBridge &usb, Dashboard &dashboard,
+             CapsuleLibrary &library,
              WavRecorder &recorder, DeviceConfig &config,
-             WifiController &wifi, TencentWorker &tencent, Print &log);
+             WifiController &wifi, TencentWorker &tencent,
+             DictationCallback startDictation,
+             DictationCallback stopDictation, Print &log);
   void poll(uint32_t nowMs);
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
@@ -101,12 +107,15 @@ class PokePodLinkService {
   BoardServices *board_ = nullptr;
   AudioPipeline *audio_ = nullptr;
   UsbVoiceBridge *usb_ = nullptr;
+  Dashboard *dashboard_ = nullptr;
   CapsuleLibrary *library_ = nullptr;
   WavRecorder *recorder_ = nullptr;
   DeviceConfig *config_ = nullptr;
   WifiController *wifi_ = nullptr;
   TencentWorker *tencent_ = nullptr;
   Print *log_ = nullptr;
+  DictationCallback startDictation_ = nullptr;
+  DictationCallback stopDictation_ = nullptr;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};
