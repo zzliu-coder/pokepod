@@ -200,7 +200,7 @@ def main() -> int:
                                  "reboot"))
     parser.add_argument(
         "--install-font", metavar="PATH",
-        help="install a PKF1 cjk16.bin over PokePod Link v2",
+        help="install a PKF2 20px A4 font over PokePod Link v2",
     )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
@@ -214,8 +214,8 @@ def main() -> int:
                 outgoing_binary = font_file.read()
         except OSError as error:
             parser.error(str(error))
-        if not (16 <= len(outgoing_binary) <= 1024 * 1024):
-            parser.error("font file must be between 16 bytes and 1 MiB")
+        if not (20 <= len(outgoing_binary) <= 5 * 1024 * 1024):
+            parser.error("font file must be between 20 bytes and 5 MiB")
     ports = arguments.ports or sorted(glob.glob("/dev/cu.usbmodem*"))
     last_error = None
     for port in ports:

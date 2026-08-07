@@ -17,7 +17,7 @@ constexpr uint32_t kSurfaceRgb = 0x0B1311;
 constexpr uint32_t kSurfaceRaisedRgb = 0x101A17;
 constexpr uint32_t kDividerRgb = 0x1A2A25;
 constexpr uint32_t kInkRgb = 0xF4FAF7;
-constexpr uint32_t kMutedRgb = 0x8EA39C;
+constexpr uint32_t kMutedRgb = 0x91A69F;
 constexpr uint32_t kDisabledRgb = 0x34413C;
 constexpr uint32_t kAccentRgb = 0x69E0B6;
 constexpr uint32_t kAccentDimRgb = 0x12372C;
@@ -42,32 +42,42 @@ constexpr uint16_t kError = color565(kErrorRgb);
 
 constexpr int16_t kScreenWidth = 368;
 constexpr int16_t kScreenHeight = 448;
-constexpr int16_t kPageMargin = 24;
-constexpr int16_t kTopBarHeight = 44;
-constexpr int16_t kBottomNavTop = 400;
-constexpr int16_t kBottomNavHeight = 48;
+constexpr int16_t kPageMargin = 20;
+constexpr int16_t kTopBarHeight = 48;
+constexpr int16_t kBackTargetSize = 56;
+constexpr int16_t kBackEdgeWidth = 40;
+constexpr int16_t kRootContentTop = 48;
+constexpr int16_t kRootContentBottom = 424;
+constexpr int16_t kPageIndicatorTop = 432;
 
-constexpr int16_t kHomeRecordTop = 108;
-constexpr int16_t kHomeRecordBottom = 338;
-constexpr int16_t kDictationTop = 344;
-constexpr int16_t kDictationBottom = 394;
+constexpr int16_t kHomePrimaryTop = 72;
+constexpr int16_t kHomePrimaryConnectedBottom = 238;
+constexpr int16_t kHomePrimarySoloBottom = 416;
+constexpr int16_t kHomeSecondaryTop = 250;
+constexpr int16_t kHomeSecondaryBottom = 416;
 
-constexpr int16_t kCapsuleListTop = 120;
-constexpr int16_t kCapsuleRowStride = 68;
+constexpr int16_t kCapsuleListTop = 104;
+constexpr int16_t kCapsuleRowStride = 76;
 constexpr int16_t kCapsuleVisibleRows = 4;
 constexpr int16_t kCapsuleListBottom =
     kCapsuleListTop + kCapsuleRowStride * kCapsuleVisibleRows;
 
-constexpr int16_t kDeviceWifiTop = 108;
-constexpr int16_t kDeviceMacTop = 164;
-constexpr int16_t kDeviceStorageTop = 220;
-constexpr int16_t kDeviceRaiseTop = 276;
-constexpr int16_t kDeviceProvisionTop = 332;
-constexpr int16_t kDeviceRowsBottom = 392;
+constexpr int16_t kDeviceWifiTop = 88;
+constexpr int16_t kDeviceMacTop = 152;
+constexpr int16_t kDeviceStorageTop = 216;
+constexpr int16_t kDeviceRaiseTop = 280;
+constexpr int16_t kDeviceProvisionTop = 344;
+constexpr int16_t kDeviceRowsBottom = 416;
 
-constexpr int16_t kDetailActionsTop = 332;
-constexpr int16_t kDetailActionsBottom = 396;
-constexpr uint32_t kRecordingFrameIntervalMs = 125;
+constexpr int16_t kDetailActionsTop = 352;
+constexpr int16_t kDetailActionsBottom = 424;
+constexpr int16_t kRecordingDynamicTop = 72;
+constexpr int16_t kRecordingDynamicBottom = 326;
+constexpr uint32_t kRecordingFrameIntervalMs = 80;
+
+constexpr int16_t kStatusIconSize = 20;
+constexpr int16_t kActionIconSize = 24;
+constexpr int16_t kMinimumTouchHeight = 56;
 
 }  // namespace ui
 }  // namespace pokepod

@@ -17,7 +17,8 @@ SD、RTC、QMI8658、AXP2101、Wi-Fi、USB CDC/UAC/HID；BLE 暂未启用。
 
 ## 日常使用
 
-设备有三个横向页面：首页、胶囊列表、设置与设备详情。每次启动首先进入首页。
+设备有三个横向页面：胶囊列表、首页、设置与设备详情。首页位于中间，每次启动
+直接显示首页；左右滑动进入相邻页面，屏幕不保留占空间的底部导航栏。
 
 - 首页点“语音胶囊”开始/停止录音；录音最长 58.5 秒。
 - 未连接 Mac 时，BOOT 短按开始/停止胶囊。
@@ -72,13 +73,15 @@ USB Mass Storage，避免 Mac 与固件同时写 SD。
 首次准备 SD 卡时，把完整中文字库通过 Link v2 安装到设备：
 
 ```sh
-./cdc-status.py --install-font assets/cjk16.bin
+./cdc-status.py --install-font assets/cjk20.a4
 ./cdc-status.py --command reboot
 ```
 
-固件会校验 PKF1 文件头、字形数量和总长度，再原子替换
-`/PokeCapsule/.system/fonts/cjk16.bin`。Flash 内始终保留固定界面汉字；完整字库
-负责显示腾讯云和 DeepSeek 返回的任意中文正文。
+固件会校验 PKF2 文件头、20 px 原生字号、4-bit 灰阶、字形数量和总长度，再原子
+替换 `/PokeCapsule/.system/fonts/cjk20.a4`。Flash 内始终保留 16 / 20 / 28 /
+36 px 固定界面字形；完整字库负责显示腾讯云和 DeepSeek 返回的任意中文正文。
+字形由 OFL 授权的 Noto Sans CJK SC Medium 生成，授权文件位于 `assets/OFL.txt`。
+最终页面组合预览位于 `design/ui-v3-compositions.svg`。
 
 ## 构建和自动测试
 

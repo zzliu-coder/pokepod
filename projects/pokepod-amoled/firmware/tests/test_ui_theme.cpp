@@ -38,14 +38,22 @@ int main() {
   assert(contrast(kWaitingRgb, kBackgroundRgb) >= 4.5);
   assert(contrast(kErrorRgb, kBackgroundRgb) >= 4.5);
 
-  assert(kBottomNavTop + kBottomNavHeight == kScreenHeight);
-  assert(kDictationBottom < kBottomNavTop);
-  assert(kCapsuleListBottom < kBottomNavTop);
-  assert(kDeviceRowsBottom < kBottomNavTop);
-  assert(kHomeRecordTop < kHomeRecordBottom);
-  assert(kCapsuleListTop >= kTopBarHeight + 76);
-  assert(kCapsuleListBottom == 392);
+  assert(kRootContentBottom < kPageIndicatorTop);
+  assert(kPageIndicatorTop < kScreenHeight);
+  assert(kHomePrimaryTop < kHomePrimaryConnectedBottom);
+  assert(kHomePrimaryConnectedBottom < kHomeSecondaryTop);
+  assert(kHomeSecondaryBottom <= kRootContentBottom);
+  assert(kHomePrimarySoloBottom <= kRootContentBottom);
+  assert(kCapsuleListTop >= kTopBarHeight + 48);
+  assert(kCapsuleListBottom <= kRootContentBottom);
+  assert(kDeviceRowsBottom <= kRootContentBottom);
+  assert(kDetailActionsBottom <= kRootContentBottom);
+  assert(kMinimumTouchHeight >= 56);
+  assert(kBackTargetSize >= kMinimumTouchHeight);
+  assert(kBackEdgeWidth == 40);
+  assert(kStatusIconSize == 20);
+  assert(kActionIconSize == 24);
   assert(kRecordingFrameIntervalMs >= 80);
-  assert(kRecordingFrameIntervalMs <= 125);
+  assert(kRecordingFrameIntervalMs <= 84);
   return 0;
 }

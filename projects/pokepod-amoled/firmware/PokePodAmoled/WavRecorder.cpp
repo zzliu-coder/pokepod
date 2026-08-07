@@ -50,9 +50,7 @@ String capsuleJson(const String &id, const String &timestamp) {
   value.reserve(512);
   value += "{\n  \"schemaVersion\": 1,\n  \"id\": \"";
   value += id;
-  value += "\",\n  \"title\": \"语音 ";
-  value += timestamp;
-  value += "\",\n  \"createdAt\": \"";
+  value += "\",\n  \"title\": \"语音胶囊\",\n  \"createdAt\": \"";
   value += timestamp;
   value += "\",\n  \"updatedAt\": \"";
   value += timestamp;

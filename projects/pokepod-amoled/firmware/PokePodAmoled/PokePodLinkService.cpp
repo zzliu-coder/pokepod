@@ -228,12 +228,12 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   const bool chunkAcks = jsonBool(root, "chunkAcks");
   if (strcmp(operation, "font-write") == 0) {
     cJSON_Delete(root);
-    const String finalPath = String(kCapsuleSystem) + "/fonts/cjk16.bin";
+    const String finalPath = String(kCapsuleSystem) + "/fonts/cjk20.a4";
     const String temporaryPath = finalPath + ".part";
     if (foregroundBusy()) {
       sendBusy(requestId);
       rememberCompleted(requestId);
-    } else if (binaryLength < 16 || binaryLength > 1024 * 1024 ||
+    } else if (binaryLength < 20 || binaryLength > 5 * 1024 * 1024 ||
                !ensureDirectoryTree(parentPath(finalPath)) ||
                !beginIncoming(IncomingKind::systemFont, requestId,
                               static_cast<uint32_t>(binaryLength),
@@ -1525,17 +1525,17 @@ bool PokePodLinkService::writeTextAtomic(const String &path,
 
 bool PokePodLinkService::validFontFile(const String &path) const {
   File file = fs_->open(path, FILE_READ);
-  uint8_t header[16];
+  uint8_t header[kFontHeaderBytes];
   if (!file || file.isDirectory() ||
       file.read(header, sizeof(header)) != sizeof(header)) {
     if (file) file.close();
     return false;
   }
-  const uint32_t count = linkGet32(header + 8);
-  const uint32_t entrySize = linkGet32(header + 12);
-  const bool ok = memcmp(header, "PKF1", 4) == 0 &&
+  const uint32_t count = linkGet32(header + 12);
+  const uint32_t entrySize = linkGet32(header + 16);
+  const bool ok = memcmp(header, "PKF2", 4) == 0 &&
       validFontLayout(linkGet16(header + 4), linkGet16(header + 6),
-                      count, entrySize, file.size());
+                      header[8], count, entrySize, file.size());
   file.close();
   return ok;
 }

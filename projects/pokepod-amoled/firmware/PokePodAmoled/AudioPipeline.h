@@ -22,6 +22,9 @@ class AudioPipeline {
   uint32_t readFailures() const { return readFailures_; }
   uint16_t peakSample() const { return peakWindow_.latest(); }
   uint16_t consumePeakWindow() { return peakWindow_.consume(); }
+  void copyEnvelope(uint16_t *output, size_t count) const {
+    peakWindow_.copyEnvelope(output, count);
+  }
   void resetPeakWindow() { peakWindow_.reset(); }
 
  private:

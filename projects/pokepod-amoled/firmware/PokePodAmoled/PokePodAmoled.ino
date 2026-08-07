@@ -86,6 +86,7 @@ void drawDashboard() {
   view.provisioning = provisioningPortal.active();
   view.recordingMs = recorder.durationMs();
   view.audioPeak = audio.consumePeakWindow();
+  audio.copyEnvelope(view.audioEnvelope, PeakWindow::kEnvelopeSamples);
   view.wifiPhase = provisioningPortal.active()
       ? WifiPhase::provisioning : wifi.phase();
   view.wifiRssi = wifi.rssi();
@@ -136,8 +137,13 @@ void toggleRecording() {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
     const bool ok = recorder.start(usb.log(), recordingId(), board.utcNow());
-    if (ok) audio.resetPeakWindow();
-    showMessage(ok ? "开始录音" : "录音启动失败");
+    if (ok) {
+      audio.resetPeakWindow();
+      transientMessage = "";
+      transientUntilMs = 0;
+    } else {
+      showMessage("录音启动失败");
+    }
   }
   drawDashboard();
 }
@@ -195,7 +201,13 @@ void pollTouch() {
     const int16_t deltaX = touchLastX - touchStartX;
     const int16_t deltaY = touchLastY - touchStartY;
     if (abs(deltaX) >= 60 && abs(deltaX) > abs(deltaY)) {
-      dashboard.swipeHorizontal(deltaX, recorder.recording());
+      if (provisioningPortal.active() &&
+          isBackEdgeSwipe(touchStartX, deltaX)) {
+        provisioningPortal.stop();
+        dashboard.back();
+      } else {
+        dashboard.swipeHorizontal(deltaX, recorder.recording(), touchStartX);
+      }
       drawDashboard();
       return;
     }
@@ -206,19 +218,13 @@ void pollTouch() {
     }
     const UiAction action = dashboard.actionAt(
         touchStartX, touchStartY, usb.hostConnected());
-    if (action == UiAction::goHome ||
-        action == UiAction::goCapsules ||
-        action == UiAction::goDevice) {
-      dashboard.navigate(action == UiAction::goHome ? RootPage::home :
-                         (action == UiAction::goCapsules
-                              ? RootPage::capsules : RootPage::device));
-      drawDashboard();
-    } else if (action == UiAction::capsuleRecord) toggleRecording();
+    if (action == UiAction::capsuleRecord) toggleRecording();
     else if (action == UiAction::wechatDictation) return;
     else if (action == UiAction::openCapsule) {
       dashboard.openCapsuleAt(touchStartY, capsuleLibrary);
       drawDashboard();
     } else if (action == UiAction::back) {
+      if (provisioningPortal.active()) provisioningPortal.stop();
       dashboard.back();
       drawDashboard();
     } else if (action == UiAction::wifiToggle) {

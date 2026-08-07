@@ -13,3 +13,6 @@ for source in "$SCRIPT_DIR"/tests/test_*.cpp; do
   "$TEST_TMP_DIR/$name"
   printf 'PASS %s\n' "$name"
 done
+
+python3 "$SCRIPT_DIR/../tools/test-provisioning-page.py"
+python3 "$SCRIPT_DIR/../tools/test-cjk-font.py"

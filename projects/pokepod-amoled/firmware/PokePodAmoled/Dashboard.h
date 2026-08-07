@@ -8,8 +8,11 @@
 #include "CapsuleLibrary.h"
 #include "ChineseRenderer.h"
 #include "DeviceConfig.h"
+#include "PeakWindow.h"
 #include "UiIcons.h"
+#include "UiMotionPolicy.h"
 #include "UiPolicy.h"
+#include "UiRenderPolicy.h"
 #include "UiTheme.h"
 #include "WifiPolicy.h"
 
@@ -29,6 +32,7 @@ struct DashboardView {
   bool provisioning = false;
   uint32_t recordingMs = 0;
   uint16_t audioPeak = 0;
+  uint16_t audioEnvelope[PeakWindow::kEnvelopeSamples] = {};
   WifiPhase wifiPhase = WifiPhase::disabled;
   int32_t wifiRssi = 0;
   String portalSsid;
@@ -41,7 +45,7 @@ class Dashboard {
   void begin(Arduino_GFX *display, fs::FS *fs = nullptr);
   void draw(const DashboardView &view);
   UiAction actionAt(int16_t x, int16_t y, bool hostConnected) const;
-  void swipeHorizontal(int16_t deltaX, bool locked);
+  void swipeHorizontal(int16_t deltaX, bool locked, int16_t startX);
   void swipeVertical(int16_t deltaY, const CapsuleLibrary &library);
   bool openCapsuleAt(int16_t y, const CapsuleLibrary &library);
   void back();
@@ -54,19 +58,22 @@ class Dashboard {
   uint32_t bodyRedrawCount() const { return bodyRedrawCount_; }
   uint32_t partialRedrawCount() const { return partialRedrawCount_; }
   bool frameBufferReady() const { return frame_ != nullptr; }
-  bool animationBufferReady() const { return recordingCanvas_ != nullptr; }
+  bool animationBufferReady() const { return frame_ != nullptr; }
 
  private:
   void drawBody(const DashboardView &view);
   void drawTopBar(const DashboardView &view);
+  void drawPageIndicator();
+  void drawBackButton();
   void drawHome(const DashboardView &view);
   void drawCapsules(const DashboardView &view);
   void drawCapsuleDetail(const DashboardView &view);
   void drawDevice(const DashboardView &view);
-  void drawBottomNav();
+  void drawProvisioning(const DashboardView &view);
   void drawCapsuleOrb(int16_t centerY, uint16_t accent,
-                      uint16_t dimAccent);
-  void drawDictationRail(const DashboardView &view);
+                      uint16_t dimAccent, int16_t scale = 100);
+  void drawHomeAction(int16_t top, int16_t bottom, bool dictation,
+                      bool holding);
   void drawToast(const String &message);
   void drawCenteredText(const String &text, int16_t y, UiTextSize size,
                         uint16_t color, bool bold = false,
@@ -75,7 +82,7 @@ class Dashboard {
                       const String &value, uint16_t valueColor);
   void drawDetailAction(int16_t left, UiIcon icon, const String &label,
                         bool emphasized, uint16_t accent);
-  void drawRecordingDynamic(const DashboardView &view);
+  void drawRecordingDynamic(const DashboardView &view, bool presentPartial);
   void drawDynamicRegions(const DashboardView &view);
   void presentFrame();
   void presentRegion(int16_t x, int16_t y, int16_t width, int16_t height);
@@ -85,15 +92,15 @@ class Dashboard {
   Arduino_GFX *output_ = nullptr;
   Arduino_GFX *display_ = nullptr;
   Arduino_Canvas_Indexed *frame_ = nullptr;
-  Arduino_Canvas_Indexed *recordingCanvas_ = nullptr;
   ChineseRenderer renderer_;
   UiState state_;
   bool invalidated_ = true;
   String lastSignature_;
   String lastTopBarSignature_;
   bool lastDictationHolding_ = false;
-  uint32_t lastRecordingSecond_ = UINT32_MAX;
+  bool lastRecording_ = false;
   uint16_t smoothedPeak_ = 0;
+  uint16_t envelopeCeiling_ = 1200;
   uint8_t animationTick_ = 0;
   uint32_t fullRedrawCount_ = 0;
   uint32_t bodyRedrawCount_ = 0;
