@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="368" height="448" viewBox="0 0 368 448">
+<rect width="368" height="448" rx="44" fill="#000"/><g font-family="PingFang SC,Arial" fill="#F4F7F6">
+<text x="24" y="34" font-size="18">‹</text><text x="51" y="35" font-size="24" font-weight="700">已选 3 条</text><text x="300" y="35" font-size="16" fill="#42E8C3">完成</text>
+<rect x="20" y="58" width="328" height="66" rx="18" fill="#0B1514" stroke="#42E8C3"/><circle cx="48" cy="91" r="10" fill="#42E8C3"/><text x="45" y="96" font-size="13" fill="#000">✓</text><text x="72" y="84" font-size="19" font-weight="600">今天的产品思路</text><text x="72" y="108" font-size="14" fill="#8EA09C">10:42 · 已转写</text><text x="316" y="97" font-size="19" fill="#FFC64A">★</text>
+<rect x="20" y="134" width="328" height="66" rx="18" fill="#0B1514" stroke="#42E8C3"/><circle cx="48" cy="167" r="10" fill="#42E8C3"/><text x="45" y="172" font-size="13" fill="#000">✓</text><text x="72" y="160" font-size="19" font-weight="600">需要补充的会议记录</text><text x="72" y="184" font-size="14" fill="#8EA09C">09:18 · 待转写</text>
+<rect x="20" y="210" width="328" height="66" rx="18" fill="#0B1514" stroke="#42E8C3"/><circle cx="48" cy="243" r="10" fill="#42E8C3"/><text x="45" y="248" font-size="13" fill="#000">✓</text><text x="72" y="236" font-size="19" font-weight="600">无线语音测试</text><text x="72" y="260" font-size="14" fill="#8EA09C">昨天 · 已转写</text>
+<rect x="20" y="286" width="328" height="48" rx="16" fill="#16201E"/><text x="42" y="316" font-size="15" fill="#42E8C3">3 条已移入回收站 · 撤销</text>
+<rect x="16" y="358" width="336" height="70" rx="24" fill="#0E1716" stroke="#243532"/><text x="43" y="400" font-size="16" fill="#FFC64A">★ 收藏</text><text x="145" y="400" font-size="16" fill="#A9B8FF">▣ 归档</text><text x="256" y="400" font-size="16" fill="#FF6B77">⌫ 删除</text>
+</g></svg>

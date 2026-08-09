@@ -24,17 +24,6 @@ int main() {
   using namespace pokepod;
 
   static_assert(kAudioBytesPerChunk == 192);
-  static_assert(kUsbAudioBytesPerChunk == 96);
-  static_assert(kUsbAudioEndpointMaxPacketBytes == 98);
-  const uint8_t stereo[] = {
-      0x01, 0x02, 0x11, 0x12,
-      0x03, 0x04, 0x13, 0x14,
-  };
-  uint8_t mono[4] = {};
-  assert(pcm16StereoLeftToMono(stereo, sizeof(stereo), mono, sizeof(mono)) == 4);
-  const uint8_t expectedMono[] = {0x01, 0x02, 0x03, 0x04};
-  assert(std::memcmp(mono, expectedMono, sizeof(mono)) == 0);
-  assert(pcm16StereoLeftToMono(nullptr, sizeof(stereo), mono, sizeof(mono)) == 0);
   constexpr uint8_t pcmSamples[] = {
       0x00, 0x00,  // 0
       0xff, 0x7f,  // 32767
@@ -51,8 +40,8 @@ int main() {
   assert(boardVariantFromTouchProbes(false, false) == BoardVariant::unknown);
   assert(boardVariantFromTouchProbes(true, true) == BoardVariant::unknown);
 
-  assert(touchActionAt(16, 246) == TouchAction::dictation);
-  assert(touchActionAt(kDisplayWidth - 17, 327) == TouchAction::dictation);
+  assert(touchActionAt(16, 246) == TouchAction::wirelessVoice);
+  assert(touchActionAt(kDisplayWidth - 17, 327) == TouchAction::wirelessVoice);
   assert(touchActionAt(16, 342) == TouchAction::recording);
   assert(touchActionAt(kDisplayWidth - 17, 423) == TouchAction::recording);
   assert(touchActionAt(15, 246) == TouchAction::none);

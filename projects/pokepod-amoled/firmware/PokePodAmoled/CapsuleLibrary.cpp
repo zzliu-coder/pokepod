@@ -76,6 +76,7 @@ bool CapsuleLibrary::scan() {
   records_.clear();
   scanFolder(kCapsuleInbox, "Inbox", 0);
   scanFolder(kCapsuleArchive, "Archive", 0);
+  scanFolder(kCapsuleTrash, ".trash", 0);
   File root = fs_->open(kCapsuleRoot);
   if (root && root.isDirectory()) {
     File entry = root.openNextFile();
@@ -97,6 +98,7 @@ bool CapsuleLibrary::scan() {
             [](const CapsuleSummary &left, const CapsuleSummary &right) {
               return left.createdAt > right.createdAt;
             });
+  rebuildVisible();
   if (log_ != nullptr) {
     log_->printf("{\"event\":\"capsule_scan\",\"count\":%u,\"pending\":%u}\n",
                  static_cast<unsigned>(records_.size()),
@@ -157,6 +159,8 @@ bool CapsuleLibrary::readRecord(const String &directory, const String &folder,
     record.createdAt = createdAt == nullptr ? "" : createdAt;
     record.audioFile = audioFile == nullptr ? "" : audioFile;
     record.favorite = jsonBool(capsule, "favorite");
+    record.archived = folder == "Archive" || folder.startsWith("Archive/");
+    record.trashed = folder == ".trash" || folder.startsWith(".trash/");
     record.durationMs = jsonUint(processing, "durationMs");
     record.status = parseStatus(jsonString(processing, "status"));
     record.preview = readBestText(record, kPreviewBytes);
@@ -169,19 +173,21 @@ bool CapsuleLibrary::readRecord(const String &directory, const String &folder,
 size_t CapsuleLibrary::pendingCount() const {
   size_t count = 0;
   for (const CapsuleSummary &record : records_) {
-    if (record.status == CapsuleStatus::queued ||
-        record.status == CapsuleStatus::transcribing) ++count;
+    if (!record.archived && !record.trashed &&
+        (record.status == CapsuleStatus::queued ||
+         record.status == CapsuleStatus::transcribing)) ++count;
   }
   return count;
 }
 
 const CapsuleSummary *CapsuleLibrary::at(size_t index) const {
-  return index < records_.size() ? &records_[index] : nullptr;
+  return index < visible_.size() ? &records_[visible_[index]] : nullptr;
 }
 
 const CapsuleSummary *CapsuleLibrary::nextQueued() const {
   for (const CapsuleSummary &record : records_) {
-    if (record.status == CapsuleStatus::queued) return &record;
+    if (!record.archived && !record.trashed &&
+        record.status == CapsuleStatus::queued) return &record;
   }
   return nullptr;
 }
@@ -225,10 +231,224 @@ bool CapsuleLibrary::toggleFavorite(const String &id) {
 
 bool CapsuleLibrary::archive(const String &id) {
   const CapsuleSummary *record = find(id);
-  if (record == nullptr || record->folder == "Archive") return false;
+  if (record == nullptr || record->archived || record->trashed ||
+      record->status == CapsuleStatus::transcribing ||
+      !safeArchiveOriginalFolder(record->folder.c_str())) return false;
+  cJSON *metadata = cJSON_CreateObject();
+  if (metadata == nullptr) return false;
+  cJSON_AddNumberToObject(metadata, "schemaVersion", 1);
+  cJSON_AddStringToObject(metadata, "capsuleId", id.c_str());
+  cJSON_AddStringToObject(metadata, "originalFolder", record->folder.c_str());
+  char *encoded = cJSON_Print(metadata);
+  const String metadataPath = record->directory + "/" +
+      kCapsuleArchiveMetadata;
+  const bool wrote = encoded != nullptr &&
+      writeTextAtomic(metadataPath, String(encoded) + "\n");
+  cJSON_free(encoded);
+  cJSON_Delete(metadata);
+  if (!wrote) return false;
   const String target = String(kCapsuleArchive) + "/" + id;
-  if (fs_->exists(target) || !fs_->rename(record->directory, target)) return false;
+  if (fs_->exists(target) || !fs_->rename(record->directory, target)) {
+    fs_->remove(metadataPath);
+    return false;
+  }
   return scan();
+}
+
+bool CapsuleLibrary::unarchive(const String &id) {
+  const CapsuleSummary *record = find(id);
+  if (record == nullptr || !record->archived || record->trashed ||
+      record->status == CapsuleStatus::transcribing) return false;
+  const String metadataText = readText(
+      record->directory + "/" + kCapsuleArchiveMetadata, kMaxMetadataBytes);
+  cJSON *metadata = cJSON_ParseWithLength(metadataText.c_str(),
+                                          metadataText.length());
+  const char *original = metadata == nullptr
+      ? nullptr : jsonString(metadata, "originalFolder");
+  String targetDirectory = safeArchiveOriginalFolder(original)
+      ? safeRestoreDirectory(original) : String(kCapsuleInbox);
+  cJSON_Delete(metadata);
+  String target = targetDirectory + "/" + id;
+  if (fs_->exists(target) && targetDirectory != kCapsuleInbox) {
+    targetDirectory = kCapsuleInbox;
+    target = targetDirectory + "/" + id;
+  }
+  if (fs_->exists(target) || !fs_->rename(record->directory, target)) {
+    return false;
+  }
+  fs_->remove(target + "/" + kCapsuleArchiveMetadata);
+  return scan();
+}
+
+bool CapsuleLibrary::trash(const String &id, const String &trashedAt) {
+  const CapsuleSummary *record = find(id);
+  if (record == nullptr || record->trashed || trashedAt.isEmpty() ||
+      record->status == CapsuleStatus::transcribing) return false;
+  cJSON *metadata = cJSON_CreateObject();
+  if (metadata == nullptr) return false;
+  cJSON_AddNumberToObject(metadata, "schemaVersion", 1);
+  cJSON_AddStringToObject(metadata, "capsuleId", id.c_str());
+  cJSON_AddStringToObject(metadata, "trashedAt", trashedAt.c_str());
+  cJSON_AddStringToObject(metadata, "originalFolder", record->folder.c_str());
+  cJSON_AddNumberToObject(metadata, "revision", 1);
+  char *encoded = cJSON_Print(metadata);
+  const bool wrote = encoded != nullptr && writeTextAtomic(
+      record->directory + "/trash.json", String(encoded) + "\n");
+  cJSON_free(encoded);
+  cJSON_Delete(metadata);
+  const String target = String(kCapsuleTrash) + "/" + id;
+  if (!wrote) return false;
+  if (fs_->exists(target) || !fs_->rename(record->directory, target)) {
+    fs_->remove(record->directory + "/trash.json");
+    return false;
+  }
+  return scan();
+}
+
+bool CapsuleLibrary::restore(const String &id) {
+  const CapsuleSummary *record = find(id);
+  if (record == nullptr || !record->trashed) return false;
+  const String metadataText = readText(record->directory + "/trash.json",
+                                       kMaxMetadataBytes);
+  cJSON *metadata = cJSON_ParseWithLength(metadataText.c_str(),
+                                          metadataText.length());
+  const char *original = metadata == nullptr
+      ? nullptr : jsonString(metadata, "originalFolder");
+  String targetDirectory = safeRestoreDirectory(
+      original == nullptr ? String() : String(original));
+  cJSON_Delete(metadata);
+  String target = targetDirectory + "/" + id;
+  if (fs_->exists(target) && targetDirectory != kCapsuleInbox) {
+    targetDirectory = kCapsuleInbox;
+    target = targetDirectory + "/" + id;
+  }
+  if (fs_->exists(target) || !fs_->rename(record->directory, target)) {
+    return false;
+  }
+  fs_->remove(target + "/trash.json");
+  return scan();
+}
+
+CapsuleBatchResult CapsuleLibrary::batch(
+    const std::vector<String> &ids, CapsuleBatchAction action,
+    const String &changedAt) {
+  CapsuleBatchResult result;
+  if (ids.empty()) return result;
+  bool favoriteTarget = true;
+  if (action == CapsuleBatchAction::favorite) {
+    favoriteTarget = false;
+    for (const String &id : ids) {
+      const CapsuleSummary *record = find(id);
+      if (record != nullptr && !record->favorite) {
+        favoriteTarget = true;
+        break;
+      }
+    }
+  }
+  for (const String &id : ids) {
+    const CapsuleSummary *record = find(id);
+    if (record == nullptr || record->status == CapsuleStatus::transcribing) {
+      result.failedId = id;
+      return result;
+    }
+    if (action == CapsuleBatchAction::trashOrRestore &&
+        !record->trashed && changedAt.isEmpty()) {
+      result.failedId = id;
+      return result;
+    }
+  }
+
+  std::vector<String> changed;
+  changed.reserve(ids.size());
+  for (const String &id : ids) {
+    const CapsuleSummary *record = find(id);
+    bool ok = false;
+    bool changedThisItem = true;
+    if (action == CapsuleBatchAction::favorite) {
+      changedThisItem = record != nullptr &&
+          record->favorite != favoriteTarget;
+      ok = !changedThisItem;
+      if (!ok) ok = toggleFavorite(id);
+    } else if (action == CapsuleBatchAction::archiveOrRestore) {
+      ok = scope_ == CapsuleScope::trash ? restore(id) :
+          (scope_ == CapsuleScope::archive ? unarchive(id) : archive(id));
+    } else {
+      ok = scope_ == CapsuleScope::trash ? restore(id)
+                                         : trash(id, changedAt);
+    }
+    if (!ok) {
+      result.failedId = id;
+      CapsuleRollbackCounts rollback;
+      for (auto iterator = changed.rbegin(); iterator != changed.rend();
+           ++iterator) {
+        bool rollbackOk = false;
+        if (action == CapsuleBatchAction::favorite) {
+          rollbackOk = toggleFavorite(*iterator);
+        } else if (action == CapsuleBatchAction::archiveOrRestore) {
+          if (scope_ == CapsuleScope::trash) {
+            rollbackOk = trash(*iterator, changedAt);
+          } else if (scope_ == CapsuleScope::archive) {
+            rollbackOk = archive(*iterator);
+          } else {
+            rollbackOk = unarchive(*iterator);
+          }
+        } else if (scope_ == CapsuleScope::trash) {
+          rollbackOk = trash(*iterator, changedAt);
+        } else {
+          rollbackOk = restore(*iterator);
+        }
+        rollback.record(rollbackOk);
+        if (!rollbackOk && result.rollbackFailedId.isEmpty()) {
+          result.rollbackFailedId = *iterator;
+        }
+      }
+      result.rollbackAttempted = rollback.attempted;
+      result.rollbackFailed = rollback.failed;
+      result.rolledBackFully = rollback.fullyRolledBack();
+      result.changed = rollback.failed;
+      return result;
+    }
+    if (changedThisItem) changed.push_back(id);
+  }
+  result.ok = true;
+  result.changed = changed.size();
+  return result;
+}
+
+void CapsuleLibrary::setScope(CapsuleScope scope) {
+  if (scope_ == scope) return;
+  scope_ = scope;
+  rebuildVisible();
+}
+
+void CapsuleLibrary::rebuildVisible() {
+  visible_.clear();
+  for (size_t index = 0; index < records_.size(); ++index) {
+    const CapsuleSummary &record = records_[index];
+    const bool pending = record.status == CapsuleStatus::queued ||
+        record.status == CapsuleStatus::transcribing;
+    if (capsuleVisibleInScope(scope_, record.favorite, pending,
+                              record.status == CapsuleStatus::failed,
+                              record.archived, record.trashed)) {
+      visible_.push_back(index);
+    }
+  }
+  ++revision_;
+  if (revision_ == 0) revision_ = 1;
+}
+
+String CapsuleLibrary::safeRestoreDirectory(const String &folder) const {
+  if (folder.isEmpty() || folder.startsWith(".") || folder.startsWith("/") ||
+      folder.indexOf("\\") >= 0 || folder.indexOf("//") >= 0 ||
+      folder == "." || folder == ".." || folder.indexOf("/../") >= 0 ||
+      folder.startsWith("../") || folder.endsWith("/..")) {
+    return String(kCapsuleInbox);
+  }
+  const String candidate = String(kCapsuleRoot) + "/" + folder;
+  File directory = fs_->open(candidate);
+  const bool valid = directory && directory.isDirectory();
+  if (directory) directory.close();
+  return valid ? candidate : String(kCapsuleInbox);
 }
 
 String CapsuleLibrary::readBestText(const CapsuleSummary &record,

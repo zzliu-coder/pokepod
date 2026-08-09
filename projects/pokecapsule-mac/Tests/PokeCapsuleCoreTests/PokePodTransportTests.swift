@@ -102,17 +102,9 @@ final class PokePodTransportTests: XCTestCase {
         }
     }
 
-    func testPokePodDictationHoldSendsStartThenStopOperations() throws {
-        let channel = ScriptedLinkChannel()
-        let transport = try PokePodTransport(
-            deviceURL: URL(fileURLWithPath: "/dev/cu.PokePod-contract"),
-            channel: channel)
-
-        try transport.beginDictationHold()
-        try transport.endDictationHold()
-
-        XCTAssertEqual(channel.operations, ["dictate-start", "dictate-stop"])
-        XCTAssertFalse(channel.operations.contains("dictate"))
+    func testPokePodLinkProductOperationsContainNoWiredDictation() {
+        let operations = Set(PokePodLinkOperation.allCases.map(\.rawValue))
+        XCTAssertTrue(operations.isDisjoint(with: ["dictate", "dictate-start", "dictate-stop"]))
     }
 
     func testPokePodIdentityPreservesPlatformAndMatchesLegacyRegistration() throws {

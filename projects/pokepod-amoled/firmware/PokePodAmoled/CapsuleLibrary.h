@@ -4,6 +4,8 @@
 #include <FS.h>
 #include <vector>
 
+#include "CapsuleBrowserState.h"
+
 namespace pokepod {
 
 enum class CapsuleStatus {
@@ -27,14 +29,33 @@ struct CapsuleSummary {
   String audioFile;
   CapsuleStatus status = CapsuleStatus::damaged;
   bool favorite = false;
+  bool archived = false;
+  bool trashed = false;
   uint32_t durationMs = 0;
+};
+
+enum class CapsuleBatchAction : uint8_t {
+  favorite,
+  archiveOrRestore,
+  trashOrRestore,
+};
+
+struct CapsuleBatchResult {
+  bool ok = false;
+  size_t changed = 0;
+  String failedId;
+  size_t rollbackAttempted = 0;
+  size_t rollbackFailed = 0;
+  String rollbackFailedId;
+  bool rolledBackFully = false;
 };
 
 class CapsuleLibrary {
  public:
   bool begin(fs::FS &fs, Print &log);
   bool scan();
-  size_t count() const { return records_.size(); }
+  size_t count() const { return visible_.size(); }
+  uint32_t revision() const { return revision_; }
   size_t pendingCount() const;
   const CapsuleSummary *at(size_t index) const;
   const CapsuleSummary *nextQueued() const;
@@ -47,6 +68,14 @@ class CapsuleLibrary {
   bool requeue(const String &id);
   bool toggleFavorite(const String &id);
   bool archive(const String &id);
+  bool unarchive(const String &id);
+  bool trash(const String &id, const String &trashedAt);
+  bool restore(const String &id);
+  CapsuleBatchResult batch(const std::vector<String> &ids,
+                           CapsuleBatchAction action,
+                           const String &changedAt);
+  void setScope(CapsuleScope scope);
+  CapsuleScope scope() const { return scope_; }
   String readBestText(const CapsuleSummary &record, size_t maxBytes = 16384) const;
 
   static const char *statusName(CapsuleStatus status);
@@ -61,10 +90,15 @@ class CapsuleLibrary {
                         const String &rawTextFile, const String &errorStage,
                         const String &error, bool incrementAttempts);
   bool updateFavorite(const String &id, bool favorite);
+  void rebuildVisible();
+  String safeRestoreDirectory(const String &folder) const;
 
   fs::FS *fs_ = nullptr;
   Print *log_ = nullptr;
   std::vector<CapsuleSummary> records_;
+  std::vector<size_t> visible_;
+  CapsuleScope scope_ = CapsuleScope::inbox;
+  uint32_t revision_ = 0;
 };
 
 }  // namespace pokepod

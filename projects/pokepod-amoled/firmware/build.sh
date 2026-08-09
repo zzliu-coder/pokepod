@@ -13,6 +13,9 @@ ESP32_CORE_VERSION=$(
   "$ARDUINO_CLI" core list 2>/dev/null |
     awk '$1 == "esp32:esp32" { print $2; exit }'
 )
+ESP32_S3_SDK_DIR="/Users/zheliu/Library/Arduino15/packages/esp32/tools/esp32s3-libs/$ESP32_CORE_VERSION"
+SDK_OVERLAY_DIR="$WORK_DIR/sdk-single-connection"
+SDK_VARIANT=qio_opi
 
 if [ ! -x "$ARDUINO_CLI" ]; then
   echo "Arduino CLI not found: $ARDUINO_CLI" >&2
@@ -30,91 +33,70 @@ if [ -z "$ESP32_CORE_VERSION" ]; then
   echo "ESP32 Arduino core is not installed" >&2
   exit 1
 fi
-
-# Arduino-ESP32 3.3.8 shipped before TinyUSB PR #3640. Its ESP32-S3 DWC2
-# driver can permanently deactivate an isochronous IN endpoint after an
-# incomplete transfer, leaving USB microphones enumerated but sending only
-# zero-length packets. Build a project-local archive with the single corrected
-# DWC2 object from the first fixed release; never mutate the global Arduino
-# installation. Newer cores already contain the upstream fix.
-set --
-TINYUSB_PATCHED_ARCHIVE=""
-if [ "$ESP32_CORE_VERSION" = "3.3.8" ]; then
-  TOOLCHAIN_DIR="$WORK_DIR/toolchain"
-  UPSTREAM_ZIP="$TOOLCHAIN_DIR/esp32s3-libs-3.3.9.zip"
-  UPSTREAM_DIR="$TOOLCHAIN_DIR/esp32s3-3.3.9"
-  PATCH_DIR="$TOOLCHAIN_DIR/tinyusb-3.3.8-pr3640"
-  BASE_SDK="/Users/zheliu/Library/Arduino15/packages/esp32/tools/esp32s3-libs/3.3.8"
-  BASE_ARCHIVE="$BASE_SDK/lib/libarduino_tinyusb.a"
-  BASE_LD_LIBS="$BASE_SDK/flags/ld_libs"
-  TINYUSB_PATCHED_ARCHIVE="$PATCH_DIR/libarduino_tinyusb.a"
-  PATCHED_LD_LIBS="$PATCH_DIR/ld_libs"
-  UPSTREAM_URL="https://github.com/espressif/arduino-esp32/releases/download/3.3.9/esp32s3-libs-3.3.9.zip"
-  UPSTREAM_ZIP_SHA="34684fecef49e92e9fb11784ab5f0892328d3678ad8e8445a2bbf2cddf6a4fb6"
-  BASE_ARCHIVE_SHA="afe9a1545350848486edd59b5a798c80c6fd462ffa1d2d71ec1f80a24f53848f"
-  PATCH_OBJECT_SHA="04ad2e97999b3a2ba4057c8d89be0f58f92e158460541369db2f4d3e206321f2"
-  XTENSA_AR="/Users/zheliu/Library/Arduino15/packages/esp32/tools/esp-x32/2601/bin/xtensa-esp32s3-elf-ar"
-
-  mkdir -p "$TOOLCHAIN_DIR" "$UPSTREAM_DIR" "$PATCH_DIR" "$PATCH_DIR/verify"
-  if [ ! -f "$BASE_ARCHIVE" ] || [ ! -f "$BASE_LD_LIBS" ]; then
-    echo "Arduino-ESP32 3.3.8 TinyUSB inputs are missing" >&2
-    exit 1
-  fi
-  if [ "$(shasum -a 256 "$BASE_ARCHIVE" | awk '{print $1}')" != "$BASE_ARCHIVE_SHA" ]; then
-    echo "Arduino-ESP32 3.3.8 TinyUSB archive hash changed" >&2
-    exit 1
-  fi
-  if [ ! -f "$UPSTREAM_ZIP" ] ||
-     [ "$(shasum -a 256 "$UPSTREAM_ZIP" 2>/dev/null | awk '{print $1}')" != "$UPSTREAM_ZIP_SHA" ]; then
-    command -v curl >/dev/null 2>&1 || {
-      echo "curl is required to obtain the pinned TinyUSB fix" >&2
-      exit 1
-    }
-    curl -L --fail --retry 10 --retry-all-errors --continue-at - \
-      --output "$UPSTREAM_ZIP" "$UPSTREAM_URL"
-  fi
-  if [ "$(shasum -a 256 "$UPSTREAM_ZIP" | awk '{print $1}')" != "$UPSTREAM_ZIP_SHA" ]; then
-    echo "Pinned ESP32-S3 library package hash mismatch" >&2
-    exit 1
-  fi
-
-  unzip -jo "$UPSTREAM_ZIP" esp32s3-libs/lib/libarduino_tinyusb.a \
-    -d "$UPSTREAM_DIR" >/dev/null
-  (
-    cd "$UPSTREAM_DIR"
-    "$XTENSA_AR" x libarduino_tinyusb.a dcd_dwc2.c.obj
-  )
-  if [ "$(shasum -a 256 "$UPSTREAM_DIR/dcd_dwc2.c.obj" | awk '{print $1}')" != "$PATCH_OBJECT_SHA" ]; then
-    echo "Pinned TinyUSB DWC2 object hash mismatch" >&2
-    exit 1
-  fi
-
-  cp "$BASE_ARCHIVE" "$TINYUSB_PATCHED_ARCHIVE"
-  (
-    cd "$UPSTREAM_DIR"
-    "$XTENSA_AR" r "$TINYUSB_PATCHED_ARCHIVE" dcd_dwc2.c.obj
-  )
-  (
-    cd "$PATCH_DIR/verify"
-    "$XTENSA_AR" x "$TINYUSB_PATCHED_ARCHIVE" dcd_dwc2.c.obj
-  )
-  if [ "$(shasum -a 256 "$PATCH_DIR/verify/dcd_dwc2.c.obj" | awk '{print $1}')" != "$PATCH_OBJECT_SHA" ]; then
-    echo "Project-local TinyUSB patch verification failed" >&2
-    exit 1
-  fi
-  sed "s#-larduino_tinyusb#$TINYUSB_PATCHED_ARCHIVE#" \
-    "$BASE_LD_LIBS" >"$PATCHED_LD_LIBS"
-  set -- --build-property "compiler.c.elf.libs=@$PATCHED_LD_LIBS"
-elif [ "$ESP32_CORE_VERSION" = "3.3.9" ] ||
-     [ "$ESP32_CORE_VERSION" = "3.3.10" ] ||
-     [ "$ESP32_CORE_VERSION" = "3.3.11" ]; then
-  :
-else
-  echo "Unsupported ESP32 Arduino core: $ESP32_CORE_VERSION" >&2
+if [ ! -f "$ESP32_S3_SDK_DIR/sdkconfig" ] ||
+   [ ! -f "$ESP32_S3_SDK_DIR/$SDK_VARIANT/include/sdkconfig.h" ]; then
+  echo "ESP32-S3 SDK configuration not found: $ESP32_S3_SDK_DIR" >&2
   exit 1
 fi
 
-mkdir -p "$(dirname -- "$VENDOR_DIR")" "$WORK_DIR/build" "$WORK_DIR/output"
+case "$ESP32_CORE_VERSION" in
+  3.3.8|3.3.9|3.3.10|3.3.11) ;;
+  *)
+    echo "Unsupported ESP32 Arduino core: $ESP32_CORE_VERSION" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$(dirname -- "$VENDOR_DIR")" "$WORK_DIR/build" "$WORK_DIR/output" \
+  "$SDK_OVERLAY_DIR/$SDK_VARIANT/include"
+
+# Arduino-ESP32 ships a generic SDK configured for three NimBLE controller
+# connections. PokePod Voice has passkey callbacks that do not carry a
+# connection handle, so the stack-facing Arduino BLE layer must be compiled
+# for exactly one connection. Keep the installed toolchain immutable and build
+# against a local symlink overlay containing only the two adjusted configs.
+for sdk_item in "$ESP32_S3_SDK_DIR"/*; do
+  sdk_name=$(basename -- "$sdk_item")
+  case "$sdk_name" in
+    sdkconfig|"$SDK_VARIANT") continue ;;
+  esac
+  ln -sfn "$sdk_item" "$SDK_OVERLAY_DIR/$sdk_name"
+done
+for sdk_item in "$ESP32_S3_SDK_DIR/$SDK_VARIANT"/*; do
+  sdk_name=$(basename -- "$sdk_item")
+  [ "$sdk_name" = include ] && continue
+  ln -sfn "$sdk_item" "$SDK_OVERLAY_DIR/$SDK_VARIANT/$sdk_name"
+done
+for sdk_item in "$ESP32_S3_SDK_DIR/$SDK_VARIANT/include"/*; do
+  sdk_name=$(basename -- "$sdk_item")
+  [ "$sdk_name" = sdkconfig.h ] && continue
+  ln -sfn "$sdk_item" "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/$sdk_name"
+done
+awk '
+  /^CONFIG_BT_NIMBLE_MAX_CONNECTIONS=/ {
+    print "CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1"; next
+  }
+  /^CONFIG_NIMBLE_MAX_CONNECTIONS=/ {
+    print "CONFIG_NIMBLE_MAX_CONNECTIONS=1"; next
+  }
+  { print }
+' "$ESP32_S3_SDK_DIR/sdkconfig" > "$SDK_OVERLAY_DIR/sdkconfig.next"
+mv "$SDK_OVERLAY_DIR/sdkconfig.next" "$SDK_OVERLAY_DIR/sdkconfig"
+awk '
+  /^#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS / {
+    print "#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1"; next
+  }
+  /^#define CONFIG_NIMBLE_MAX_CONNECTIONS / {
+    print "#define CONFIG_NIMBLE_MAX_CONNECTIONS 1"; next
+  }
+  { print }
+' "$ESP32_S3_SDK_DIR/$SDK_VARIANT/include/sdkconfig.h" \
+  > "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next"
+mv "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next" \
+  "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
+rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$SDK_OVERLAY_DIR/sdkconfig"
+rg -qx '#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1' \
+  "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
 if [ ! -d "$VENDOR_DIR/.git" ]; then
   git clone https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.8.git "$VENDOR_DIR"
 fi
@@ -127,6 +109,7 @@ BUILD_LOG="$WORK_DIR/build.log"
 if ! "$ARDUINO_CLI" compile --clean \
   --warnings all \
   --fqbn 'esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none' \
+  --build-property "compiler.sdk.path=$SDK_OVERLAY_DIR" \
   --library "$GFX_LIBRARY" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Arduino_DriveBus" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Adafruit_XCA9554" \
@@ -143,15 +126,14 @@ then
   exit 1
 fi
 cat "$BUILD_LOG"
+rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$WORK_DIR/build/sdkconfig"
+if rg -q '^CONFIG_BT_NIMBLE_MAX_CONNECTIONS=[2-9]' \
+  "$WORK_DIR/build/sdkconfig"; then
+  printf 'Build used a multi-connection NimBLE configuration\n' >&2
+  exit 3
+fi
 if rg -q "${SKETCH_DIR}/.*warning:" "$BUILD_LOG"; then
   printf 'Project source emitted compiler warnings\n' >&2
   exit 2
 fi
-if [ -n "$TINYUSB_PATCHED_ARCHIVE" ] &&
-   ! rg -Fq "$TINYUSB_PATCHED_ARCHIVE(dcd_dwc2.c.obj)" \
-     "$WORK_DIR/output/PokePodAmoled.ino.map"; then
-  printf 'Project-local TinyUSB DWC2 fix was not linked\n' >&2
-  exit 3
-fi
-
 shasum -a 256 "$WORK_DIR"/output/*

@@ -9,6 +9,7 @@ enum class UiIcon : uint8_t {
   list,
   device,
   wifi,
+  bluetooth,
   mac,
   storage,
   raise,

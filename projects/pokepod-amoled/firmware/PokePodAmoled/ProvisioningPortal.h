@@ -6,18 +6,23 @@
 #include <vector>
 
 #include "DeviceConfig.h"
+#include "ProvisioningDiagnostics.h"
+#include "ProvisioningPolicy.h"
 
 namespace pokepod {
 
 class ProvisioningPortal {
  public:
   ProvisioningPortal();
-  bool begin(DeviceConfig &config, Print &log);
+  bool begin(DeviceConfig &config, ProvisioningDiagnostics &diagnostics,
+             Print &log);
   void loop(uint32_t nowMs);
   void stop();
   bool active() const { return active_; }
   const String &ssid() const { return ssid_; }
   const String &password() const { return password_; }
+  const String &statusMessage() const { return statusMessage_; }
+  ProvisioningState state() const;
   bool takeConfigurationChanged();
 
  private:
@@ -34,7 +39,11 @@ class ProvisioningPortal {
   void scanRequest();
   void showPortal();
   void saveRequest();
+  void forgetRequest();
   void sendSaveJson(int statusCode, bool accepted);
+  void beginStationValidation();
+  void restorePortalForRetry();
+  const char *portalState() const;
   void redirectPortal();
   String pageHtml() const;
   String networksJson() const;
@@ -44,6 +53,7 @@ class ProvisioningPortal {
   DNSServer dns_;
   WebServer server_;
   DeviceConfig *config_ = nullptr;
+  ProvisioningDiagnostics *diagnostics_ = nullptr;
   Print *log_ = nullptr;
   DeviceSettings candidate_;
   String ssid_;
@@ -54,12 +64,16 @@ class ProvisioningPortal {
   bool active_ = false;
   bool validating_ = false;
   bool scanning_ = false;
+  bool transitionPending_ = false;
   bool changed_ = false;
   bool saved_ = false;
   uint32_t startedMs_ = 0;
   uint32_t validatingSinceMs_ = 0;
   uint32_t scanStartedMs_ = 0;
+  uint32_t transitionAtMs_ = 0;
   uint32_t closeAtMs_ = 0;
+  int16_t candidateRssi_ = -127;
+  uint8_t validationAttempt_ = 0;
 };
 
 }  // namespace pokepod

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="368" height="448" viewBox="0 0 368 448">
+<rect width="368" height="448" rx="44" fill="#000"/><g font-family="PingFang SC,Arial" fill="#F4F7F6">
+<text x="24" y="35" font-size="18" font-weight="600">▰ 82%</text><circle cx="266" cy="29" r="5" fill="#42E8C3"/><text x="278" y="35" font-size="14" fill="#8EA09C">转写中</text>
+<rect x="20" y="58" width="328" height="157" rx="28" fill="#0B1514" stroke="#1D3733"/><ellipse cx="82" cy="136" rx="39" ry="27" fill="none" stroke="#42E8C3" stroke-width="3"/><path d="M61 136h42M82 115v42" stroke="#42E8C3" stroke-width="3"/><text x="132" y="126" font-size="28" font-weight="700">语音胶囊</text><text x="132" y="158" font-size="18" fill="#42E8C3">轻触录音</text>
+<rect x="20" y="228" width="328" height="157" rx="28" fill="#0C101B" stroke="#252D4A"/><circle cx="82" cy="306" r="31" fill="none" stroke="#A9B8FF" stroke-width="3"/><path d="M68 306h28M82 292v28" stroke="#A9B8FF" stroke-width="3"/><text x="132" y="296" font-size="26" font-weight="700">微信语音输入</text><text x="132" y="328" font-size="18" fill="#A9B8FF">按住说话 · 已连接</text>
+<circle cx="174" cy="418" r="3" fill="#44504E"/><rect x="181" y="415" width="14" height="6" rx="3" fill="#42E8C3"/><circle cx="202" cy="418" r="3" fill="#44504E"/>
+</g></svg>

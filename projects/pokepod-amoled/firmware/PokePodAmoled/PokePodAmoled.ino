@@ -4,19 +4,24 @@
 #include <esp_system.h>
 
 #include "AudioPipeline.h"
+#include "AudioCaptureRouter.h"
+#include "BleVoiceService.h"
 #include "BoardConfig.h"
 #include "BoardServices.h"
 #include "ButtonDebouncer.h"
-#include "ButtonPolicy.h"
 #include "CapsuleLibrary.h"
 #include "CapsulePolicy.h"
+#include "CapsuleUndoState.h"
 #include "Dashboard.h"
 #include "DeviceConfig.h"
 #include "ProvisioningPortal.h"
+#include "ProvisioningDiagnostics.h"
 #include "PokePodLinkService.h"
+#include "PowerPolicy.h"
 #include "RaiseToWakePolicy.h"
+#include "RuntimePowerManager.h"
 #include "TencentWorker.h"
-#include "UsbVoiceBridge.h"
+#include "UsbLinkBridge.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
 
@@ -26,7 +31,9 @@ namespace {
 
 BoardServices board;
 AudioPipeline audio;
-UsbVoiceBridge usb;
+AudioCaptureRouter captureRouter;
+UsbLinkBridge usb;
+BleVoiceService bleVoice;
 WavRecorder recorder;
 CapsuleLibrary capsuleLibrary;
 Dashboard dashboard;
@@ -35,24 +42,70 @@ DeviceConfig deviceConfig;
 WifiController wifi;
 TencentWorker tencentWorker;
 ProvisioningPortal provisioningPortal;
+ProvisioningDiagnostics provisioningDiagnostics;
 PokePodLinkService linkService;
 RaiseToWakePolicy raiseToWake;
+RuntimePowerManager runtimePower;
+AutoScreenOffPolicy autoScreenOff;
 
 uint8_t audioBuffer[kAudioBytesPerChunk];
 TouchGestureTracker touchGesture;
-bool touchDictationHolding = false;
-bool touchDictationAttempted = false;
-bool bootDictationHolding = false;
+bool touchWirelessHolding = false;
+bool touchWirelessAttempted = false;
+bool touchDeviceForgetAttempted = false;
+bool touchCapsuleSelectionAttempted = false;
+bool touchVerticalScrolling = false;
+bool scrollRedrawPending = false;
+bool bootWirelessHolding = false;
 bool bootProvisioningExitArmed = false;
-bool dictationUiActive = false;
+bool bootScreenWakeArmed = false;
+bool wirelessUiActive = false;
 UiAction touchAction = UiAction::none;
 uint32_t lastTouchMs = 0;
 uint32_t lastDashboardMs = 0;
+uint32_t lastScrollFrameMs = 0;
 uint32_t lastSensorMs = 0;
 uint32_t bootPressedAtMs = 0;
 bool rtcSyncedFromNetwork = false;
+bool ignoreTouchUntilRelease = false;
 String transientMessage;
 uint32_t transientUntilMs = 0;
+CapsuleUndoState trashUndo;
+PowerDecision currentPowerDecision;
+
+void noteUserActivity(uint32_t nowMs = millis()) {
+  autoScreenOff.noteActivity(nowMs);
+}
+
+void setScreenState(bool enabled) {
+  if (board.status().screenOn == enabled) return;
+  board.setScreenOn(enabled);
+  board.configureScreenOffSensors(!enabled,
+                                  deviceConfig.settings().raiseToWake,
+                                  usb.log());
+  if (enabled) {
+    noteUserActivity();
+    dashboard.invalidate();
+  }
+}
+
+PowerInputs currentPowerInputs() {
+  PowerInputs input;
+  input.screenOn = board.status().screenOn;
+  input.audioActive = audio.active() || recorder.recording() || audio.playing();
+  input.bleConnected = bleVoice.connected();
+  input.bleStreaming = bleVoice.streaming();
+  input.wifiRadioOn = wifi.radioOn() || provisioningPortal.active();
+  input.usbHostConnected = usb.hostConnected();
+  input.vbusPresent = board.status().vbusPresent;
+  input.linkBusy = linkService.receivingBinary() ||
+      linkService.maintenanceActive();
+  input.storageBusy = recorder.recording();
+  input.networkBusy = tencentWorker.working();
+  input.provisioning = provisioningPortal.active();
+  input.uiAnimating = dashboard.scrollActive();
+  return input;
+}
 
 String recordingId() {
   uint8_t randomBytes[16];
@@ -65,24 +118,74 @@ String recordingId() {
   return String(value);
 }
 
-void showMessage(const char *message, uint32_t durationMs = 1800) {
+String deviceId() {
+  const uint64_t mac = ESP.getEfuseMac();
+  char value[24];
+  snprintf(value, sizeof(value), "pokepod-%04x%08x",
+           static_cast<unsigned>((mac >> 32) & 0xffff),
+           static_cast<unsigned>(mac & 0xffffffff));
+  return String(value);
+}
+
+void showMessage(const String &message, uint32_t durationMs = 1800) {
   transientMessage = message;
   transientUntilMs = millis() + durationMs;
 }
 
+void armTrashUndo(const std::vector<String> &ids) {
+  std::vector<std::string> stableIds;
+  stableIds.reserve(ids.size());
+  for (const String &id : ids) stableIds.emplace_back(id.c_str());
+  trashUndo.arm(stableIds, millis());
+  showMessage("已删除 · 点此撤销", CapsuleUndoState::kDurationMs);
+}
+
+void restoreRecentTrash() {
+  const uint32_t now = millis();
+  std::vector<std::string> failedIds;
+  const std::vector<std::string> pending = trashUndo.pendingIds();
+  for (const std::string &id : pending) {
+    if (!capsuleLibrary.restore(id.c_str())) failedIds.push_back(id);
+  }
+  const CapsuleUndoResult result = trashUndo.finishAttempt(failedIds);
+  dashboard.invalidate();
+  if (result.failed() == 0) {
+    showMessage(String("已恢复 ") + result.restored + " 条");
+  } else {
+    const String message = String("已恢复 ") + result.restored +
+        " 条，失败 " + result.failed() + " 条 · 再试";
+    const uint32_t remaining = trashUndo.remainingMs(now);
+    showMessage(message, remaining == 0 ? 1800 : remaining);
+  }
+}
+
 void drawDashboard() {
+  if (!board.status().screenOn) return;
   DashboardView view;
   view.board = &board.status();
   view.library = &capsuleLibrary;
   view.settings = &deviceConfig.settings();
   view.audioReady = audio.ready();
   view.usbReady = usb.ready();
-  view.hostConnected = usb.hostConnected();
-  view.dictationHolding = dictationUiActive;
+  view.usbConnected = usb.hostConnected();
+  view.bleVoiceConnected = bleVoice.connected();
+  view.bleVoiceReady = bleVoice.appReady();
+  view.bleVoiceBonded = bleVoice.bonded();
+  view.bleVoicePairing = bleVoice.pairingMode(millis());
+  view.bleVoicePasskey = bleVoice.passkey();
+  view.bleVoiceMtu = bleVoice.mtu();
+  const BleVoiceQualitySnapshot bleQuality = bleVoice.quality();
+  view.bleVoiceNotifyFailures = bleQuality.notifyFailures;
+  view.bleVoiceQueueOverflows = bleQuality.queueOverflows;
+  view.bleVoiceReadyTimeouts = bleQuality.readyTimeouts;
+  view.bleVoiceStopAckTimeouts = bleQuality.stopAckTimeouts;
+  view.bleVoiceStreamTimeouts = bleQuality.streamTimeouts;
+  view.wirelessHolding = wirelessUiActive;
   view.recording = recorder.recording();
   view.transcribing = tencentWorker.working();
   view.playing = audio.playing();
   view.provisioning = provisioningPortal.active();
+  view.undoAvailable = trashUndo.available(millis());
   view.recordingMs = recorder.durationMs();
   view.audioPeak = audio.consumePeakWindow();
   audio.copyEnvelope(view.audioEnvelope, PeakWindow::kEnvelopeSamples);
@@ -91,43 +194,60 @@ void drawDashboard() {
   view.wifiRssi = wifi.rssi();
   view.portalSsid = provisioningPortal.ssid();
   view.portalPassword = provisioningPortal.password();
+  view.portalStatus = provisioningPortal.statusMessage();
+  view.portalState = provisioningPortal.state();
+  view.provisioningDiagnostics = &provisioningDiagnostics;
   if (deadlinePending(millis(), transientUntilMs)) view.message = transientMessage;
   dashboard.draw(view);
 }
 
-bool startDictationHold() {
-  if (!usb.hostConnected()) {
-    showMessage("USB 键盘尚未就绪");
+bool startWirelessHold() {
+  if (!bleVoice.appReady()) {
+    showMessage(bleVoice.connected() ? "蓝牙连接质量不足" : "等待 Mac 应用");
     drawDashboard();
     return false;
   }
-  dictationUiActive = true;
+  if (audio.playing()) audio.stopPlayback(usb.log());
+  if (!captureRouter.available() || !audio.startCapture(usb.log())) {
+    showMessage("无线麦克风暂时不可用");
+    drawDashboard();
+    return false;
+  }
+  uint32_t sessionId = esp_random();
+  if (sessionId == 0) sessionId = 1;
+  if (!bleVoice.startSession(sessionId, millis(), captureRouter)) {
+    audio.stopHardware(usb.log());
+    showMessage("无线麦克风暂时不可用");
+    drawDashboard();
+    return false;
+  }
+  wirelessUiActive = true;
+  noteUserActivity();
   transientMessage = "";
   transientUntilMs = 0;
   drawDashboard();
-  const bool sent = usb.beginDictationHold();
-  if (!sent) {
-    dictationUiActive = false;
-    showMessage("USB 键盘尚未就绪");
-    drawDashboard();
-  }
-  return sent;
+  return true;
 }
 
-bool stopDictationHold() {
-  const bool sent = usb.endDictationHold();
-  dictationUiActive = false;
+bool stopWirelessHold() {
+  bleVoice.endSession();
+  wirelessUiActive = false;
+  noteUserActivity();
   transientMessage = "";
   transientUntilMs = 0;
   drawDashboard();
-  return sent;
+  return true;
 }
 
 void toggleRecording() {
   if (recorder.recording()) {
     const bool ok = recorder.stop(usb.log());
+    captureRouter.release(AudioCaptureOwner::localCapsule);
+    audio.stopHardware(usb.log());
     if (ok) capsuleLibrary.scan();
     showMessage(ok ? "胶囊已进入转写队列" : "录音提交失败");
+  } else if (tencentWorker.working()) {
+    showMessage("当前胶囊正在转写");
   } else if (!board.sdReady()) {
     showMessage("请插入 microSD 卡");
   } else if (!audio.ready()) {
@@ -135,43 +255,63 @@ void toggleRecording() {
   } else {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
-    const bool ok = recorder.start(usb.log(), recordingId(), board.utcNow());
+    const bool acquired = captureRouter.acquire(AudioCaptureOwner::localCapsule);
+    const bool ok = acquired && audio.startCapture(usb.log()) &&
+        recorder.start(usb.log(), recordingId(), board.utcNow());
     if (ok) {
       audio.resetPeakWindow();
       transientMessage = "";
       transientUntilMs = 0;
     } else {
+      captureRouter.release(AudioCaptureOwner::localCapsule);
+      audio.stopHardware(usb.log());
       showMessage("录音启动失败");
     }
   }
+  noteUserActivity();
   drawDashboard();
 }
 
 void emitStatus() {
   const BoardStatus &s = board.status();
+  const BleVoiceQualitySnapshot quality = bleVoice.quality();
+  const RuntimePowerSnapshot &power = runtimePower.snapshot();
   usb.log().printf(
-      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"usb\":%s,\"host_connected\":%s,\"mic_streaming\":%s,\"mic_open_count\":%lu,\"mic_close_count\":%lu,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"uac_attempted_bytes\":%llu,\"uac_accepted_bytes\":%llu,\"uac_short_writes\":%lu,\"uac_usb_bytes_sent\":%llu,\"uac_usb_packets_sent\":%lu,\"uac_usb_zero_packets\":%lu,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s}\n",
+      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"last_wake_cause\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_diagnostic_count\":%u}\n",
       variantName(s.variant), s.display ? "true" : "false", s.touch ? "true" : "false",
       s.sdCard ? "true" : "false", audio.ready() ? "true" : "false",
+      audio.active() ? "true" : "false",
       usb.ready() ? "true" : "false", usb.hostConnected() ? "true" : "false",
-      usb.microphoneStreaming() ? "true" : "false",
-      static_cast<unsigned long>(usb.microphoneOpenCount()),
-      static_cast<unsigned long>(usb.microphoneCloseCount()),
+      bleVoice.connected() ? "true" : "false",
+      bleVoice.appReady() ? "true" : "false", bleVoice.mtu(),
+      bleVoice.streaming() ? "true" : "false",
+      static_cast<unsigned long>(quality.notifyAttempts),
+      static_cast<unsigned long>(quality.notifyAccepted),
+      static_cast<unsigned long>(quality.notifyFailures),
+      static_cast<unsigned long>(quality.queueOverflows),
+      static_cast<unsigned long>(quality.sessionFailures),
+      static_cast<unsigned long>(quality.readyTimeouts),
+      static_cast<unsigned long>(quality.stopAckTimeouts),
+      static_cast<unsigned long>(quality.streamTimeouts),
+      static_cast<unsigned>(quality.lastErrorCode),
       static_cast<unsigned long long>(audio.bytesRead()),
       static_cast<unsigned long>(audio.readFailures()), audio.peakSample(),
-      static_cast<unsigned long long>(usb.microphoneBytesAttempted()),
-      static_cast<unsigned long long>(usb.microphoneBytesAccepted()),
-      static_cast<unsigned long>(usb.microphoneShortWrites()),
-      static_cast<unsigned long long>(usb.microphoneUsbBytesSent()),
-      static_cast<unsigned long>(usb.microphoneUsbPacketsSent()),
-      static_cast<unsigned long>(usb.microphoneUsbZeroLengthPackets()),
       recorder.recording() ? "true" : "false",
       static_cast<unsigned long>(recorder.durationMs()), s.batteryPercent,
       s.charging ? "true" : "false", s.vbusPresent ? "true" : "false",
       wifi.phaseName(), static_cast<long>(wifi.rssi()),
+      wifi.radioOn() ? "true" : "false",
+      wifi.powerSaveEnabled() ? "true" : "false",
       static_cast<unsigned>(capsuleLibrary.pendingCount()),
       deviceConfig.hasTencent() ? "true" : "false",
-      tencentWorker.working() ? "true" : "false");
+      tencentWorker.working() ? "true" : "false",
+      powerModeName(power.mode), power.cpuMhz,
+      static_cast<unsigned long>(power.lightSleepCount),
+      static_cast<unsigned long long>(power.lightSleepUs),
+      static_cast<unsigned>(power.lastWakeCause),
+      power.automaticPmSupported ? "true" : "false",
+      power.bleModemSleepSupported ? "true" : "false",
+      static_cast<unsigned>(provisioningDiagnostics.count()));
 }
 
 void pollTouch() {
@@ -179,37 +319,96 @@ void pollTouch() {
   int16_t x = 0;
   int16_t y = 0;
   const bool touched = board.readTouch(x, y);
+  if (!board.status().screenOn) {
+    if (touched || board.takeTouchInterrupt()) {
+      ignoreTouchUntilRelease = true;
+      setScreenState(true);
+    }
+    return;
+  }
+  if (ignoreTouchUntilRelease) {
+    if (!touched) ignoreTouchUntilRelease = false;
+    return;
+  }
   if (touched && !touchGesture.active) {
+    noteUserActivity(now);
     touchGesture.begin(x, y, now);
-    touchDictationAttempted = false;
-    touchAction = dashboard.actionAt(x, y, usb.hostConnected());
+    touchWirelessAttempted = false;
+    touchDeviceForgetAttempted = false;
+    touchCapsuleSelectionAttempted = false;
+    touchVerticalScrolling = false;
+    touchAction = dashboard.actionAt(x, y, bleVoice.appReady());
   } else if (touched) {
     touchGesture.update(x, y);
-    if (touchAction == UiAction::wechatDictation &&
-        !touchDictationAttempted &&
-        touchGesture.dictationReady(now)) {
-      touchDictationAttempted = true;
-      touchDictationHolding = startDictationHold();
+    if (!touchVerticalScrolling && !touchWirelessHolding &&
+        !touchDeviceForgetAttempted && !touchCapsuleSelectionAttempted &&
+        touchGesture.verticalSwipe()) {
+      touchVerticalScrolling = dashboard.beginVerticalScroll(
+          touchGesture.startY, touchGesture.startedAtMs, capsuleLibrary);
+    }
+    if (touchVerticalScrolling) {
+      if (dashboard.updateVerticalScroll(y, now, capsuleLibrary)) {
+        scrollRedrawPending = true;
+      }
+      return;
+    }
+    if (touchAction == UiAction::wechatVoice &&
+        !touchWirelessAttempted &&
+        touchGesture.wirelessHoldReady(now)) {
+      touchWirelessAttempted = true;
+      touchWirelessHolding = startWirelessHold();
+    } else if (touchAction == UiAction::wirelessSettings &&
+               !touchDeviceForgetAttempted && touchGesture.tapEligible() &&
+               now - touchGesture.startedAtMs >= ui::kDeviceForgetHoldMs) {
+      touchDeviceForgetAttempted = true;
+      bleVoice.forgetMac();
+      showMessage("已忘记 Mac");
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (touchAction == UiAction::openCapsule &&
+               !touchCapsuleSelectionAttempted &&
+               !dashboard.capsuleSelectionMode() &&
+               touchGesture.tapEligible() &&
+               now - touchGesture.startedAtMs >=
+                   CapsuleBrowserState::kLongPressMs) {
+      touchCapsuleSelectionAttempted = true;
+      if (!dashboard.beginCapsuleSelectionAt(touchGesture.startY,
+                                             capsuleLibrary)) {
+        showMessage("正在转写，暂时不能选择");
+      }
+      drawDashboard();
     }
   } else if (!touched) {
     if (!touchGesture.active) return;
     const int16_t deltaX = touchGesture.deltaX();
-    const int16_t deltaY = touchGesture.deltaY();
     const int16_t startX = touchGesture.startX;
     const int16_t startY = touchGesture.startY;
     const bool horizontalSwipe = touchGesture.horizontalSwipe();
     const bool verticalSwipe = touchGesture.verticalSwipe();
     const bool tapEligible = touchGesture.tapEligible();
     touchGesture.reset();
-    if (touchDictationHolding) {
-      touchDictationHolding = false;
-      stopDictationHold();
+    if (touchVerticalScrolling) {
+      touchVerticalScrolling = false;
+      dashboard.endVerticalScroll(now);
+      noteUserActivity(now);
+      scrollRedrawPending = false;
+      lastScrollFrameMs = now;
+      drawDashboard();
       return;
     }
+    if (touchWirelessHolding) {
+      touchWirelessHolding = false;
+      stopWirelessHold();
+      return;
+    }
+    if (touchDeviceForgetAttempted) return;
+    if (touchCapsuleSelectionAttempted) return;
     if (horizontalSwipe) {
       if (provisioningPortal.active() &&
           isBackEdgeSwipe(startX, deltaX)) {
-        provisioningPortal.stop();
+        if (dashboard.state().screen() != UiScreen::provisioningLog) {
+          provisioningPortal.stop();
+        }
         dashboard.back();
       } else {
         dashboard.swipeHorizontal(deltaX, recorder.recording(), startX);
@@ -217,21 +416,33 @@ void pollTouch() {
       drawDashboard();
       return;
     }
-    if (verticalSwipe) {
-      dashboard.swipeVertical(deltaY, capsuleLibrary);
-      drawDashboard();
-      return;
-    }
+    if (verticalSwipe) return;
     if (!tapEligible) return;
+    noteUserActivity(now);
     const UiAction action = touchAction;
-    if (action == UiAction::capsuleRecord) toggleRecording();
-    else if (action == UiAction::wechatDictation) return;
+    if (action == UiAction::undoTrash) {
+      restoreRecentTrash();
+      drawDashboard();
+    } else if (action == UiAction::capsuleRecord) toggleRecording();
+    else if (action == UiAction::wechatVoice) return;
     else if (action == UiAction::openCapsule) {
-      dashboard.openCapsuleAt(startY, capsuleLibrary);
+      if (dashboard.capsuleSelectionMode()) {
+        if (!dashboard.toggleCapsuleSelectionAt(startY, capsuleLibrary)) {
+          showMessage("正在转写，暂时不能选择");
+        }
+      } else {
+        dashboard.openCapsuleAt(startY, capsuleLibrary);
+      }
       drawDashboard();
     } else if (action == UiAction::back) {
-      if (provisioningPortal.active()) provisioningPortal.stop();
+      if (provisioningPortal.active() &&
+          dashboard.state().screen() != UiScreen::provisioningLog) {
+        provisioningPortal.stop();
+      }
       dashboard.back();
+      drawDashboard();
+    } else if (action == UiAction::openProvisioningLog) {
+      dashboard.openProvisioningLog();
       drawDashboard();
     } else if (action == UiAction::wifiToggle) {
       const bool enabled = !deviceConfig.settings().wifiEnabled;
@@ -242,8 +453,22 @@ void pollTouch() {
       }
       dashboard.invalidate();
       drawDashboard();
+    } else if (action == UiAction::wirelessSettings) {
+      if (bleVoice.pairingMode(now)) {
+        bleVoice.cancelPairingMode();
+        showMessage("已取消配对");
+      } else {
+        bleVoice.enterPairingMode(now);
+        char pairMessage[48];
+        snprintf(pairMessage, sizeof(pairMessage), "配对码 %06lu · 长按忘记",
+                 static_cast<unsigned long>(bleVoice.passkey()));
+        showMessage(String(pairMessage), 5000);
+      }
+      dashboard.invalidate();
+      drawDashboard();
     } else if (action == UiAction::openProvisioning) {
-      if (provisioningPortal.begin(deviceConfig, usb.log())) {
+      if (provisioningPortal.begin(deviceConfig, provisioningDiagnostics,
+                                   usb.log())) {
         showMessage("手机连接屏幕上的热点");
       } else {
         showMessage("配网热点启动失败");
@@ -257,6 +482,51 @@ void pollTouch() {
       }
       dashboard.invalidate();
       drawDashboard();
+    } else if (action == UiAction::openCapsuleScope) {
+      dashboard.openScopePicker();
+      drawDashboard();
+    } else if (capsuleScopeIndexForAction(action) >= 0) {
+      capsuleLibrary.setScope(static_cast<CapsuleScope>(
+          capsuleScopeIndexForAction(action)));
+      dashboard.scopeChanged();
+      drawDashboard();
+    } else if (action == UiAction::openDetailMore) {
+      dashboard.openDetailMore();
+      drawDashboard();
+    } else if (action == UiAction::closeOverlay) {
+      dashboard.closeOverlays();
+      drawDashboard();
+    } else if (action == UiAction::bulkFavorite ||
+               action == UiAction::bulkArchive ||
+               action == UiAction::bulkTrash) {
+      const std::vector<String> ids =
+          dashboard.selectedCapsuleIds(capsuleLibrary);
+      const CapsuleScope scope = capsuleLibrary.scope();
+      const CapsuleBatchAction batchAction =
+          action == UiAction::bulkFavorite
+              ? CapsuleBatchAction::favorite
+              : (action == UiAction::bulkArchive
+                     ? CapsuleBatchAction::archiveOrRestore
+                     : CapsuleBatchAction::trashOrRestore);
+      const CapsuleBatchResult result = capsuleLibrary.batch(
+          ids, batchAction, board.utcNow());
+      dashboard.clearCapsuleSelection();
+      if (!result.ok) {
+        if (result.rolledBackFully) {
+          showMessage("批量失败，已完整回滚");
+        } else if (result.rollbackFailed > 0) {
+          showMessage(String("回滚失败 ") + result.rollbackFailed +
+                      " 条，请到 Mac 处理");
+        } else {
+          showMessage("批量操作未完成");
+        }
+      } else if (action == UiAction::bulkTrash &&
+                 scope != CapsuleScope::trash) {
+        armTrashUndo(ids);
+      } else {
+        showMessage(String("已处理 ") + result.changed + " 条");
+      }
+      drawDashboard();
     } else {
       const CapsuleSummary *selected = dashboard.selected(capsuleLibrary);
       if (selected == nullptr) return;
@@ -265,11 +535,33 @@ void pollTouch() {
         capsuleLibrary.toggleFavorite(id);
         dashboard.invalidate();
       } else if (action == UiAction::archive) {
-        capsuleLibrary.archive(id);
-        dashboard.back();
+        const bool wasTrashed = selected->trashed;
+        const bool wasArchived = selected->archived;
+        const bool ok = wasTrashed
+            ? capsuleLibrary.restore(id)
+            : (wasArchived ? capsuleLibrary.unarchive(id)
+                           : capsuleLibrary.archive(id));
+        if (ok) {
+          dashboard.back();
+          showMessage(wasTrashed ? "已恢复" :
+                      (wasArchived ? "已移回收件箱" : "已归档"));
+        } else {
+          showMessage("操作失败");
+        }
+      } else if (action == UiAction::trash) {
+        if (capsuleLibrary.trash(id, board.utcNow())) {
+          dashboard.closeOverlays();
+          dashboard.back();
+          std::vector<String> ids;
+          ids.push_back(id);
+          armTrashUndo(ids);
+        } else {
+          showMessage("删除失败");
+        }
       } else if (action == UiAction::retry) {
         if (selected->status != CapsuleStatus::failed) return;
         if (capsuleLibrary.requeue(id)) {
+          dashboard.closeOverlays();
           tencentWorker.wake();
           showMessage("已重新加入转写队列");
         } else {
@@ -279,7 +571,8 @@ void pollTouch() {
         if (audio.playing()) {
           audio.stopPlayback(usb.log());
           showMessage("已停止播放");
-        } else if (usb.microphoneStreaming() || recorder.recording()) {
+        } else if (!captureRouter.available() || recorder.recording() ||
+                   tencentWorker.working()) {
           showMessage("麦克风使用中，暂时无法播放");
         } else if (!safeCapsuleFileName(selected->audioFile.c_str()) ||
                    !audio.startPlayback(
@@ -303,8 +596,10 @@ void setup() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
 
   board.begin(Serial);
+  provisioningDiagnostics.begin(Serial);
   audio.begin(Serial);
   const bool usbStarted = usb.begin(board.status().variant);
+  const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
   deviceConfig.begin(usb.log());
   if (board.sdReady() && recorder.begin(SD_MMC, usb.log())) {
     recorder.recoverInterrupted(usb.log(), board.utcNow());
@@ -312,20 +607,27 @@ void setup() {
     tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
   }
   wifi.begin(deviceConfig, usb.log());
-  linkService.begin(usb.stream(), SD_MMC, board, audio, usb, dashboard,
+  runtimePower.begin(usb.log());
+  linkService.begin(usb.stream(), SD_MMC, board, audio, captureRouter,
+                    usb, bleVoice,
+                    dashboard,
                     capsuleLibrary, recorder,
                     deviceConfig, wifi, tencentWorker,
-                    startDictationHold, stopDictationHold, usb.log());
+                    provisioningDiagnostics, runtimePower, usb.log());
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
-  showMessage(usbStarted ? "BOOT 可录胶囊  连接 Mac 可语音输入"
-                         : "USB 启动失败",
+  showMessage(usbStarted && bleStarted ? "PokePod 已就绪"
+                                      : "连接服务启动失败",
               3000);
   drawDashboard();
+  autoScreenOff.begin(millis());
   emitStatus();
 }
 
 void loop() {
   const uint32_t now = millis();
+  if (trashUndo.expire(now)) {
+    dashboard.invalidate();
+  }
 
   // A CDC upload can otherwise overrun TinyUSB while a full-screen AMOLED
   // redraw or an SD/network task owns the main loop. Once a binary request has
@@ -335,15 +637,22 @@ void loop() {
     return;
   }
   if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
+    noteUserActivity(now);
+    if (!board.status().screenOn) {
+      bootScreenWakeArmed = true;
+      setScreenState(true);
+      return;
+    }
+    if (bootButton.releasedEdge() && bootScreenWakeArmed) {
+      bootScreenWakeArmed = false;
+      return;
+    }
     if (bootButton.pressedEdge()) {
       if (provisioningPortal.active()) {
         bootProvisioningExitArmed = true;
         return;
       }
       bootPressedAtMs = now;
-      if (bootPressStartsDictation(usb.hostConnected())) {
-        bootDictationHolding = startDictationHold();
-      }
     } else if (bootButton.releasedEdge()) {
       if (bootProvisioningExitArmed) {
         bootProvisioningExitArmed = false;
@@ -354,58 +663,64 @@ void loop() {
         drawDashboard();
         return;
       }
-      if (bootDictationHolding) {
-        bootDictationHolding = false;
-        stopDictationHold();
+      if (bootWirelessHolding) {
+        bootWirelessHolding = false;
+        stopWirelessHold();
         return;
       }
-      const BootGestureAction action = bootGestureAction(
-          usb.hostConnected(), now - bootPressedAtMs);
-      if (action == BootGestureAction::dictationRelease) stopDictationHold();
-      if (action == BootGestureAction::capsuleToggle) toggleRecording();
+      if (bleVoice.appReady() && !recorder.recording()) {
+        showMessage("请按住说话");
+        drawDashboard();
+      } else {
+        toggleRecording();
+      }
     }
   }
-
-  // Keep I2S sampling for health diagnostics, but only feed TinyUSB while the
-  // host has selected the microphone streaming alternate interface. TinyUSB
-  // clears its IN FIFO whenever that interface closes; writing concurrently
-  // with the clear can leave CoreAudio receiving an endless series of ZLPs.
-  if (usb.microphoneStreaming() && audio.playing()) {
-    audio.stopPlayback(usb.log());
+  if (bootButton.pressed() && bleVoice.appReady() &&
+      !bootWirelessHolding && !recorder.recording() &&
+      now - bootPressedAtMs >= ui::kWirelessHoldDelayMs) {
+    bootWirelessHolding = startWirelessHold();
   }
+
   if (audio.playing()) {
     audio.pumpPlayback(usb.log());
-  } else if (audio.ready() || recorder.recording()) {
+  } else if (audio.active()) {
     size_t bytes = audio.read(audioBuffer, sizeof(audioBuffer));
     if (bytes > 0) {
-      if (usb.microphoneStreaming()) {
-        usb.writeMicrophone(audioBuffer, static_cast<uint16_t>(bytes));
+      if (bleVoice.acceptingAudio() &&
+          !bleVoice.appendAudio(audioBuffer, bytes, now)) {
+        wirelessUiActive = false;
+        showMessage("无线语音已中断");
       }
       if (recorder.recording()) {
         const bool wasRecording = recorder.recording();
         recorder.append(audioBuffer, bytes, usb.log());
-        if (wasRecording && !recorder.recording()) capsuleLibrary.scan();
+        if (wasRecording && !recorder.recording()) {
+          captureRouter.release(AudioCaptureOwner::localCapsule);
+          audio.stopHardware(usb.log());
+          capsuleLibrary.scan();
+        }
       }
     }
+  }
+  bleVoice.poll(now);
+  if (wirelessUiActive && !bleVoice.streaming()) {
+    wirelessUiActive = false;
+    dashboard.invalidate();
+  }
+  if (captureRouter.available() && !audio.playing() && audio.active()) {
+    audio.stopHardware(usb.log());
   }
 
   linkService.poll(now);
   if (linkService.receivingBinary()) return;
 
-  // Captive-portal HTTP and DNS must remain responsive even if macOS keeps the
-  // UAC microphone interface open. These handlers are the active setup path;
-  // other network and display work can still yield to isochronous audio.
-  const bool microphoneStreaming = usb.microphoneStreaming();
   if (provisioningPortal.active()) provisioningPortal.loop(now);
   if (provisioningPortal.takeConfigurationChanged()) {
     wifi.configurationChanged();
     tencentWorker.wake();
     dashboard.invalidate();
   }
-  // macOS can keep the UAC alternate interface open even when dictation is
-  // idle. Network and CDC work must continue in that state or queued capsules
-  // and the desktop mirror would remain blocked indefinitely. Display and
-  // sensor work below still yields to isochronous audio.
   const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
       deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
   wifi.loop(now, recorder.recording(), networkWork,
@@ -417,38 +732,66 @@ void loop() {
                      transcriptionDispatchBusy(recorder.recording(),
                                                linkService.maintenanceActive()),
                      board.status().charging);
-  if ((!microphoneStreaming || touchDictationHolding ||
-       provisioningPortal.active()) &&
-      now - lastTouchMs >= 10) {
+  currentPowerDecision = runtimePower.apply(currentPowerInputs(), usb.log());
+  if (now - lastTouchMs >= currentPowerDecision.touchPollMs) {
     lastTouchMs = now;
     pollTouch();
   }
+  if (dashboard.advanceVerticalScroll(now, capsuleLibrary)) {
+    scrollRedrawPending = true;
+  }
+  if (scrollRedrawPending &&
+      now - lastScrollFrameMs >= ui::kScrollFrameIntervalMs) {
+    scrollRedrawPending = false;
+    lastScrollFrameMs = now;
+    lastDashboardMs = now;
+    drawDashboard();
+  }
 
-  const uint32_t sensorIntervalMs = board.status().screenOn ? 500 : 100;
-  if (!microphoneStreaming && now - lastSensorMs >= sensorIntervalMs) {
+  const uint32_t sensorIntervalMs = currentPowerDecision.sensorPollMs;
+  if (now - lastSensorMs >= sensorIntervalMs) {
     lastSensorMs = now;
     board.refreshSensors();
     const BoardStatus &status = board.status();
-    if (raiseToWake.update(now, deviceConfig.settings().raiseToWake,
-                           status.screenOn, status.accelerationX,
-                           status.accelerationY, status.accelerationZ)) {
-      board.setScreenOn(true);
-      dashboard.invalidate();
+    bleVoice.setBatteryPercent(status.batteryPercent);
+    if (!status.screenOn && deviceConfig.settings().raiseToWake &&
+        board.pollMotionWake()) {
+      setScreenState(true);
+    } else if (raiseToWake.update(now, deviceConfig.settings().raiseToWake,
+                                  status.screenOn, status.accelerationX,
+                                  status.accelerationY,
+                                  status.accelerationZ)) {
+      setScreenState(true);
     }
     const PowerKeyEvent powerKey = board.pollPowerKey();
     if (powerKey == PowerKeyEvent::shortPress) {
-      board.setScreenOn(!board.status().screenOn);
+      setScreenState(!board.status().screenOn);
     } else if (powerKey == PowerKeyEvent::longPress) {
-      if (recorder.recording()) recorder.stop(usb.log());
+      if (recorder.recording()) {
+        recorder.stop(usb.log());
+        captureRouter.release(AudioCaptureOwner::localCapsule);
+        audio.stopHardware(usb.log());
+      }
+      if (bleVoice.streaming()) stopWirelessHold();
       if (audio.playing()) audio.stopPlayback(usb.log());
       board.safeShutdown();
     }
   }
+  const bool keepScreenAwake = recorder.recording() || wirelessUiActive ||
+      audio.playing() || provisioningPortal.active();
+  if (autoScreenOff.shouldTurnOff(now, board.status().screenOn,
+                                 keepScreenAwake)) {
+    setScreenState(false);
+    currentPowerDecision = runtimePower.apply(currentPowerInputs(), usb.log());
+  }
   const uint32_t dashboardIntervalMs =
-      recorder.recording() ? ui::kRecordingFrameIntervalMs : 1000;
-  if (!microphoneStreaming &&
-      now - lastDashboardMs >= dashboardIntervalMs) {
+      (recorder.recording() || wirelessUiActive)
+          ? ui::kRecordingFrameIntervalMs : 1000;
+  if (now - lastDashboardMs >= dashboardIntervalMs) {
     lastDashboardMs = now;
     drawDashboard();
+  }
+  if (currentPowerDecision.allowLightSleep) {
+    runtimePower.enterLightSleep(currentPowerInputs(), usb.log());
   }
 }

@@ -34,7 +34,7 @@ int main() {
   assert(contrast(kInkRgb, kBackgroundRgb) >= 4.5);
   assert(contrast(kMutedRgb, kBackgroundRgb) >= 4.5);
   assert(contrast(kAccentRgb, kBackgroundRgb) >= 4.5);
-  assert(contrast(kDictationRgb, kBackgroundRgb) >= 4.5);
+  assert(contrast(kWirelessRgb, kBackgroundRgb) >= 4.5);
   assert(contrast(kWaitingRgb, kBackgroundRgb) >= 4.5);
   assert(contrast(kErrorRgb, kBackgroundRgb) >= 4.5);
 
@@ -57,9 +57,9 @@ int main() {
   assert(kDetailActionsBottom <= kRootContentBottom);
   assert(kMinimumTouchHeight >= 56);
   assert(kTouchTapSlop >= 8 && kTouchTapSlop <= 16);
-  assert(kTouchSwipeThreshold >= 48 && kTouchSwipeThreshold <= 72);
-  assert(kTouchVerticalThreshold >= 40 && kTouchVerticalThreshold <= 60);
-  assert(kDictationHoldDelayMs >= 120 && kDictationHoldDelayMs <= 220);
+  assert(kTouchSwipeThreshold == 32);
+  assert(kTouchVerticalThreshold == 12);
+  assert(kWirelessHoldDelayMs == 280);
   assert(kBackTargetSize >= kMinimumTouchHeight);
   assert(kBackEdgeWidth == 40);
   assert(kStatusIconSize == 20);

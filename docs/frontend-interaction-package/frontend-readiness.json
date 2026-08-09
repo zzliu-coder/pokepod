@@ -1,0 +1,26 @@
+{
+  "schema_version":"bigfront.readiness.v1",
+  "status":"ready_for_build",
+  "post_build_status":"not_run",
+  "target_level":"verified",
+  "core_surfaces":["pod-home","pod-capsules","pod-device","voice-menu"],
+  "gates":{
+    "scope":{"status":"pass","evidence":["evidence/gates/scope.json"],"blocking_issues":[]},
+    "information_architecture":{"status":"pass","evidence":["evidence/gates/information_architecture.json"],"blocking_issues":[]},
+    "interaction":{"status":"pass","evidence":["evidence/gates/interaction.json"],"blocking_issues":[]},
+    "design_system":{"status":"pass","evidence":["evidence/gates/design_system.json"],"blocking_issues":[]},
+    "component_architecture":{"status":"pass","evidence":["evidence/gates/component_architecture.json"],"blocking_issues":[]},
+    "rendered_artifact":{"status":"pass","evidence":["evidence/gates/rendered_artifact.json"],"blocking_issues":[]},
+    "acceptance":{"status":"pass","evidence":["evidence/gates/acceptance.json"],"blocking_issues":[]}
+  },
+  "critical_unverified":[],
+  "deferred_truths":["真实微信输入法没有状态回执，最终文字首尾完整性保留一次人工验收。"],
+  "artifact_evidence":[
+    {"surface_id":"pod-home","surface":"PokePod 首页","target":"ESP32 368x448","artifact":"artifacts/pod-home.svg","states":["voice-ready","transcribing"],"inputs":["touch","horizontal-swipe","BOOT-hold"],"evidence":["evidence/artifacts/pod-home.json"],"result":"pass"},
+    {"surface_id":"pod-capsules","surface":"PokePod 胶囊管理","target":"ESP32 368x448","artifact":"artifacts/pod-capsules.svg","states":["multi-select","undo"],"inputs":["touch","vertical-scroll","long-press"],"evidence":["evidence/artifacts/pod-capsules.json"],"result":"pass"},
+    {"surface_id":"pod-device","surface":"PokePod 设备与无线语音","target":"ESP32 368x448","artifact":"artifacts/pod-device.svg","states":["connected","pairing-entry"],"inputs":["touch","horizontal-swipe"],"evidence":["evidence/artifacts/pod-device.json"],"result":"pass"},
+    {"surface_id":"voice-menu","surface":"PokePod Voice 菜单栏","target":"macOS 360x520","artifact":"artifacts/voice-menu.svg","states":["ready","listening","error-recovery"],"inputs":["pointer","accessibility"],"evidence":["evidence/artifacts/voice-menu.json"],"result":"pass"}
+  ],
+  "handoff":{"allowed":true,"implementation_skill":"codeprinter","required_inputs":["frontend-interaction-package","rendered-artifacts","surface-registry.json","frontend-contract.json","evidence-receipts","10-ui-acceptance-script.md"]},
+  "claim_limit":"交互包允许施工；产品完成仍需要实现后回验和真机证据。"
+}

@@ -8,13 +8,8 @@ MAC_PROJECT="$WORKTREE_DIR/projects/pokecapsule-mac"
 "$SCRIPT_DIR/firmware/run-host-tests.sh"
 sh -n "$SCRIPT_DIR/firmware/build.sh" \
   "$SCRIPT_DIR/firmware/run-host-tests.sh" \
-  "$SCRIPT_DIR/usb-audio-smoke.sh" \
   "$SCRIPT_DIR/device-acceptance.sh" \
-  "$SCRIPT_DIR/end-to-end-acceptance.sh" \
-  "$SCRIPT_DIR/flash.sh" \
-  "$SCRIPT_DIR/hid-shortcut-smoke.sh" \
-  "$SCRIPT_DIR/mac-bridge-diagnostics.sh" \
-  "$SCRIPT_DIR/mac-dictation-diagnostics.sh"
+  "$SCRIPT_DIR/flash.sh"
 /usr/bin/python3 - "$SCRIPT_DIR/cdc-status.py" \
   "$SCRIPT_DIR/sd-capsule-acceptance.py" \
   "$SCRIPT_DIR/provision-pokepod.py" <<'PY'

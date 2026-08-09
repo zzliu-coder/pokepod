@@ -12,11 +12,14 @@ namespace pokepod {
 class AudioPipeline {
  public:
   bool begin(Print &log);
+  bool startCapture(Print &log);
+  void stopHardware(Print &log);
   size_t read(uint8_t *buffer, size_t capacity);
   bool startPlayback(fs::FS &fs, const String &path, Print &log);
   void pumpPlayback(Print &log);
   void stopPlayback(Print &log);
-  bool ready() const { return ready_; }
+  bool ready() const { return available_; }
+  bool active() const { return hardwareActive_; }
   bool playing() const { return playing_; }
   uint64_t bytesRead() const { return bytesRead_; }
   uint32_t readFailures() const { return readFailures_; }
@@ -28,8 +31,12 @@ class AudioPipeline {
   void resetPeakWindow() { peakWindow_.reset(); }
 
  private:
+  bool startHardware(Print &log);
+
   I2SClass i2s_;
-  bool ready_ = false;
+  void *codec_ = nullptr;
+  bool available_ = false;
+  bool hardwareActive_ = false;
   uint64_t bytesRead_ = 0;
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;

@@ -19,12 +19,12 @@ PokeCapsule Mac 是 Poke3、Android 手机与 PokePod 共用的 USB 管理器。
 - 默认使用 DeepSeek `https://api.deepseek.com/chat/completions`、`deepseek-v4-flash`，并显式关闭 thinking。
 - API 结果在写回失败时保存在本机待提交缓存，重试不会再次请求模型。
 - ADB 始终通过 `Process.arguments` 执行，目录名不会进入 shell。
-- PokePod AMOLED 通过 USB HID 在按住期间保持 Option-Z 按下、松手时释放，并同时作为 `TinyUSB UAC1` USB 麦克风使用。
-- 设置页提供听写设置入口；语音输入链路不需要 PokeCapsule 的辅助功能或输入监控权限。
+- PokePod AMOLED 通过 USB CDC 与 PokeCapsule 同步；无线语音由独立的 `PokePod Voice.app` 通过 BLE、BlackHole 2ch 和 Option-Z 完成。
+- `PokePod Voice.app` 独立检查蓝牙、BlackHole 2ch 和辅助功能权限；PokeCapsule 本身不申请这些权限。
 
 ## PokePod Link v2
 
-Mac 通过 USB CDC 使用 `PPV2` 二进制帧：20 字节小端帧头、版本、类型、请求号、长度与 CRC32。每次连接使用随机非零请求号起点，避免设备跨连接去重时误判新会话。控制消息使用 JSON，文件内容使用独立二进制数据帧。当前客户端覆盖 `hello`、`status`、`identity`、`fingerprint`、`read`、`stage-write`、`commit`、`command`、`result`、`configure`、`set-time`、`dictate-start`、`dictate-stop` 与 `reboot`，设备 busy 时进行有上限的退避。微信语音输入按“按住说话、松开结束”发送 start/stop；旧 `dictate` 仅保留协议兼容，不进入产品调用路径。
+Mac 通过 USB CDC 使用 `PPV2` 二进制帧：20 字节小端帧头、版本、类型、请求号、长度与 CRC32。每次连接使用随机非零请求号起点，避免设备跨连接去重时误判新会话。控制消息使用 JSON，文件内容使用独立二进制数据帧。当前客户端覆盖 `hello`、`status`、`identity`、`fingerprint`、`read`、`stage-write`、`commit`、`command`、`result`、`configure`、`set-time` 与 `reboot`，设备 busy 时进行有上限的退避。
 
 ## 构建和测试
 
@@ -37,6 +37,7 @@ swift build -c release
 
 ```bash
 swift run PokeCapsule
+swift run PokePodVoice
 ```
 
 ## ADB
@@ -67,10 +68,22 @@ Poke3 需要开启 USB 调试并接受 Mac 的 RSA 授权。管理器在事务�
 
 ## PokePod 语音输入
 
-1. 点击“打开听写设置”，把听写快捷键设为 Option-Z。
-2. 将听写的输入麦克风选为 `TinyUSB UAC1`（厂商 PokeCapsule，48 kHz）。
+1. 在微信输入法中把“按住说话”固定为 Option-Z。
+2. 从 BlackHole 官方仓库安装 BlackHole 2ch。
+3. 启动 `PokePod Voice.app`，按菜单栏引导授予蓝牙与辅助功能权限并完成 PokePod 配对。
+4. 菜单栏显示“就绪”后，在设备上按住“微信语音输入”或 BOOT 说话，松开结束。
 
-PokePod 的 BOOT 键和屏幕按钮在按住期间保持 Option-Z 按下、松手时释放，macOS 将其作为普通 USB 键盘快捷键处理。PokeCapsule 不监听键盘，因此不会触发相关隐私授权弹窗。
+首次完成蓝牙、BlackHole、辅助功能和设备 ready 握手后，应用会尝试一次“登录时启动”。无论系统注册成功与否都会记录这次决定；之后完全尊重菜单中的手动开关，不会再次自动打开。
+
+实时音频固定为 `16 kHz / mono / IMA ADPCM`，20 ms 一帧。每帧 header 的 predictor 是第一个 PCM 样本，payload 解码后续 319 个样本，最后一个高半字节是 padding。应用先保存当前默认输入，临时切换到 BlackHole，积累 120 ms 音频后按下 Option-Z；松手后排空 120 ms 尾音，释放按键并在 250 ms 后恢复原输入。蓝牙断开、400 ms 无帧、音频错误和退出共用同一恢复路径。用户会话中手动选择其他麦克风时，应用保留用户的新选择。原麦克风暂时离线时，恢复记录和原 UID 会一直保留并每两秒重试；设备重新出现且切换成功后才清除。默认输入仍为 BlackHole 时，新会话会被拒绝，绝不会把 BlackHole 覆盖成“原麦克风”。
+
+设备发出 `session-start` 后，应用依次完成保存输入、切换 BlackHole、启动 AUHAL 和建立同一 `sessionId` 的接收缓冲，随后才回复非零 session ready。任一步失败只回复 reject，设备不会提前发送音频。重复开始、上一会话迟到的音频和错误事件会被丢弃，不会打断当前输入。
+
+菜单将链路诊断分成两种证据。“Mac 接收质量”显示 Mac 实际收到并成功解码的帧、重复/迟到/跨会话丢弃、序列缺口补静音及最近 session/sequence；“设备发送队列”读取固件 DeviceInfo 的可选累计计数，并在每次会话完整结束或收到会话错误后刷新，分别显示 Ready 超时和音频流超时。设备侧 `notifyAccepted` 只表示 NimBLE 主机接受入队，不代表无线空口已送达，因此应用不把它称为发送成功率，也不虚构 RSSI 或空口丢包率。旧固件没有这些可选字段时仍可正常连接，菜单会明确显示“固件未提供发送队列统计”。
+
+松手后的 stop-ack 会等到尾音排空、Option-Z 释放、AUHAL 停止和默认麦克风恢复全部完成后才发送。400 ms 看门狗等异常路径先执行相同的本地恢复，再向对应会话发送 reject。菜单中的“忘记并重新配对”会等待 GATT 写响应；若回调丢失则在 750 ms 后有界断开，设备先主动断开和 Mac 先收到写回调两种顺序都会继续重新扫描。
+
+BlackHole 驱动由用户独立安装，不随应用打包。主机测试可以验证协议、时序和恢复策略；真实 BLE、BlackHole 音频和微信最终文字仍需真机验收。
 
 ## 数据安全
 
@@ -90,9 +103,9 @@ PokePod 的 BOOT 键和屏幕按钮在按住期间保持 Option-Z 按下、松�
 - SwiftUI 页面拆为应用壳、设备侧栏、胶囊列表、设置和批量操作组件；批量操作只在选中胶囊后出现。
 - DeepSeek 继续由用户手动触发，不参与设备端自动转写。
 
-## 已完成的真机验收
+## 已完成的验收
 
-- 58 项 Swift 测试（默认 1 项只读真机测试跳过）、Release 构建、原子应用打包和代码签名校验通过；其中包含 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/重复响应/断线/busy、随机会话请求号、自动设备匹配、按住听写 start/stop、未知协议只读降级，以及共享协议中的 v1 M4A、v2 M4A/WAV 兼容夹具。
+- Swift 测试、Release 构建、双应用原子打包和代码签名校验覆盖 ADB/PokePod 共用传输契约、Link v2 坏帧/CRC/重复响应/断线/busy、无线 UUID/wire、IMA ADPCM、丢包补静音、序号回绕、预缓冲、尾排空、看门狗与输入恢复策略。
 - 已自动识别 USB 连接的 Poke3，并建立只读镜像。
 - 两条真机录音已从 `raw_ready` 自动调用 DeepSeek，写回 `polished.md` 后变为 `ready`。
 - 维护握手、目录创建、目录删除、校对提交和重复事务幂等已在真机通过。
@@ -100,4 +113,4 @@ PokePod 的 BOOT 键和屏幕按钮在按住期间保持 Option-Z 按下、松�
 
 仍需长期或大样本验证：100 条真实胶囊批量整理、USB 在事务中途断开、长时间待机耗电和极端并发压力。
 
-PokePod CDC 的完整读写、设备身份、分页清单、原子提交和断线恢复需要与对应固件在真机联调。本轮只完成 Mac 实现、模拟传输契约和帧级自动测试，没有操作或刷写 PokePod。
+PokePod CDC 的完整读写、设备身份、分页清单、原子提交和断线恢复需要与对应固件在真机联调。无线 BLE、安全配对、BlackHole 实际输出、30 次按住/松开和微信最终文字同样属于明确的真机未验证边界。

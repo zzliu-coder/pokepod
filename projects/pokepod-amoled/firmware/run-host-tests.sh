@@ -15,5 +15,23 @@ for source in "$SCRIPT_DIR"/tests/test_*.cpp; do
 done
 
 python3 "$SCRIPT_DIR/../tools/test-provisioning-page.py"
+python3 "$SCRIPT_DIR/../tools/test-device-config-atomic.py"
 python3 "$SCRIPT_DIR/../tools/test-cjk-font.py"
+python3 "$SCRIPT_DIR/../tools/test-fixed-font-coverage.py"
+python3 "$SCRIPT_DIR/../tools/test-usb-connection-contract.py"
 python3 "$SCRIPT_DIR/../tools/test-flash-policy.py"
+python3 "$SCRIPT_DIR/../tools/test-power-diagnostics-contract.py"
+python3 "$SCRIPT_DIR/../tools/test-scroll-contract.py"
+
+if rg -q 'USBAudioCard|USBHIDKeyboard|UsbVoiceBridge|dictate-start|dictate-stop' \
+  "$SCRIPT_DIR/PokePodAmoled" "$SCRIPT_DIR/build.sh"
+then
+  printf 'FAIL legacy_usb_voice_surface\n' >&2
+  exit 1
+fi
+rg -q 'class UsbLinkBridge' "$SCRIPT_DIR/PokePodAmoled/UsbLinkBridge.h"
+rg -q 'class BleVoiceService' "$SCRIPT_DIR/PokePodAmoled/BleVoiceService.h"
+rg -q 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$SCRIPT_DIR/build.sh"
+rg -q 'requires a single NimBLE controller connection' \
+  "$SCRIPT_DIR/PokePodAmoled/BleVoiceService.h"
+printf 'PASS wireless_voice_deletion_contract\n'

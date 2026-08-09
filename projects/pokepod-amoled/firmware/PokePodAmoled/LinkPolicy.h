@@ -25,10 +25,15 @@ inline bool purgeStagingDirectoryName(const char *value) {
       value[6] != '\0';
 }
 
-constexpr bool linkStorageBusy(bool recording, bool transcribing,
-                               bool uacStreaming) {
-  (void)uacStreaming;
+constexpr bool linkStorageBusy(bool recording, bool transcribing) {
   return recording || transcribing;
+}
+
+constexpr bool linkForegroundBusy(bool recording, bool transcribing,
+                                  bool bleVoiceActive,
+                                  bool captureAvailable) {
+  return linkStorageBusy(recording, transcribing) || bleVoiceActive ||
+      !captureAvailable;
 }
 
 constexpr bool transcriptionDispatchBusy(bool recording,

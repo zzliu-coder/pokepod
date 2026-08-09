@@ -1,0 +1,1 @@
+{"schema_version":"bigfront.gate-evidence.v1","gate":"component_architecture","subject":"State ownership and platform boundaries","target":"firmware framebuffer + native macOS","procedure":["Check rendering, storage, BLE, CoreAudio and shortcut responsibilities are separated."],"result":"pass","captures":["06-component-pattern-plan.md"]}

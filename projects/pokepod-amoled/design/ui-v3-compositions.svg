@@ -5,7 +5,7 @@
     .ui{font-family:'Noto Sans CJK SC','PingFang SC',sans-serif;fill:#f4faf7}
     .display{font-size:28px;font-weight:700}.body{font-size:20px;font-weight:650}
     .compact{font-size:16px;font-weight:550;fill:#91a69f}.timer{font-size:36px;font-weight:500}
-    .divider{stroke:#1a2a25}.accent{stroke:#69e0b6}.dictation{stroke:#a0b2ff}
+    .divider{stroke:#1a2a25}.accent{stroke:#69e0b6}.wireless{stroke:#a0b2ff}
   </style>
   <defs>
     <g id="topbar" class="ui">

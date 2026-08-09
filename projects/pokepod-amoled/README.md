@@ -4,8 +4,8 @@ PokePod 把 Waveshare ESP32-S3-Touch-AMOLED-1.8 做成两种设备：
 
 - 独立语音胶囊：录制 `16 kHz / 16 bit / mono WAV`，保存为 PokeCapsule
   schema v2，联网后由腾讯云一句话识别生成 `raw.txt`。
-- Mac 有线语音终端：USB 同时提供 48 kHz 单声道麦克风、长按 Option+Z
-  键盘输入和 PokePod Link v2 数据同步。
+- Mac 无线语音终端：BLE 发送实时压缩音频给独立的 PokePod Voice.app；USB
+  只保留 PokePod Link v2 数据同步、维护和刷写。
 
 固件在启动时通过触摸控制器地址自动识别硬件：
 
@@ -13,7 +13,7 @@ PokePod 把 Waveshare ESP32-S3-Touch-AMOLED-1.8 做成两种设备：
 - I2C `0x15`：V2，CO5300 + CST820。
 
 同一份固件支持 V1/V2。代码使用 AMOLED、触摸、ES8311 麦克风和扬声器、
-SD、RTC、QMI8658、AXP2101、Wi-Fi、USB CDC/UAC/HID；BLE 暂未启用。
+SD、RTC、QMI8658、AXP2101、Wi-Fi、BLE 和 USB CDC。
 
 ## 日常使用
 
@@ -21,8 +21,8 @@ SD、RTC、QMI8658、AXP2101、Wi-Fi、USB CDC/UAC/HID；BLE 暂未启用。
 直接显示首页；左右滑动进入相邻页面，屏幕不保留占空间的底部导航栏。
 
 - 首页点“语音胶囊”开始/停止录音；录音最长 58.5 秒。
-- 未连接 Mac 时，BOOT 短按开始/停止胶囊。
-- 连接 Mac 时，按住 BOOT 使用微信语音输入，松开结束；胶囊录音使用屏幕按钮。
+- PokePod Voice.app 未就绪时，BOOT 短按开始/停止胶囊。
+- PokePod Voice.app 就绪时，按住 BOOT 使用微信语音输入，松开结束；胶囊录音使用屏幕按钮。
 - 屏幕“微信语音输入”同样是按住说话、松开结束。
 - 胶囊详情可阅读 `final.md > polished.md > raw.txt > title`、播放 WAV、
   收藏、归档和重新转写。
@@ -32,6 +32,13 @@ SD、RTC、QMI8658、AXP2101、Wi-Fi、USB CDC/UAC/HID；BLE 暂未启用。
 Wi-Fi 平时关闭。录音、待转写或充电产生网络需求时自动连接，最后一项工作
 结束三分钟后关闭。失败按 10 秒、30 秒、2 分钟重试，随后保留队列等待下次
 录音、手动开启或充电唤醒。
+
+设备采用统一低功耗策略：普通界面使用 80 MHz，录音、无线语音、配网、网络、
+存储和 Link 事务临时切到 240 MHz；30 秒无操作后 AMOLED 执行面板休眠，音频
+I2S 与 ES8311 只在录音或播放期间上电。屏幕关闭且 USB、供电、BLE 连接和后台
+工作均为空闲时，设备进入带 100 ms 定时兜底的短周期 light sleep。当前固定的
+Arduino-ESP32 3.3.8 SDK 没有编译自动 DFS 和 BLE controller modem sleep，状态
+接口会如实把这两项报告为不支持，不能据此推算固定的续航倍数。
 
 ## 存储和密钥
 
@@ -49,10 +56,16 @@ SecretKey 不会在网页、Link 状态、日志或 SD 中读回。Link v2 的 `
 网页保持可用。配置热点密码固定为 `88888888`，只在用户主动开启后的五分钟内
 有效。
 
+PokePod 本机“连接手机”页直接显示扫描、连接、验证、保存、成功或失败状态。
+点击“诊断记录”可查看最近 16 条配网阶段、SSID、信号、耗时和 802.11 失败原因；
+记录以 CRC 环形 NVS blob 保存，重启后仍可读取。Link v2 同时提供
+`get-provisioning-diagnostics` 和 `clear-provisioning-diagnostics`。诊断记录不
+保存 Wi-Fi 密码、腾讯密钥、音频或请求正文。
+
 腾讯请求使用 TLS 证书校验和 TC3-HMAC-SHA256。WAV 以两遍流式方式完成
 签名与 Base64 上传，不在内存中保存完整音频或完整请求体。转写在后台任务中
-运行，屏幕、按键和 Link 主循环保持响应；录音、转写或 UAC 工作期间，Mac 的
-SD 操作会收到可重试的 `busy`。
+运行，屏幕、按键、BLE 和 Link 主循环保持响应；本地录音占用麦克风或文件提交
+期间，Mac 的 SD 操作会收到可重试的 `busy`。
 
 ## PokePod Link v2
 
@@ -62,7 +75,7 @@ CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32�
 - hello、状态、身份、元数据指纹；
 - 分页文件清单和分块读取；
 - 分块暂存写入、原子提交、共享管理命令和结果查询；
-- 配置、UTC 校时、录音、停止、Option+Z 按下/释放、重启；
+- 配置、UTC 校时、录音、停止和重启；
 - 可选逐块确认，防止大文件超过 TinyUSB CDC 接收窗口；
 - 路径穿越拦截、重复请求拦截、传输超时和忙碌重试。
 
@@ -119,31 +132,33 @@ BOOT` 作为救援入口，然后重新运行同一个脚本。
 若旧固件已损坏，脚本会提示唯一的人工恢复动作：按住 BOOT，短按一次 RESET，
 松开 BOOT，再重跑脚本。
 
-真机连接后：
+真机连接后，CDC 与板载外设验收：
 
 ```sh
 ./device-acceptance.sh
-./end-to-end-acceptance.sh
 ```
 
 `cdc-status.py` 使用真实 Link v2 帧读取设备状态。真机门检查 V1 显示、触摸、
-IO 扩展器、RTC、IMU、PMU、SD、音频和 USB 状态，
-UAC 48 kHz 单声道连续采集、麦克风非静音和 USB/I2S 计数器。端到端门长按
-Option+Z，确认微信输入法在按住期间打开 UAC，并在释放后关闭。最终文字进入
-真实输入框仍保留一次人工确认。
+IO 扩展器、RTC、IMU、PMU、SD、音频和 USB CDC 状态。BLE 音频、BlackHole、
+Option+Z 与微信输入法的端到端验收由 PokePod Voice.app 的验收流程完成；最终
+文字进入真实输入框仍保留一次人工确认。
 
-## Mac 设置
+## 无线语音
 
-1. 把微信语音输入法“按住说话”快捷键设为 Option+Z。
-2. 选择 **TinyUSB UAC1**（制造商 **PokeCapsule**，48 kHz）作为输入麦克风。
-3. macOS 系统听写使用另一组快捷键，例如连按两下 Control，避免抢占 Option+Z。
+1. 安装 BlackHole 2ch 和 PokePod Voice.app。
+2. 把微信语音输入法“按住说话”快捷键设为 Option+Z。
+3. 在设备页进入两分钟配对模式，由 PokePod Voice.app 完成安全配对。
+4. 菜单栏状态显示“就绪”后，在首页或 BOOT 上按住说话、松开结束。
 
-Option+Z 的按下和释放由 PokePod HID 直接发送，PokeCapsule 不参与快捷键中转，不需要辅助
-功能或输入监控权限。
+设备页轻触“无线语音”可开始或取消配对，并显示六位配对码和当前 MTU；长按
+该行可忘记已经授权的 Mac。设备只保留一个绑定。
+
+PokePod Voice.app 接收 `16 kHz / mono / IMA ADPCM` 音频，临时把默认输入切换为
+BlackHole，并负责 Option+Z 的按下、释放和异常恢复。PokeCapsule 不参与该链路。
 
 ## 恢复边界
 
 正式刷写前必须保留两次逐字节一致的原始 16 MB Flash 备份，并记录安全状态。
 合并固件从偏移 `0x0` 写入；设备进入 ROM BOOT 模式后可从同一偏移恢复原镜像。
-主机测试和 clean build 只能证明软件候选成立，不能替代真实 CDC、UAC、SD、
+主机测试和 clean build 只能证明软件候选成立，不能替代真实 CDC、BLE、SD、
 腾讯返回、扬声器、触摸与电源管理验收。

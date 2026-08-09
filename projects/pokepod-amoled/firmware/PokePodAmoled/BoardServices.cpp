@@ -9,8 +9,10 @@ namespace pokepod {
 namespace {
 
 Arduino_IIC *gTouch = nullptr;
+volatile bool gTouchInterruptPending = false;
 
 void touchInterrupt() {
+  gTouchInterruptPending = true;
   if (gTouch != nullptr) {
     gTouch->IIC_Interrupt_Flag = true;
   }
@@ -61,6 +63,7 @@ bool BoardServices::beginIoExpander(Print &log) {
   for (uint8_t pin : {uint8_t(0), uint8_t(1), uint8_t(2), uint8_t(7)}) {
     expander_.pinMode(pin, OUTPUT);
   }
+  expander_.pinMode(6, INPUT);
   expander_.digitalWrite(0, LOW);
   expander_.digitalWrite(1, LOW);
   expander_.digitalWrite(2, LOW);
@@ -187,11 +190,56 @@ void BoardServices::refreshSensors() {
     status_.charging = pmu_.isCharging();
     status_.vbusPresent = pmu_.isVbusIn();
   }
-  if (status_.imu) {
+  if (status_.imu && !imuLowPower_) {
     status_.imuTemperatureC = imu_.getTemperature_C();
     imu_.getAccelerometer(status_.accelerationX, status_.accelerationY,
                           status_.accelerationZ);
   }
+}
+
+bool BoardServices::takeTouchInterrupt() {
+  noInterrupts();
+  const bool pending = gTouchInterruptPending;
+  gTouchInterruptPending = false;
+  interrupts();
+  return pending;
+}
+
+bool BoardServices::configureScreenOffSensors(bool screenOff,
+                                              bool raiseToWake,
+                                              Print &log) {
+  if (!status_.imu) return false;
+  bool ok = true;
+  if (!screenOff) {
+    imu_.disableAccelerometer();
+    ok = imu_.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
+                                  SensorQMI8658::ACC_ODR_125Hz,
+                                  SensorQMI8658::LPF_MODE_0) == 0 &&
+        imu_.enableAccelerometer();
+    imuLowPower_ = false;
+  } else if (raiseToWake) {
+    ok = imu_.configWakeOnMotion(
+        200, SensorQMI8658::ACC_ODR_LOWPOWER_21Hz,
+        SensorQMI8658::INTERRUPT_PIN_1, 1, 0x08) == 0;
+    imuLowPower_ = ok;
+    imuInterruptBaseline_ = expander_.digitalRead(6);
+  } else {
+    ok = imu_.disableAccelerometer();
+    imuLowPower_ = ok;
+  }
+  log.printf("{\"event\":\"imu_power\",\"ok\":%s,\"screen_off\":%s,\"wake_on_motion\":%s}\n",
+             ok ? "true" : "false", screenOff ? "true" : "false",
+             screenOff && raiseToWake ? "true" : "false");
+  return ok;
+}
+
+bool BoardServices::pollMotionWake() {
+  if (!status_.imu || !imuLowPower_) return false;
+  const int level = expander_.digitalRead(6);
+  if (level == imuInterruptBaseline_) return false;
+  imu_.getIrqStatus();
+  imuInterruptBaseline_ = level;
+  return true;
 }
 
 bool BoardServices::readTouch(int16_t &x, int16_t &y) {
@@ -218,13 +266,15 @@ PowerKeyEvent BoardServices::pollPowerKey() {
 
 void BoardServices::setScreenOn(bool enabled) {
   if (!status_.display || status_.screenOn == enabled) return;
-  status_.screenOn = enabled;
+  if (enabled) display_->displayOn();
   const uint8_t brightness = enabled ? 180 : 0;
   if (status_.variant == BoardVariant::v1Sh8601Ft3168) {
     static_cast<Arduino_SH8601 *>(display_)->setBrightness(brightness);
   } else if (status_.variant == BoardVariant::v2Co5300Cst820) {
     static_cast<Arduino_CO5300 *>(display_)->setBrightness(brightness);
   }
+  if (!enabled) display_->displayOff();
+  status_.screenOn = enabled;
 }
 
 void BoardServices::safeShutdown() {

@@ -1,0 +1,9 @@
+{
+  "schema_version": "bigfront.surfaces.v1",
+  "surfaces": [
+    {"surface_id":"pod-home","name":"PokePod 首页","is_core":true,"source":"03-screen-map.md#surface-清单"},
+    {"surface_id":"pod-capsules","name":"PokePod 胶囊管理","is_core":true,"source":"03-screen-map.md#surface-清单"},
+    {"surface_id":"pod-device","name":"PokePod 设备与无线语音","is_core":true,"source":"03-screen-map.md#surface-清单"},
+    {"surface_id":"voice-menu","name":"PokePod Voice 菜单栏","is_core":true,"source":"03-screen-map.md#surface-清单"}
+  ]
+}

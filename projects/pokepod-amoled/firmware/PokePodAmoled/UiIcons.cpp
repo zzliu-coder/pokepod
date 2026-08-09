@@ -50,6 +50,13 @@ void drawUiIcon(Arduino_GFX &display, UiIcon icon, int16_t x, int16_t y,
       display.drawLine(x + 12, y + 10, x + 17, y + 14, color);
       display.fillCircle(x + 12, y + 20, 2, color);
       break;
+    case UiIcon::bluetooth:
+      display.drawFastVLine(x + 12, y + 1, 22, color);
+      display.drawLine(x + 12, y + 1, x + 20, y + 8, color);
+      display.drawLine(x + 20, y + 8, x + 7, y + 18, color);
+      display.drawLine(x + 12, y + 23, x + 20, y + 16, color);
+      display.drawLine(x + 20, y + 16, x + 7, y + 6, color);
+      break;
     case UiIcon::mac:
       display.drawRoundRect(x + 3, y + 4, 18, 14, 2, color);
       display.drawFastHLine(x + 7, y + 21, 10, color);

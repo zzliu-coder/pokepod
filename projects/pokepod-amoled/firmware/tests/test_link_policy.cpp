@@ -21,10 +21,14 @@ int main() {
   assert(!purgeStagingDirectoryName("purge-"));
   assert(!purgeStagingDirectoryName("recording-1234"));
 
-  assert(linkStorageBusy(true, false, false));
-  assert(linkStorageBusy(false, true, false));
-  assert(!linkStorageBusy(false, false, true));
-  assert(!linkStorageBusy(false, false, false));
+  assert(linkStorageBusy(true, false));
+  assert(linkStorageBusy(false, true));
+  assert(!linkStorageBusy(false, false));
+  assert(linkForegroundBusy(true, false, false, true));
+  assert(linkForegroundBusy(false, true, false, true));
+  assert(linkForegroundBusy(false, false, true, false));
+  assert(linkForegroundBusy(false, false, false, false));
+  assert(!linkForegroundBusy(false, false, false, true));
   assert(transcriptionDispatchBusy(true, false));
   assert(transcriptionDispatchBusy(false, true));
   assert(!transcriptionDispatchBusy(false, false));

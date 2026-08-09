@@ -1,5 +1,9 @@
 #include "ChineseRenderer.h"
 
+#include <cstdlib>
+#include <cstring>
+#include <esp_heap_caps.h>
+
 #include "CapsulePolicy.h"
 #include "FixedChineseFont.h"
 #include "FontPolicy.h"
@@ -72,6 +76,19 @@ void ChineseRenderer::begin(Arduino_GFX *display, fs::FS *fs) {
   sdFontReady_ = false;
   sdGlyphCount_ = 0;
   sdEntrySize_ = 0;
+  sdCacheAge_ = 0;
+  if (sdCache_ == nullptr) {
+    sdCache_ = static_cast<SdGlyphCacheEntry *>(heap_caps_calloc(
+        kSdGlyphCacheEntries, sizeof(SdGlyphCacheEntry),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (sdCache_ == nullptr) {
+      sdCache_ = static_cast<SdGlyphCacheEntry *>(
+          calloc(kSdGlyphCacheEntries, sizeof(SdGlyphCacheEntry)));
+    }
+  } else {
+    std::memset(sdCache_, 0,
+                kSdGlyphCacheEntries * sizeof(SdGlyphCacheEntry));
+  }
   if (fontFile_) fontFile_.close();
   if (fs == nullptr) return;
   const String path = String(kCapsuleSystem) + "/fonts/cjk20.a4";
@@ -95,7 +112,9 @@ void ChineseRenderer::drawText(const String &text, int16_t x, int16_t y,
                                int16_t maxWidth, uint8_t maxLines,
                                uint16_t color, uint16_t background,
                                uint16_t skipLines, bool preferSdFont,
-                               UiTextSize size, bool bold) {
+                               UiTextSize size, bool bold,
+                               int16_t pixelOffset, int16_t clipTop,
+                               int16_t clipBottom) {
   if (display_ == nullptr || maxLines == 0 || maxWidth < 4) return;
   size_t offset = 0;
   uint16_t logicalLine = 0;
@@ -110,12 +129,9 @@ void ChineseRenderer::drawText(const String &text, int16_t x, int16_t y,
       continue;
     }
 
-    GlyphData glyph;
-    const bool found =
-        (preferSdFont && loadSd(codepoint, size, glyph)) ||
-        loadFixed(codepoint, size, glyph) ||
-        (!preferSdFont && loadSd(codepoint, size, glyph));
-    const uint8_t width = found ? glyph.advance : glyphPixels(size);
+    const uint8_t fixedWidth = fixedAdvance(codepoint, size);
+    uint8_t width = fixedWidth != 0 ? fixedWidth :
+        (codepoint < 0x80 ? glyphPixels(size) * 3 / 5 : glyphPixels(size));
     if (cursorX > 0 && cursorX + width > maxWidth) {
       ++logicalLine;
       cursorX = 0;
@@ -126,18 +142,61 @@ void ChineseRenderer::drawText(const String &text, int16_t x, int16_t y,
       continue;
     }
     if (logicalLine >= skipLines + maxLines) break;
+    GlyphData glyph;
+    const bool found =
+        (preferSdFont && loadSd(codepoint, size, glyph)) ||
+        loadFixed(codepoint, size, glyph) ||
+        (!preferSdFont && loadSd(codepoint, size, glyph));
+    if (found) width = glyph.advance;
     const int16_t drawY = y +
-        (logicalLine - skipLines) * lineHeight(size);
+        (logicalLine - skipLines) * lineHeight(size) - pixelOffset;
     if (found) {
-      drawGlyph(x + cursorX, drawY, glyph, color, background, bold);
+      drawGlyph(x + cursorX, drawY, glyph, color, background, bold,
+                clipTop, clipBottom);
     } else {
       const uint8_t pixels = glyphPixels(size);
-      display_->fillRect(x + cursorX, drawY, width, pixels, background);
-      display_->drawRect(x + cursorX + 1, drawY + 1,
-                         width - 2, pixels - 2, color);
+      const int16_t visibleTop = drawY < clipTop ? clipTop : drawY;
+      const int16_t glyphBottom = drawY + pixels;
+      const int16_t visibleBottom =
+          glyphBottom > clipBottom ? clipBottom : glyphBottom;
+      if (visibleBottom > visibleTop) {
+        display_->fillRect(x + cursorX, visibleTop, width,
+                           visibleBottom - visibleTop, background);
+        if (visibleTop == drawY && visibleBottom == glyphBottom) {
+          display_->drawRect(x + cursorX + 1, drawY + 1,
+                             width - 2, pixels - 2, color);
+        }
+      }
     }
     cursorX += width;
   }
+}
+
+uint16_t ChineseRenderer::wrappedLineCount(const String &text,
+                                           int16_t maxWidth,
+                                           UiTextSize size) const {
+  if (maxWidth < 4 || text.isEmpty()) return 1;
+  size_t offset = 0;
+  uint16_t lines = 1;
+  int16_t cursorX = 0;
+  while (offset < text.length()) {
+    const uint32_t codepoint = decodeUtf8(text.c_str(), text.length(), offset);
+    if (codepoint == '\r') continue;
+    if (codepoint == '\n') {
+      ++lines;
+      cursorX = 0;
+      continue;
+    }
+    const uint8_t advance = fixedAdvance(codepoint, size);
+    const uint8_t width = advance != 0 ? advance :
+        (codepoint < 0x80 ? glyphPixels(size) * 3 / 5 : glyphPixels(size));
+    if (cursorX > 0 && cursorX + width > maxWidth) {
+      ++lines;
+      cursorX = 0;
+    }
+    cursorX += width;
+  }
+  return lines;
 }
 
 int16_t ChineseRenderer::measureTextWidth(const String &text,
@@ -158,6 +217,10 @@ int16_t ChineseRenderer::measureTextWidth(const String &text,
         (codepoint < 0x80 ? glyphPixels(size) * 3 / 5 : glyphPixels(size));
   }
   return current > widest ? current : widest;
+}
+
+int16_t ChineseRenderer::textLineHeight(UiTextSize size) const {
+  return lineHeight(size);
 }
 
 bool ChineseRenderer::loadFixed(uint32_t codepoint, UiTextSize size,
@@ -184,6 +247,7 @@ bool ChineseRenderer::loadFixed(uint32_t codepoint, UiTextSize size,
 bool ChineseRenderer::loadSd(uint32_t codepoint, UiTextSize size,
                              GlyphData &glyph) {
   if (size != UiTextSize::body || !sdFontReady_ || !fontFile_) return false;
+  if (loadSdCache(codepoint, glyph)) return true;
   uint32_t low = 0;
   uint32_t high = sdGlyphCount_;
   uint8_t prefix[8];
@@ -200,8 +264,48 @@ bool ChineseRenderer::loadSd(uint32_t codepoint, UiTextSize size,
       little32(prefix) != codepoint) return false;
   glyph.pixels = 20;
   glyph.advance = prefix[4];
-  return fontFile_.read(glyph.bitmap, fontBitmapBytes(20, 20)) ==
+  const bool loaded = fontFile_.read(glyph.bitmap, fontBitmapBytes(20, 20)) ==
       fontBitmapBytes(20, 20);
+  if (loaded) storeSdCache(codepoint, glyph);
+  return loaded;
+}
+
+bool ChineseRenderer::loadSdCache(uint32_t codepoint, GlyphData &glyph) {
+  if (sdCache_ == nullptr) return false;
+  for (uint16_t index = 0; index < kSdGlyphCacheEntries; ++index) {
+    SdGlyphCacheEntry &entry = sdCache_[index];
+    if (!entry.valid || entry.codepoint != codepoint) continue;
+    entry.age = ++sdCacheAge_;
+    glyph.pixels = 20;
+    glyph.advance = entry.advance;
+    std::memcpy(glyph.bitmap, entry.bitmap, kSdGlyphBitmapBytes);
+    return true;
+  }
+  return false;
+}
+
+void ChineseRenderer::storeSdCache(uint32_t codepoint,
+                                   const GlyphData &glyph) {
+  if (sdCache_ == nullptr) return;
+  uint16_t target = 0;
+  uint32_t oldest = UINT32_MAX;
+  for (uint16_t index = 0; index < kSdGlyphCacheEntries; ++index) {
+    if (!sdCache_[index].valid) {
+      target = index;
+      oldest = 0;
+      break;
+    }
+    if (sdCache_[index].age < oldest) {
+      oldest = sdCache_[index].age;
+      target = index;
+    }
+  }
+  SdGlyphCacheEntry &entry = sdCache_[target];
+  entry.codepoint = codepoint;
+  entry.age = ++sdCacheAge_;
+  entry.advance = glyph.advance;
+  entry.valid = true;
+  std::memcpy(entry.bitmap, glyph.bitmap, kSdGlyphBitmapBytes);
 }
 
 uint8_t ChineseRenderer::fixedAdvance(uint32_t codepoint,
@@ -221,9 +325,18 @@ uint8_t ChineseRenderer::fixedAdvance(uint32_t codepoint,
 
 void ChineseRenderer::drawGlyph(int16_t x, int16_t y,
                                 const GlyphData &glyph, uint16_t color,
-                                uint16_t background, bool bold) {
-  display_->fillRect(x, y, glyph.advance, glyph.pixels, background);
-  for (uint16_t row = 0; row < glyph.pixels; ++row) {
+                                uint16_t background, bool bold,
+                                int16_t clipTop, int16_t clipBottom) {
+  const int16_t visibleTop = y < clipTop ? clipTop : y;
+  const int16_t glyphBottom = y + glyph.pixels;
+  const int16_t visibleBottom =
+      glyphBottom > clipBottom ? clipBottom : glyphBottom;
+  if (visibleBottom <= visibleTop) return;
+  display_->fillRect(x, visibleTop, glyph.advance,
+                     visibleBottom - visibleTop, background);
+  const uint16_t firstRow = static_cast<uint16_t>(visibleTop - y);
+  const uint16_t lastRow = static_cast<uint16_t>(visibleBottom - y);
+  for (uint16_t row = firstRow; row < lastRow; ++row) {
     uint16_t column = 0;
     while (column < glyph.advance) {
       uint8_t alpha = alpha4At(

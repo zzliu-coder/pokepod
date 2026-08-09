@@ -6,7 +6,9 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "PokeCapsuleCore", targets: ["PokeCapsuleCore"]),
-        .executable(name: "PokeCapsule", targets: ["PokeCapsule"])
+        .executable(name: "PokeCapsule", targets: ["PokeCapsule"]),
+        .library(name: "PokePodVoiceCore", targets: ["PokePodVoiceCore"]),
+        .executable(name: "PokePodVoice", targets: ["PokePodVoice"])
     ],
     targets: [
         .target(
@@ -24,6 +26,23 @@ let package = Package(
         .testTarget(
             name: "PokeCapsuleCoreTests",
             dependencies: ["PokeCapsuleCore"]
+        ),
+        .target(name: "PokePodVoiceCore"),
+        .executableTarget(
+            name: "PokePodVoice",
+            dependencies: ["PokePodVoiceCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreBluetooth"),
+                .linkedFramework("ServiceManagement")
+            ]
+        ),
+        .testTarget(
+            name: "PokePodVoiceCoreTests",
+            dependencies: ["PokePodVoiceCore"]
         )
     ],
     swiftLanguageVersions: [.v5]

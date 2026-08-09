@@ -1,0 +1,123 @@
+import AppKit
+import SwiftUI
+
+@main
+struct PokePodVoiceApp: App {
+    @StateObject private var model = VoiceRuntimeModel()
+
+    var body: some Scene {
+        MenuBarExtra {
+            VoiceMenuView(model: model)
+        } label: {
+            Label("PokePod Voice · \(model.state.title)", systemImage: model.state.symbol)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+private struct VoiceMenuView: View {
+    @ObservedObject var model: VoiceRuntimeModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: model.state.symbol)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(stateColor)
+                    .frame(width: 34, height: 34)
+                    .background(stateColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.state.title).font(.headline)
+                    Text(model.deviceName).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            Text(model.detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+            readinessRow("蓝牙", ready: model.bluetoothReady, actionTitle: "重连") {
+                model.reconnect()
+            }
+            readinessRow("BlackHole 2ch", ready: model.blackHoleReady, actionTitle: "安装") {
+                model.openBlackHoleInstaller()
+            }
+            readinessRow("辅助功能", ready: model.accessibilityReady, actionTitle: "授权") {
+                model.requestAccessibility()
+            }
+
+            HStack {
+                Image(systemName: "chart.bar.xaxis")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Mac 接收质量")
+                        .font(.caption.weight(.semibold))
+                    Text(model.connectionQuality)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(alignment: .top) {
+                Image(systemName: "arrow.up.forward.square")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("设备发送队列")
+                        .font(.caption.weight(.semibold))
+                    Text(model.deviceQueueQuality)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("主机入队不代表无线空口已送达")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Divider()
+            Toggle("登录时启动", isOn: Binding(
+                get: { model.launchAtLogin },
+                set: { model.setLaunchAtLogin($0) }))
+            HStack {
+                Button("重连") { model.reconnect() }
+                Button("重新配对") { model.forgetPokePod() }
+                Button("恢复麦克风") { model.repairMicrophone() }
+                Spacer()
+                Button("退出") { NSApplication.shared.terminate(nil) }
+            }
+        }
+        .padding(16)
+        .frame(width: 340)
+    }
+
+    @ViewBuilder
+    private func readinessRow(
+        _ title: String,
+        ready: Bool,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack {
+            Image(systemName: ready ? "checkmark.circle.fill" : "exclamationmark.circle")
+                .foregroundStyle(ready ? Color.green : Color.orange)
+            Text(title)
+            Spacer()
+            Text(ready ? "已就绪" : "未就绪")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !ready { Button(actionTitle, action: action).controlSize(.small) }
+        }
+    }
+
+    private var stateColor: Color {
+        switch model.state {
+        case .setup: return .orange
+        case .connecting: return .blue
+        case .ready: return .mint
+        case .listening: return .cyan
+        case .error: return .red
+        }
+    }
+}

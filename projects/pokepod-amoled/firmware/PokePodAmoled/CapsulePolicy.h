@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace pokepod {
 
@@ -13,6 +14,7 @@ constexpr const char *kCapsuleTrash = "/PokeCapsule/.trash";
 constexpr const char *kCapsuleSystem = "/PokeCapsule/.system";
 constexpr const char *kCapsuleWavFile = "audio.wav";
 constexpr const char *kCapsuleWavFormat = "wav-pcm-s16le";
+constexpr const char *kCapsuleArchiveMetadata = "archive.json";
 
 constexpr bool isHexDigit(char value) {
   return (value >= '0' && value <= '9') ||
@@ -66,6 +68,32 @@ constexpr bool capsuleStatusNeedsStartupRequeue(const char *value) {
   size_t index = 0;
   while (interrupted[index] != '\0' && value[index] == interrupted[index]) ++index;
   return interrupted[index] == '\0' && value[index] == '\0';
+}
+
+inline bool safeArchiveOriginalFolder(const char *value) {
+  if (value == nullptr || value[0] == '\0' || value[0] == '.' ||
+      value[0] == '/' || strlen(value) > 160 ||
+      strcmp(value, "Archive") == 0 || strncmp(value, "Archive/", 8) == 0) {
+    return false;
+  }
+  size_t segmentStart = 0;
+  for (size_t index = 0;; ++index) {
+    const char c = value[index];
+    if (c == '\\' || (c != '\0' && static_cast<unsigned char>(c) < 0x20)) {
+      return false;
+    }
+    if (c == '/' || c == '\0') {
+      const size_t length = index - segmentStart;
+      if (length == 0 || value[segmentStart] == '.' ||
+          (length == 2 && value[segmentStart] == '.' &&
+           value[segmentStart + 1] == '.')) {
+        return false;
+      }
+      if (c == '\0') break;
+      segmentStart = index + 1;
+    }
+  }
+  return true;
 }
 
 }  // namespace pokepod

@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 #include "ProvisioningPolicy.h"
+#include "WifiDisconnectDiagnostics.h"
+#include "WifiFailurePolicy.h"
 
 namespace pokepod {
 namespace {
@@ -13,13 +16,36 @@ constexpr uint32_t kValidationTimeoutMs = 15000;
 constexpr uint32_t kScanTimeoutMs = 8000;
 constexpr size_t kMaximumNetworks = 20;
 
+String validationFailureMessage(uint16_t reason) {
+  switch (wifiFailureKind(reason)) {
+    case WifiFailureKind::noAccessPoint:
+      return "找不到该热点；请确认 2.4 GHz 热点仍开启";
+    case WifiFailureKind::authentication:
+      return "热点认证失败；请检查密码和 WPA2 兼容性";
+    case WifiFailureKind::capacity:
+      return "热点连接设备数已满";
+    case WifiFailureKind::timeout:
+      return "连接热点超时；请保持热点设置页开启后重试";
+    case WifiFailureKind::association:
+      return "热点拒绝连接；请检查热点兼容设置";
+    case WifiFailureKind::other:
+      return "无法连接该 Wi-Fi（原因 " + String(reason) + "）";
+    case WifiFailureKind::none:
+      return "无法连接该 Wi-Fi；没有收到热点响应";
+  }
+  return "无法连接该 Wi-Fi";
+}
+
 }  // namespace
 
 ProvisioningPortal::ProvisioningPortal() : server_(80) {}
 
-bool ProvisioningPortal::begin(DeviceConfig &config, Print &log) {
+bool ProvisioningPortal::begin(DeviceConfig &config,
+                               ProvisioningDiagnostics &diagnostics,
+                               Print &log) {
   if (active_) return true;
   config_ = &config;
+  diagnostics_ = &diagnostics;
   log_ = &log;
   candidate_ = config.settings();
   const uint32_t suffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xffff);
@@ -27,23 +53,35 @@ bool ProvisioningPortal::begin(DeviceConfig &config, Print &log) {
   snprintf(name, sizeof(name), "PokePod-%04lX", static_cast<unsigned long>(suffix));
   ssid_ = name;
   password_ = kProvisioningPassword;
-  statusMessage_ = "正在扫描附近的 2.4 GHz 网络";
+  // Keep the captive AP stable while the phone loads the page. Scanning on
+  // the single ESP32 radio is explicit (the user can tap 重新扫描) so the
+  // first HTTP request never competes with an STA scan.
+  statusMessage_ = "请选择附近的 2.4 GHz 网络或手工输入";
   validating_ = false;
   scanning_ = false;
+  transitionPending_ = false;
   changed_ = false;
   saved_ = false;
   closeAtMs_ = 0;
-  WiFi.mode(WIFI_AP_STA);
+  candidateRssi_ = -127;
+  validationAttempt_ = 0;
+  WiFi.mode(WIFI_AP);
   if (!WiFi.softAP(ssid_.c_str(), password_.c_str())) {
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, ssid_, 0,
+                         kProvisioningReasonPortalFailed, 0, 0, log);
     log.println("{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"softap\"}");
     return false;
   }
+  esp_wifi_set_ps(WIFI_PS_NONE);
   installRoutes();
   dns_.start(53, "*", WiFi.softAPIP());
   server_.begin();
   startedMs_ = millis();
   active_ = true;
-  startScan();
+  diagnostics_->record(ProvisioningLogStage::portalStarted,
+                       ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
+                       log);
   log.printf("{\"event\":\"provisioning\",\"ok\":true,\"ssid\":\"%s\",\"expires_ms\":%lu}\n",
              ssid_.c_str(), static_cast<unsigned long>(kPortalLifetimeMs));
   return true;
@@ -53,25 +91,51 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
   if (!active_) return;
   dns_.processNextRequest();
   server_.handleClient();
+  if (transitionPending_ &&
+      static_cast<int32_t>(nowMs - transitionAtMs_) >= 0) {
+    transitionPending_ = false;
+    beginStationValidation();
+  }
   pollScan();
   if (validating_) {
     if (WiFi.status() == WL_CONNECTED) {
       validating_ = false;
+      const uint32_t elapsed = nowMs - validatingSinceMs_;
+      diagnostics_->record(ProvisioningLogStage::connected,
+                           ProvisioningLogOutcome::success,
+                           candidate_.wifiSsid, WiFi.RSSI(), 0, elapsed,
+                           validationAttempt_, *log_);
       if (config_->save(candidate_, *log_)) {
         changed_ = true;
         saved_ = true;
-        statusMessage_ = "保存成功；热点即将关闭";
+        statusMessage_ = "已连接 " + candidate_.wifiSsid;
         closeAtMs_ = nowMs + 1800;
+        diagnostics_->record(ProvisioningLogStage::configSaved,
+                             ProvisioningLogOutcome::success,
+                             candidate_.wifiSsid, WiFi.RSSI(), 0, elapsed,
+                             validationAttempt_, *log_);
       } else {
         saved_ = false;
         statusMessage_ = "写入配置失败，请重试";
+        diagnostics_->record(ProvisioningLogStage::failed,
+                             ProvisioningLogOutcome::failure,
+                             candidate_.wifiSsid, WiFi.RSSI(),
+                             kProvisioningReasonStorage, elapsed,
+                             validationAttempt_, *log_);
+        restorePortalForRetry();
       }
     } else if (static_cast<uint32_t>(nowMs - validatingSinceMs_) >=
                kValidationTimeoutMs) {
       validating_ = false;
       saved_ = false;
-      WiFi.disconnect(false, false);
-      statusMessage_ = "无法连接该 Wi-Fi，请检查名称和密码";
+      const uint16_t reason = lastWifiDisconnectReason();
+      statusMessage_ = validationFailureMessage(reason);
+      diagnostics_->record(ProvisioningLogStage::failed,
+                           ProvisioningLogOutcome::failure,
+                           candidate_.wifiSsid, candidateRssi_, reason,
+                           nowMs - validatingSinceMs_, validationAttempt_,
+                           *log_);
+      restorePortalForRetry();
     }
   }
   if ((closeAtMs_ != 0 && static_cast<int32_t>(nowMs - closeAtMs_) >= 0) ||
@@ -91,12 +155,19 @@ void ProvisioningPortal::stop() {
   active_ = false;
   validating_ = false;
   scanning_ = false;
+  transitionPending_ = false;
   networks_.clear();
   closeAtMs_ = 0;
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->record(ProvisioningLogStage::portalStopped,
+                         ProvisioningLogOutcome::info, ssid_, 0, 0,
+                         millis() - startedMs_, validationAttempt_, *log_);
+  }
   if (log_ != nullptr) log_->println("{\"event\":\"provisioning_stopped\"}");
 }
 
 bool ProvisioningPortal::takeConfigurationChanged() {
+  if (active_) return false;
   const bool value = changed_;
   changed_ = false;
   return value;
@@ -108,6 +179,7 @@ void ProvisioningPortal::installRoutes() {
   server_.on("/networks", HTTP_GET, [this]() { showNetworks(); });
   server_.on("/scan", HTTP_POST, [this]() { scanRequest(); });
   server_.on("/save", HTTP_POST, [this]() { saveRequest(); });
+  server_.on("/forget-network", HTTP_POST, [this]() { forgetRequest(); });
   server_.on("/status", HTTP_GET, [this]() { showPortal(); });
   server_.on("/generate_204", HTTP_ANY, [this]() { redirectPortal(); });
   server_.on("/hotspot-detect.html", HTTP_ANY, [this]() { redirectPortal(); });
@@ -118,13 +190,28 @@ void ProvisioningPortal::installRoutes() {
 
 void ProvisioningPortal::startScan() {
   if (!active_ || validating_ || scanning_) return;
+  WiFi.mode(WIFI_AP_STA);
   const int16_t result = WiFi.scanNetworks(true, false, false, 120);
   scanning_ = result == WIFI_SCAN_RUNNING;
   scanStartedMs_ = millis();
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->record(ProvisioningLogStage::scanStarted,
+                         ProvisioningLogOutcome::info, "", 0, 0,
+                         scanStartedMs_ - startedMs_, validationAttempt_,
+                         *log_);
+  }
   if (!scanning_) {
+    WiFi.mode(WIFI_AP);
     statusMessage_ = "扫描启动失败；可手工输入网络名称";
     if (log_ != nullptr) {
       log_->println("{\"event\":\"wifi_scan\",\"ok\":false,\"stage\":\"start\"}");
+    }
+    if (diagnostics_ != nullptr && log_ != nullptr) {
+      diagnostics_->record(ProvisioningLogStage::failed,
+                           ProvisioningLogOutcome::failure, "", 0,
+                           kProvisioningReasonScanStart,
+                           millis() - scanStartedMs_, validationAttempt_,
+                           *log_);
     }
   }
 }
@@ -136,18 +223,34 @@ void ProvisioningPortal::pollScan() {
     if (static_cast<uint32_t>(millis() - scanStartedMs_) < kScanTimeoutMs) return;
     scanning_ = false;
     WiFi.scanDelete();
+    WiFi.mode(WIFI_AP);
     statusMessage_ = "扫描超时；可重新扫描或手工输入";
     if (log_ != nullptr) {
       log_->println("{\"event\":\"wifi_scan\",\"ok\":false,\"stage\":\"timeout\"}");
+    }
+    if (diagnostics_ != nullptr && log_ != nullptr) {
+      diagnostics_->record(ProvisioningLogStage::failed,
+                           ProvisioningLogOutcome::failure, "", 0,
+                           kProvisioningReasonScanTimeout,
+                           millis() - scanStartedMs_, validationAttempt_,
+                           *log_);
     }
     return;
   }
   if (count < 0) {
     scanning_ = false;
     WiFi.scanDelete();
+    WiFi.mode(WIFI_AP);
     statusMessage_ = "扫描失败；可重新扫描或手工输入";
     if (log_ != nullptr) {
       log_->println("{\"event\":\"wifi_scan\",\"ok\":false,\"stage\":\"complete\"}");
+    }
+    if (diagnostics_ != nullptr && log_ != nullptr) {
+      diagnostics_->record(ProvisioningLogStage::failed,
+                           ProvisioningLogOutcome::failure, "", 0,
+                           kProvisioningReasonScanFailed,
+                           millis() - scanStartedMs_, validationAttempt_,
+                           *log_);
     }
     return;
   }
@@ -174,12 +277,21 @@ void ProvisioningPortal::pollScan() {
   if (networks_.size() > kMaximumNetworks) networks_.resize(kMaximumNetworks);
   WiFi.scanDelete();
   scanning_ = false;
+  // Return to AP-only mode after the scan. This prevents the STA side from
+  // stealing the AP channel while the phone is using the portal.
+  WiFi.mode(WIFI_AP);
   statusMessage_ = networks_.empty()
       ? "没有发现网络；可重新扫描或手工输入"
       : "请选择附近的 2.4 GHz 网络";
   if (log_ != nullptr) {
     log_->printf("{\"event\":\"wifi_scan\",\"ok\":true,\"networks\":%u}\n",
                  static_cast<unsigned>(networks_.size()));
+  }
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->record(ProvisioningLogStage::scanFinished,
+                         ProvisioningLogOutcome::success, "", 0, 0,
+                         millis() - scanStartedMs_, validationAttempt_,
+                         *log_);
   }
 }
 
@@ -218,6 +330,10 @@ void ProvisioningPortal::saveRequest() {
   const String manualSsid = server_.arg("ssidManual");
   next.wifiSsid = manualSsid.isEmpty() ? server_.arg("ssid") : manualSsid;
   next.wifiPassword = server_.arg("wifiPassword");
+  if (next.wifiPassword.isEmpty()) {
+    const WifiCredential *remembered = config_->wifiNetwork(next.wifiSsid);
+    if (remembered != nullptr) next.wifiPassword = remembered->password;
+  }
   next.hotwordId = server_.arg("hotwordId");
   next.wifiEnabled = true;
   const String secretId = server_.arg("secretId");
@@ -229,6 +345,10 @@ void ProvisioningPortal::saveRequest() {
   } else if (!secretId.isEmpty() || !secretKey.isEmpty()) {
     if (secretId.isEmpty() || secretKey.isEmpty()) {
       statusMessage_ = "SecretId 和 SecretKey 必须同时填写";
+      diagnostics_->record(ProvisioningLogStage::failed,
+                           ProvisioningLogOutcome::failure, next.wifiSsid,
+                           -127, kProvisioningReasonInvalidInput, 0,
+                           validationAttempt_, *log_);
       sendSaveJson(400, false);
       return;
     }
@@ -239,16 +359,82 @@ void ProvisioningPortal::saveRequest() {
       (!next.wifiPassword.isEmpty() &&
        (next.wifiPassword.length() < 8 || next.wifiPassword.length() > 63))) {
     statusMessage_ = "Wi-Fi 名称或密码长度不正确";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, next.wifiSsid,
+                         -127, kProvisioningReasonInvalidInput, 0,
+                         validationAttempt_, *log_);
     sendSaveJson(400, false);
     return;
   }
   candidate_ = next;
+  candidateRssi_ = -127;
+  const auto scanned = std::find_if(
+      networks_.begin(), networks_.end(),
+      [&next](const ScannedNetwork &network) {
+        return network.ssid == next.wifiSsid;
+      });
+  if (scanned != networks_.end()) candidateRssi_ = scanned->rssi;
+  ++validationAttempt_;
   saved_ = false;
-  statusMessage_ = "正在连接并验证 Wi-Fi";
+  statusMessage_ = "正在连接 " + next.wifiSsid;
   validating_ = true;
   validatingSinceMs_ = millis();
-  WiFi.begin(candidate_.wifiSsid.c_str(), candidate_.wifiPassword.c_str());
+  transitionPending_ = true;
+  transitionAtMs_ = validatingSinceMs_ + 200;
+  // A single ESP32 radio cannot reliably keep serving the captive AP while
+  // associating its STA interface with a different channel. Acknowledge the
+  // request first, then close the AP and validate in STA-only mode. The short
+  // grace period lets the phone receive the HTTP 202 before the AP disappears.
   sendSaveJson(202, true);
+}
+
+void ProvisioningPortal::beginStationValidation() {
+  dns_.stop();
+  WiFi.softAPdisconnect(false);
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  clearWifiDisconnectReason();
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->record(ProvisioningLogStage::connectStarted,
+                         ProvisioningLogOutcome::info,
+                         candidate_.wifiSsid, candidateRssi_, 0, 0,
+                         validationAttempt_, *log_);
+  }
+  WiFi.begin(candidate_.wifiSsid.c_str(), candidate_.wifiPassword.c_str());
+}
+
+void ProvisioningPortal::restorePortalForRetry() {
+  transitionPending_ = false;
+  dns_.stop();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_AP);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  if (WiFi.softAP(ssid_.c_str(), password_.c_str())) {
+    dns_.start(53, "*", WiFi.softAPIP());
+  }
+}
+
+void ProvisioningPortal::forgetRequest() {
+  if (validating_) {
+    server_.send(409, "application/json; charset=utf-8",
+                 "{\"error\":\"正在验证 Wi-Fi\"}");
+    return;
+  }
+  const String ssid = server_.arg("ssid");
+  if (ssid.isEmpty() || config_->wifiNetwork(ssid) == nullptr) {
+    server_.send(404, "application/json; charset=utf-8",
+                 "{\"error\":\"没有找到该网络\"}");
+    return;
+  }
+  if (!config_->forgetWifi(ssid, *log_)) {
+    server_.send(500, "application/json; charset=utf-8",
+                 "{\"error\":\"保存失败，请重试\"}");
+    return;
+  }
+  candidate_ = config_->settings();
+  changed_ = true;
+  statusMessage_ = "已忘记所选网络";
+  showNetworks();
 }
 
 void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
@@ -260,9 +446,30 @@ void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
   json += validating_ ? "true" : "false";
   json += ",\"saved\":";
   json += saved_ ? "true" : "false";
+  json += ",\"wifiState\":\"";
+  json += portalState();
+  json += "\"";
   json += ",\"message\":\"" + jsonEscape(statusMessage_) + "\"}";
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(statusCode, "application/json; charset=utf-8", json);
+}
+
+ProvisioningState ProvisioningPortal::state() const {
+  if (saved_) return ProvisioningState::connected;
+  if (validating_ || transitionPending_) return ProvisioningState::connecting;
+  if (scanning_) return ProvisioningState::scanning;
+  if (statusMessage_.indexOf("失败") >= 0 ||
+      statusMessage_.indexOf("无法") >= 0 ||
+      statusMessage_.indexOf("超时") >= 0 ||
+      statusMessage_.indexOf("拒绝") >= 0 ||
+      statusMessage_.indexOf("找不到") >= 0) {
+    return ProvisioningState::error;
+  }
+  return ProvisioningState::ready;
+}
+
+const char *ProvisioningPortal::portalState() const {
+  return provisioningStateName(state());
 }
 
 void ProvisioningPortal::redirectPortal() {
@@ -300,6 +507,13 @@ button{touch-action:manipulation}
 .hero p{margin:8px 0 0;color:#91a69f;font-size:15px;line-height:1.45}
 .status{display:flex;gap:10px;margin:0 0 14px;padding:11px 13px;border:1px solid #1a2a25;border-radius:14px;background:#0b1311;color:#cbd9d4;font-size:14px;line-height:1.45}
 .status:before{content:"";flex:0 0 auto;width:8px;height:8px;margin-top:6px;border-radius:50%;background:#f0c45b;box-shadow:0 4px 14px rgba(240,196,91,.28)}
+.status[data-state='connecting']:before{background:#f0c45b;box-shadow:0 0 14px rgba(240,196,91,.45);animation:pulse 1.2s ease-in-out infinite}
+.status[data-state='connected']:before{background:#69e0b6;box-shadow:0 0 14px rgba(105,224,182,.45)}
+.status[data-state='error']:before{background:#ff786d;box-shadow:0 0 14px rgba(255,120,109,.35)}
+@keyframes pulse{50%{opacity:.35;transform:scale(.72)}}
+.connection{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 0 14px;padding:13px 14px;border:1px solid #1a2a25;border-radius:14px;background:#07100d}
+.connection-copy{min-width:0}.connection-title{color:#91a69f;font-size:12px;font-weight:700}.connection-detail{margin-top:4px;color:#f4faf7;font-size:15px;font-weight:750;white-space:nowrap;text-overflow:ellipsis}
+.connection-state{flex:0 0 auto;color:#f0c45b;font-size:14px;font-weight:800}.connection[data-state='connected'] .connection-state{color:#69e0b6}.connection[data-state='error'] .connection-state{color:#ff786d}
 .screen[hidden]{display:none}
 .card{padding:18px 16px;border:1px solid #1a2a25;border-radius:18px;background:#0b1311}
 .card-head{display:flex;align-items:center;gap:12px;margin-bottom:17px}
@@ -318,6 +532,11 @@ input:focus,select:focus{border-color:#69e0b6;box-shadow:0 0 0 3px rgba(105,224,
 select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg,transparent 50%,#91a69f 50%),linear-gradient(135deg,#91a69f 50%,transparent 50%);background-position:calc(100% - 19px) 23px,calc(100% - 14px) 23px;background-size:5px 5px;background-repeat:no-repeat}
 .scan-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}
 .scan-help{color:#91a69f;font-size:12px}
+.remembered{margin:0 0 16px;padding:12px;border:1px solid #1f342d;border-radius:14px;background:#07100d}
+.remembered-title{margin:0 0 8px;color:#91a69f;font-size:12px;font-weight:700}
+.remembered-item{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:38px;border-top:1px solid #14231e;color:#cbd9d4;font-size:14px}
+.remembered-item:first-of-type{border-top:0}
+.forget{border:0;background:transparent;color:#ff8d82;font-size:13px;font-weight:700}
 .secondary{min-height:44px;padding:9px 14px;border:1px solid #2c4a40;border-radius:13px;background:#101a17;color:#69e0b6;font-size:14px;font-weight:750}
 .secondary:disabled{opacity:.45}
 .disclosure{margin-top:16px;border-top:1px solid #1a2a25;padding-top:14px}
@@ -349,19 +568,21 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
 <main class='shell'>
 <div class='top'><div class='brand'><span class='mark' aria-hidden='true'></span><span>POKEPOD</span></div><div class='progress' aria-hidden='true'><i id='p1' class='on'></i><i id='p2'></i></div></div>
 <header class='hero'><h1 id='title'>连接网络</h1><p id='subtitle'>选择附近的 2.4 GHz Wi-Fi</p></header>
-<div id='status' class='status' role='status' aria-live='polite'>)HTML");
+<div id='status' class='status' data-state='ready' role='status' aria-live='polite'>)HTML");
   html += htmlEscape(statusMessage_);
   html += F(R"HTML(</div>
+<div id='connection' class='connection' data-state='ready' role='status' aria-live='polite'><div class='connection-copy'><div class='connection-title'>设备网络状态</div><div id='connection-detail' class='connection-detail'>等待选择 Wi-Fi</div></div><div id='connection-state' class='connection-state'>待设置</div></div>
 <form id='form' method='post' action='/save'>
 <section id='wifi-step' class='screen'>
 <div class='card' aria-labelledby='wifi-title'>
 <div class='card-head'><span class='number'>01</span><h2 id='wifi-title'>Wi-Fi</h2></div>
+<div id='remembered-wrap' class='remembered' hidden><p class='remembered-title'>已保存网络</p><div id='remembered-list'></div></div>
 <label class='field'><span class='field-name'>附近网络</span><select id='ssid' name='ssid' data-current=')HTML");
   html += htmlEscape(candidate_.wifiSsid);
   html += F(R"HTML('><option value=''>正在读取附近网络…</option></select></label>
 <div class='scan-row'><span class='scan-help'>按信号强度排列</span><button id='rescan' class='secondary' type='button'>重新扫描</button></div>
 <details class='disclosure manual'><summary>手工输入网络名称</summary><div class='disclosure-body'><label class='field'><span class='field-name'>网络名称</span><input id='manual' name='ssidManual' maxlength='32' autocomplete='off' autocapitalize='none' spellcheck='false' placeholder='Wi-Fi 名称'></label></div></details>
-<label class='field'><span class='field-name'>Wi-Fi 密码</span><input id='wifi-password' name='wifiPassword' type='password' maxlength='63' autocomplete='current-password' autocapitalize='none' spellcheck='false' placeholder='网络密码'></label>
+<label class='field'><span class='field-name'>Wi-Fi 密码</span><input id='wifi-password' name='wifiPassword' type='password' maxlength='63' autocomplete='current-password' autocapitalize='none' spellcheck='false' placeholder='已保存网络可留空'></label>
 </div>
 <div class='actions'><button id='next' class='primary' type='button'>下一步</button></div>
 </section>
@@ -397,20 +618,23 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
 <p class='footer'>热点 5 分钟后自动关闭</p>
 </main>
 <script>
-const s=document.getElementById('ssid'),b=document.getElementById('rescan'),form=document.getElementById('form'),save=document.getElementById('save'),status=document.getElementById('status'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),success=document.getElementById('success-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2');
+const s=document.getElementById('ssid'),b=document.getElementById('rescan'),form=document.getElementById('form'),save=document.getElementById('save'),status=document.getElementById('status'),connection=document.getElementById('connection'),connectionDetail=document.getElementById('connection-detail'),connectionState=document.getElementById('connection-state'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),success=document.getElementById('success-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2'),rememberedWrap=document.getElementById('remembered-wrap'),rememberedList=document.getElementById('remembered-list');
 let preferred=s.dataset.current;
 let validationTimer=0;
 function strength(r){return r>=-55?'强':r>=-70?'中':'弱'}
+function renderStatus(d){const state=d.wifiState||((d.saved)?'connected':(d.validating?'connecting':(d.scanning?'scanning':'ready')));const names={ready:['待设置','等待选择 Wi-Fi'],scanning:['扫描中','正在查找附近网络'],connecting:['连接中','正在验证 '+(d.wifiSsid||'目标网络')],connected:['已连接',d.wifiSsid?'已连接 '+d.wifiSsid:'Wi-Fi 已验证'],error:['连接失败','请检查热点后重试']};const copy=names[state]||names.ready;connection.dataset.state=state;connectionState.textContent=copy[0];connectionDetail.textContent=copy[1];status.dataset.state=state;if(d.message)status.textContent=d.message}
 function syncViewport(){const viewport=window.visualViewport;const height=viewport?viewport.height:window.innerHeight;document.documentElement.style.setProperty('--viewport-height',Math.round(height)+'px')}
 function resetScroll(){requestAnimationFrame(()=>{const root=document.scrollingElement||document.documentElement;root.scrollTop=0;document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>{root.scrollTop=0})})}
-function render(d){const chosen=s.value||preferred;s.textContent='';for(const n of d.networks){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' · '+strength(n.rssi)+(n.secured?' · 加密':' · 开放');s.appendChild(o)}if(chosen&&![...s.options].some(o=>o.value===chosen)){const o=document.createElement('option');o.value=chosen;o.textContent=chosen+' · 已保存';s.prepend(o)}if(!s.options.length){const o=document.createElement('option');o.value='';o.textContent=d.scanning?'正在扫描…':'没有发现网络';s.appendChild(o)}if([...s.options].some(o=>o.value===chosen))s.value=chosen;if(d.message)status.textContent=d.message;b.textContent=d.scanning?'扫描中…':'重新扫描';b.disabled=d.scanning;if(d.scanning)setTimeout(()=>load(false),800)}
+function renderRemembered(items){rememberedList.textContent='';rememberedWrap.hidden=!items.length;for(const item of items){const row=document.createElement('div');row.className='remembered-item';const name=document.createElement('span');name.textContent=item.ssid;const forget=document.createElement('button');forget.type='button';forget.className='forget';forget.textContent='忘记';forget.addEventListener('click',()=>forgetNetwork(item.ssid));row.append(name,forget);rememberedList.appendChild(row)}}
+function render(d){const remembered=d.remembered||[];const rememberedNames=new Set(remembered.map(n=>n.ssid));renderRemembered(remembered);const chosen=s.value||preferred;s.textContent='';for(const n of d.networks){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' · '+strength(n.rssi)+(rememberedNames.has(n.ssid)?' · 已保存':n.secured?' · 加密':' · 开放');s.appendChild(o)}if(chosen&&![...s.options].some(o=>o.value===chosen)){const o=document.createElement('option');o.value=chosen;o.textContent=chosen+' · 已保存';s.prepend(o)}if(!s.options.length){const o=document.createElement('option');o.value='';o.textContent=d.scanning?'正在扫描…':'没有发现网络';s.appendChild(o)}if([...s.options].some(o=>o.value===chosen))s.value=chosen;renderStatus(d);b.textContent=d.scanning?'扫描中…':'重新扫描';b.disabled=d.scanning;if(d.scanning)setTimeout(()=>load(false),800)}
 async function load(rescan){try{const r=await fetch(rescan?'/scan':'/networks',{method:rescan?'POST':'GET',cache:'no-store'});render(await r.json())}catch(e){b.textContent='重新扫描';b.disabled=false}}
+async function forgetNetwork(ssid){if(!confirm('忘记“'+ssid+'”？'))return;const body=new FormData();body.append('ssid',ssid);try{const r=await fetch('/forget-network',{method:'POST',body,cache:'no-store'});const d=await r.json();if(!r.ok){status.textContent=d.error||'无法忘记网络';return}if(preferred===ssid)preferred='';render(d)}catch(e){status.textContent='操作失败，请保持连接 PokePod 热点'}}
 function blurKeyboard(){const active=document.activeElement;if(active&&active.blur)active.blur()}
 function showTencent(){const manual=document.getElementById('manual').value;if(!s.value&&!manual){status.textContent='请选择网络或手工输入名称';try{s.focus({preventScroll:true})}catch(e){s.focus()}return}blurKeyboard();setTimeout(()=>{wifi.hidden=true;tencent.hidden=false;title.textContent='腾讯云转写';subtitle.textContent='保存语音转写凭证';p1.classList.remove('on');p2.classList.add('on');syncViewport();resetScroll()},180)}
 function showWifi(){blurKeyboard();tencent.hidden=true;wifi.hidden=false;title.textContent='连接网络';subtitle.textContent='选择附近的 2.4 GHz Wi-Fi';p2.classList.remove('on');p1.classList.add('on');syncViewport();resetScroll()}
-function showSuccess(){clearTimeout(validationTimer);wifi.hidden=true;tencent.hidden=true;success.hidden=false;status.textContent='保存成功；热点即将关闭';title.textContent='设置完成';subtitle.textContent='PokePod 已连接到网络';save.disabled=true;syncViewport();resetScroll()}
-async function pollValidation(){try{const r=await fetch('/networks',{cache:'no-store'});const d=await r.json();if(d.message)status.textContent=d.message;if(d.saved){showSuccess();return}if(d.validating){validationTimer=setTimeout(pollValidation,500);return}save.disabled=false;save.textContent='重新保存';document.getElementById('back').disabled=false}catch(e){status.textContent='设备正在切换网络，请查看 PokePod 屏幕';validationTimer=setTimeout(pollValidation,700)}}
-async function submitForm(event){event.preventDefault();blurKeyboard();save.disabled=true;document.getElementById('back').disabled=true;save.textContent='正在连接…';status.textContent='正在连接并验证 Wi-Fi';try{const r=await fetch('/save',{method:'POST',body:new FormData(form),cache:'no-store'});const d=await r.json();status.textContent=d.message||'正在连接并验证 Wi-Fi';if(!r.ok){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='保存并连接';return}pollValidation()}catch(e){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='重新保存';status.textContent='提交失败，请保持连接 PokePod 热点后重试'}}
+function showSuccess(){clearTimeout(validationTimer);wifi.hidden=true;tencent.hidden=true;success.hidden=false;renderStatus({wifiState:'connected',saved:true,wifiSsid:s.value||preferred,message:'保存成功；热点即将关闭'});title.textContent='设置完成';subtitle.textContent='PokePod 已连接到网络';save.disabled=true;syncViewport();resetScroll()}
+async function pollValidation(){try{const r=await fetch('/networks',{cache:'no-store'});const d=await r.json();renderStatus(d);if(d.saved){showSuccess();return}if(d.validating){validationTimer=setTimeout(pollValidation,500);return}save.disabled=false;save.textContent='重新保存';document.getElementById('back').disabled=false}catch(e){renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'});validationTimer=setTimeout(pollValidation,700)}}
+async function submitForm(event){event.preventDefault();blurKeyboard();save.disabled=true;document.getElementById('back').disabled=true;save.textContent='正在连接…';renderStatus({wifiState:'connecting',message:'正在连接并验证 Wi-Fi',wifiSsid:s.value||document.getElementById('manual').value});try{const r=await fetch('/save',{method:'POST',body:new FormData(form),cache:'no-store'});const d=await r.json();renderStatus(d);if(!r.ok){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='保存并连接';return}pollValidation()}catch(e){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='重新保存';renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'})}}
 b.addEventListener('click',()=>load(true));
 document.getElementById('next').addEventListener('click',showTencent);
 document.getElementById('back').addEventListener('click',showWifi);
@@ -434,12 +658,25 @@ String ProvisioningPortal::networksJson() const {
   json += validating_ ? "true" : "false";
   json += ",\"saved\":";
   json += saved_ ? "true" : "false";
+  json += ",\"wifiState\":\"";
+  json += portalState();
+  json += "\",\"wifiSsid\":\"";
+  json += jsonEscape(candidate_.wifiSsid);
+  json += "\"";
   json += ",\"message\":\"" + jsonEscape(statusMessage_) + "\",\"networks\":[";
   for (size_t index = 0; index < networks_.size(); ++index) {
     if (index != 0) json += ',';
     json += "{\"ssid\":\"" + jsonEscape(networks_[index].ssid) + "\",\"rssi\":" +
         String(networks_[index].rssi) + ",\"secured\":" +
         (networks_[index].secured ? "true" : "false") + "}";
+  }
+  json += "],\"remembered\":[";
+  if (config_ != nullptr) {
+    const auto &remembered = config_->wifiNetworks();
+    for (size_t index = 0; index < remembered.size(); ++index) {
+      if (index != 0) json += ',';
+      json += "{\"ssid\":\"" + jsonEscape(remembered[index].ssid) + "\"}";
+    }
   }
   json += "]}";
   return json;

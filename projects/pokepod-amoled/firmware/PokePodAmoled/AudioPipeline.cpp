@@ -11,10 +11,19 @@ namespace pokepod {
 bool AudioPipeline::begin(Print &log) {
   pinMode(kSpeakerAmpPin, OUTPUT);
   // Waveshare's ES8311 example enables the board audio power path before
-  // starting I2S. USB exposes a microphone-only UAC interface, so no host
+  // starting I2S. BLE and local WAV both consume the physical microphone, so no
   // playback samples are routed to this TX channel.
   digitalWrite(kSpeakerAmpPin, LOW);
   i2s_.setPins(kI2sBclk, kI2sWordSelect, kI2sDataOut, kI2sDataIn, kI2sMclk);
+  available_ = startHardware(log);
+  if (available_) stopHardware(log);
+  log.printf("{\"event\":\"audio_ready\",\"ok\":%s,\"policy\":\"on_demand\"}\n",
+             available_ ? "true" : "false");
+  return available_;
+}
+
+bool AudioPipeline::startHardware(Print &log) {
+  if (hardwareActive_) return true;
   if (!i2s_.begin(I2S_MODE_STD, kAudioSampleRate, I2S_DATA_BIT_WIDTH_16BIT,
                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"i2s\"}");
@@ -26,6 +35,7 @@ bool AudioPipeline::begin(Print &log) {
 
   es8311_handle_t codec = es8311_create(0, ES8311_ADDRESS_0);
   if (codec == nullptr) {
+    i2s_.end();
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_create\"}");
     return false;
   }
@@ -45,17 +55,42 @@ bool AudioPipeline::begin(Print &log) {
   if (error == ESP_OK) error = es8311_voice_volume_set(codec, 82, nullptr);
   if (error == ESP_OK) error = es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_30DB);
   if (error != ESP_OK) {
+    es8311_delete(codec);
+    i2s_.end();
     log.printf("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_init\",\"error\":%d}\n", error);
     return false;
   }
-  ready_ = true;
+  codec_ = codec;
+  hardwareActive_ = true;
   log.printf("{\"event\":\"audio\",\"ok\":true,\"sample_rate\":%lu,\"channels\":%u}\n",
              static_cast<unsigned long>(kAudioSampleRate), kAudioChannels);
   return true;
 }
 
+bool AudioPipeline::startCapture(Print &log) {
+  if (!available_) return false;
+  return startHardware(log);
+}
+
+void AudioPipeline::stopHardware(Print &log) {
+  if (!hardwareActive_ || playing_) return;
+  digitalWrite(kSpeakerAmpPin, LOW);
+  // Resetting the ES8311 before removing MCLK closes its ADC/DAC power path.
+  Wire.beginTransmission(ES8311_ADDRESS_0);
+  Wire.write(static_cast<uint8_t>(0x00));
+  Wire.write(static_cast<uint8_t>(0x1F));
+  Wire.endTransmission();
+  i2s_.end();
+  if (codec_ != nullptr) {
+    es8311_delete(static_cast<es8311_handle_t>(codec_));
+    codec_ = nullptr;
+  }
+  hardwareActive_ = false;
+  log.println("{\"event\":\"audio_power\",\"active\":false}");
+}
+
 size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
-  if (!ready_ || buffer == nullptr || capacity == 0) return 0;
+  if (!hardwareActive_ || buffer == nullptr || capacity == 0) return 0;
   const size_t bytes = i2s_.readBytes(reinterpret_cast<char *>(buffer), capacity);
   if (bytes == 0) {
     ++readFailures_;
@@ -69,7 +104,7 @@ size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
 }
 
 bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
-  if (!ready_ || playing_) return false;
+  if (!available_ || playing_ || !startHardware(log)) return false;
   File file = fs.open(path, FILE_READ);
   uint8_t header[kWavHeaderBytes];
   uint32_t dataBytes = 0;
@@ -77,6 +112,7 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
       file.read(header, sizeof(header)) != sizeof(header) ||
       !validCapsuleWavHeader(header, sizeof(header), file.size(), dataBytes)) {
     if (file) file.close();
+    stopHardware(log);
     log.println("{\"event\":\"playback_error\",\"stage\":\"wav_header\"}");
     return false;
   }
@@ -123,6 +159,7 @@ void AudioPipeline::stopPlayback(Print &log) {
   playing_ = false;
   digitalWrite(kSpeakerAmpPin, LOW);
   log.println("{\"event\":\"playback_stopped\"}");
+  stopHardware(log);
 }
 
 }  // namespace pokepod

@@ -18,11 +18,6 @@ struct SettingsView: View {
                 Text("每台设备拥有独立镜像、备份和离线操作队列。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("PokePod 有线语音输入") {
-                Button("打开听写设置") { openDictationSettings() }
-                Text("按住设备按键时会保持 Option-Z 按下并开始听写，松手时释放并结束；无需给 PokeCapsule 键盘监听或辅助功能权限。听写麦克风请选择 TinyUSB UAC1（PokeCapsule，48 kHz）。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
             Section("手动校对") {
                 TextField("API 地址", text: $endpoint)
                 TextField("模型", text: $model)
@@ -55,12 +50,6 @@ struct SettingsView: View {
             apiKey = ""
             message = "密钥已保存"
         } catch { message = error.localizedDescription }
-    }
-
-    private func openDictationSettings() {
-        guard let url = URL(string:
-            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Dictation") else { return }
-        NSWorkspace.shared.open(url)
     }
 
     private func importKey() {

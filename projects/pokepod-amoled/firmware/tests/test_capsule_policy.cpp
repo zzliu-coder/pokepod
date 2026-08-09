@@ -23,6 +23,13 @@ int main() {
   assert(!capsuleStatusNeedsStartupRequeue("transcribing-old"));
   assert(!capsuleStatusNeedsStartupRequeue(nullptr));
   assert(!safeCapsuleFileName(""));
+  assert(safeArchiveOriginalFolder("Inbox"));
+  assert(safeArchiveOriginalFolder("Projects/Ideas"));
+  assert(!safeArchiveOriginalFolder("Archive"));
+  assert(!safeArchiveOriginalFolder("Archive/Old"));
+  assert(!safeArchiveOriginalFolder(".trash"));
+  assert(!safeArchiveOriginalFolder("Projects/../Inbox"));
+  assert(!safeArchiveOriginalFolder("/Inbox"));
   assert(std::strcmp(kCapsuleWavFile, "audio.wav") == 0);
   assert(std::strcmp(kCapsuleWavFormat, "wav-pcm-s16le") == 0);
   return 0;

@@ -43,6 +43,9 @@ class BoardServices {
   bool begin(Print &log);
   void refreshSensors();
   bool readTouch(int16_t &x, int16_t &y);
+  bool takeTouchInterrupt();
+  bool configureScreenOffSensors(bool screenOff, bool raiseToWake, Print &log);
+  bool pollMotionWake();
   PowerKeyEvent pollPowerKey();
   void setScreenOn(bool enabled);
   void safeShutdown();
@@ -72,6 +75,8 @@ class BoardServices {
   SensorPCF85063 rtc_;
   SensorQMI8658 imu_;
   XPowersAXP2101 pmu_;
+  bool imuLowPower_ = false;
+  int imuInterruptBaseline_ = HIGH;
 };
 
 }  // namespace pokepod

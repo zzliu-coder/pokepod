@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="368" height="448" viewBox="0 0 368 448">
+<rect width="368" height="448" rx="44" fill="#000"/><g font-family="PingFang SC,Arial" fill="#F4F7F6">
+<text x="24" y="35" font-size="24" font-weight="700">设备</text><text x="287" y="34" font-size="14" fill="#42E8C3">状态正常</text>
+<rect x="20" y="58" width="328" height="82" rx="20" fill="#0B1514" stroke="#1D3733"/><circle cx="52" cy="99" r="18" fill="#15332E"/><text x="45" y="105" font-size="17" fill="#42E8C3">◉</text><text x="82" y="91" font-size="19" font-weight="600">无线语音</text><text x="82" y="117" font-size="14" fill="#8EA09C">已连接 MacBook Air</text><text x="308" y="106" font-size="18" fill="#42E8C3">›</text>
+<rect x="20" y="150" width="328" height="62" rx="18" fill="#08100F"/><text x="42" y="188" font-size="17" fill="#A9B8FF">▣</text><text x="78" y="188" font-size="18">USB 同步</text><text x="268" y="188" font-size="15" fill="#A9B8FF">已连接</text>
+<rect x="20" y="222" width="328" height="62" rx="18" fill="#08100F"/><text x="42" y="260" font-size="17" fill="#FFC64A">⌁</text><text x="78" y="260" font-size="18">无线网络</text><text x="250" y="260" font-size="15" fill="#8EA09C">按需开启</text>
+<rect x="20" y="294" width="328" height="62" rx="18" fill="#08100F"/><text x="42" y="332" font-size="17" fill="#42E8C3">▤</text><text x="78" y="332" font-size="18">存储与字库</text><text x="280" y="332" font-size="15" fill="#42E8C3">可用</text>
+<rect x="20" y="366" width="328" height="56" rx="18" fill="#10100E" stroke="#3A3020"/><text x="42" y="401" font-size="16" fill="#FFC64A">配对新 Mac · 忘记当前 Mac</text><text x="309" y="401" font-size="18" fill="#FFC64A">›</text>
+</g></svg>

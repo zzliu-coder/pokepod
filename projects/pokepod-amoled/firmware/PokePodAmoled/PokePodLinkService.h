@@ -11,26 +11,30 @@ namespace pokepod {
 
 class BoardServices;
 class AudioPipeline;
+class AudioCaptureRouter;
 class CapsuleLibrary;
 class DeviceConfig;
 class Dashboard;
 class TencentWorker;
-class UsbVoiceBridge;
+class UsbLinkBridge;
+class BleVoiceService;
 class WavRecorder;
 class WifiController;
+class ProvisioningDiagnostics;
+class RuntimePowerManager;
 
 class PokePodLinkService {
  public:
-  using DictationCallback = bool (*)();
-
   bool begin(Stream &stream, fs::FS &fs, BoardServices &board,
              AudioPipeline &audio,
-             UsbVoiceBridge &usb, Dashboard &dashboard,
+             AudioCaptureRouter &captureRouter,
+             UsbLinkBridge &usb, BleVoiceService &bleVoice,
+             Dashboard &dashboard,
              CapsuleLibrary &library,
              WavRecorder &recorder, DeviceConfig &config,
              WifiController &wifi, TencentWorker &tencent,
-             DictationCallback startDictation,
-             DictationCallback stopDictation, Print &log);
+             ProvisioningDiagnostics &provisioningDiagnostics,
+             RuntimePowerManager &power, Print &log);
   void poll(uint32_t nowMs);
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
@@ -102,21 +106,24 @@ class PokePodLinkService {
   bool copyTree(const String &source, const String &target, uint8_t depth = 0);
   bool rewriteCopiedMetadata(const String &directory, const String &id);
   String newUuid() const;
+  String provisioningDiagnosticsJson() const;
 
   Stream *stream_ = nullptr;
   fs::FS *fs_ = nullptr;
   BoardServices *board_ = nullptr;
   AudioPipeline *audio_ = nullptr;
-  UsbVoiceBridge *usb_ = nullptr;
+  AudioCaptureRouter *captureRouter_ = nullptr;
+  UsbLinkBridge *usb_ = nullptr;
+  BleVoiceService *bleVoice_ = nullptr;
   Dashboard *dashboard_ = nullptr;
   CapsuleLibrary *library_ = nullptr;
   WavRecorder *recorder_ = nullptr;
   DeviceConfig *config_ = nullptr;
   WifiController *wifi_ = nullptr;
   TencentWorker *tencent_ = nullptr;
+  ProvisioningDiagnostics *provisioningDiagnostics_ = nullptr;
+  RuntimePowerManager *power_ = nullptr;
   Print *log_ = nullptr;
-  DictationCallback startDictation_ = nullptr;
-  DictationCallback stopDictation_ = nullptr;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};

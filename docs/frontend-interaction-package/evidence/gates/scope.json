@@ -1,0 +1,1 @@
+{"schema_version":"bigfront.gate-evidence.v1","gate":"scope","subject":"PokePod wireless voice and capsule management scope","target":"ESP32 368x448 + macOS 360x520","procedure":["Compare user-approved plan, boundaries and Surface registry."],"result":"pass","captures":["00-spec-summary.md"]}

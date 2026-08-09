@@ -10,17 +10,31 @@ namespace pokepod {
 // Page values encode their physical order. Home is deliberately the center.
 enum class RootPage : uint8_t { capsules = 0, home = 1, device = 2 };
 enum class HomeMode : uint8_t { idle, recording, committing, queued, transcribing, success, failed };
-enum class UiScreen : uint8_t { capsules, home, device, capsuleDetail, provisioning };
+enum class UiScreen : uint8_t {
+  capsules,
+  home,
+  device,
+  capsuleDetail,
+  provisioning,
+  provisioningLog,
+};
 
 struct UiState {
   RootPage page = RootPage::home;
   HomeMode homeMode = HomeMode::idle;
   bool capsuleDetail = false;
   bool provisioning = false;
+  bool provisioningLog = false;
   bool detailRetryEnabled = false;
-  int capsuleSelection = -1;
+  bool detailTrashEnabled = false;
+  bool detailMoreOverlay = false;
+  bool capsuleScopeOverlay = false;
+  bool capsuleSelectionMode = false;
+  bool capsuleTrashScope = false;
+  bool undoAvailable = false;
 
   UiScreen screen() const {
+    if (provisioning && provisioningLog) return UiScreen::provisioningLog;
     if (provisioning) return UiScreen::provisioning;
     if (capsuleDetail) return UiScreen::capsuleDetail;
     if (page == RootPage::capsules) return UiScreen::capsules;
@@ -58,8 +72,10 @@ inline bool touchTapEligible(int16_t maximumDeltaX,
 }
 
 inline bool touchHorizontalSwipe(int16_t deltaX, int16_t deltaY) {
-  return touchMagnitude(deltaX) >= ui::kTouchSwipeThreshold &&
-      touchMagnitude(deltaX) > touchMagnitude(deltaY);
+  const int32_t horizontal = touchMagnitude(deltaX);
+  const int32_t vertical = touchMagnitude(deltaY);
+  return horizontal >= ui::kTouchSwipeThreshold &&
+      horizontal * 100 > vertical * 135;
 }
 
 inline bool touchVerticalSwipe(int16_t deltaX, int16_t deltaY) {
@@ -67,9 +83,9 @@ inline bool touchVerticalSwipe(int16_t deltaX, int16_t deltaY) {
       touchMagnitude(deltaY) > touchMagnitude(deltaX);
 }
 
-inline bool dictationHoldReady(uint32_t elapsedMs, int16_t maximumDeltaX,
-                               int16_t maximumDeltaY) {
-  return elapsedMs >= ui::kDictationHoldDelayMs &&
+inline bool wirelessHoldReady(uint32_t elapsedMs, int16_t maximumDeltaX,
+                              int16_t maximumDeltaY) {
+  return elapsedMs >= ui::kWirelessHoldDelayMs &&
       touchTapEligible(maximumDeltaX, maximumDeltaY);
 }
 
@@ -117,9 +133,9 @@ struct TouchGestureTracker {
   bool verticalSwipe() const {
     return touchVerticalSwipe(deltaX(), deltaY());
   }
-  bool dictationReady(uint32_t nowMs) const {
-    return active && dictationHoldReady(nowMs - startedAtMs,
-                                        maximumDeltaX, maximumDeltaY);
+  bool wirelessHoldReady(uint32_t nowMs) const {
+    return active && pokepod::wirelessHoldReady(nowMs - startedAtMs,
+                                                maximumDeltaX, maximumDeltaY);
   }
   void reset() { active = false; }
 };
@@ -142,30 +158,58 @@ inline bool isBackEdgeSwipe(int16_t startX, int16_t deltaX) {
       deltaX > ui::kTouchSwipeThreshold;
 }
 
-inline uint16_t scrolledOffset(uint16_t current, int16_t deltaY,
-                               bool canIncrease, uint16_t step) {
-  if (deltaY < -40 && canIncrease) return current + step;
-  if (deltaY > 40 && current >= step) return current - step;
-  return current;
-}
-
 enum class UiAction : uint8_t {
   none,
   capsuleRecord,
-  wechatDictation,
+  wechatVoice,
   openProvisioning,
+  openProvisioningLog,
   wifiToggle,
+  wirelessSettings,
   raiseToWakeToggle,
   openCapsule,
+  openCapsuleScope,
+  selectScopeInbox,
+  selectScopeFavorites,
+  selectScopePending,
+  selectScopeFailed,
+  selectScopeArchive,
+  selectScopeTrash,
+  openDetailMore,
+  closeOverlay,
   back,
   play,
   favorite,
   archive,
   retry,
+  trash,
+  bulkFavorite,
+  bulkArchive,
+  bulkTrash,
+  undoTrash,
 };
 
+inline int8_t capsuleScopeIndexForAction(UiAction action) {
+  switch (action) {
+    case UiAction::selectScopeInbox: return 0;
+    case UiAction::selectScopeFavorites: return 1;
+    case UiAction::selectScopePending: return 2;
+    case UiAction::selectScopeFailed: return 3;
+    case UiAction::selectScopeArchive: return 4;
+    case UiAction::selectScopeTrash: return 5;
+    default: return -1;
+  }
+}
+
+inline void reconcileMissingCapsule(UiState &state) {
+  state.capsuleDetail = false;
+  state.detailMoreOverlay = false;
+  state.detailRetryEnabled = false;
+  state.detailTrashEnabled = false;
+}
+
 inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
-                           bool macConnected) {
+                           bool voiceReady) {
   if (x < 0 || x >= kDisplayWidth || y < 0 || y >= kDisplayHeight) {
     return UiAction::none;
   }
@@ -173,10 +217,46 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
   if (screen == UiScreen::provisioning) {
     const bool backButton = x < ui::kBackTargetSize &&
         y < ui::kBackTargetSize;
-    const bool exitButton = y >= ui::kProvisionExitTop &&
-        y < ui::kProvisionExitBottom;
-    return backButton || exitButton ? UiAction::back : UiAction::none;
+    if (backButton) return UiAction::back;
+    if (y >= ui::kProvisionExitTop && y < ui::kProvisionExitBottom) {
+      return x < ui::kProvisionLogSplit ? UiAction::openProvisioningLog
+                                        : UiAction::back;
+    }
+    return UiAction::none;
   }
+  if (screen == UiScreen::provisioningLog) {
+    return x < ui::kBackTargetSize && y < ui::kBackTargetSize
+        ? UiAction::back : UiAction::none;
+  }
+  if (state.capsuleScopeOverlay) {
+    if (x < ui::kScopePickerLeft || x >= ui::kScopePickerRight ||
+        y < ui::kScopePickerTop || y >= ui::kScopePickerBottom) {
+      return UiAction::closeOverlay;
+    }
+    switch ((y - ui::kScopePickerTop) / ui::kScopePickerRowHeight) {
+      case 0: return UiAction::selectScopeInbox;
+      case 1: return UiAction::selectScopeFavorites;
+      case 2: return UiAction::selectScopePending;
+      case 3: return UiAction::selectScopeFailed;
+      case 4: return UiAction::selectScopeArchive;
+      case 5: return UiAction::selectScopeTrash;
+    }
+    return UiAction::closeOverlay;
+  }
+  if (state.detailMoreOverlay) {
+    if (x < ui::kDetailMoreLeft || x >= ui::kDetailMoreRight ||
+        y < ui::kDetailMoreTop || y >= ui::kDetailMoreBottom) {
+      return UiAction::closeOverlay;
+    }
+    const int16_t row =
+        (y - ui::kDetailMoreTop) / ui::kDetailMoreRowHeight;
+    if (row == 0) {
+      return state.detailRetryEnabled ? UiAction::retry : UiAction::none;
+    }
+    return state.detailTrashEnabled ? UiAction::trash : UiAction::none;
+  }
+  if (state.undoAvailable && x >= 20 && x < 348 &&
+      y >= 366 && y < 418) return UiAction::undoTrash;
   if (screen == UiScreen::capsuleDetail) {
     if (x < ui::kBackTargetSize && y < ui::kBackTargetSize) {
       return UiAction::back;
@@ -185,7 +265,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       if (x < 92) return UiAction::play;
       if (x < 184) return UiAction::favorite;
       if (x < 276) return UiAction::archive;
-      return state.detailRetryEnabled ? UiAction::retry : UiAction::none;
+      return UiAction::openDetailMore;
     }
     return UiAction::none;
   }
@@ -194,19 +274,20 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return y >= ui::kRootContentTop && y < ui::kRootContentBottom
           ? UiAction::capsuleRecord : UiAction::none;
     }
-    if (state.homeMode != HomeMode::idle) return UiAction::none;
-    const int16_t recordBottom = macConnected
-        ? ui::kHomePrimaryConnectedBottom : ui::kHomePrimarySoloBottom;
-    if (y >= ui::kHomePrimaryTop && y < recordBottom) {
+    if (y >= ui::kHomePrimaryTop && y < ui::kHomePrimaryConnectedBottom) {
       return UiAction::capsuleRecord;
     }
-    if (macConnected && y >= ui::kHomeSecondaryTop &&
-        y < ui::kHomeSecondaryBottom) return UiAction::wechatDictation;
+    if (y >= ui::kHomeSecondaryTop &&
+        y < ui::kHomeSecondaryBottom) return UiAction::wechatVoice;
+    (void)voiceReady;
     return UiAction::none;
   }
   if (screen == UiScreen::device) {
     if (y >= ui::kDeviceWifiTop && y < ui::kDeviceMacTop) {
       return UiAction::wifiToggle;
+    }
+    if (y >= ui::kDeviceMacTop && y < ui::kDeviceStorageTop) {
+      return UiAction::wirelessSettings;
     }
     if (y >= ui::kDeviceRaiseTop && y < ui::kDeviceProvisionTop) {
       return UiAction::raiseToWakeToggle;
@@ -216,8 +297,25 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     return UiAction::none;
   }
-  if (screen == UiScreen::capsules && y >= ui::kCapsuleListTop &&
-      y < ui::kCapsuleListBottom) return UiAction::openCapsule;
+  if (screen == UiScreen::capsules) {
+    if (y >= ui::kTopBarHeight && y < ui::kCapsuleListTop) {
+      return state.capsuleSelectionMode ? UiAction::back
+                                        : UiAction::openCapsuleScope;
+    }
+    if (state.capsuleSelectionMode &&
+        y >= ui::kCapsuleSelectionBarTop &&
+        y < ui::kCapsuleSelectionBarBottom) {
+      if (x < 123) return UiAction::bulkFavorite;
+      if (x < 245) return UiAction::bulkArchive;
+      return state.capsuleTrashScope ? UiAction::none
+                                     : UiAction::bulkTrash;
+    }
+    const int16_t listBottom = state.capsuleSelectionMode
+        ? ui::kCapsuleSelectionBarTop : ui::kCapsuleListBottom;
+    if (y >= ui::kCapsuleListTop && y < listBottom) {
+      return UiAction::openCapsule;
+    }
+  }
   return UiAction::none;
 }
 

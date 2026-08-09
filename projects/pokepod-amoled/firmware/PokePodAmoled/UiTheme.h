@@ -21,8 +21,8 @@ constexpr uint32_t kMutedRgb = 0x91A69F;
 constexpr uint32_t kDisabledRgb = 0x34413C;
 constexpr uint32_t kAccentRgb = 0x69E0B6;
 constexpr uint32_t kAccentDimRgb = 0x12372C;
-constexpr uint32_t kDictationRgb = 0xA0B2FF;
-constexpr uint32_t kDictationDimRgb = 0x151A2C;
+constexpr uint32_t kWirelessRgb = 0xA0B2FF;
+constexpr uint32_t kWirelessDimRgb = 0x151A2C;
 constexpr uint32_t kWaitingRgb = 0xF0C45B;
 constexpr uint32_t kErrorRgb = 0xFF786D;
 
@@ -35,8 +35,8 @@ constexpr uint16_t kMuted = color565(kMutedRgb);
 constexpr uint16_t kDisabled = color565(kDisabledRgb);
 constexpr uint16_t kAccent = color565(kAccentRgb);
 constexpr uint16_t kAccentDim = color565(kAccentDimRgb);
-constexpr uint16_t kDictation = color565(kDictationRgb);
-constexpr uint16_t kDictationDim = color565(kDictationDimRgb);
+constexpr uint16_t kWireless = color565(kWirelessRgb);
+constexpr uint16_t kWirelessDim = color565(kWirelessDimRgb);
 constexpr uint16_t kWaiting = color565(kWaitingRgb);
 constexpr uint16_t kError = color565(kErrorRgb);
 
@@ -61,6 +61,14 @@ constexpr int16_t kCapsuleRowStride = 76;
 constexpr int16_t kCapsuleVisibleRows = 4;
 constexpr int16_t kCapsuleListBottom =
     kCapsuleListTop + kCapsuleRowStride * kCapsuleVisibleRows;
+constexpr int16_t kCapsuleSelectionBarTop = 352;
+constexpr int16_t kCapsuleSelectionBarBottom = 424;
+constexpr int16_t kScopePickerLeft = 24;
+constexpr int16_t kScopePickerRight = 344;
+constexpr int16_t kScopePickerTop = 82;
+constexpr int16_t kScopePickerRowHeight = 48;
+constexpr int16_t kScopePickerBottom =
+    kScopePickerTop + kScopePickerRowHeight * 6;
 
 constexpr int16_t kDeviceWifiTop = 88;
 constexpr int16_t kDeviceMacTop = 152;
@@ -82,20 +90,35 @@ constexpr int16_t kSettingTitleWithValueWidth = 178;
 constexpr int16_t kSettingToggleWidth = 42;
 constexpr int16_t kProvisionExitTop = 360;
 constexpr int16_t kProvisionExitBottom = 424;
+constexpr int16_t kProvisionLogSplit = 184;
+constexpr int16_t kProvisionLogListTop = 88;
+constexpr int16_t kProvisionLogRowStride = 94;
+constexpr int16_t kProvisionLogVisibleRows = 3;
+constexpr int16_t kProvisionLogListBottom = 424;
 
 constexpr int16_t kDetailActionsTop = 352;
 constexpr int16_t kDetailActionsBottom = 424;
+constexpr int16_t kDetailTextTop = 88;
+constexpr int16_t kDetailTextBottom = kDetailActionsTop;
+constexpr int16_t kDetailMoreLeft = 34;
+constexpr int16_t kDetailMoreRight = 334;
+constexpr int16_t kDetailMoreTop = 202;
+constexpr int16_t kDetailMoreRowHeight = 68;
+constexpr int16_t kDetailMoreBottom =
+    kDetailMoreTop + kDetailMoreRowHeight * 2;
 constexpr int16_t kRecordingDynamicTop = 72;
 constexpr int16_t kRecordingDynamicBottom = 326;
 constexpr uint32_t kRecordingFrameIntervalMs = 80;
+constexpr uint32_t kScrollFrameIntervalMs = 40;
 
 constexpr int16_t kStatusIconSize = 20;
 constexpr int16_t kActionIconSize = 24;
 constexpr int16_t kMinimumTouchHeight = 56;
 constexpr int16_t kTouchTapSlop = 12;
-constexpr int16_t kTouchSwipeThreshold = 60;
-constexpr int16_t kTouchVerticalThreshold = 45;
-constexpr uint32_t kDictationHoldDelayMs = 160;
+constexpr int16_t kTouchSwipeThreshold = 32;
+constexpr int16_t kTouchVerticalThreshold = 12;
+constexpr uint32_t kWirelessHoldDelayMs = 280;
+constexpr uint32_t kDeviceForgetHoldMs = 900;
 
 }  // namespace ui
 }  // namespace pokepod

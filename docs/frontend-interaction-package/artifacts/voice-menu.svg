@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="520" viewBox="0 0 360 520">
+<rect width="360" height="520" rx="18" fill="#111312"/><g font-family="-apple-system,PingFang SC,Arial" fill="#F4F7F6">
+<circle cx="32" cy="35" r="11" fill="#42E8C3"/><text x="54" y="31" font-size="20" font-weight="700">PokePod Voice</text><text x="54" y="50" font-size="13" fill="#8EA09C">正在输入 · 连接稳定</text>
+<rect x="18" y="72" width="324" height="132" rx="16" fill="#0B1A17" stroke="#1D4038"/><text x="34" y="102" font-size="15" fill="#8EA09C">就绪检查</text><text x="34" y="132" font-size="16">✓ 蓝牙</text><text x="34" y="160" font-size="16">✓ BlackHole 2ch</text><text x="34" y="188" font-size="16">✓ 辅助功能</text><text x="276" y="160" font-size="14" fill="#42E8C3">全部就绪</text>
+<rect x="18" y="216" width="324" height="112" rx="16" fill="#171A19"/><text x="34" y="247" font-size="15" fill="#8EA09C">当前会话</text><text x="34" y="278" font-size="18" font-weight="600">PokePod-A994</text><text x="34" y="306" font-size="14" fill="#8EA09C">16 kHz · ADPCM · 丢包 0.2%</text><circle cx="304" cy="274" r="20" fill="none" stroke="#42E8C3" stroke-width="3"/><circle cx="304" cy="274" r="8" fill="#42E8C3"/>
+<rect x="18" y="342" width="324" height="52" rx="14" fill="#202523"/><text x="36" y="375" font-size="16">恢复原麦克风</text><text x="309" y="375" font-size="18" fill="#42E8C3">↻</text>
+<rect x="18" y="404" width="156" height="48" rx="14" fill="#1C2220"/><text x="59" y="434" font-size="15">重新连接</text><rect x="186" y="404" width="156" height="48" rx="14" fill="#1C2220"/><text x="226" y="434" font-size="15">重新配对</text>
+<line x1="18" y1="470" x2="342" y2="470" stroke="#2A302E"/><text x="24" y="500" font-size="14" fill="#8EA09C">登录时启动</text><text x="299" y="500" font-size="14" fill="#FF6B77">退出</text>
+</g></svg>

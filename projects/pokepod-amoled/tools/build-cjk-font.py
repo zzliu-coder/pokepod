@@ -11,21 +11,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 
-FIXED_TEXT = """
-胶囊列表首页设置与设备详情语音微信输入录音中停止电池充电无线网络已连接未连接异常开启关闭
-配网模式返回收藏归档重试播放暂无内容待转写转写中完成失败按可再次触发时间信号存储麦克风扬声器
-触摸屏型号打开手机连接热点密码五分钟自动新建正在提交成功队列系统版本抬起亮屏可用不可用请插入
-卡短按长按安全关机发送云端文字原文校对正文上一条下一条分钟前小时前天今天设备温度
-轻触开始最长秒正在记录声音完成后会出现在还没有回到第一条刚刚需要检查选择热点名称保存成功
-状态正常扫描附近网络存储字库抬起设备时屏临时等待开始结束按住松开正在输入未设置扫描附近网络
-转写可阅读录音微信连接关闭打开热点名称密码配置网络腾讯转写下一步上一步保存验证清除已有密钥
-一上不与中临为也云五交亮仍任会传但使保信候值停充克入关再写分列则别制功加务动卡即发取句可台同名后启和响囊回在填备失始字存安完密对将尚就屏已常幕并库应度开异式归录径待微必志态情成或手抬持按接提插播支收放整文断新无日时显暂最有未本机权条查校档检模次止正步求池法消清点热状用电留的盘码确示秒称稍空第签线络绪缺网置胶腾自藏表装触讯设证识词试话该详语请读败起超路转输过返进连送选通配重钟钥键长闭间队限除音页须频风首验麦
-"""
-
 ASCII_POINTS = list(range(0x20, 0x7F))
 PUNCTUATION = "，。！？：；、“”‘’（）【】《》—…·￥"
 FIXED_SIZES = (16, 20, 28, 36)
-DISPLAY_TEXT = "语音胶囊微信输入正在转写胶囊设备连接手机暂无内容需要检查密码"
 TIMER_TEXT = "0123456789:%-"
 
 
@@ -62,8 +50,31 @@ def render_glyph(font_path: Path, point: int, size: int) -> tuple[int, bytes]:
     return advance, bytes(packed)
 
 
-def fixed_codepoints() -> list[int]:
-    return sorted(set(ASCII_POINTS + [ord(char) for char in FIXED_TEXT if ord(char) > 127]))
+def default_ui_sources() -> list[Path]:
+    source_dir = Path(__file__).parents[1] / "firmware" / "PokePodAmoled"
+    return sorted(
+        path for path in source_dir.iterdir()
+        if path.suffix in {".cpp", ".h", ".ino"}
+        and path.name != "FixedChineseFont.h"
+    )
+
+
+def source_ui_characters(paths: list[Path]) -> set[str]:
+    characters: set[str] = set(PUNCTUATION)
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        characters.update(
+            char for char in source
+            if 0x3400 <= ord(char) <= 0x4DBF
+            or 0x4E00 <= ord(char) <= 0x9FFF
+            or 0xF900 <= ord(char) <= 0xFAFF
+            or char in PUNCTUATION
+        )
+    return characters
+
+
+def fixed_codepoints(paths: list[Path]) -> list[int]:
+    return sorted(set(ASCII_POINTS + [ord(char) for char in source_ui_characters(paths)]))
 
 
 def full_codepoints() -> list[int]:
@@ -87,8 +98,6 @@ def write_binary(path: Path, font_path: Path, points: list[int], size: int) -> N
 
 
 def points_for_size(size: int, all_points: list[int]) -> list[int]:
-    if size == 28:
-        return sorted(set(ASCII_POINTS + [ord(char) for char in DISPLAY_TEXT]))
     if size == 36:
         return sorted({ord(char) for char in TIMER_TEXT})
     return all_points
@@ -100,6 +109,9 @@ def write_header(path: Path, font_path: Path, points: list[int]) -> None:
         "#pragma once",
         "",
         "#include <stdint.h>",
+        "",
+        "// Generated from every Chinese character and UI punctuation mark in PokePodAmoled source.",
+        "// Regenerate with tools/build-cjk-font.py; do not hand-edit glyphs.",
         "",
         "namespace pokepod {",
         "",
@@ -131,13 +143,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--font", type=Path, required=True)
     parser.add_argument("--fixed-header", type=Path, required=True)
-    parser.add_argument("--sd-font", type=Path, required=True)
+    parser.add_argument("--sd-font", type=Path)
+    parser.add_argument("--source", type=Path, action="append")
     args = parser.parse_args()
     if not args.font.is_file():
         raise SystemExit(f"font does not exist: {args.font}")
-    points = fixed_codepoints()
+    sources = args.source or default_ui_sources()
+    missing_sources = [source for source in sources if not source.is_file()]
+    if missing_sources:
+        raise SystemExit(f"source does not exist: {missing_sources[0]}")
+    points = fixed_codepoints(sources)
     write_header(args.fixed_header, args.font, points)
-    write_binary(args.sd_font, args.font, full_codepoints(), 20)
+    if args.sd_font is not None:
+        write_binary(args.sd_font, args.font, full_codepoints(), 20)
 
 
 if __name__ == "__main__":

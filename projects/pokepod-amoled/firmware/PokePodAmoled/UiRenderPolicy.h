@@ -15,8 +15,8 @@ inline UiRenderPlan uiRenderPlan(bool recording, bool bodyRepainted) {
 }
 
 inline bool shouldDrawToast(bool hasMessage, bool recording,
-                            bool dictationHolding, bool provisioning) {
-  return hasMessage && !recording && !dictationHolding && !provisioning;
+                            bool wirelessHolding, bool provisioning) {
+  return hasMessage && !recording && !wirelessHolding && !provisioning;
 }
 
 }  // namespace pokepod

@@ -1,0 +1,1 @@
+{"schema_version":"bigfront.gate-evidence.v1","gate":"interaction","subject":"Tap, swipe, long-press and recovery arbitration","target":"ESP32 368x448 touch + BOOT","procedure":["Review thresholds, cancellation, lock and completion feedback for shared hit regions."],"result":"pass","captures":["04-interaction-flows.md"]}

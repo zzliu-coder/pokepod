@@ -1,5 +1,7 @@
 #include "PokePodLinkService.h"
 
+#include "WifiFailurePolicy.h"
+
 #include <SD_MMC.h>
 #include <cJSON.h>
 #include <esp_system.h>
@@ -7,6 +9,7 @@
 #include <vector>
 
 #include "AudioPipeline.h"
+#include "AudioCaptureRouter.h"
 #include "BoardServices.h"
 #include "CapsuleLibrary.h"
 #include "CapsulePolicy.h"
@@ -14,7 +17,10 @@
 #include "Dashboard.h"
 #include "FontPolicy.h"
 #include "TencentWorker.h"
-#include "UsbVoiceBridge.h"
+#include "UsbLinkBridge.h"
+#include "BleVoiceService.h"
+#include "ProvisioningDiagnostics.h"
+#include "RuntimePowerManager.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
 
@@ -94,25 +100,29 @@ bool sameUuid(const char *left, const char *right) {
 
 bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                BoardServices &board, AudioPipeline &audio,
-                               UsbVoiceBridge &usb, Dashboard &dashboard,
+                               AudioCaptureRouter &captureRouter,
+                               UsbLinkBridge &usb, BleVoiceService &bleVoice,
+                               Dashboard &dashboard,
                                CapsuleLibrary &library, WavRecorder &recorder,
                                DeviceConfig &config, WifiController &wifi,
                                TencentWorker &tencent,
-                               DictationCallback startDictation,
-                               DictationCallback stopDictation, Print &log) {
+                               ProvisioningDiagnostics &provisioningDiagnostics,
+                               RuntimePowerManager &power, Print &log) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
   audio_ = &audio;
+  captureRouter_ = &captureRouter;
   usb_ = &usb;
+  bleVoice_ = &bleVoice;
   dashboard_ = &dashboard;
   library_ = &library;
   recorder_ = &recorder;
   config_ = &config;
   wifi_ = &wifi;
   tencent_ = &tencent;
-  startDictation_ = startDictation;
-  stopDictation_ = stopDictation;
+  provisioningDiagnostics_ = &provisioningDiagnostics;
+  power_ = &power;
   log_ = &log;
   activeMaintenance_ = "";
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
@@ -408,7 +418,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     sendOk(requestId,
-           "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"dictate-start\",\"dictate-stop\",\"record\",\"stop\",\"font-write\",\"reboot\"]");
+           "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"reboot\"]");
   } else if (strcmp(operation, "status") == 0) {
     const BoardStatus &status = board_->status();
     String extra = "\"recording\":";
@@ -419,6 +429,16 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"charging\":";
     extra += status.charging ? "true" : "false";
     extra += ",\"wifi\":\"" + String(wifi_->phaseName()) + "\"";
+    extra += ",\"wifiDisconnectReason\":" +
+        String(wifi_->lastDisconnectReason());
+    extra += ",\"wifiDisconnectKind\":\"" +
+        String(wifiFailureKey(wifi_->lastDisconnectReason())) + "\"";
+    extra += ",\"wifiRadioOn\":" +
+        String(wifi_->radioOn() ? "true" : "false");
+    extra += ",\"wifiPowerSave\":" +
+        String(wifi_->powerSaveEnabled() ? "true" : "false");
+    extra += ",\"wifiPowerSaveError\":" +
+        String(wifi_->powerSaveError());
     extra += ",\"pendingCapsules\":" + String(library_->pendingCount());
     extra += ",\"asr_hash_ms\":" + String(tencent_->lastHashElapsedMs());
     extra += ",\"asr_connect_ms\":" + String(tencent_->lastConnectElapsedMs());
@@ -438,21 +458,39 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"audio\":" + String(audio_ != nullptr && audio_->ready() ? "true" : "false");
     extra += ",\"usb\":" + String(usb_->ready() ? "true" : "false");
     extra += ",\"host_connected\":" + String(usb_->hostConnected() ? "true" : "false");
-    extra += ",\"mic_streaming\":" + String(usb_->microphoneStreaming() ? "true" : "false");
-    extra += ",\"dictation_holding\":" + String(usb_->dictationHeld() ? "true" : "false");
-    extra += ",\"mic_open_count\":" + String(usb_->microphoneOpenCount());
-    extra += ",\"mic_close_count\":" + String(usb_->microphoneCloseCount());
+    extra += ",\"bleVoiceConnected\":" +
+        String(bleVoice_ != nullptr && bleVoice_->connected() ? "true" : "false");
+    extra += ",\"bleVoiceReady\":" +
+        String(bleVoice_ != nullptr && bleVoice_->appReady() ? "true" : "false");
+    extra += ",\"bleVoiceMtu\":" +
+        String(bleVoice_ == nullptr ? 0 : bleVoice_->mtu());
+    const BleVoiceQualitySnapshot bleQuality = bleVoice_ == nullptr
+        ? BleVoiceQualitySnapshot() : bleVoice_->quality();
+    extra += ",\"bleVoiceNotifyAttempts\":" +
+        String(bleQuality.notifyAttempts);
+    extra += ",\"bleVoiceNotifyAccepted\":" +
+        String(bleQuality.notifyAccepted);
+    extra += ",\"bleVoiceNotifyFailures\":" +
+        String(bleQuality.notifyFailures);
+    extra += ",\"bleVoiceQueueOverflows\":" +
+        String(bleQuality.queueOverflows);
+    extra += ",\"bleVoiceSessionFailures\":" +
+        String(bleQuality.sessionFailures);
+    extra += ",\"bleVoiceReadyTimeouts\":" +
+        String(bleQuality.readyTimeouts);
+    extra += ",\"bleVoiceStopAckTimeouts\":" +
+        String(bleQuality.stopAckTimeouts);
+    extra += ",\"bleVoiceStreamTimeouts\":" +
+        String(bleQuality.streamTimeouts);
+    extra += ",\"bleVoiceLastErrorCode\":" +
+        String(bleQuality.lastErrorCode);
     extra += ",\"audio_read_bytes\":" + String(static_cast<unsigned long>(audio_->bytesRead()));
     extra += ",\"audio_read_failures\":" + String(audio_->readFailures());
     extra += ",\"audio_peak\":" + String(audio_->peakSample());
-    extra += ",\"uac_attempted_bytes\":" + String(static_cast<unsigned long>(usb_->microphoneBytesAttempted()));
-    extra += ",\"uac_accepted_bytes\":" + String(static_cast<unsigned long>(usb_->microphoneBytesAccepted()));
-    extra += ",\"uac_short_writes\":" + String(usb_->microphoneShortWrites());
-    extra += ",\"uac_usb_bytes_sent\":" + String(static_cast<unsigned long>(usb_->microphoneUsbBytesSent()));
-    extra += ",\"uac_usb_packets_sent\":" + String(usb_->microphoneUsbPacketsSent());
-    extra += ",\"uac_usb_zero_packets\":" + String(usb_->microphoneUsbZeroLengthPackets());
     extra += ",\"tencentConfigured\":" +
         String(config_->hasTencent() ? "true" : "false");
+    extra += ",\"wifiNetworkCount\":" +
+        String(static_cast<unsigned>(config_->wifiNetworks().size()));
     extra += ",\"ui_full_redraws\":" + String(dashboard_->fullRedrawCount());
     extra += ",\"ui_body_redraws\":" + String(dashboard_->bodyRedrawCount());
     extra += ",\"ui_partial_redraws\":" + String(dashboard_->partialRedrawCount());
@@ -460,7 +498,27 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         String(dashboard_->frameBufferReady() ? "true" : "false");
     extra += ",\"ui_animation_buffer\":" +
         String(dashboard_->animationBufferReady() ? "true" : "false");
+    const RuntimePowerSnapshot &power = power_->snapshot();
+    extra += ",\"powerMode\":\"" + String(powerModeName(power.mode)) + "\"";
+    extra += ",\"cpuMhz\":" + String(power.cpuMhz);
+    extra += ",\"powerTransitions\":" + String(power.transitions);
+    extra += ",\"lightSleepCount\":" + String(power.lightSleepCount);
+    extra += ",\"lightSleepMs\":" +
+        String(static_cast<unsigned long>(power.lightSleepUs / 1000ULL));
+    extra += ",\"lastWakeCause\":" + String(power.lastWakeCause);
+    extra += ",\"automaticPmSupported\":" +
+        String(power.automaticPmSupported ? "true" : "false");
+    extra += ",\"bleModemSleepSupported\":" +
+        String(power.bleModemSleepSupported ? "true" : "false");
+    extra += ",\"provisioningDiagnosticCount\":" +
+        String(static_cast<unsigned>(provisioningDiagnostics_->count()));
     sendOk(requestId, extra.c_str());
+  } else if (strcmp(operation, "get-provisioning-diagnostics") == 0) {
+    sendJson(requestId, provisioningDiagnosticsJson());
+  } else if (strcmp(operation, "clear-provisioning-diagnostics") == 0) {
+    if (foregroundBusy()) sendBusy(requestId);
+    else if (provisioningDiagnostics_->clear(*log_)) sendOk(requestId);
+    else sendError(requestId, "provisioning diagnostics clear failed");
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
         "\",\"displayName\":\"PokePod\",\"manufacturer\":\"PokeCapsule\",\"model\":\"" +
@@ -503,29 +561,6 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     if (unixTimeMs < 1704067200000LL || !board_->setUtcEpoch(unixTimeMs / 1000)) {
       sendError(requestId, "invalid UTC time");
     } else sendOk(requestId);
-  } else if (strcmp(operation, "dictate-start") == 0) {
-    const bool sent = startDictation_ != nullptr
-        ? startDictation_() : usb_->beginDictationHold();
-    if (sent) {
-      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_started\",\"shortcut\":\"OPTION_Z\"");
-    } else sendError(requestId, "USB HID is not ready");
-  } else if (strcmp(operation, "dictate-stop") == 0) {
-    const bool sent = stopDictation_ != nullptr
-        ? stopDictation_() : usb_->endDictationHold();
-    if (sent) {
-      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_stopped\",\"shortcut\":\"OPTION_Z\"");
-    } else sendError(requestId, "USB HID is not ready");
-  } else if (strcmp(operation, "dictate") == 0) {
-    // Compatibility pulse for an older host. Product interaction uses the
-    // explicit hold pair above so speech lasts exactly as long as the button.
-    const bool sent = startDictation_ != nullptr
-        ? startDictation_() : usb_->beginDictationHold();
-    if (sent) {
-      delay(800);
-      if (stopDictation_ != nullptr) stopDictation_();
-      else usb_->endDictationHold();
-      sendOk(requestId, "\"sent\":true,\"event\":\"dictation_pulse\",\"shortcut\":\"OPTION_Z\"");
-    } else sendError(requestId, "USB HID is not ready");
   } else if (strcmp(operation, "record") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
     else if (audio_ == nullptr || !audio_->ready() || !board_->sdReady()) {
@@ -533,17 +568,33 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     } else {
       const String id = newUuid();
       tencent_->wake();
-      if (recorder_->start(*log_, id, board_->utcNow())) {
+      const bool acquired = captureRouter_->acquire(
+          AudioCaptureOwner::localCapsule);
+      if (!acquired) {
+        sendBusy(requestId);
+      } else if (audio_->startCapture(*log_) &&
+                 recorder_->start(*log_, id, board_->utcNow())) {
         const String extra = "\"recording\":true,\"capsuleId\":\"" + id + "\"";
         sendOk(requestId, extra.c_str());
-      } else sendError(requestId, "recording start failed");
+      } else {
+        captureRouter_->release(AudioCaptureOwner::localCapsule);
+        audio_->stopHardware(*log_);
+        sendError(requestId, "recording start failed");
+      }
     }
   } else if (strcmp(operation, "stop") == 0) {
     if (!recorder_->recording()) sendError(requestId, "recording is not active");
-    else if (recorder_->stop(*log_)) {
-      library_->scan();
-      sendOk(requestId, "\"recording\":false,\"queued\":true");
-    } else sendError(requestId, "recording commit failed");
+    else {
+      const bool committed = recorder_->stop(*log_);
+      captureRouter_->release(AudioCaptureOwner::localCapsule);
+      audio_->stopHardware(*log_);
+      if (committed) {
+        library_->scan();
+        sendOk(requestId, "\"recording\":false,\"queued\":true");
+      } else {
+        sendError(requestId, "recording commit failed");
+      }
+    }
   } else if (strcmp(operation, "reboot") == 0) {
     sendOk(requestId);
     rebootAtMs_ = millis() + 100;
@@ -634,6 +685,8 @@ void PokePodLinkService::handleConfigure(uint32_t requestId, void *jsonRoot) {
   tencent_->wake();
   const String extra = "\"wifiConfigured\":" +
       String(config_->hasWifi() ? "true" : "false") +
+      ",\"wifiNetworkCount\":" +
+      String(static_cast<unsigned>(config_->wifiNetworks().size())) +
       ",\"tencentConfigured\":" +
       String(config_->hasTencent() ? "true" : "false");
   sendOk(requestId, extra.c_str());
@@ -1157,6 +1210,38 @@ String PokePodLinkService::newUuid() const {
   return String(result);
 }
 
+String PokePodLinkService::provisioningDiagnosticsJson() const {
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "status", "ok");
+  cJSON_AddNumberToObject(root, "version", kLinkVersion);
+  cJSON_AddNumberToObject(root, "schemaVersion", 1);
+  cJSON *records = cJSON_AddArrayToObject(root, "records");
+  if (provisioningDiagnostics_ != nullptr) {
+    for (size_t index = 0; index < provisioningDiagnostics_->count(); ++index) {
+      const StoredProvisioningLogRecord *record =
+          provisioningDiagnostics_->newest(index);
+      if (record == nullptr) continue;
+      cJSON *item = cJSON_CreateObject();
+      cJSON_AddNumberToObject(item, "sequence", record->sequence);
+      cJSON_AddNumberToObject(item, "epoch", record->epoch);
+      cJSON_AddNumberToObject(item, "elapsedMs", record->elapsedMs);
+      cJSON_AddStringToObject(item, "stage", provisioningLogStageKey(
+          static_cast<ProvisioningLogStage>(record->stage)));
+      cJSON_AddNumberToObject(item, "outcome", record->outcome);
+      cJSON_AddNumberToObject(item, "attempt", record->attempt);
+      cJSON_AddStringToObject(item, "ssid", record->ssid);
+      cJSON_AddNumberToObject(item, "rssi", record->rssi);
+      cJSON_AddNumberToObject(item, "reason", record->reason);
+      cJSON_AddStringToObject(item, "reasonKind",
+                              wifiFailureKey(record->reason));
+      cJSON_AddItemToArray(records, item);
+    }
+  }
+  const String result = printed(root);
+  cJSON_Delete(root);
+  return result;
+}
+
 bool PokePodLinkService::executeCommand(const String &path,
                                         const String &transactionId,
                                         String &message) {
@@ -1618,9 +1703,12 @@ String PokePodLinkService::deviceId() const {
 }
 
 bool PokePodLinkService::foregroundBusy() const {
-  if (recorder_ == nullptr || tencent_ == nullptr) return true;
-  return linkStorageBusy(recorder_->recording(), tencent_->working(),
-                         usb_ != nullptr && usb_->microphoneStreaming());
+  if (recorder_ == nullptr || tencent_ == nullptr || bleVoice_ == nullptr ||
+      captureRouter_ == nullptr) return true;
+  if (audio_ != nullptr && audio_->playing()) return true;
+  return linkForegroundBusy(recorder_->recording(), tencent_->working(),
+                            bleVoice_->streaming(),
+                            captureRouter_->available());
 }
 
 }  // namespace pokepod

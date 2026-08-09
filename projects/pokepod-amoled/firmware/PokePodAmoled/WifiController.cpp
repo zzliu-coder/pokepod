@@ -1,12 +1,20 @@
 #include "WifiController.h"
 
 #include <WiFi.h>
+#include <algorithm>
 #include <esp_sntp.h>
+#include <esp_wifi.h>
 #include <time.h>
+
+#include "RememberedWifiPolicy.h"
+#include "WifiDisconnectDiagnostics.h"
 
 namespace pokepod {
 namespace {
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
+constexpr uint32_t kWifiScanTimeoutMs = 8000;
+constexpr uint32_t kWifiCandidateDelayMs = 500;
+constexpr uint32_t kWifiMruPersistRetryMs = 5000;
 }
 
 bool WifiController::begin(DeviceConfig &config, Print &log) {
@@ -14,6 +22,7 @@ bool WifiController::begin(DeviceConfig &config, Print &log) {
   log_ = &log;
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
+  beginWifiDisconnectDiagnostics();
   WiFi.mode(WIFI_OFF);
   return true;
 }
@@ -52,13 +61,29 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
     return;
   }
   if (connected_) {
+    setPowerSave(true);
     connectionFailed_ = false;
     failedAttempts_ = 0;
+    if (!successfulNetworkNoted_ &&
+        (lastMruPersistAttemptMs_ == 0 ||
+         static_cast<uint32_t>(nowMs - lastMruPersistAttemptMs_) >=
+             kWifiMruPersistRetryMs)) {
+      lastMruPersistAttemptMs_ = nowMs == 0 ? 1 : nowMs;
+      if (config_->markWifiSuccessful(WiFi.SSID(), *log_)) {
+        successfulNetworkNoted_ = true;
+        candidateOrder_.clear();
+        candidatePosition_ = 0;
+      }
+    }
     if (!ntpStarted_) {
       configTime(0, 0, "ntp.tencent.com", "pool.ntp.org");
       ntpStarted_ = true;
       log_->println("{\"event\":\"wifi_online\",\"ntp\":\"started\"}");
     }
+    return;
+  }
+  if (scanning_) {
+    pollScan(nowMs);
     return;
   }
   if (radioOn_ && connectionStartedMs_ != 0 &&
@@ -79,18 +104,97 @@ void WifiController::configurationChanged() {
   exhausted_ = false;
   connectionFailed_ = false;
   ntpStarted_ = false;
+  scanning_ = false;
+  successfulNetworkNoted_ = false;
+  lastMruPersistAttemptMs_ = 0;
+  candidateOrder_.clear();
+  candidatePosition_ = 0;
+  WiFi.scanDelete();
 }
 
 void WifiController::startConnection(uint32_t nowMs) {
   if (config_ == nullptr || !config_->hasWifi()) return;
+  if (candidateOrder_.empty()) {
+    startScan(nowMs);
+    return;
+  }
+  connectCandidate(nowMs);
+}
+
+void WifiController::startScan(uint32_t nowMs) {
   WiFi.mode(WIFI_STA);
-  WiFi.begin(config_->settings().wifiSsid.c_str(),
-             config_->settings().wifiPassword.c_str());
+  setPowerSave(false);
+  radioOn_ = true;
+  connectionStartedMs_ = 0;
+  connectionFailed_ = false;
+  const int16_t scan = WiFi.scanNetworks(true, false, false, 120);
+  scanning_ = scan == WIFI_SCAN_RUNNING;
+  scanStartedMs_ = nowMs == 0 ? 1 : nowMs;
+  if (scan >= 0) {
+    buildCandidateOrder(scan);
+    WiFi.scanDelete();
+    scanning_ = false;
+    connectCandidate(nowMs);
+  } else if (!scanning_) {
+    buildCandidateOrder(0);
+    connectCandidate(nowMs);
+  }
+}
+
+void WifiController::pollScan(uint32_t nowMs) {
+  const int16_t count = WiFi.scanComplete();
+  if (count == WIFI_SCAN_RUNNING &&
+      static_cast<uint32_t>(nowMs - scanStartedMs_) < kWifiScanTimeoutMs) {
+    return;
+  }
+  scanning_ = false;
+  buildCandidateOrder(count < 0 ? 0 : count);
+  WiFi.scanDelete();
+  connectCandidate(nowMs);
+}
+
+void WifiController::buildCandidateOrder(int16_t scanCount) {
+  std::vector<WifiCandidateScore> ranked;
+  const auto &remembered = config_->wifiNetworks();
+  ranked.reserve(remembered.size());
+  for (size_t index = 0; index < remembered.size(); ++index) {
+    WifiCandidateScore candidate;
+    candidate.index = static_cast<uint8_t>(index);
+    for (int16_t scanIndex = 0; scanIndex < scanCount; ++scanIndex) {
+      if (WiFi.SSID(scanIndex) == remembered[index].ssid) {
+        candidate.visible = true;
+        candidate.rssi = std::max(candidate.rssi, WiFi.RSSI(scanIndex));
+      }
+    }
+    ranked.push_back(candidate);
+  }
+  rankWifiCandidates(ranked);
+  candidateOrder_.clear();
+  for (const WifiCandidateScore &candidate : ranked) {
+    candidateOrder_.push_back(candidate.index);
+  }
+  candidatePosition_ = 0;
+}
+
+void WifiController::connectCandidate(uint32_t nowMs) {
+  if (config_ == nullptr || candidatePosition_ >= candidateOrder_.size()) return;
+  const auto &remembered = config_->wifiNetworks();
+  const size_t index = candidateOrder_[candidatePosition_];
+  if (index >= remembered.size()) return;
+  WiFi.mode(WIFI_STA);
+  setPowerSave(false);
+  clearWifiDisconnectReason();
+  WiFi.begin(remembered[index].ssid.c_str(), remembered[index].password.c_str());
   radioOn_ = true;
   connectionStartedMs_ = nowMs == 0 ? 1 : nowMs;
   connectionFailed_ = false;
-  log_->printf("{\"event\":\"wifi_connecting\",\"attempt\":%u}\n",
-               static_cast<unsigned>(failedAttempts_ + 1));
+  successfulNetworkNoted_ = false;
+  lastMruPersistAttemptMs_ = 0;
+  log_->printf(
+      "{\"event\":\"wifi_connecting\",\"round\":%u,\"candidate\":%u,\"remembered\":%u}\n",
+      static_cast<unsigned>(failedAttempts_ + 1),
+      static_cast<unsigned>(candidatePosition_ + 1),
+      static_cast<unsigned>(candidateOrder_.size()));
 }
 
 void WifiController::stopRadio() {
@@ -98,17 +202,49 @@ void WifiController::stopRadio() {
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
   radioOn_ = false;
+  powerSaveConfigured_ = false;
+  powerSaveEnabled_ = false;
   connected_ = false;
   connectionStartedMs_ = 0;
   ntpStarted_ = false;
+  scanning_ = false;
+  WiFi.scanDelete();
+}
+
+void WifiController::setPowerSave(bool enabled) {
+  if (powerSaveConfigured_ && powerSaveEnabled_ == enabled) return;
+  const esp_err_t error = esp_wifi_set_ps(
+      enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+  powerSaveError_ = error;
+  if (error == ESP_OK) {
+    powerSaveConfigured_ = true;
+    powerSaveEnabled_ = enabled;
+    if (log_ != nullptr) {
+      log_->printf("{\"event\":\"wifi_power_save\",\"enabled\":%s}\n",
+                   enabled ? "true" : "false");
+    }
+  }
 }
 
 void WifiController::noteFailure(uint32_t nowMs) {
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
   radioOn_ = false;
+  powerSaveConfigured_ = false;
+  powerSaveEnabled_ = false;
   connected_ = false;
   connectionStartedMs_ = 0;
+  successfulNetworkNoted_ = false;
+  if (candidatePosition_ + 1 < candidateOrder_.size()) {
+    ++candidatePosition_;
+    connectionFailed_ = false;
+    retryAtMs_ = nowMs + kWifiCandidateDelayMs;
+    log_->printf("{\"event\":\"wifi_candidate_retry\",\"candidate\":%u}\n",
+                 static_cast<unsigned>(candidatePosition_ + 1));
+    return;
+  }
+  candidateOrder_.clear();
+  candidatePosition_ = 0;
   connectionFailed_ = true;
   const uint32_t retryDelay = wifiRetryDelayMs(failedAttempts_);
   ++failedAttempts_;
@@ -146,6 +282,10 @@ bool WifiController::timeReady() const {
 
 bool WifiController::networkTimeSynchronized() const {
   return ntpStarted_ && sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED;
+}
+
+uint16_t WifiController::lastDisconnectReason() const {
+  return lastWifiDisconnectReason();
 }
 
 }  // namespace pokepod

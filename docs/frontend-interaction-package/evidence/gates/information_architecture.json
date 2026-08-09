@@ -1,0 +1,1 @@
+{"schema_version":"bigfront.gate-evidence.v1","gate":"information_architecture","subject":"Root navigation, overlays and menu hierarchy","target":"ESP32 368x448 + macOS 360x520","procedure":["Check every core Surface has one responsibility, entry, exit and preserved state."],"result":"pass","captures":["03-screen-map.md"]}
