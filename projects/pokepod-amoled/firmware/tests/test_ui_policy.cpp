@@ -129,6 +129,7 @@ int main() {
   assert(uiActionAt(state, 180, 300, false) == UiAction::raiseToWakeToggle);
   assert(uiActionAt(state, 180, 380, false) == UiAction::openProvisioning);
   assert(uiActionAt(state, 180, 200, false) == UiAction::wirelessSettings);
+  assert(uiActionAt(state, 180, 240, false) == UiAction::toggleComputerSync);
 
   state.page = RootPage::capsules;
   assert(uiActionAt(state, 180, 70, false) == UiAction::openCapsuleScope);

@@ -4,8 +4,9 @@ PokePod 把 Waveshare ESP32-S3-Touch-AMOLED-1.8 做成两种设备：
 
 - 独立语音胶囊：录制 `16 kHz / 16 bit / mono WAV`，保存为 PokeCapsule
   schema v2，联网后由腾讯云一句话识别生成 `raw.txt`。
-- Mac 无线语音终端：BLE 发送实时压缩音频给独立的 PokePod Voice.app；USB
-  只保留 PokePod Link v2 数据同步、维护和刷写。
+- Mac 无线语音终端：BLE 发送实时压缩音频给独立的 PokePod Voice.app；PokePod
+  Link v2 可通过 USB CDC 或经过 TLS 与双向 HMAC 认证的局域网通道同步胶囊。
+  USB 同时保留首次无线配对、维护和刷写。
 
 固件在启动时通过触摸控制器地址自动识别硬件：
 
@@ -78,6 +79,16 @@ CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32�
 - 配置、UTC 校时、录音、停止和重启；
 - 可选逐块确认，防止大文件超过 TinyUSB CDC 接收窗口；
 - 路径穿越拦截、重复请求拦截、传输超时和忙碌重试。
+
+设置页的“与电脑同步”会打开一个从点击时刻计算、绝对截止为五分钟的局域网
+窗口。窗口内设备通过 Bonjour 发布临时实例，TCP 连接先完成 TLS，再使用经 USB
+导出的配对密钥做双向 HMAC 认证。截止时监听、Bonjour 和现有无线会话一起关闭，
+认证和传输活动都不会延长窗口。
+
+首次配对由 Mac 通过 USB 调用 `pairing-export`。返回的 bundle 使用设备现有永久
+`pokepod-...` identity，避免产生第二个资料库身份；该操作在无线通道会被拒绝。
+递归文件清单为 `audio.m4a` 和 `audio.wav` 返回小写 64 位 SHA-256，Mac 只有在
+UUID、文件名、长度和摘要全部一致时才复用本地音频。
 
 Mac 端通过 `DeviceTransport` 共用镜像、离线队列和 DeepSeek 回写逻辑；
 PokePod 使用 `PokePodTransport`，Android/Poke3 使用 `ADBTransport`。设备不启用

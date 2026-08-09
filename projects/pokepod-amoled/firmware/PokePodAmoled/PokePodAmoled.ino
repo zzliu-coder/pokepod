@@ -17,6 +17,7 @@
 #include "ProvisioningPortal.h"
 #include "ProvisioningDiagnostics.h"
 #include "PokePodLinkService.h"
+#include "LinkServiceCoordinator.h"
 #include "PowerPolicy.h"
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
@@ -24,6 +25,8 @@
 #include "UsbLinkBridge.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
+#include "WirelessSyncIdentity.h"
+#include "WirelessSyncService.h"
 
 using namespace pokepod;
 
@@ -44,6 +47,9 @@ TencentWorker tencentWorker;
 ProvisioningPortal provisioningPortal;
 ProvisioningDiagnostics provisioningDiagnostics;
 PokePodLinkService linkService;
+LinkServiceCoordinator linkCoordinator;
+WirelessSyncIdentity wirelessSyncIdentity;
+WirelessSyncService wirelessSync;
 RaiseToWakePolicy raiseToWake;
 RuntimePowerManager runtimePower;
 AutoScreenOffPolicy autoScreenOff;
@@ -68,6 +74,7 @@ uint32_t lastSensorMs = 0;
 uint32_t bootPressedAtMs = 0;
 bool rtcSyncedFromNetwork = false;
 bool ignoreTouchUntilRelease = false;
+bool lastUsbHostConnected = false;
 String transientMessage;
 uint32_t transientUntilMs = 0;
 CapsuleUndoState trashUndo;
@@ -99,9 +106,9 @@ PowerInputs currentPowerInputs() {
   input.usbHostConnected = usb.hostConnected();
   input.vbusPresent = board.status().vbusPresent;
   input.linkBusy = linkService.receivingBinary() ||
-      linkService.maintenanceActive();
+      linkService.maintenanceActive() || wirelessSync.linkBusy();
   input.storageBusy = recorder.recording();
-  input.networkBusy = tencentWorker.working();
+  input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy();
   input.provisioning = provisioningPortal.active();
   input.uiAnimating = dashboard.scrollActive();
   return input;
@@ -119,11 +126,8 @@ String recordingId() {
 }
 
 String deviceId() {
-  const uint64_t mac = ESP.getEfuseMac();
   char value[24];
-  snprintf(value, sizeof(value), "pokepod-%04x%08x",
-           static_cast<unsigned>((mac >> 32) & 0xffff),
-           static_cast<unsigned>(mac & 0xffffffff));
+  formatPokePodDeviceId(ESP.getEfuseMac(), value);
   return String(value);
 }
 
@@ -180,6 +184,13 @@ void drawDashboard() {
   view.bleVoiceReadyTimeouts = bleQuality.readyTimeouts;
   view.bleVoiceStopAckTimeouts = bleQuality.stopAckTimeouts;
   view.bleVoiceStreamTimeouts = bleQuality.streamTimeouts;
+  view.wifiSyncOpen = wirelessSync.openWindow();
+  view.wifiSyncSecureReady = wirelessSync.secureReady();
+  view.wifiSyncListener = wirelessSync.listenerActive();
+  view.wifiSyncBonjour = wirelessSync.bonjourActive();
+  view.wifiSyncClient = wirelessSync.clientConnected();
+  view.wifiSyncAuthenticated = wirelessSync.authenticated();
+  view.wifiSyncRemainingSeconds = wirelessSync.remainingSeconds();
   view.wirelessHolding = wirelessUiActive;
   view.recording = recorder.recording();
   view.transcribing = tencentWorker.working();
@@ -312,6 +323,17 @@ void emitStatus() {
       power.automaticPmSupported ? "true" : "false",
       power.bleModemSleepSupported ? "true" : "false",
       static_cast<unsigned>(provisioningDiagnostics.count()));
+  usb.log().printf(
+      "{\"event\":\"wifi_sync_status\",\"window\":%s,\"phase\":\"%s\",\"secure\":%s,\"listener\":%s,\"bonjour\":%s,\"client\":%s,\"authenticated\":%s,\"remaining_seconds\":%lu,\"last_error\":\"%s\"}\n",
+      wirelessSync.openWindow() ? "true" : "false",
+      wirelessSyncWindowPhaseName(wirelessSync.phase()),
+      wirelessSync.secureReady() ? "true" : "false",
+      wirelessSync.listenerActive() ? "true" : "false",
+      wirelessSync.bonjourActive() ? "true" : "false",
+      wirelessSync.clientConnected() ? "true" : "false",
+      wirelessSync.authenticated() ? "true" : "false",
+      static_cast<unsigned long>(wirelessSync.remainingSeconds()),
+      wirelessSync.lastError());
 }
 
 void pollTouch() {
@@ -466,6 +488,20 @@ void pollTouch() {
       }
       dashboard.invalidate();
       drawDashboard();
+    } else if (action == UiAction::toggleComputerSync) {
+      if (wirelessSync.openWindow()) {
+        wirelessSync.close();
+        showMessage("电脑同步已关闭");
+      } else if (!wirelessSync.secureReady()) {
+        showMessage("无线同步安全服务未就绪");
+      } else {
+        wirelessSync.open(now);
+        showMessage(deviceConfig.hasWifi()
+                        ? "电脑同步已开启 5 分钟"
+                        : "已开启 · 请先完成手机配网");
+      }
+      dashboard.invalidate();
+      drawDashboard();
     } else if (action == UiAction::openProvisioning) {
       if (provisioningPortal.begin(deviceConfig, provisioningDiagnostics,
                                    usb.log())) {
@@ -601,6 +637,8 @@ void setup() {
   const bool usbStarted = usb.begin(board.status().variant);
   const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
   deviceConfig.begin(usb.log());
+  const bool syncIdentityStarted =
+      wirelessSyncIdentity.begin(ESP.getEfuseMac(), usb.log());
   if (board.sdReady() && recorder.begin(SD_MMC, usb.log())) {
     recorder.recoverInterrupted(usb.log(), board.utcNow());
     capsuleLibrary.begin(SD_MMC, usb.log());
@@ -613,18 +651,31 @@ void setup() {
                     dashboard,
                     capsuleLibrary, recorder,
                     deviceConfig, wifi, tencentWorker,
-                    provisioningDiagnostics, runtimePower, usb.log());
+                    provisioningDiagnostics, runtimePower, usb.log(),
+                    &linkCoordinator, LinkTransport::usb, &wirelessSync);
+  const bool wifiSyncStarted = wirelessSync.begin(
+      SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
+      capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
+      provisioningDiagnostics, runtimePower, wirelessSyncIdentity,
+      linkCoordinator, usb.log());
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
-  showMessage(usbStarted && bleStarted ? "PokePod 已就绪"
-                                      : "连接服务启动失败",
+  showMessage(usbStarted && bleStarted && syncIdentityStarted && wifiSyncStarted
+                  ? "PokePod 已就绪"
+                  : (usbStarted && bleStarted
+                         ? "无线同步安全服务未就绪"
+                         : "连接服务启动失败"),
               3000);
   drawDashboard();
   autoScreenOff.begin(millis());
+  lastUsbHostConnected = usb.hostConnected();
   emitStatus();
 }
 
 void loop() {
   const uint32_t now = millis();
+  const bool usbHostConnected = usb.hostConnected();
+  if (lastUsbHostConnected && !usbHostConnected) linkService.disconnect();
+  lastUsbHostConnected = usbHostConnected;
   if (trashUndo.expire(now)) {
     dashboard.invalidate();
   }
@@ -632,8 +683,13 @@ void loop() {
   // A CDC upload can otherwise overrun TinyUSB while a full-screen AMOLED
   // redraw or an SD/network task owns the main loop. Once a binary request has
   // started, drain it before doing any optional UI or sensor work.
+  wirelessSync.enforceDeadline(now);
   if (linkService.receivingBinary()) {
     linkService.poll(now);
+    return;
+  }
+  if (wirelessSync.receivingBinary()) {
+    wirelessSync.poll(now, wifi.connected());
     return;
   }
   if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
@@ -712,8 +768,11 @@ void loop() {
     audio.stopHardware(usb.log());
   }
 
+  wirelessSync.enforceDeadline(now);
   linkService.poll(now);
-  if (linkService.receivingBinary()) return;
+  if (linkService.receivingBinary()) {
+    return;
+  }
 
   if (provisioningPortal.active()) provisioningPortal.loop(now);
   if (provisioningPortal.takeConfigurationChanged()) {
@@ -724,13 +783,16 @@ void loop() {
   const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
       deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
   wifi.loop(now, recorder.recording(), networkWork,
-            board.status().charging, provisioningPortal.active());
+            board.status().charging, provisioningPortal.active(),
+            wirelessSync.wifiDemand());
+  wirelessSync.poll(now, wifi.connected());
   if (!rtcSyncedFromNetwork && wifi.networkTimeSynchronized()) {
     rtcSyncedFromNetwork = board.setUtcEpoch(time(nullptr));
   }
   tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                      transcriptionDispatchBusy(recorder.recording(),
-                                               linkService.maintenanceActive()),
+                                               linkService.maintenanceActive() ||
+                                                   wirelessSync.linkBusy()),
                      board.status().charging);
   currentPowerDecision = runtimePower.apply(currentPowerInputs(), usb.log());
   if (now - lastTouchMs >= currentPowerDecision.touchPollMs) {

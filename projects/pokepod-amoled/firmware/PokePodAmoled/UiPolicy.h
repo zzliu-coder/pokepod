@@ -166,6 +166,7 @@ enum class UiAction : uint8_t {
   openProvisioningLog,
   wifiToggle,
   wirelessSettings,
+  toggleComputerSync,
   raiseToWakeToggle,
   openCapsule,
   openCapsuleScope,
@@ -288,6 +289,9 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     if (y >= ui::kDeviceMacTop && y < ui::kDeviceStorageTop) {
       return UiAction::wirelessSettings;
+    }
+    if (y >= ui::kDeviceStorageTop && y < ui::kDeviceRaiseTop) {
+      return UiAction::toggleComputerSync;
     }
     if (y >= ui::kDeviceRaiseTop && y < ui::kDeviceProvisionTop) {
       return UiAction::raiseToWakeToggle;

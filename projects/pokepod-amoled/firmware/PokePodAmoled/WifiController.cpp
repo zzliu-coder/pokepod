@@ -28,9 +28,10 @@ bool WifiController::begin(DeviceConfig &config, Print &log) {
 }
 
 void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
-                          bool charging, bool provisioning) {
+                          bool charging, bool provisioning,
+                          bool wirelessSync) {
   if (config_ == nullptr) return;
-  const bool demand = recording || pendingWork || charging;
+  const bool demand = recording || pendingWork || charging || wirelessSync;
   if ((!previousDemand_ && demand) || (!previousCharging_ && charging)) {
     exhausted_ = false;
     failedAttempts_ = 0;
@@ -47,6 +48,7 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
   inputs.charging = charging;
   inputs.recording = recording;
   inputs.pendingWork = pendingWork;
+  inputs.wirelessSync = wirelessSync;
   inputs.connected = connected_;
   inputs.provisioning = provisioning;
   inputs.connectionFailed = connectionFailed_ || exhausted_;

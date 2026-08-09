@@ -6,6 +6,7 @@
 
 #include "LinkFrame.h"
 #include "LinkPolicy.h"
+#include "LinkServiceCoordinator.h"
 
 namespace pokepod {
 
@@ -22,6 +23,7 @@ class WavRecorder;
 class WifiController;
 class ProvisioningDiagnostics;
 class RuntimePowerManager;
+class WirelessSyncPairingProvider;
 
 class PokePodLinkService {
  public:
@@ -34,8 +36,12 @@ class PokePodLinkService {
              WavRecorder &recorder, DeviceConfig &config,
              WifiController &wifi, TencentWorker &tencent,
              ProvisioningDiagnostics &provisioningDiagnostics,
-             RuntimePowerManager &power, Print &log);
+             RuntimePowerManager &power, Print &log,
+             LinkServiceCoordinator *coordinator = nullptr,
+             LinkTransport transport = LinkTransport::none,
+             WirelessSyncPairingProvider *pairingProvider = nullptr);
   void poll(uint32_t nowMs);
+  void disconnect();
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
@@ -81,9 +87,12 @@ class PokePodLinkService {
   String readText(const String &path, size_t limit) const;
   bool collectFiles(const String &directory, const String &relative,
                     uint8_t depth, std::vector<String> &files) const;
+  bool sha256File(File &file, char output[65]) const;
   String metadataFingerprint() const;
   String deviceId() const;
   bool foregroundBusy() const;
+  bool acquireRequestLease(uint32_t requestId);
+  void releaseRequestLease();
   bool safeFolder(const char *value, bool allowBuiltIn = true) const;
   String folderDirectory(const char *value) const;
   String activeCapsuleDirectory(const String &id) const;
@@ -124,6 +133,10 @@ class PokePodLinkService {
   ProvisioningDiagnostics *provisioningDiagnostics_ = nullptr;
   RuntimePowerManager *power_ = nullptr;
   Print *log_ = nullptr;
+  LinkServiceCoordinator *coordinator_ = nullptr;
+  LinkTransport transport_ = LinkTransport::none;
+  WirelessSyncPairingProvider *pairingProvider_ = nullptr;
+  bool requestLeaseHeld_ = false;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};

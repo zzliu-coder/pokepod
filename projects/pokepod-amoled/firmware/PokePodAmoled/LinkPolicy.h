@@ -71,6 +71,14 @@ inline bool safeLinkRelativePath(const char *value, bool allowHiddenRoot = false
   return true;
 }
 
+inline bool linkAudioFileNeedsDigest(const char *path) {
+  if (path == nullptr) return false;
+  const char *basename = strrchr(path, '/');
+  basename = basename == nullptr ? path : basename + 1;
+  return strcmp(basename, "audio.m4a") == 0 ||
+      strcmp(basename, "audio.wav") == 0;
+}
+
 class LinkRequestHistory {
  public:
   bool contains(uint32_t requestId) const {

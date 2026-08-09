@@ -30,14 +30,29 @@ int main() {
   state = nextWifiDecision(state, input, 1000 + kWifiGraceMs);
   assert(state.phase == WifiPhase::off && !state.radioOn);
 
+  input.connected = false;
+  input.wirelessSync = true;
+  state = nextWifiDecision(state, input, 400000);
+  assert(state.phase == WifiPhase::connecting && state.radioOn);
+  input.connected = true;
+  state = nextWifiDecision(state, input, 400001);
+  assert(state.phase == WifiPhase::online && state.radioOn);
+  assert(!state.processQueue);
+  input.wirelessSync = false;
+  input.connected = false;
+
   input.charging = true;
   state = nextWifiDecision(state, input, 500000);
   assert(state.radioOn);
   input.manuallyDisabled = true;
   state = nextWifiDecision(state, input, 500001);
   assert(state.phase == WifiPhase::off && !state.radioOn);
-  input.provisioning = true;
+  input.wirelessSync = true;
   state = nextWifiDecision(state, input, 500002);
+  assert(state.phase == WifiPhase::connecting && state.radioOn);
+  input.wirelessSync = false;
+  input.provisioning = true;
+  state = nextWifiDecision(state, input, 500003);
   assert(state.phase == WifiPhase::provisioning && state.radioOn);
 
   assert(wifiRetryDelayMs(0) == 10000);

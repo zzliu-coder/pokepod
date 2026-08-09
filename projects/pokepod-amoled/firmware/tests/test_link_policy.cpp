@@ -13,6 +13,13 @@ int main() {
   assert(!safeLinkRelativePath("Inbox\\a"));
   assert(!safeLinkRelativePath(".staging/a", false));
 
+  assert(linkAudioFileNeedsDigest("Inbox/id/audio.m4a"));
+  assert(linkAudioFileNeedsDigest("Archive/id/audio.wav"));
+  assert(linkAudioFileNeedsDigest("audio.wav"));
+  assert(!linkAudioFileNeedsDigest("Inbox/id/audio.M4A"));
+  assert(!linkAudioFileNeedsDigest("Inbox/id/processing.json"));
+  assert(!linkAudioFileNeedsDigest(nullptr));
+
   assert(purgeOutcome(false, false) == PurgeOutcome::rejected);
   assert(purgeOutcome(true, true) == PurgeOutcome::committed);
   assert(purgeOutcome(true, false) ==

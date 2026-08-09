@@ -578,12 +578,33 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  view.bleVoiceReady || view.bleVoicePairing
                      ? ui::kWireless : ui::kMuted,
                  SettingAccessory::value);
-  drawSettingRow(ui::kDeviceStorageTop, UiIcon::storage, "存储与字库",
-                 !view.board->sdCard ? "SD 需要检查" :
-                 (renderer_.sdFontReady() ? "可用" : "字库未安装"),
-                 view.board->sdCard && renderer_.sdFontReady()
-                     ? ui::kAccent : ui::kError,
-                 SettingAccessory::value);
+  char syncRemaining[16];
+  snprintf(syncRemaining, sizeof(syncRemaining), "%lu:%02lu",
+           static_cast<unsigned long>(view.wifiSyncRemainingSeconds / 60),
+           static_cast<unsigned long>(view.wifiSyncRemainingSeconds % 60));
+  String syncDetail;
+  uint16_t syncColor = ui::kMuted;
+  if (!view.wifiSyncSecureReady) {
+    syncDetail = "安全服务未就绪";
+    syncColor = ui::kError;
+  } else if (!view.wifiSyncOpen) {
+    syncDetail = "轻触开启 5 分钟";
+  } else if (view.wifiSyncAuthenticated) {
+    syncDetail = String("同步中 · ") + syncRemaining;
+    syncColor = ui::kAccent;
+  } else if (view.wifiSyncClient) {
+    syncDetail = String("正在验证 · ") + syncRemaining;
+    syncColor = ui::kWaiting;
+  } else if (view.wifiSyncListener && view.wifiSyncBonjour) {
+    syncDetail = String("等待 Mac · ") + syncRemaining;
+    syncColor = ui::kWaiting;
+  } else {
+    syncDetail = String("连接 Wi-Fi · ") + syncRemaining;
+    syncColor = ui::kWaiting;
+  }
+  drawSettingRow(ui::kDeviceStorageTop, UiIcon::mac, "与电脑同步",
+                 syncDetail, syncColor, SettingAccessory::toggle,
+                 view.wifiSyncOpen);
   const bool raiseEnabled = view.settings != nullptr &&
       view.settings->raiseToWake;
   drawSettingRow(ui::kDeviceRaiseTop, UiIcon::raise, "抬起亮屏",
@@ -924,6 +945,20 @@ String Dashboard::signature(const DashboardView &view) const {
   value += view.bleVoiceStopAckTimeouts;
   value += ':';
   value += view.bleVoiceStreamTimeouts;
+  value += ':';
+  value += view.wifiSyncOpen;
+  value += ':';
+  value += view.wifiSyncSecureReady;
+  value += ':';
+  value += view.wifiSyncListener;
+  value += ':';
+  value += view.wifiSyncBonjour;
+  value += ':';
+  value += view.wifiSyncClient;
+  value += ':';
+  value += view.wifiSyncAuthenticated;
+  value += ':';
+  value += view.wifiSyncRemainingSeconds;
   value += ':';
   value += view.wirelessHolding;
   value += ':';

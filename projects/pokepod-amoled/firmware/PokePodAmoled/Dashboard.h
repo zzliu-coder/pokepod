@@ -39,6 +39,13 @@ struct DashboardView {
   uint32_t bleVoiceReadyTimeouts = 0;
   uint32_t bleVoiceStopAckTimeouts = 0;
   uint32_t bleVoiceStreamTimeouts = 0;
+  bool wifiSyncOpen = false;
+  bool wifiSyncSecureReady = false;
+  bool wifiSyncListener = false;
+  bool wifiSyncBonjour = false;
+  bool wifiSyncClient = false;
+  bool wifiSyncAuthenticated = false;
+  uint32_t wifiSyncRemainingSeconds = 0;
   bool wirelessHolding = false;
   bool recording = false;
   bool transcribing = false;

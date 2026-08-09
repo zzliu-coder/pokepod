@@ -22,6 +22,7 @@ struct WifiInputs {
   bool charging = false;
   bool recording = false;
   bool pendingWork = false;
+  bool wirelessSync = false;
   bool connected = false;
   bool provisioning = false;
   bool connectionFailed = false;
@@ -45,7 +46,7 @@ inline WifiDecision nextWifiDecision(const WifiDecision &previous,
     result.idleSinceMs = 0;
     return result;
   }
-  if (!inputs.configured || inputs.manuallyDisabled) {
+  if (!inputs.configured || (inputs.manuallyDisabled && !inputs.wirelessSync)) {
     result.phase = inputs.configured ? WifiPhase::off : WifiPhase::disabled;
     result.radioOn = false;
     result.processQueue = false;
@@ -53,7 +54,8 @@ inline WifiDecision nextWifiDecision(const WifiDecision &previous,
     return result;
   }
 
-  const bool demand = inputs.charging || inputs.recording || inputs.pendingWork;
+  const bool demand = inputs.charging || inputs.recording ||
+      inputs.pendingWork || inputs.wirelessSync;
   if (demand) {
     result.phase = inputs.connected ? WifiPhase::online :
         (inputs.connectionFailed ? WifiPhase::error : WifiPhase::connecting);

@@ -12,7 +12,7 @@ class WifiController {
  public:
   bool begin(DeviceConfig &config, Print &log);
   void loop(uint32_t nowMs, bool recording, bool pendingWork, bool charging,
-            bool provisioning);
+            bool provisioning, bool wirelessSync);
   void configurationChanged();
 
   WifiPhase phase() const { return decision_.phase; }
