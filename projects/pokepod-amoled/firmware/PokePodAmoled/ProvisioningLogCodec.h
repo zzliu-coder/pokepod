@@ -15,6 +15,9 @@ constexpr uint16_t kProvisioningReasonScanTimeout = 65003;
 constexpr uint16_t kProvisioningReasonScanFailed = 65004;
 constexpr uint16_t kProvisioningReasonInvalidInput = 65005;
 constexpr uint16_t kProvisioningReasonPortalFailed = 65006;
+constexpr uint16_t kProvisioningReasonStartupTimeout = 65007;
+constexpr uint16_t kProvisioningReasonRadioBusy = 65008;
+constexpr uint16_t kProvisioningReasonRestartBase = 65100;
 
 enum class ProvisioningLogStage : uint8_t {
   portalStarted = 1,
@@ -25,6 +28,7 @@ enum class ProvisioningLogStage : uint8_t {
   configSaved = 6,
   failed = 7,
   portalStopped = 8,
+  portalRequested = 9,
 };
 
 enum class ProvisioningLogOutcome : uint8_t {
@@ -108,7 +112,7 @@ inline bool validateProvisioningLog(const StoredProvisioningLog &log) {
   for (size_t index = 0; index < kProvisioningLogCapacity; ++index) {
     const StoredProvisioningLogRecord &record = log.records[index];
     if (!provisioningLogHasTerminator(record.ssid, sizeof(record.ssid)) ||
-        record.stage > static_cast<uint8_t>(ProvisioningLogStage::portalStopped) ||
+        record.stage > static_cast<uint8_t>(ProvisioningLogStage::portalRequested) ||
         record.outcome > static_cast<uint8_t>(ProvisioningLogOutcome::failure)) {
       return false;
     }

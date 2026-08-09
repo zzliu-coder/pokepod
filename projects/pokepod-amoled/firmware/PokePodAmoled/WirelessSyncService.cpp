@@ -36,7 +36,7 @@ bool WirelessSyncService::begin(
                        dashboard, library, recorder, config, wifi, tencent,
                        provisioningDiagnostics, power, log, &coordinator,
                        LinkTransport::wifi, nullptr,
-                       &window_.transferGate());
+                       &window_.transferGate(), nullptr);
   log.printf("{\"event\":\"wifi_sync_service\",\"ok\":%s,\"tls_identity\":%s}\n",
              begun_ ? "true" : "false", identity.ready() ? "true" : "false");
   return begun_;

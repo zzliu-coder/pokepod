@@ -16,6 +16,7 @@
 #include "DeviceConfig.h"
 #include "ProvisioningPortal.h"
 #include "ProvisioningDiagnostics.h"
+#include "ProvisioningCoordinator.h"
 #include "PokePodLinkService.h"
 #include "LinkServiceCoordinator.h"
 #include "PowerPolicy.h"
@@ -46,6 +47,7 @@ WifiController wifi;
 TencentWorker tencentWorker;
 ProvisioningPortal provisioningPortal;
 ProvisioningDiagnostics provisioningDiagnostics;
+ProvisioningCoordinator provisioningCoordinator;
 PokePodLinkService linkService;
 LinkServiceCoordinator linkCoordinator;
 WirelessSyncIdentity wirelessSyncIdentity;
@@ -102,14 +104,14 @@ PowerInputs currentPowerInputs() {
   input.audioActive = audio.active() || recorder.recording() || audio.playing();
   input.bleConnected = bleVoice.connected();
   input.bleStreaming = bleVoice.streaming();
-  input.wifiRadioOn = wifi.radioOn() || provisioningPortal.active();
+  input.wifiRadioOn = wifi.radioOn() || provisioningCoordinator.ownsWifi();
   input.usbHostConnected = usb.hostConnected();
   input.vbusPresent = board.status().vbusPresent;
   input.linkBusy = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy();
   input.storageBusy = recorder.recording();
   input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy();
-  input.provisioning = provisioningPortal.active();
+  input.provisioning = provisioningCoordinator.visible();
   input.uiAnimating = dashboard.scrollActive();
   return input;
 }
@@ -195,12 +197,12 @@ void drawDashboard() {
   view.recording = recorder.recording();
   view.transcribing = tencentWorker.working();
   view.playing = audio.playing();
-  view.provisioning = provisioningPortal.active();
+  view.provisioning = provisioningCoordinator.visible();
   view.undoAvailable = trashUndo.available(millis());
   view.recordingMs = recorder.durationMs();
   view.audioPeak = audio.consumePeakWindow();
   audio.copyEnvelope(view.audioEnvelope, PeakWindow::kEnvelopeSamples);
-  view.wifiPhase = provisioningPortal.active()
+  view.wifiPhase = provisioningCoordinator.visible()
       ? WifiPhase::provisioning : wifi.phase();
   view.wifiRssi = wifi.rssi();
   view.portalSsid = provisioningPortal.ssid();
@@ -288,7 +290,7 @@ void emitStatus() {
   const BleVoiceQualitySnapshot quality = bleVoice.quality();
   const RuntimePowerSnapshot &power = runtimePower.snapshot();
   usb.log().printf(
-      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"last_wake_cause\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_diagnostic_count\":%u}\n",
+      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"last_wake_cause\":%u,\"reset_reason\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_startup_phase\":\"%s\",\"provisioning_diagnostic_count\":%u}\n",
       variantName(s.variant), s.display ? "true" : "false", s.touch ? "true" : "false",
       s.sdCard ? "true" : "false", audio.ready() ? "true" : "false",
       audio.active() ? "true" : "false",
@@ -320,8 +322,10 @@ void emitStatus() {
       static_cast<unsigned long>(power.lightSleepCount),
       static_cast<unsigned long long>(power.lightSleepUs),
       static_cast<unsigned>(power.lastWakeCause),
+      static_cast<unsigned>(esp_reset_reason()),
       power.automaticPmSupported ? "true" : "false",
       power.bleModemSleepSupported ? "true" : "false",
+      provisioningCoordinator.phaseName(),
       static_cast<unsigned>(provisioningDiagnostics.count()));
   usb.log().printf(
       "{\"event\":\"wifi_sync_status\",\"window\":%s,\"phase\":\"%s\",\"secure\":%s,\"listener\":%s,\"bonjour\":%s,\"client\":%s,\"authenticated\":%s,\"remaining_seconds\":%lu,\"last_error\":\"%s\"}\n",
@@ -426,10 +430,10 @@ void pollTouch() {
     if (touchDeviceForgetAttempted) return;
     if (touchCapsuleSelectionAttempted) return;
     if (horizontalSwipe) {
-      if (provisioningPortal.active() &&
+      if (provisioningCoordinator.visible() &&
           isBackEdgeSwipe(startX, deltaX)) {
         if (dashboard.state().screen() != UiScreen::provisioningLog) {
-          provisioningPortal.stop();
+          provisioningCoordinator.stop();
         }
         dashboard.back();
       } else {
@@ -457,9 +461,9 @@ void pollTouch() {
       }
       drawDashboard();
     } else if (action == UiAction::back) {
-      if (provisioningPortal.active() &&
+      if (provisioningCoordinator.visible() &&
           dashboard.state().screen() != UiScreen::provisioningLog) {
-        provisioningPortal.stop();
+        provisioningCoordinator.stop();
       }
       dashboard.back();
       drawDashboard();
@@ -503,11 +507,11 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {
-      if (provisioningPortal.begin(deviceConfig, provisioningDiagnostics,
-                                   usb.log())) {
-        showMessage("手机连接屏幕上的热点");
+      if (wirelessSync.openWindow()) wirelessSync.close();
+      if (provisioningCoordinator.request(now)) {
+        showMessage("正在准备配网热点");
       } else {
-        showMessage("配网热点启动失败");
+        showMessage("配网启动请求失败");
       }
       dashboard.invalidate();
       drawDashboard();
@@ -632,7 +636,8 @@ void setup() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
 
   board.begin(Serial);
-  provisioningDiagnostics.begin(Serial);
+  provisioningDiagnostics.begin(
+      Serial, static_cast<uint16_t>(esp_reset_reason()));
   audio.begin(Serial);
   const bool usbStarted = usb.begin(board.status().variant);
   const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
@@ -645,6 +650,8 @@ void setup() {
     tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
   }
   wifi.begin(deviceConfig, usb.log());
+  provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
+                                provisioningDiagnostics, usb.log());
   runtimePower.begin(usb.log());
   linkService.begin(usb.stream(), SD_MMC, board, audio, captureRouter,
                     usb, bleVoice,
@@ -653,19 +660,24 @@ void setup() {
                     deviceConfig, wifi, tencentWorker,
                     provisioningDiagnostics, runtimePower, usb.log(),
                     &linkCoordinator, LinkTransport::usb, &wirelessSync,
-                    nullptr);
+                    nullptr, &provisioningCoordinator);
   const bool wifiSyncStarted = wirelessSync.begin(
       SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
       capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
       provisioningDiagnostics, runtimePower, wirelessSyncIdentity,
       linkCoordinator, usb.log());
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
-  showMessage(usbStarted && bleStarted && syncIdentityStarted && wifiSyncStarted
-                  ? "PokePod 已就绪"
-                  : (usbStarted && bleStarted
-                         ? "无线同步安全服务未就绪"
-                         : "连接服务启动失败"),
-              3000);
+  if (provisioningDiagnostics.recoveredInterruptedSession()) {
+    showMessage("上次配网被重启中断 · 见诊断", 5000);
+  } else {
+    showMessage(usbStarted && bleStarted && syncIdentityStarted &&
+                        wifiSyncStarted
+                    ? "PokePod 已就绪"
+                    : (usbStarted && bleStarted
+                           ? "无线同步安全服务未就绪"
+                           : "连接服务启动失败"),
+                3000);
+  }
   drawDashboard();
   autoScreenOff.begin(millis());
   lastUsbHostConnected = usb.hostConnected();
@@ -705,7 +717,7 @@ void loop() {
       return;
     }
     if (bootButton.pressedEdge()) {
-      if (provisioningPortal.active()) {
+      if (provisioningCoordinator.visible()) {
         bootProvisioningExitArmed = true;
         return;
       }
@@ -713,7 +725,7 @@ void loop() {
     } else if (bootButton.releasedEdge()) {
       if (bootProvisioningExitArmed) {
         bootProvisioningExitArmed = false;
-        if (provisioningPortal.active()) provisioningPortal.stop();
+        if (provisioningCoordinator.visible()) provisioningCoordinator.stop();
         dashboard.back();
         dashboard.invalidate();
         showMessage("已退出手机配网");
@@ -775,16 +787,15 @@ void loop() {
     return;
   }
 
-  if (provisioningPortal.active()) provisioningPortal.loop(now);
-  if (provisioningPortal.takeConfigurationChanged()) {
-    wifi.configurationChanged();
+  provisioningCoordinator.poll(now);
+  if (provisioningCoordinator.takeConfigurationChanged()) {
     tencentWorker.wake();
     dashboard.invalidate();
   }
   const bool networkWork = capsuleLibrary.pendingCount() > 0 &&
       deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
   wifi.loop(now, recorder.recording(), networkWork,
-            board.status().charging, provisioningPortal.active(),
+            board.status().charging, provisioningCoordinator.ownsWifi(),
             wirelessSync.wifiDemand());
   wirelessSync.poll(now, wifi.connected());
   if (!rtcSyncedFromNetwork && wifi.networkTimeSynchronized()) {
@@ -841,7 +852,7 @@ void loop() {
     }
   }
   const bool keepScreenAwake = recorder.recording() || wirelessUiActive ||
-      audio.playing() || provisioningPortal.active();
+      audio.playing() || provisioningCoordinator.visible();
   if (autoScreenOff.shouldTurnOff(now, board.status().screenOn,
                                  keepScreenAwake)) {
     setScreenState(false);

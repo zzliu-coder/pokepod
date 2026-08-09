@@ -14,11 +14,14 @@ namespace pokepod {
 class ProvisioningPortal {
  public:
   ProvisioningPortal();
-  bool begin(DeviceConfig &config, ProvisioningDiagnostics &diagnostics,
-             Print &log);
+  bool prepare(DeviceConfig &config, ProvisioningDiagnostics &diagnostics,
+               Print &log);
+  bool startPrepared();
+  void failStartupTimeout();
   void loop(uint32_t nowMs);
   void stop();
   bool active() const { return active_; }
+  bool prepared() const { return prepared_; }
   const String &ssid() const { return ssid_; }
   const String &password() const { return password_; }
   const String &statusMessage() const { return statusMessage_; }
@@ -61,6 +64,8 @@ class ProvisioningPortal {
   String statusMessage_;
   std::vector<ScannedNetwork> networks_;
   bool routesInstalled_ = false;
+  bool prepared_ = false;
+  bool starting_ = false;
   bool active_ = false;
   bool validating_ = false;
   bool scanning_ = false;

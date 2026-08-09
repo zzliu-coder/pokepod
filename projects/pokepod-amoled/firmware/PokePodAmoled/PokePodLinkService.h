@@ -23,6 +23,7 @@ class BleVoiceService;
 class WavRecorder;
 class WifiController;
 class ProvisioningDiagnostics;
+class ProvisioningCoordinator;
 class RuntimePowerManager;
 class WirelessSyncPairingProvider;
 
@@ -41,7 +42,8 @@ class PokePodLinkService {
              LinkServiceCoordinator *coordinator = nullptr,
              LinkTransport transport = LinkTransport::none,
              WirelessSyncPairingProvider *pairingProvider = nullptr,
-             LinkTransferGate *transferGate = nullptr);
+             LinkTransferGate *transferGate = nullptr,
+             ProvisioningCoordinator *provisioningCoordinator = nullptr);
   void poll(uint32_t nowMs);
   void disconnect();
   bool active() const { return sessionActive_; }
@@ -134,6 +136,7 @@ class PokePodLinkService {
   WifiController *wifi_ = nullptr;
   TencentWorker *tencent_ = nullptr;
   ProvisioningDiagnostics *provisioningDiagnostics_ = nullptr;
+  ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
   RuntimePowerManager *power_ = nullptr;
   Print *log_ = nullptr;
   LinkServiceCoordinator *coordinator_ = nullptr;

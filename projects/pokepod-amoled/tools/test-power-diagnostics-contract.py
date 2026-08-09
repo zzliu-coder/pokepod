@@ -40,6 +40,10 @@ assert "WIFI_PS_NONE" in portal
 assert "provisioning-diagnostics" in link
 assert "get-provisioning-diagnostics" in link
 assert "clear-provisioning-diagnostics" in link
+assert "provisioning-start" in link
+assert "provisioning-stop" in link
+assert "resetReason" in link
+assert "provisioningStartupPhase" in link
 assert "drawProvisioningLog" in dashboard
 assert "诊断记录" in dashboard
 

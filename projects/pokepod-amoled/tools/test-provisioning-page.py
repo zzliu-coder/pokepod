@@ -6,6 +6,9 @@ from pathlib import Path
 
 firmware_dir = Path(__file__).parents[1] / "firmware" / "PokePodAmoled"
 source = (firmware_dir / "ProvisioningPortal.cpp").read_text(encoding="utf-8")
+coordinator = (firmware_dir / "ProvisioningCoordinator.cpp").read_text(encoding="utf-8")
+wifi_source = (firmware_dir / "WifiController.cpp").read_text(encoding="utf-8")
+link_source = (firmware_dir / "PokePodLinkService.cpp").read_text(encoding="utf-8")
 main_source = (firmware_dir / "PokePodAmoled.ino").read_text(encoding="utf-8")
 dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
@@ -86,11 +89,39 @@ assert "restorePortalForRetry();" in source
 assert "WiFi.mode(WIFI_STA);" in source[source.index(
     "void ProvisioningPortal::beginStationValidation()"):
     source.index("void ProvisioningPortal::restorePortalForRetry()")]
-begin_handler = source[source.index("bool ProvisioningPortal::begin"):
-                        source.index("void ProvisioningPortal::loop")]
-assert "statusMessage_ = \"请选择附近的 2.4 GHz 网络或手工输入\";" in begin_handler
-assert "startScan();" not in begin_handler
-portal_loop = "if (provisioningPortal.active()) provisioningPortal.loop(now);"
+prepare_handler = source[source.index("bool ProvisioningPortal::prepare"):
+                         source.index("bool ProvisioningPortal::startPrepared")]
+start_handler = source[source.index("bool ProvisioningPortal::startPrepared"):
+                       source.index("void ProvisioningPortal::failStartupTimeout")]
+assert "statusMessage_ = \"正在准备配网热点\";" in prepare_handler
+assert "WiFi.mode" not in prepare_handler
+assert "WiFi.softAP" not in prepare_handler
+assert "startScan();" not in prepare_handler
+assert "WiFi.mode(WIFI_AP)" in start_handler
+assert "WiFi.softAP" in start_handler
+assert "statusMessage_ = \"请选择附近的 2.4 GHz 网络或手工输入\";" in start_handler
+state_handler = source[source.index("ProvisioningState ProvisioningPortal::state() const"):
+                       source.index("const char *ProvisioningPortal::portalState")]
+assert 'statusMessage_.indexOf("仍在")' in state_handler
+stop_handler = source[source.index("void ProvisioningPortal::stop()"):
+                      source.index("bool ProvisioningPortal::takeConfigurationChanged")]
+assert "const bool wasPrepared = prepared_;" in stop_handler
+assert "wasActive || wasPrepared" in stop_handler
+request_handler = coordinator[coordinator.index("bool ProvisioningCoordinator::request"):
+                              coordinator.index("void ProvisioningCoordinator::poll")]
+assert "quiesceForProvisioning" not in request_handler
+assert "WiFi." not in request_handler
+poll_handler = coordinator[coordinator.index("void ProvisioningCoordinator::poll"):
+                           coordinator.index("void ProvisioningCoordinator::stop")]
+assert "ProvisioningStartupAction::quiesceRadio" in poll_handler
+assert "quiesceForProvisioning" in poll_handler
+assert poll_handler.index("quiesceForProvisioning") < poll_handler.index("startPrepared")
+quiesce_handler = wifi_source[wifi_source.index("void WifiController::quiesceForProvisioning"):
+                              wifi_source.index("bool WifiController::readyForProvisioning")]
+assert "esp_wifi_scan_stop" in quiesce_handler
+assert "WiFi.disconnect" in quiesce_handler
+assert "WiFi.mode(WIFI_OFF)" in quiesce_handler
+portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
 assert main_source.index(portal_loop) < main_source.index(
     "wifi.loop(now", main_source.index(portal_loop))
@@ -101,6 +132,9 @@ network_section = main_source[
 ]
 assert "wifi.loop(now" in network_section
 assert "tencentWorker.loop(now" in network_section
+assert 'strcmp(operation, "provisioning-start") == 0' in link_source
+assert 'strcmp(operation, "provisioning-stop") == 0' in link_source
+assert "only available over USB" in link_source
 assert source.index("id='wifi-step'") < source.index("id='tencent-step'")
 change_gate = source[source.index("bool ProvisioningPortal::takeConfigurationChanged()"):
                      source.index("void ProvisioningPortal::installRoutes()")]

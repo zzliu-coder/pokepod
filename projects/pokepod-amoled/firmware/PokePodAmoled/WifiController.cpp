@@ -55,7 +55,7 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
   decision_ = nextWifiDecision(decision_, inputs, nowMs);
 
   if (provisioning) {
-    radioOn_ = true;
+    radioOn_ = WiFi.getMode() != WIFI_OFF;
     return;
   }
   if (!decision_.radioOn || exhausted_) {
@@ -112,6 +112,33 @@ void WifiController::configurationChanged() {
   candidateOrder_.clear();
   candidatePosition_ = 0;
   WiFi.scanDelete();
+}
+
+void WifiController::quiesceForProvisioning(Print &log) {
+  // An asynchronous STA scan and an AP mode transition share the same radio.
+  // Stop the scan at the ESP-IDF layer before changing Arduino WiFi mode so a
+  // touch event can never race an in-flight scan/connect task.
+  const esp_err_t scanStop = esp_wifi_scan_stop();
+  WiFi.scanDelete();
+  WiFi.disconnect(false, false);
+  const bool modeOff = WiFi.mode(WIFI_OFF);
+  radioOn_ = false;
+  connected_ = false;
+  scanning_ = false;
+  connectionStartedMs_ = 0;
+  scanStartedMs_ = 0;
+  successfulNetworkNoted_ = false;
+  powerSaveConfigured_ = false;
+  powerSaveEnabled_ = false;
+  log.printf(
+      "{\"event\":\"wifi_quiesce_for_provisioning\",\"scan_stop\":%d,\"mode_off\":%s}\n",
+      static_cast<int>(scanStop), modeOff ? "true" : "false");
+}
+
+bool WifiController::readyForProvisioning() const {
+  return WiFi.getMode() == WIFI_OFF &&
+      WiFi.scanComplete() != WIFI_SCAN_RUNNING &&
+      WiFi.status() != WL_CONNECTED;
 }
 
 void WifiController::startConnection(uint32_t nowMs) {

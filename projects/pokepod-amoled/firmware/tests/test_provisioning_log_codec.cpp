@@ -44,5 +44,14 @@ int main() {
               sizeof(unterminated.records[0].ssid));
   finalizeProvisioningLog(unterminated);
   assert(!validateProvisioningLog(unterminated));
+
+  StoredProvisioningLog requested{};
+  initializeProvisioningLog(requested);
+  StoredProvisioningLogRecord request{};
+  request.stage = static_cast<uint8_t>(ProvisioningLogStage::portalRequested);
+  request.outcome = static_cast<uint8_t>(ProvisioningLogOutcome::info);
+  appendProvisioningLog(requested, request);
+  finalizeProvisioningLog(requested);
+  assert(validateProvisioningLog(requested));
   return 0;
 }

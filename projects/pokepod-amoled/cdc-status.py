@@ -196,6 +196,7 @@ def main() -> int:
     parser.add_argument("ports", nargs="*")
     parser.add_argument("--command", default="status",
                         choices=("hello", "status", "record", "stop",
+                                 "provisioning-start", "provisioning-stop",
                                  "reboot"))
     parser.add_argument(
         "--install-font", metavar="PATH",

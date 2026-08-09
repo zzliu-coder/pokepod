@@ -40,10 +40,10 @@ String validationFailureMessage(uint16_t reason) {
 
 ProvisioningPortal::ProvisioningPortal() : server_(80) {}
 
-bool ProvisioningPortal::begin(DeviceConfig &config,
-                               ProvisioningDiagnostics &diagnostics,
-                               Print &log) {
-  if (active_) return true;
+bool ProvisioningPortal::prepare(DeviceConfig &config,
+                                 ProvisioningDiagnostics &diagnostics,
+                                 Print &log) {
+  if (active_ || prepared_) return true;
   config_ = &config;
   diagnostics_ = &diagnostics;
   log_ = &log;
@@ -56,7 +56,7 @@ bool ProvisioningPortal::begin(DeviceConfig &config,
   // Keep the captive AP stable while the phone loads the page. Scanning on
   // the single ESP32 radio is explicit (the user can tap 重新扫描) so the
   // first HTTP request never competes with an STA scan.
-  statusMessage_ = "请选择附近的 2.4 GHz 网络或手工输入";
+  statusMessage_ = "正在准备配网热点";
   validating_ = false;
   scanning_ = false;
   transitionPending_ = false;
@@ -65,12 +65,37 @@ bool ProvisioningPortal::begin(DeviceConfig &config,
   closeAtMs_ = 0;
   candidateRssi_ = -127;
   validationAttempt_ = 0;
-  WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(ssid_.c_str(), password_.c_str())) {
+  prepared_ = true;
+  starting_ = true;
+  diagnostics_->record(ProvisioningLogStage::portalRequested,
+                       ProvisioningLogOutcome::info, ssid_, 0, 0, 0, 0,
+                       log);
+  log.printf("{\"event\":\"provisioning\",\"phase\":\"requested\",\"ssid\":\"%s\"}\n",
+             ssid_.c_str());
+  return true;
+}
+
+bool ProvisioningPortal::startPrepared() {
+  if (active_) return true;
+  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) return false;
+  if (WiFi.getMode() != WIFI_OFF ||
+      WiFi.scanComplete() == WIFI_SCAN_RUNNING ||
+      WiFi.status() == WL_CONNECTED) {
+    starting_ = false;
+    statusMessage_ = "无线网络仍在关闭，请退出后重试";
     diagnostics_->record(ProvisioningLogStage::failed,
                          ProvisioningLogOutcome::failure, ssid_, 0,
-                         kProvisioningReasonPortalFailed, 0, 0, log);
-    log.println("{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"softap\"}");
+                         kProvisioningReasonRadioBusy, 0, 0, *log_);
+    return false;
+  }
+  if (!WiFi.mode(WIFI_AP) ||
+      !WiFi.softAP(ssid_.c_str(), password_.c_str())) {
+    starting_ = false;
+    statusMessage_ = "配网热点启动失败，请退出后重试";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, ssid_, 0,
+                         kProvisioningReasonPortalFailed, 0, 0, *log_);
+    log_->println("{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"softap\"}");
     return false;
   }
   esp_wifi_set_ps(WIFI_PS_NONE);
@@ -79,12 +104,23 @@ bool ProvisioningPortal::begin(DeviceConfig &config,
   server_.begin();
   startedMs_ = millis();
   active_ = true;
+  starting_ = false;
+  statusMessage_ = "请选择附近的 2.4 GHz 网络或手工输入";
   diagnostics_->record(ProvisioningLogStage::portalStarted,
                        ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
-                       log);
-  log.printf("{\"event\":\"provisioning\",\"ok\":true,\"ssid\":\"%s\",\"expires_ms\":%lu}\n",
-             ssid_.c_str(), static_cast<unsigned long>(kPortalLifetimeMs));
+                       *log_);
+  log_->printf("{\"event\":\"provisioning\",\"ok\":true,\"ssid\":\"%s\",\"expires_ms\":%lu}\n",
+               ssid_.c_str(), static_cast<unsigned long>(kPortalLifetimeMs));
   return true;
+}
+
+void ProvisioningPortal::failStartupTimeout() {
+  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) return;
+  starting_ = false;
+  statusMessage_ = "无线网络关闭超时，请退出后重试";
+  diagnostics_->record(ProvisioningLogStage::failed,
+                       ProvisioningLogOutcome::failure, ssid_, 0,
+                       kProvisioningReasonStartupTimeout, 0, 0, *log_);
 }
 
 void ProvisioningPortal::loop(uint32_t nowMs) {
@@ -145,25 +181,33 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
 }
 
 void ProvisioningPortal::stop() {
-  if (!active_) return;
-  dns_.stop();
-  server_.stop();
-  WiFi.softAPdisconnect(true);
-  WiFi.disconnect(false, false);
-  WiFi.scanDelete();
-  WiFi.mode(WIFI_OFF);
+  const bool wasActive = active_;
+  const bool wasPrepared = prepared_;
+  if (wasActive) {
+    dns_.stop();
+    server_.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(false, false);
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_OFF);
+  }
   active_ = false;
+  prepared_ = false;
+  starting_ = false;
   validating_ = false;
   scanning_ = false;
   transitionPending_ = false;
   networks_.clear();
   closeAtMs_ = 0;
-  if (diagnostics_ != nullptr && log_ != nullptr) {
+  if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
     diagnostics_->record(ProvisioningLogStage::portalStopped,
                          ProvisioningLogOutcome::info, ssid_, 0, 0,
-                         millis() - startedMs_, validationAttempt_, *log_);
+                         wasActive ? millis() - startedMs_ : 0,
+                         validationAttempt_, *log_);
   }
-  if (log_ != nullptr) log_->println("{\"event\":\"provisioning_stopped\"}");
+  if ((wasActive || wasPrepared) && log_ != nullptr) {
+    log_->println("{\"event\":\"provisioning_stopped\"}");
+  }
 }
 
 bool ProvisioningPortal::takeConfigurationChanged() {
@@ -456,11 +500,14 @@ void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
 
 ProvisioningState ProvisioningPortal::state() const {
   if (saved_) return ProvisioningState::connected;
-  if (validating_ || transitionPending_) return ProvisioningState::connecting;
+  if (starting_ || validating_ || transitionPending_) {
+    return ProvisioningState::connecting;
+  }
   if (scanning_) return ProvisioningState::scanning;
   if (statusMessage_.indexOf("失败") >= 0 ||
       statusMessage_.indexOf("无法") >= 0 ||
       statusMessage_.indexOf("超时") >= 0 ||
+      statusMessage_.indexOf("仍在") >= 0 ||
       statusMessage_.indexOf("拒绝") >= 0 ||
       statusMessage_.indexOf("找不到") >= 0) {
     return ProvisioningState::error;

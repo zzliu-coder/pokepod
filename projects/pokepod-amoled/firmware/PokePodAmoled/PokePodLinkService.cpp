@@ -21,6 +21,7 @@
 #include "UsbLinkBridge.h"
 #include "BleVoiceService.h"
 #include "ProvisioningDiagnostics.h"
+#include "ProvisioningCoordinator.h"
 #include "RuntimePowerManager.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
@@ -115,7 +116,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                LinkServiceCoordinator *coordinator,
                                LinkTransport transport,
                                WirelessSyncPairingProvider *pairingProvider,
-                               LinkTransferGate *transferGate) {
+                               LinkTransferGate *transferGate,
+                               ProvisioningCoordinator *provisioningCoordinator) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
@@ -130,6 +132,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   wifi_ = &wifi;
   tencent_ = &tencent;
   provisioningDiagnostics_ = &provisioningDiagnostics;
+  provisioningCoordinator_ = provisioningCoordinator;
   power_ = &power;
   log_ = &log;
   coordinator_ = coordinator;
@@ -479,7 +482,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"pairing-export\",\"reboot\"]"
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
         : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
@@ -569,13 +572,41 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"lightSleepMs\":" +
         String(static_cast<unsigned long>(power.lightSleepUs / 1000ULL));
     extra += ",\"lastWakeCause\":" + String(power.lastWakeCause);
+    extra += ",\"resetReason\":" +
+        String(static_cast<unsigned>(esp_reset_reason()));
     extra += ",\"automaticPmSupported\":" +
         String(power.automaticPmSupported ? "true" : "false");
     extra += ",\"bleModemSleepSupported\":" +
         String(power.bleModemSleepSupported ? "true" : "false");
     extra += ",\"provisioningDiagnosticCount\":" +
         String(static_cast<unsigned>(provisioningDiagnostics_->count()));
+    extra += ",\"provisioningStartupPhase\":\"" +
+        String(provisioningCoordinator_ == nullptr ? "unavailable" :
+               provisioningCoordinator_->phaseName()) + "\"";
     sendOk(requestId, extra.c_str());
+  } else if (strcmp(operation, "provisioning-start") == 0) {
+    if (transport_ != LinkTransport::usb ||
+        provisioningCoordinator_ == nullptr) {
+      sendError(requestId,
+                "provisioning-start is only available over USB");
+    } else if (foregroundBusy()) {
+      sendBusy(requestId);
+    } else if (!provisioningCoordinator_->request(millis())) {
+      sendError(requestId, "provisioning startup request rejected");
+    } else {
+      const String extra = "\"phase\":\"" +
+          String(provisioningCoordinator_->phaseName()) + "\"";
+      sendOk(requestId, extra.c_str());
+    }
+  } else if (strcmp(operation, "provisioning-stop") == 0) {
+    if (transport_ != LinkTransport::usb ||
+        provisioningCoordinator_ == nullptr) {
+      sendError(requestId,
+                "provisioning-stop is only available over USB");
+    } else {
+      provisioningCoordinator_->stop();
+      sendOk(requestId, "\"phase\":\"idle\"");
+    }
   } else if (strcmp(operation, "get-provisioning-diagnostics") == 0) {
     sendJson(requestId, provisioningDiagnosticsJson());
   } else if (strcmp(operation, "clear-provisioning-diagnostics") == 0) {

@@ -19,7 +19,7 @@ void copySsid(char *destination, size_t capacity, const String &ssid) {
 
 }  // namespace
 
-bool ProvisioningDiagnostics::begin(Print &log) {
+bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
   open_ = preferences_.begin("pokepod_diag", false);
   initializeProvisioningLog(stored_);
   if (!open_) {
@@ -32,6 +32,28 @@ bool ProvisioningDiagnostics::begin(Print &log) {
       preferences_.getBytes(kProvisioningLogKey, &loaded, sizeof(loaded)) ==
           sizeof(loaded) && validateProvisioningLog(loaded);
   if (loadedOk) stored_ = loaded;
+  recoveredInterruptedSession_ = false;
+  const StoredProvisioningLogRecord *latest = provisioningLogNewest(stored_, 0);
+  if (latest != nullptr) {
+    const ProvisioningLogStage stage =
+        static_cast<ProvisioningLogStage>(latest->stage);
+    const bool unfinished =
+        stage == ProvisioningLogStage::portalRequested ||
+        stage == ProvisioningLogStage::portalStarted ||
+        stage == ProvisioningLogStage::scanStarted ||
+        stage == ProvisioningLogStage::scanFinished ||
+        stage == ProvisioningLogStage::connectStarted ||
+        stage == ProvisioningLogStage::connected;
+    if (unfinished) {
+      const uint16_t boundedReset = resetReason > 99 ? 99 : resetReason;
+      const String interruptedSsid(latest->ssid);
+      recoveredInterruptedSession_ = record(
+          ProvisioningLogStage::failed, ProvisioningLogOutcome::failure,
+          interruptedSsid, latest->rssi,
+          static_cast<uint16_t>(kProvisioningReasonRestartBase + boundedReset),
+          latest->elapsedMs, latest->attempt, log);
+    }
+  }
   ++revision_;
   log.printf("{\"event\":\"provisioning_log\",\"ok\":true,\"count\":%u,\"recovered\":%s}\n",
              static_cast<unsigned>(stored_.count), loadedOk ? "true" : "false");
@@ -97,6 +119,7 @@ const char *provisioningLogStageKey(ProvisioningLogStage stage) {
     case ProvisioningLogStage::configSaved: return "config_saved";
     case ProvisioningLogStage::failed: return "failed";
     case ProvisioningLogStage::portalStopped: return "portal_stopped";
+    case ProvisioningLogStage::portalRequested: return "portal_requested";
   }
   return "unknown";
 }
@@ -111,6 +134,7 @@ String provisioningLogStageLabel(ProvisioningLogStage stage) {
     case ProvisioningLogStage::configSaved: return "配置保存成功";
     case ProvisioningLogStage::failed: return "连接失败";
     case ProvisioningLogStage::portalStopped: return "配网热点已关闭";
+    case ProvisioningLogStage::portalRequested: return "正在准备配网热点";
   }
   return "未知阶段";
 }
@@ -129,6 +153,13 @@ String provisioningLogReasonLabel(const StoredProvisioningLogRecord &record) {
     case kProvisioningReasonScanFailed: return "扫描失败";
     case kProvisioningReasonInvalidInput: return "输入内容不完整";
     case kProvisioningReasonPortalFailed: return "配网热点启动失败";
+    case kProvisioningReasonStartupTimeout: return "无线网络关闭超时";
+    case kProvisioningReasonRadioBusy: return "无线网络仍在运行";
+  }
+  if (record.reason >= kProvisioningReasonRestartBase &&
+      record.reason < kProvisioningReasonRestartBase + 100) {
+    return String("配网过程被重启中断 · 原因 ") +
+        (record.reason - kProvisioningReasonRestartBase);
   }
   switch (wifiFailureKind(record.reason)) {
     case WifiFailureKind::noAccessPoint: return "没有收到热点响应";
