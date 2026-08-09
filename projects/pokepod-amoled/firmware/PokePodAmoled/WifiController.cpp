@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "RememberedWifiPolicy.h"
+#include "ProvisioningRadioPolicy.h"
 #include "WifiDisconnectDiagnostics.h"
 
 namespace pokepod {
@@ -100,6 +101,7 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
 
 void WifiController::configurationChanged() {
   stopRadio();
+  provisioningModeOffSucceeded_ = false;
   decision_ = WifiDecision();
   failedAttempts_ = 0;
   retryAtMs_ = 0;
@@ -122,6 +124,7 @@ void WifiController::quiesceForProvisioning(Print &log) {
   WiFi.scanDelete();
   WiFi.disconnect(false, false);
   const bool modeOff = WiFi.mode(WIFI_OFF);
+  provisioningModeOffSucceeded_ = modeOff;
   radioOn_ = false;
   connected_ = false;
   scanning_ = false;
@@ -136,9 +139,9 @@ void WifiController::quiesceForProvisioning(Print &log) {
 }
 
 bool WifiController::readyForProvisioning() const {
-  return WiFi.getMode() == WIFI_OFF &&
-      WiFi.scanComplete() != WIFI_SCAN_RUNNING &&
-      WiFi.status() != WL_CONNECTED;
+  return provisioningRadioReady(
+      provisioningModeOffSucceeded_, WiFi.getMode() == WIFI_OFF,
+      WiFi.scanComplete() == WIFI_SCAN_RUNNING);
 }
 
 void WifiController::startConnection(uint32_t nowMs) {

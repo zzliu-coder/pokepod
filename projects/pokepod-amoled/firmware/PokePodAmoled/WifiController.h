@@ -61,6 +61,7 @@ class WifiController {
   bool powerSaveConfigured_ = false;
   bool powerSaveEnabled_ = false;
   int32_t powerSaveError_ = 0;
+  bool provisioningModeOffSucceeded_ = false;
 };
 
 }  // namespace pokepod

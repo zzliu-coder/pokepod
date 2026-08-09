@@ -121,6 +121,10 @@ quiesce_handler = wifi_source[wifi_source.index("void WifiController::quiesceFor
 assert "esp_wifi_scan_stop" in quiesce_handler
 assert "WiFi.disconnect" in quiesce_handler
 assert "WiFi.mode(WIFI_OFF)" in quiesce_handler
+ready_handler = wifi_source[wifi_source.index("bool WifiController::readyForProvisioning"):
+                            wifi_source.index("void WifiController::startConnection")]
+assert "provisioningRadioReady" in ready_handler
+assert "WiFi.status()" not in ready_handler
 portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
 assert main_source.index(portal_loop) < main_source.index(
