@@ -8,6 +8,8 @@ enum class ProvisioningStartupPhase : uint8_t {
   idle,
   requested,
   quiescing,
+  switchingMode,
+  startingAccessPoint,
   active,
   failed,
 };
@@ -15,7 +17,9 @@ enum class ProvisioningStartupPhase : uint8_t {
 enum class ProvisioningStartupAction : uint8_t {
   none,
   quiesceRadio,
-  startPortal,
+  switchRadioMode,
+  startAccessPoint,
+  startPortalServices,
   failTimeout,
 };
 
@@ -25,6 +29,9 @@ inline const char *provisioningStartupPhaseName(
     case ProvisioningStartupPhase::idle: return "idle";
     case ProvisioningStartupPhase::requested: return "requested";
     case ProvisioningStartupPhase::quiescing: return "quiescing";
+    case ProvisioningStartupPhase::switchingMode: return "switching-mode";
+    case ProvisioningStartupPhase::startingAccessPoint:
+      return "starting-access-point";
     case ProvisioningStartupPhase::active: return "active";
     case ProvisioningStartupPhase::failed: return "failed";
   }
@@ -35,45 +42,79 @@ class ProvisioningStartupPolicy {
  public:
   static constexpr uint32_t kRequestSettleMs = 32;
   static constexpr uint32_t kMinimumSettleMs = 120;
-  static constexpr uint32_t kStartupTimeoutMs = 2500;
+  static constexpr uint32_t kModeSettleMs = 120;
+  static constexpr uint32_t kAccessPointSettleMs = 120;
+  static constexpr uint32_t kStartupTimeoutMs = 4000;
 
   bool request(uint32_t nowMs) {
     if (phase_ != ProvisioningStartupPhase::idle) return false;
     requestedAtMs_ = nowMs;
     quiescedAtMs_ = 0;
+    stepStartedAtMs_ = 0;
     phase_ = ProvisioningStartupPhase::requested;
-    startIssued_ = false;
+    pendingAction_ = ProvisioningStartupAction::none;
     return true;
   }
 
-  ProvisioningStartupAction update(uint32_t nowMs, bool wifiReady) {
-    if ((phase_ != ProvisioningStartupPhase::requested &&
-         phase_ != ProvisioningStartupPhase::quiescing) || startIssued_) {
+  ProvisioningStartupAction update(uint32_t nowMs) {
+    if (phase_ == ProvisioningStartupPhase::idle ||
+        phase_ == ProvisioningStartupPhase::active ||
+        phase_ == ProvisioningStartupPhase::failed) {
       return ProvisioningStartupAction::none;
     }
-    const uint32_t elapsed = static_cast<uint32_t>(nowMs - requestedAtMs_);
-    if (elapsed >= kStartupTimeoutMs) {
+    if (elapsedAtLeast(nowMs, requestedAtMs_, kStartupTimeoutMs)) {
       phase_ = ProvisioningStartupPhase::failed;
+      pendingAction_ = ProvisioningStartupAction::none;
       return ProvisioningStartupAction::failTimeout;
     }
+    if (pendingAction_ != ProvisioningStartupAction::none) {
+      return ProvisioningStartupAction::none;
+    }
     if (phase_ == ProvisioningStartupPhase::requested) {
-      if (elapsed < kRequestSettleMs) return ProvisioningStartupAction::none;
+      if (!elapsedAtLeast(nowMs, requestedAtMs_, kRequestSettleMs)) {
+        return ProvisioningStartupAction::none;
+      }
       phase_ = ProvisioningStartupPhase::quiescing;
       quiescedAtMs_ = nowMs;
       return ProvisioningStartupAction::quiesceRadio;
     }
-    const uint32_t quiescedFor = static_cast<uint32_t>(nowMs - quiescedAtMs_);
-    if (wifiReady && quiescedFor >= kMinimumSettleMs) {
-      startIssued_ = true;
-      return ProvisioningStartupAction::startPortal;
+    if (phase_ == ProvisioningStartupPhase::quiescing &&
+        elapsedAtLeast(nowMs, quiescedAtMs_, kMinimumSettleMs)) {
+      pendingAction_ = ProvisioningStartupAction::switchRadioMode;
+      return pendingAction_;
+    }
+    if (phase_ == ProvisioningStartupPhase::switchingMode &&
+        elapsedAtLeast(nowMs, stepStartedAtMs_, kModeSettleMs)) {
+      pendingAction_ = ProvisioningStartupAction::startAccessPoint;
+      return pendingAction_;
+    }
+    if (phase_ == ProvisioningStartupPhase::startingAccessPoint &&
+        elapsedAtLeast(nowMs, stepStartedAtMs_, kAccessPointSettleMs)) {
+      pendingAction_ = ProvisioningStartupAction::startPortalServices;
+      return pendingAction_;
     }
     return ProvisioningStartupAction::none;
   }
 
-  void finishStart(bool succeeded) {
-    if (phase_ != ProvisioningStartupPhase::quiescing || !startIssued_) return;
-    phase_ = succeeded ? ProvisioningStartupPhase::active
-                       : ProvisioningStartupPhase::failed;
+  void finishStep(ProvisioningStartupAction action, bool succeeded,
+                  uint32_t nowMs) {
+    if (action == ProvisioningStartupAction::none ||
+        action != pendingAction_) {
+      return;
+    }
+    pendingAction_ = ProvisioningStartupAction::none;
+    if (!succeeded) {
+      phase_ = ProvisioningStartupPhase::failed;
+      return;
+    }
+    stepStartedAtMs_ = nowMs;
+    if (action == ProvisioningStartupAction::switchRadioMode) {
+      phase_ = ProvisioningStartupPhase::switchingMode;
+    } else if (action == ProvisioningStartupAction::startAccessPoint) {
+      phase_ = ProvisioningStartupPhase::startingAccessPoint;
+    } else if (action == ProvisioningStartupAction::startPortalServices) {
+      phase_ = ProvisioningStartupPhase::active;
+    }
   }
 
   void fail() {
@@ -86,13 +127,16 @@ class ProvisioningStartupPolicy {
     phase_ = ProvisioningStartupPhase::idle;
     requestedAtMs_ = 0;
     quiescedAtMs_ = 0;
-    startIssued_ = false;
+    stepStartedAtMs_ = 0;
+    pendingAction_ = ProvisioningStartupAction::none;
   }
 
   ProvisioningStartupPhase phase() const { return phase_; }
   bool pending() const {
     return phase_ == ProvisioningStartupPhase::requested ||
-        phase_ == ProvisioningStartupPhase::quiescing;
+        phase_ == ProvisioningStartupPhase::quiescing ||
+        phase_ == ProvisioningStartupPhase::switchingMode ||
+        phase_ == ProvisioningStartupPhase::startingAccessPoint;
   }
   bool active() const {
     return phase_ == ProvisioningStartupPhase::active;
@@ -104,10 +148,20 @@ class ProvisioningStartupPolicy {
   bool ownsWifi() const { return visible(); }
 
  private:
+  static bool elapsedAtLeast(uint32_t nowMs, uint32_t sinceMs,
+                             uint32_t durationMs) {
+    // A request may be created after the caller captured its loop timestamp.
+    // A slightly older nowMs must wait for the next poll, not look like a
+    // uint32 wrap of almost 49 days. Real timer wrap remains supported.
+    const int32_t elapsed = static_cast<int32_t>(nowMs - sinceMs);
+    return elapsed >= 0 && static_cast<uint32_t>(elapsed) >= durationMs;
+  }
+
   ProvisioningStartupPhase phase_ = ProvisioningStartupPhase::idle;
   uint32_t requestedAtMs_ = 0;
   uint32_t quiescedAtMs_ = 0;
-  bool startIssued_ = false;
+  uint32_t stepStartedAtMs_ = 0;
+  ProvisioningStartupAction pendingAction_ = ProvisioningStartupAction::none;
 };
 
 }  // namespace pokepod

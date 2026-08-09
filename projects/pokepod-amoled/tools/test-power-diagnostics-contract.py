@@ -44,6 +44,12 @@ assert "provisioning-start" in link
 assert "provisioning-stop" in link
 assert "resetReason" in link
 assert "provisioningStartupPhase" in link
+assert "internalHeapFree" in link
+assert "internalHeapLargest" in link
+assert "psramFree" in link
+assert "internal_heap_free" in main
+assert "internal_heap_largest" in main
+assert "psram_free" in main
 assert "drawProvisioningLog" in dashboard
 assert "诊断记录" in dashboard
 

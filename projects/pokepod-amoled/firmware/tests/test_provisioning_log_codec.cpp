@@ -53,5 +53,18 @@ int main() {
   appendProvisioningLog(requested, request);
   finalizeProvisioningLog(requested);
   assert(validateProvisioningLog(requested));
+
+  StoredProvisioningLog staged = requested;
+  StoredProvisioningLogRecord radio{};
+  radio.stage = static_cast<uint8_t>(ProvisioningLogStage::radioModeStarted);
+  radio.outcome = static_cast<uint8_t>(ProvisioningLogOutcome::success);
+  appendProvisioningLog(staged, radio);
+  StoredProvisioningLogRecord accessPoint{};
+  accessPoint.stage =
+      static_cast<uint8_t>(ProvisioningLogStage::accessPointStarted);
+  accessPoint.outcome = static_cast<uint8_t>(ProvisioningLogOutcome::success);
+  appendProvisioningLog(staged, accessPoint);
+  finalizeProvisioningLog(staged);
+  assert(validateProvisioningLog(staged));
   return 0;
 }

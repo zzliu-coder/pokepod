@@ -81,7 +81,11 @@ awk '
   }
   { print }
 ' "$ESP32_S3_SDK_DIR/sdkconfig" > "$SDK_OVERLAY_DIR/sdkconfig.next"
-mv "$SDK_OVERLAY_DIR/sdkconfig.next" "$SDK_OVERLAY_DIR/sdkconfig"
+if cmp -s "$SDK_OVERLAY_DIR/sdkconfig.next" "$SDK_OVERLAY_DIR/sdkconfig"; then
+  rm "$SDK_OVERLAY_DIR/sdkconfig.next"
+else
+  mv "$SDK_OVERLAY_DIR/sdkconfig.next" "$SDK_OVERLAY_DIR/sdkconfig"
+fi
 awk '
   /^#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS / {
     print "#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1"; next
@@ -92,8 +96,13 @@ awk '
   { print }
 ' "$ESP32_S3_SDK_DIR/$SDK_VARIANT/include/sdkconfig.h" \
   > "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next"
-mv "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next" \
-  "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
+if cmp -s "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next" \
+    "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"; then
+  rm "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next"
+else
+  mv "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next" \
+    "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
+fi
 rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$SDK_OVERLAY_DIR/sdkconfig"
 rg -qx '#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1' \
   "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
@@ -106,7 +115,11 @@ fi
 git -C "$VENDOR_DIR" checkout --detach "$WAVESHARE_COMMIT"
 
 BUILD_LOG="$WORK_DIR/build.log"
-if ! "$ARDUINO_CLI" compile --clean \
+CLEAN_FLAG=--clean
+if [ "${POKEPOD_INCREMENTAL:-0}" = 1 ]; then
+  CLEAN_FLAG=
+fi
+if ! "$ARDUINO_CLI" compile $CLEAN_FLAG \
   --warnings all \
   --fqbn 'esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none' \
   --build-property "compiler.sdk.path=$SDK_OVERLAY_DIR" \

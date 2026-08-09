@@ -39,6 +39,8 @@ bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
         static_cast<ProvisioningLogStage>(latest->stage);
     const bool unfinished =
         stage == ProvisioningLogStage::portalRequested ||
+        stage == ProvisioningLogStage::radioModeStarted ||
+        stage == ProvisioningLogStage::accessPointStarted ||
         stage == ProvisioningLogStage::portalStarted ||
         stage == ProvisioningLogStage::scanStarted ||
         stage == ProvisioningLogStage::scanFinished ||
@@ -120,6 +122,9 @@ const char *provisioningLogStageKey(ProvisioningLogStage stage) {
     case ProvisioningLogStage::failed: return "failed";
     case ProvisioningLogStage::portalStopped: return "portal_stopped";
     case ProvisioningLogStage::portalRequested: return "portal_requested";
+    case ProvisioningLogStage::radioModeStarted: return "radio_mode_started";
+    case ProvisioningLogStage::accessPointStarted:
+      return "access_point_started";
   }
   return "unknown";
 }
@@ -135,6 +140,8 @@ String provisioningLogStageLabel(ProvisioningLogStage stage) {
     case ProvisioningLogStage::failed: return "连接失败";
     case ProvisioningLogStage::portalStopped: return "配网热点已关闭";
     case ProvisioningLogStage::portalRequested: return "正在准备配网热点";
+    case ProvisioningLogStage::radioModeStarted: return "无线模式已切换";
+    case ProvisioningLogStage::accessPointStarted: return "配网热点无线层已启动";
   }
   return "未知阶段";
 }

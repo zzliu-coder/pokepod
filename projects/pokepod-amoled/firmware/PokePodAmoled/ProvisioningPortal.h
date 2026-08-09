@@ -16,7 +16,9 @@ class ProvisioningPortal {
   ProvisioningPortal();
   bool prepare(DeviceConfig &config, ProvisioningDiagnostics &diagnostics,
                Print &log);
-  bool startPrepared();
+  bool switchToAccessPointMode();
+  bool startAccessPoint();
+  bool startServices();
   void failStartupTimeout();
   void loop(uint32_t nowMs);
   void stop();

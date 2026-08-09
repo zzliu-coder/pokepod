@@ -4,6 +4,7 @@
 
 #include <SD_MMC.h>
 #include <cJSON.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 #include <algorithm>
@@ -141,6 +142,20 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   transferGate_ = transferGate;
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
+  if (payload_ == nullptr) {
+    payload_ = static_cast<uint8_t *>(heap_caps_calloc(
+        kLinkMaxDataBytes, sizeof(uint8_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (payload_ == nullptr) {
+    stream_ = nullptr;
+    log_->println(
+        "{\"event\":\"link_buffer\",\"ok\":false,\"memory\":\"psram\"}");
+    return false;
+  }
+  log_->printf(
+      "{\"event\":\"link_buffer\",\"ok\":true,\"memory\":\"psram\",\"bytes\":%u}\n",
+      static_cast<unsigned>(kLinkMaxDataBytes));
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
     return false;
@@ -223,7 +238,9 @@ void PokePodLinkService::consumeByte(uint8_t value) {
     if (currentHeader_.payloadLength == 0) processFrame();
     return;
   }
-  if (payloadUsed_ < sizeof(payload_)) payload_[payloadUsed_++] = value;
+  if (payload_ != nullptr && payloadUsed_ < kLinkMaxDataBytes) {
+    payload_[payloadUsed_++] = value;
+  }
   if (payloadUsed_ == currentHeader_.payloadLength) processFrame();
 }
 
@@ -574,6 +591,13 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"lastWakeCause\":" + String(power.lastWakeCause);
     extra += ",\"resetReason\":" +
         String(static_cast<unsigned>(esp_reset_reason()));
+    extra += ",\"internalHeapFree\":" + String(static_cast<unsigned>(
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    extra += ",\"internalHeapLargest\":" + String(static_cast<unsigned>(
+        heap_caps_get_largest_free_block(
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    extra += ",\"psramFree\":" +
+        String(static_cast<unsigned>(ESP.getFreePsram()));
     extra += ",\"automaticPmSupported\":" +
         String(power.automaticPmSupported ? "true" : "false");
     extra += ",\"bleModemSleepSupported\":" +
@@ -1697,7 +1721,7 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
       return false;
     }
     const size_t count = file.read(
-        payload_, std::min(sizeof(payload_), length - sent));
+        payload_, std::min<size_t>(kLinkMaxDataBytes, length - sent));
     if (count == 0) {
       file.close();
       return false;

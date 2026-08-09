@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_wifi.h>
 
 #include "ProvisioningPolicy.h"
@@ -15,6 +16,22 @@ constexpr uint32_t kPortalLifetimeMs = 5UL * 60UL * 1000UL;
 constexpr uint32_t kValidationTimeoutMs = 15000;
 constexpr uint32_t kScanTimeoutMs = 8000;
 constexpr size_t kMaximumNetworks = 20;
+
+bool elapsedAtLeast(uint32_t nowMs, uint32_t sinceMs, uint32_t durationMs) {
+  const int32_t elapsed = static_cast<int32_t>(nowMs - sinceMs);
+  return elapsed >= 0 && static_cast<uint32_t>(elapsed) >= durationMs;
+}
+
+void logProvisioningMemory(Print &log, const char *phase) {
+  log.printf(
+      "{\"event\":\"provisioning_memory\",\"phase\":\"%s\",\"internal_free\":%u,\"internal_largest\":%u,\"psram_free\":%u}\n",
+      phase,
+      static_cast<unsigned>(heap_caps_get_free_size(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(ESP.getFreePsram()));
+}
 
 String validationFailureMessage(uint16_t reason) {
   switch (wifiFailureKind(reason)) {
@@ -75,12 +92,12 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   return true;
 }
 
-bool ProvisioningPortal::startPrepared() {
+bool ProvisioningPortal::switchToAccessPointMode() {
   if (active_) return true;
   if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) return false;
-  if (WiFi.getMode() != WIFI_OFF ||
-      WiFi.scanComplete() == WIFI_SCAN_RUNNING ||
-      WiFi.status() == WL_CONNECTED) {
+  const wifi_mode_t mode = WiFi.getMode();
+  if ((mode != WIFI_OFF && mode != WIFI_STA) ||
+      WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
     starting_ = false;
     statusMessage_ = "无线网络仍在关闭，请退出后重试";
     diagnostics_->record(ProvisioningLogStage::failed,
@@ -88,17 +105,56 @@ bool ProvisioningPortal::startPrepared() {
                          kProvisioningReasonRadioBusy, 0, 0, *log_);
     return false;
   }
-  if (!WiFi.mode(WIFI_AP) ||
-      !WiFi.softAP(ssid_.c_str(), password_.c_str())) {
+  logProvisioningMemory(*log_, "before-mode-ap");
+  if (!WiFi.mode(WIFI_AP)) {
+    starting_ = false;
+    statusMessage_ = "无线模式切换失败，请退出后重试";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, ssid_, 0,
+                         kProvisioningReasonPortalFailed, 0, 0, *log_);
+    log_->println(
+        "{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"mode-ap\"}");
+    return false;
+  }
+  diagnostics_->record(ProvisioningLogStage::radioModeStarted,
+                       ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
+                       *log_);
+  logProvisioningMemory(*log_, "after-mode-ap");
+  return true;
+}
+
+bool ProvisioningPortal::startAccessPoint() {
+  if (active_) return true;
+  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr ||
+      (WiFi.getMode() & WIFI_MODE_AP) == 0) {
+    return false;
+  }
+  logProvisioningMemory(*log_, "before-softap");
+  if (!WiFi.softAP(ssid_.c_str(), password_.c_str())) {
     starting_ = false;
     statusMessage_ = "配网热点启动失败，请退出后重试";
     diagnostics_->record(ProvisioningLogStage::failed,
                          ProvisioningLogOutcome::failure, ssid_, 0,
                          kProvisioningReasonPortalFailed, 0, 0, *log_);
-    log_->println("{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"softap\"}");
+    log_->println(
+        "{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"softap\"}");
     return false;
   }
   esp_wifi_set_ps(WIFI_PS_NONE);
+  diagnostics_->record(ProvisioningLogStage::accessPointStarted,
+                       ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
+                       *log_);
+  logProvisioningMemory(*log_, "after-softap");
+  return true;
+}
+
+bool ProvisioningPortal::startServices() {
+  if (active_) return true;
+  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr ||
+      (WiFi.getMode() & WIFI_MODE_AP) == 0) {
+    return false;
+  }
+  logProvisioningMemory(*log_, "before-services");
   installRoutes();
   dns_.start(53, "*", WiFi.softAPIP());
   server_.begin();
@@ -111,6 +167,7 @@ bool ProvisioningPortal::startPrepared() {
                        *log_);
   log_->printf("{\"event\":\"provisioning\",\"ok\":true,\"ssid\":\"%s\",\"expires_ms\":%lu}\n",
                ssid_.c_str(), static_cast<unsigned long>(kPortalLifetimeMs));
+  logProvisioningMemory(*log_, "after-services");
   return true;
 }
 
@@ -175,7 +232,7 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
     }
   }
   if ((closeAtMs_ != 0 && static_cast<int32_t>(nowMs - closeAtMs_) >= 0) ||
-      static_cast<uint32_t>(nowMs - startedMs_) >= kPortalLifetimeMs) {
+      elapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
     stop();
   }
 }
@@ -186,10 +243,17 @@ void ProvisioningPortal::stop() {
   if (wasActive) {
     dns_.stop();
     server_.stop();
-    WiFi.softAPdisconnect(true);
+  }
+  if (wasPrepared) {
+    if ((WiFi.getMode() & WIFI_MODE_AP) != 0) {
+      WiFi.softAPdisconnect(true);
+    }
     WiFi.disconnect(false, false);
     WiFi.scanDelete();
-    WiFi.mode(WIFI_OFF);
+    // Leave the driver initialized until WifiController resumes on the next
+    // loop. This avoids an immediate deinit/reinit cycle when the user closes
+    // and reopens provisioning.
+    WiFi.mode(WIFI_STA);
   }
   active_ = false;
   prepared_ = false;

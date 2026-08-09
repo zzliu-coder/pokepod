@@ -29,6 +29,8 @@ enum class ProvisioningLogStage : uint8_t {
   failed = 7,
   portalStopped = 8,
   portalRequested = 9,
+  radioModeStarted = 10,
+  accessPointStarted = 11,
 };
 
 enum class ProvisioningLogOutcome : uint8_t {
@@ -112,7 +114,8 @@ inline bool validateProvisioningLog(const StoredProvisioningLog &log) {
   for (size_t index = 0; index < kProvisioningLogCapacity; ++index) {
     const StoredProvisioningLogRecord &record = log.records[index];
     if (!provisioningLogHasTerminator(record.ssid, sizeof(record.ssid)) ||
-        record.stage > static_cast<uint8_t>(ProvisioningLogStage::portalRequested) ||
+        record.stage >
+            static_cast<uint8_t>(ProvisioningLogStage::accessPointStarted) ||
         record.outcome > static_cast<uint8_t>(ProvisioningLogOutcome::failure)) {
       return false;
     }

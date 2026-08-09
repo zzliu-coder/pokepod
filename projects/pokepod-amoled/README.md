@@ -119,6 +119,16 @@ USB Mass Storage，避免 Mac 与固件同时写 SD。
 `work/pokepod-build/output`。`verify.sh` 运行固件主机测试、干净固件编译、
 Mac 测试和 release build、脚本语法检查及 diff 检查。
 
+日常修改固件后可以复用编译缓存：
+
+```sh
+POKEPOD_INCREMENTAL=1 ./firmware/build.sh
+```
+
+脚本只在 NimBLE 配置内容真的改变时更新时间戳，避免 ESP32 核心和整套显示库
+被误判为需要重编。当前机器上相同源码的重复构建由约 283 秒降到约 46 秒；
+正式交付仍使用默认的 clean build。
+
 设备正常运行并通过 USB 连接时，刷写只需一个命令：
 
 ```sh

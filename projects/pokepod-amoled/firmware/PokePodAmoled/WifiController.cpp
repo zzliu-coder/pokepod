@@ -7,7 +7,6 @@
 #include <time.h>
 
 #include "RememberedWifiPolicy.h"
-#include "ProvisioningRadioPolicy.h"
 #include "WifiDisconnectDiagnostics.h"
 
 namespace pokepod {
@@ -101,7 +100,6 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
 
 void WifiController::configurationChanged() {
   stopRadio();
-  provisioningModeOffSucceeded_ = false;
   decision_ = WifiDecision();
   failedAttempts_ = 0;
   retryAtMs_ = 0;
@@ -122,10 +120,11 @@ void WifiController::quiesceForProvisioning(Print &log) {
   // touch event can never race an in-flight scan/connect task.
   const esp_err_t scanStop = esp_wifi_scan_stop();
   WiFi.scanDelete();
-  WiFi.disconnect(false, false);
-  const bool modeOff = WiFi.mode(WIFI_OFF);
-  provisioningModeOffSucceeded_ = modeOff;
-  radioOn_ = false;
+  const wifi_mode_t mode = WiFi.getMode();
+  const bool stationEnabled = (mode & WIFI_MODE_STA) != 0;
+  const esp_err_t disconnectResult = stationEnabled
+      ? esp_wifi_disconnect() : ESP_ERR_WIFI_NOT_CONNECT;
+  radioOn_ = mode != WIFI_OFF;
   connected_ = false;
   scanning_ = false;
   connectionStartedMs_ = 0;
@@ -134,14 +133,9 @@ void WifiController::quiesceForProvisioning(Print &log) {
   powerSaveConfigured_ = false;
   powerSaveEnabled_ = false;
   log.printf(
-      "{\"event\":\"wifi_quiesce_for_provisioning\",\"scan_stop\":%d,\"mode_off\":%s}\n",
-      static_cast<int>(scanStop), modeOff ? "true" : "false");
-}
-
-bool WifiController::readyForProvisioning() const {
-  return provisioningRadioReady(
-      provisioningModeOffSucceeded_, WiFi.getMode() == WIFI_OFF,
-      WiFi.scanComplete() == WIFI_SCAN_RUNNING);
+      "{\"event\":\"wifi_quiesce_for_provisioning\",\"scan_stop\":%d,\"disconnect\":%d,\"mode\":%u}\n",
+      static_cast<int>(scanStop), static_cast<int>(disconnectResult),
+      static_cast<unsigned>(mode));
 }
 
 void WifiController::startConnection(uint32_t nowMs) {

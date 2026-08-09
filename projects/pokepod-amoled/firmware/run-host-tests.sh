@@ -23,6 +23,7 @@ python3 "$SCRIPT_DIR/../tools/test-flash-policy.py"
 python3 "$SCRIPT_DIR/../tools/test-power-diagnostics-contract.py"
 python3 "$SCRIPT_DIR/../tools/test-scroll-contract.py"
 python3 "$SCRIPT_DIR/../tools/test-wireless-sync-contract.py"
+python3 "$SCRIPT_DIR/../tools/test-link-buffer-policy.py"
 
 if rg -q 'USBAudioCard|USBHIDKeyboard|UsbVoiceBridge|dictate-start|dictate-stop' \
   "$SCRIPT_DIR/PokePodAmoled" "$SCRIPT_DIR/build.sh"

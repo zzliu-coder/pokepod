@@ -15,7 +15,6 @@ class WifiController {
             bool provisioning, bool wirelessSync);
   void configurationChanged();
   void quiesceForProvisioning(Print &log);
-  bool readyForProvisioning() const;
 
   WifiPhase phase() const { return decision_.phase; }
   bool connected() const { return connected_; }
@@ -61,7 +60,6 @@ class WifiController {
   bool powerSaveConfigured_ = false;
   bool powerSaveEnabled_ = false;
   int32_t powerSaveError_ = 0;
-  bool provisioningModeOffSucceeded_ = false;
 };
 
 }  // namespace pokepod

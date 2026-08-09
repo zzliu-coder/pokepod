@@ -40,23 +40,33 @@ bool ProvisioningCoordinator::request(uint32_t nowMs) {
 void ProvisioningCoordinator::poll(uint32_t nowMs) {
   if (portal_ == nullptr || wifi_ == nullptr) return;
   if (startup_.pending()) {
-    const ProvisioningStartupAction action =
-        startup_.update(nowMs, wifi_->readyForProvisioning());
+    const ProvisioningStartupAction action = startup_.update(nowMs);
     if (action == ProvisioningStartupAction::quiesceRadio) {
       wifi_->quiesceForProvisioning(*log_);
       log_->println(
           "{\"event\":\"provisioning_startup\",\"phase\":\"quiescing\"}");
-    } else if (action == ProvisioningStartupAction::startPortal) {
-      const bool started = portal_->startPrepared();
-      startup_.finishStart(started);
-      if (!started) resumeNormalWifi();
+    } else if (action == ProvisioningStartupAction::switchRadioMode) {
+      const bool completed = portal_->switchToAccessPointMode();
+      startup_.finishStep(action, completed, nowMs);
+      if (!completed) resumeNormalWifi();
+    } else if (action == ProvisioningStartupAction::startAccessPoint) {
+      const bool completed = portal_->startAccessPoint();
+      startup_.finishStep(action, completed, nowMs);
+      if (!completed) resumeNormalWifi();
+    } else if (action == ProvisioningStartupAction::startPortalServices) {
+      const bool completed = portal_->startServices();
+      startup_.finishStep(action, completed, nowMs);
+      if (!completed) resumeNormalWifi();
     } else if (action == ProvisioningStartupAction::failTimeout) {
       portal_->failStartupTimeout();
       resumeNormalWifi();
     }
   }
   if (startup_.active()) {
-    if (portal_->active()) portal_->loop(nowMs);
+    // Link v2 can create the request after the main loop captured nowMs.
+    // The portal's lifetime starts during this poll, so give it a timestamp
+    // sampled after startup rather than the caller's stale loop timestamp.
+    if (portal_->active()) portal_->loop(millis());
     if (!portal_->active()) {
       startup_.reset();
       resumeNormalWifi();

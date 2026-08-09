@@ -149,7 +149,11 @@ class PokePodLinkService {
   uint8_t headerBytes_[kLinkHeaderBytes] = {};
   size_t headerUsed_ = 0;
   LinkFrameHeader currentHeader_;
-  uint8_t payload_[kLinkMaxDataBytes] = {};
+  // Link v2 needs a full data-frame buffer. There are two service instances
+  // (USB and Wi-Fi); keeping both 16 KiB buffers in internal DRAM starves the
+  // Wi-Fi driver of large contiguous blocks when the provisioning AP starts.
+  // The board has mandatory PSRAM, so allocate these long-lived buffers there.
+  uint8_t *payload_ = nullptr;
   size_t payloadUsed_ = 0;
   uint8_t magicMatched_ = 0;
   bool sessionActive_ = false;
