@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "LinkTransferGate.h"
+
 namespace pokepod {
 
 constexpr uint32_t kWirelessSyncWindowMs = 5UL * 60UL * 1000UL;
@@ -30,14 +32,14 @@ struct WirelessSyncWindowDecision {
 class WirelessSyncWindow {
  public:
   bool open(uint32_t nowMs) {
-    deadlineMs_ = nowMs + kWirelessSyncWindowMs;
+    deadlineGate_.arm(nowMs, kWirelessSyncWindowMs);
     open_ = true;
     return true;
   }
 
   void close() {
     open_ = false;
-    deadlineMs_ = 0;
+    deadlineGate_.cancel();
   }
 
   WirelessSyncWindowDecision update(
@@ -51,7 +53,7 @@ class WirelessSyncWindow {
 
     WirelessSyncWindowDecision result;
     result.wifiDemand = true;
-    result.remainingMs = static_cast<uint32_t>(deadlineMs_ - nowMs);
+    result.remainingMs = static_cast<uint32_t>(deadlineMs() - nowMs);
     if (!inputs.networkConnected || !inputs.secureServerReady) {
       result.phase = WirelessSyncWindowPhase::waitingForNetwork;
       return result;
@@ -66,13 +68,14 @@ class WirelessSyncWindow {
 
   bool opened() const { return open_; }
   bool deadlineReached(uint32_t nowMs) const {
-    return open_ && static_cast<int32_t>(nowMs - deadlineMs_) >= 0;
+    return open_ && deadlineGate_.expired(nowMs);
   }
-  uint32_t deadlineMs() const { return deadlineMs_; }
+  uint32_t deadlineMs() const { return deadlineGate_.deadlineMs(); }
+  LinkTransferGate &transferGate() { return deadlineGate_; }
 
  private:
   bool open_ = false;
-  uint32_t deadlineMs_ = 0;
+  AbsoluteLinkDeadlineGate deadlineGate_;
 };
 
 inline const char *wirelessSyncWindowPhaseName(

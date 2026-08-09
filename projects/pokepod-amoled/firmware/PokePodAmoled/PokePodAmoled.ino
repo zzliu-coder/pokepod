@@ -652,7 +652,8 @@ void setup() {
                     capsuleLibrary, recorder,
                     deviceConfig, wifi, tencentWorker,
                     provisioningDiagnostics, runtimePower, usb.log(),
-                    &linkCoordinator, LinkTransport::usb, &wirelessSync);
+                    &linkCoordinator, LinkTransport::usb, &wirelessSync,
+                    nullptr);
   const bool wifiSyncStarted = wirelessSync.begin(
       SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
       capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,

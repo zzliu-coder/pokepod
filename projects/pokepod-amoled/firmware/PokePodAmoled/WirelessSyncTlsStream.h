@@ -4,6 +4,8 @@
 #include <NetworkClient.h>
 #include <esp_tls.h>
 
+#include "LinkTransferGate.h"
+
 namespace pokepod {
 
 class WirelessSyncIdentity;
@@ -16,10 +18,11 @@ enum class WirelessTlsPhase : uint8_t {
   closed,
 };
 
-class WirelessSyncTlsStream : public Stream {
+class WirelessSyncTlsStream : public Stream,
+                              public LinkTransferCancellationSink {
  public:
   bool begin(NetworkClient client, const WirelessSyncIdentity &identity,
-             uint32_t nowMs, Print &log);
+             LinkTransferGate &transferGate, uint32_t nowMs, Print &log);
   bool pollHandshake(uint32_t nowMs);
   void close();
 
@@ -29,6 +32,7 @@ class WirelessSyncTlsStream : public Stream {
   void flush() override;
   size_t write(uint8_t value) override;
   size_t write(const uint8_t *buffer, size_t size) override;
+  void cancelForTransferDeadline() override;
 
   WirelessTlsPhase phase() const { return phase_; }
   bool ready() const { return phase_ == WirelessTlsPhase::ready; }
@@ -37,6 +41,7 @@ class WirelessSyncTlsStream : public Stream {
 
  private:
   bool pump();
+  bool ensureTransferPermitted();
   void markFailed(int error);
 
   NetworkClient client_;
@@ -46,6 +51,7 @@ class WirelessSyncTlsStream : public Stream {
   uint32_t startedAtMs_ = 0;
   int lastError_ = 0;
   Print *log_ = nullptr;
+  LinkTransferGate *transferGate_ = nullptr;
   uint8_t receive_[4096] = {};
   size_t receiveOffset_ = 0;
   size_t receiveUsed_ = 0;

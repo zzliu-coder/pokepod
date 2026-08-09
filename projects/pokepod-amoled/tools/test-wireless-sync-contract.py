@@ -43,11 +43,22 @@ tls = read("WirelessSyncTlsStream.cpp")
 assert "esp_tls_server_session_init" in tls
 assert "esp_tls_server_session_continue_async" in tls
 assert "esp_tls_conn_read" in tls and "esp_tls_conn_write" in tls
+assert tls.count("ensureTransferPermitted()") >= 8
+assert "if (!ensureTransferPermitted()) return offset;" in tls
+assert tls.index("if (!ensureTransferPermitted()) return offset;") < tls.index(
+    "esp_tls_conn_write"
+)
+assert "public LinkTransferCancellationSink" in read("WirelessSyncTlsStream.h")
+assert "cancelForTransferDeadline()" in tls
+assert "transferGate_->attachCancellationSink(this)" in tls
+assert "transferGate_->detachCancellationSink(this)" in tls
 
 service = read("WirelessSyncService.cpp")
 assert "LinkTransport::wifi, nullptr" in service
 assert "link_.begin(tls_" in service
 assert "link_.begin(incoming" not in service
+assert "&window_.transferGate()" in service
+assert "window_.transferGate(), nowMs" in service
 
 window = read("WirelessSyncWindow.h")
 assert "kWirelessSyncWindowMs = 5UL * 60UL * 1000UL" in window
@@ -75,6 +86,10 @@ assert "mbedtls_sha256_update" in link
 assert "mbedtls_sha256_finish" in link
 assert 'static constexpr char kHex[] = "0123456789abcdef"' in link
 assert "output[64] = '\\0'" in link
+assert link.count("transferPermitted()") >= 12
+
+main = read("PokePodAmoled.ino")
+assert "LinkTransport::usb, &wirelessSync,\n                    nullptr" in main
 
 identity = read("WirelessSyncIdentity.cpp")
 assert 'cJSON_AddStringToObject(root, "deviceId", deviceId_)' in identity

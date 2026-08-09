@@ -35,7 +35,8 @@ bool WirelessSyncService::begin(
   begun_ = link_.begin(tls_, fs, board, audio, captureRouter, usb, bleVoice,
                        dashboard, library, recorder, config, wifi, tencent,
                        provisioningDiagnostics, power, log, &coordinator,
-                       LinkTransport::wifi, nullptr);
+                       LinkTransport::wifi, nullptr,
+                       &window_.transferGate());
   log.printf("{\"event\":\"wifi_sync_service\",\"ok\":%s,\"tls_identity\":%s}\n",
              begun_ ? "true" : "false", identity.ready() ? "true" : "false");
   return begun_;
@@ -184,7 +185,8 @@ void WirelessSyncService::acceptClient(uint32_t nowMs) {
   if (!incoming) return;
   authenticator_.reset();
   link_.disconnect();
-  if (!tls_.begin(incoming, *identity_, nowMs, *log_)) {
+  if (!tls_.begin(incoming, *identity_, window_.transferGate(), nowMs,
+                  *log_)) {
     incoming.stop();
     lastError_ = "tls-initialization-failed";
     return;

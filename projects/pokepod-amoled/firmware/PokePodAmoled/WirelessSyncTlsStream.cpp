@@ -13,11 +13,18 @@ constexpr uint32_t kWriteTimeoutMs = 5000;
 
 bool WirelessSyncTlsStream::begin(NetworkClient client,
                                   const WirelessSyncIdentity &identity,
+                                  LinkTransferGate &transferGate,
                                   uint32_t nowMs, Print &log) {
   close();
-  if (!client || client.fd() < 0 || !identity.ready()) return false;
-  client_ = client;
   log_ = &log;
+  transferGate_ = &transferGate;
+  transferGate_->attachCancellationSink(this);
+  if (!ensureTransferPermitted()) return false;
+  if (!client || client.fd() < 0 || !identity.ready()) {
+    close();
+    return false;
+  }
+  client_ = client;
   const int flags = fcntl(client_.fd(), F_GETFL, 0);
   if (flags < 0 || fcntl(client_.fd(), F_SETFL, flags | O_NONBLOCK) < 0) {
     markFailed(-1);
@@ -44,9 +51,11 @@ bool WirelessSyncTlsStream::begin(NetworkClient client,
 }
 
 bool WirelessSyncTlsStream::pollHandshake(uint32_t nowMs) {
+  if (!ensureTransferPermitted()) return false;
   if (phase_ == WirelessTlsPhase::ready) return true;
   if (phase_ != WirelessTlsPhase::handshaking || tls_ == nullptr) return false;
   const int result = esp_tls_server_session_continue_async(tls_);
+  if (!ensureTransferPermitted()) return false;
   if (result == 0) {
     phase_ = WirelessTlsPhase::ready;
     if (log_ != nullptr) {
@@ -66,6 +75,10 @@ bool WirelessSyncTlsStream::pollHandshake(uint32_t nowMs) {
 }
 
 void WirelessSyncTlsStream::close() {
+  if (transferGate_ != nullptr) {
+    transferGate_->detachCancellationSink(this);
+    transferGate_ = nullptr;
+  }
   if (tls_ != nullptr) {
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;
@@ -75,13 +88,25 @@ void WirelessSyncTlsStream::close() {
   phase_ = WirelessTlsPhase::closed;
   startedAtMs_ = 0;
   receiveOffset_ = receiveUsed_ = 0;
+  log_ = nullptr;
+}
+
+void WirelessSyncTlsStream::cancelForTransferDeadline() {
+  if (log_ != nullptr) {
+    log_->println(
+        "{\"event\":\"wifi_sync_tls\",\"ok\":false,"
+        "\"error\":\"window-deadline\"}");
+  }
+  close();
 }
 
 bool WirelessSyncTlsStream::pump() {
+  if (!ensureTransferPermitted()) return false;
   if (!ready() || tls_ == nullptr) return false;
   if (receiveOffset_ < receiveUsed_) return true;
   receiveOffset_ = receiveUsed_ = 0;
   const ssize_t count = esp_tls_conn_read(tls_, receive_, sizeof(receive_));
+  if (!ensureTransferPermitted()) return false;
   if (count > 0) {
     receiveUsed_ = static_cast<size_t>(count);
     return true;
@@ -117,12 +142,17 @@ size_t WirelessSyncTlsStream::write(uint8_t value) {
 }
 
 size_t WirelessSyncTlsStream::write(const uint8_t *buffer, size_t size) {
-  if (!ready() || tls_ == nullptr || buffer == nullptr) return 0;
+  if (!ensureTransferPermitted() || !ready() || tls_ == nullptr ||
+      buffer == nullptr) {
+    return 0;
+  }
   const uint32_t started = millis();
   size_t offset = 0;
   while (offset < size) {
+    if (!ensureTransferPermitted()) return offset;
     const ssize_t written = esp_tls_conn_write(tls_, buffer + offset,
                                                size - offset);
+    if (!ensureTransferPermitted()) return offset;
     if (written > 0) {
       offset += static_cast<size_t>(written);
       continue;
@@ -139,6 +169,11 @@ size_t WirelessSyncTlsStream::write(const uint8_t *buffer, size_t size) {
     delay(1);
   }
   return offset;
+}
+
+bool WirelessSyncTlsStream::ensureTransferPermitted() {
+  if (linkTransferPermitted(transferGate_, millis())) return true;
+  return false;
 }
 
 void WirelessSyncTlsStream::markFailed(int error) {

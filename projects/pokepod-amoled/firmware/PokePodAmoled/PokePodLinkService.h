@@ -7,6 +7,7 @@
 #include "LinkFrame.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
+#include "LinkTransferGate.h"
 
 namespace pokepod {
 
@@ -39,7 +40,8 @@ class PokePodLinkService {
              RuntimePowerManager &power, Print &log,
              LinkServiceCoordinator *coordinator = nullptr,
              LinkTransport transport = LinkTransport::none,
-             WirelessSyncPairingProvider *pairingProvider = nullptr);
+             WirelessSyncPairingProvider *pairingProvider = nullptr,
+             LinkTransferGate *transferGate = nullptr);
   void poll(uint32_t nowMs);
   void disconnect();
   bool active() const { return sessionActive_; }
@@ -116,6 +118,7 @@ class PokePodLinkService {
   bool rewriteCopiedMetadata(const String &directory, const String &id);
   String newUuid() const;
   String provisioningDiagnosticsJson() const;
+  bool transferPermitted() const;
 
   Stream *stream_ = nullptr;
   fs::FS *fs_ = nullptr;
@@ -136,6 +139,7 @@ class PokePodLinkService {
   LinkServiceCoordinator *coordinator_ = nullptr;
   LinkTransport transport_ = LinkTransport::none;
   WirelessSyncPairingProvider *pairingProvider_ = nullptr;
+  LinkTransferGate *transferGate_ = nullptr;
   bool requestLeaseHeld_ = false;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;

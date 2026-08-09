@@ -114,7 +114,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                RuntimePowerManager &power, Print &log,
                                LinkServiceCoordinator *coordinator,
                                LinkTransport transport,
-                               WirelessSyncPairingProvider *pairingProvider) {
+                               WirelessSyncPairingProvider *pairingProvider,
+                               LinkTransferGate *transferGate) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
@@ -134,6 +135,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   coordinator_ = coordinator;
   transport_ = transport;
   pairingProvider_ = pairingProvider;
+  transferGate_ = transferGate;
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
@@ -166,8 +168,12 @@ void PokePodLinkService::disconnect() {
 
 void PokePodLinkService::poll(uint32_t nowMs) {
   if (stream_ == nullptr) return;
+  if (!transferPermitted()) {
+    disconnect();
+    return;
+  }
   size_t budget = 32768;
-  while (stream_->available() > 0 && budget-- > 0) {
+  while (transferPermitted() && stream_->available() > 0 && budget-- > 0) {
     const int value = stream_->read();
     if (value >= 0) consumeByte(static_cast<uint8_t>(value));
   }
@@ -229,6 +235,10 @@ void PokePodLinkService::resetFrame() {
 void PokePodLinkService::processFrame() {
   const LinkFrameHeader header = currentHeader_;
   const size_t size = payloadUsed_;
+  if (!transferPermitted()) {
+    resetFrame();
+    return;
+  }
   if (!validateLinkPayload(header, payload_, size)) {
     resetFrame();
     sendError(header.requestId, "Link v2 CRC mismatch");
@@ -682,7 +692,10 @@ void PokePodLinkService::handleRead(uint32_t requestId, void *jsonRoot) {
   }
   if (strcmp(requested, ".") == 0 && jsonBool(root, "recursive")) {
     std::vector<String> files;
-    collectFiles(kCapsuleRoot, "", 0, files);
+    if (!collectFiles(kCapsuleRoot, "", 0, files) ||
+        !transferPermitted()) {
+      return;
+    }
     std::sort(files.begin(), files.end());
     const char *cursorText = jsonString(root, "cursor");
     size_t cursor = cursorText == nullptr ? 0 : strtoul(cursorText, nullptr, 10);
@@ -740,7 +753,7 @@ bool PokePodLinkService::sha256File(File &file, char output[65]) const {
   bool ok = mbedtls_sha256_starts(&context, 0) == 0;
   uint8_t buffer[1024];
   size_t remaining = file.size();
-  while (ok && remaining > 0) {
+  while (ok && remaining > 0 && transferPermitted()) {
     const size_t wanted = std::min(remaining, sizeof(buffer));
     const int received = file.read(buffer, wanted);
     if (received <= 0) {
@@ -751,6 +764,7 @@ bool PokePodLinkService::sha256File(File &file, char output[65]) const {
         &context, buffer, static_cast<size_t>(received)) == 0;
     remaining -= static_cast<size_t>(received);
   }
+  if (remaining > 0) ok = false;
   uint8_t digest[32] = {};
   if (ok) ok = mbedtls_sha256_finish(&context, digest) == 0;
   mbedtls_sha256_free(&context);
@@ -1636,6 +1650,7 @@ bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
 }
 
 bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
+  if (!transferPermitted()) return false;
   File file = fs_->open(path, FILE_READ);
   if (!file || file.isDirectory()) {
     if (file) file.close();
@@ -1646,6 +1661,10 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
   sendOk(requestId, ("\"available\":true,\"binaryLength\":" + String(length)).c_str());
   size_t sent = 0;
   while (sent < length) {
+    if (!transferPermitted()) {
+      file.close();
+      return false;
+    }
     const size_t count = file.read(
         payload_, std::min(sizeof(payload_), length - sent));
     if (count == 0) {
@@ -1666,7 +1685,7 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
 bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
                                    uint32_t requestId,
                                    const uint8_t *payload, size_t size) {
-  if (stream_ == nullptr || size >
+  if (stream_ == nullptr || !transferPermitted() || size >
       (type == LinkFrameType::data ? kLinkMaxDataBytes : kLinkMaxControlBytes)) {
     return false;
   }
@@ -1681,9 +1700,10 @@ bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
   const auto writeAll = [this](const uint8_t *data, size_t length) {
     size_t offset = 0;
     while (offset < length) {
+      if (!transferPermitted()) return false;
       const size_t written = stream_->write(
           data + offset, std::min<size_t>(512, length - offset));
-      if (written == 0) return false;
+      if (written == 0 || !transferPermitted()) return false;
       offset += written;
       yield();
     }
@@ -1691,6 +1711,10 @@ bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
   };
   return writeAll(encoded, sizeof(encoded)) &&
       (size == 0 || writeAll(payload, size));
+}
+
+bool PokePodLinkService::transferPermitted() const {
+  return linkTransferPermitted(transferGate_, millis());
 }
 
 void PokePodLinkService::rememberCompleted(uint32_t requestId) {
@@ -1763,11 +1787,11 @@ String PokePodLinkService::readText(const String &path, size_t limit) const {
 bool PokePodLinkService::collectFiles(const String &directory,
                                       const String &relative, uint8_t depth,
                                       std::vector<String> &files) const {
-  if (depth > 5 || files.size() >= 2048) return false;
+  if (!transferPermitted() || depth > 5 || files.size() >= 2048) return false;
   File root = fs_->open(directory);
   if (!root || !root.isDirectory()) return false;
   File entry = root.openNextFile();
-  while (entry) {
+  while (entry && transferPermitted()) {
     const String full = entry.name();
     const bool isDirectory = entry.isDirectory();
     entry.close();
@@ -1776,7 +1800,11 @@ bool PokePodLinkService::collectFiles(const String &directory,
     const String childRelative = relative.isEmpty() ? name : relative + "/" + name;
     if (isDirectory) {
       if (!hiddenReadDenied(childRelative)) {
-        collectFiles(directory + "/" + name, childRelative, depth + 1, files);
+        if (!collectFiles(directory + "/" + name, childRelative,
+                          depth + 1, files)) {
+          root.close();
+          return false;
+        }
       }
     } else if (!hiddenReadDenied(childRelative)) {
       files.push_back(childRelative);
@@ -1784,24 +1812,26 @@ bool PokePodLinkService::collectFiles(const String &directory,
     entry = root.openNextFile();
   }
   root.close();
-  return true;
+  return transferPermitted();
 }
 
 String PokePodLinkService::metadataFingerprint() const {
   std::vector<String> files;
-  collectFiles(kCapsuleRoot, "", 0, files);
+  if (!collectFiles(kCapsuleRoot, "", 0, files)) return String();
   std::sort(files.begin(), files.end());
   uint64_t hash = 1469598103934665603ULL;
   uint8_t buffer[512];
   for (const String &relative : files) {
+    if (!transferPermitted()) return String();
     if (!metadataName(relative)) continue;
     hash = fnvUpdate(hash, reinterpret_cast<const uint8_t *>(relative.c_str()), relative.length());
     File file = fs_->open(String(kCapsuleRoot) + "/" + relative, FILE_READ);
-    while (file && file.available()) {
+    while (file && file.available() && transferPermitted()) {
       const size_t count = file.read(buffer, sizeof(buffer));
       hash = fnvUpdate(hash, buffer, count);
     }
     if (file) file.close();
+    if (!transferPermitted()) return String();
   }
   char value[24];
   snprintf(value, sizeof(value), "%016llx", static_cast<unsigned long long>(hash));
