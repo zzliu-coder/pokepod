@@ -776,7 +776,11 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
   const bool usbHostConnected = usb.hostConnected();
-  if (lastUsbHostConnected && !usbHostConnected) linkService.disconnect();
+  const bool usbHostSessionClosed = usb.takeHostSessionClosed();
+  if ((lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed) {
+    usb.discardHostSessionBuffers();
+    linkService.disconnect();
+  }
   lastUsbHostConnected = usbHostConnected;
   if (trashUndo.expire(now)) {
     dashboard.invalidate();
