@@ -34,6 +34,7 @@ class VoiceConditioner {
     envelopeQ8_ = 0;
     noiseFloorQ8_ = kInitialNoiseFloor << 8;
     gateOpen_ = false;
+    gateHangoverSamples_ = 0;
     gateGainQ12_ = kClosedGateGainQ12;
     gainQ12_ = kInitialGainQ12;
     for (auto &sample : speechRing_) sample = 0;
@@ -56,10 +57,20 @@ class VoiceConditioner {
 
     updateNoiseFloor(absolute, envelope);
     const int32_t noiseFloor = noiseFloorQ8_ >> 8;
-    const int32_t openLevel = maximum(kMinimumGateOpenLevel, noiseFloor * 4);
+    const int32_t openLevel = maximum(kMinimumGateOpenLevel, noiseFloor * 3);
     const int32_t closeLevel = maximum(kMinimumGateCloseLevel, noiseFloor * 2);
-    if (!gateOpen_ && envelope >= openLevel) gateOpen_ = true;
-    if (gateOpen_ && envelope <= closeLevel) gateOpen_ = false;
+    if (envelope >= openLevel) {
+      gateOpen_ = true;
+      gateHangoverSamples_ = kGateHangoverSamples;
+    } else if (gateOpen_) {
+      if (envelope > closeLevel) {
+        gateHangoverSamples_ = kGateHangoverSamples;
+      } else if (gateHangoverSamples_ > 0) {
+        --gateHangoverSamples_;
+      } else {
+        gateOpen_ = false;
+      }
+    }
 
     const int32_t gateTarget = gateOpen_ ? kOpenGateGainQ12
                                          : kClosedGateGainQ12;
@@ -115,15 +126,20 @@ class VoiceConditioner {
       10302, -784, -3091, 686, 1495, -545, -762, 388,
       366, -242, -153, 126, 50, -48, -10};
   static constexpr int32_t kHighPassFeedbackQ15 = 31690;
-  static constexpr int32_t kInitialNoiseFloor = 24;
+  // Real V1 microphones can deliver ordinary speech with a post-FIR envelope
+  // below 96.  Keep the adaptive threshold close to the measured noise floor
+  // and use a soft closed gain so quiet speech can open the gate instead of
+  // being quantized to an all-zero WAV.
+  static constexpr int32_t kInitialNoiseFloor = 8;
   static constexpr int32_t kMinimumNoiseFloor = 8;
   static constexpr int32_t kMaximumNoiseFloor = 512;
-  static constexpr int32_t kMinimumGateOpenLevel = 96;
-  static constexpr int32_t kMinimumGateCloseLevel = 64;
+  static constexpr int32_t kMinimumGateOpenLevel = 40;
+  static constexpr int32_t kMinimumGateCloseLevel = 20;
   static constexpr int32_t kClosedGateGainQ12 = 128;
   static constexpr int32_t kHalfOpenGateGainQ12 = 2048;
   static constexpr int32_t kOpenGateGainQ12 = 4096;
   static constexpr int32_t kTargetEnvelope = 4000;
+  static constexpr uint16_t kGateHangoverSamples = 1600;  // 100 ms at 16 kHz
 
   static int32_t maximum(int32_t left, int32_t right) {
     return left > right ? left : right;
@@ -193,6 +209,7 @@ class VoiceConditioner {
   int32_t envelopeQ8_ = 0;
   int32_t noiseFloorQ8_ = kInitialNoiseFloor << 8;
   bool gateOpen_ = false;
+  uint16_t gateHangoverSamples_ = 0;
   int32_t gateGainQ12_ = kClosedGateGainQ12;
   int32_t gainQ12_ = kInitialGainQ12;
 };

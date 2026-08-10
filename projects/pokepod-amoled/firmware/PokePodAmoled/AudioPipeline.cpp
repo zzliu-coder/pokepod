@@ -4,6 +4,7 @@
 #include <esp_check.h>
 #include <es8311.h>
 
+#include "PlaybackPcm.h"
 #include "WavFormat.h"
 
 namespace pokepod {
@@ -15,16 +16,19 @@ bool AudioPipeline::begin(Print &log) {
   // playback samples are routed to this TX channel.
   digitalWrite(kSpeakerAmpPin, LOW);
   i2s_.setPins(kI2sBclk, kI2sWordSelect, kI2sDataOut, kI2sDataIn, kI2sMclk);
-  available_ = startHardware(log);
+  available_ = startHardware(HardwareMode::capture, kAudioSampleRate, log);
   if (available_) stopHardware(log);
   log.printf("{\"event\":\"audio_ready\",\"ok\":%s,\"policy\":\"on_demand\"}\n",
              available_ ? "true" : "false");
   return available_;
 }
 
-bool AudioPipeline::startHardware(Print &log) {
-  if (hardwareActive_) return true;
-  if (!i2s_.begin(I2S_MODE_STD, kAudioSampleRate, I2S_DATA_BIT_WIDTH_16BIT,
+bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
+                                  Print &log) {
+  if (hardwareActive_) {
+    return hardwareMode_ == mode && hardwareSampleRate_ == sampleRate;
+  }
+  if (!i2s_.begin(I2S_MODE_STD, sampleRate, I2S_DATA_BIT_WIDTH_16BIT,
                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"i2s\"}");
     return false;
@@ -43,8 +47,8 @@ bool AudioPipeline::startHardware(Print &log) {
       .mclk_inverted = false,
       .sclk_inverted = false,
       .mclk_from_mclk_pin = true,
-      .mclk_frequency = static_cast<int>(kAudioSampleRate * 256),
-      .sample_frequency = static_cast<int>(kAudioSampleRate),
+      .mclk_frequency = static_cast<int>(sampleRate * 256),
+      .sample_frequency = static_cast<int>(sampleRate),
   };
   esp_err_t error = es8311_init(codec, &clock, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
   if (error == ESP_OK) {
@@ -52,7 +56,8 @@ bool AudioPipeline::startHardware(Print &log) {
                                            clock.sample_frequency);
   }
   if (error == ESP_OK) error = es8311_microphone_config(codec, false);
-  if (error == ESP_OK) error = es8311_voice_volume_set(codec, 82, nullptr);
+  if (error == ESP_OK) error = es8311_voice_volume_set(codec, 85, nullptr);
+  if (error == ESP_OK) error = es8311_voice_mute(codec, false);
   if (error == ESP_OK) error = es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_30DB);
   if (error != ESP_OK) {
     es8311_delete(codec);
@@ -62,14 +67,17 @@ bool AudioPipeline::startHardware(Print &log) {
   }
   codec_ = codec;
   hardwareActive_ = true;
-  log.printf("{\"event\":\"audio\",\"ok\":true,\"sample_rate\":%lu,\"channels\":%u,\"microphone_gain_db\":30,\"frontend\":\"voice_v1\"}\n",
-             static_cast<unsigned long>(kAudioSampleRate), kAudioChannels);
+  hardwareMode_ = mode;
+  hardwareSampleRate_ = sampleRate;
+  log.printf("{\"event\":\"audio\",\"ok\":true,\"mode\":\"%s\",\"sample_rate\":%lu,\"channels\":%u,\"microphone_gain_db\":30,\"frontend\":\"voice_v1\"}\n",
+             mode == HardwareMode::playback ? "playback" : "capture",
+             static_cast<unsigned long>(sampleRate), kAudioChannels);
   return true;
 }
 
 bool AudioPipeline::startCapture(Print &log) {
   if (!available_) return false;
-  return startHardware(log);
+  return startHardware(HardwareMode::capture, kAudioSampleRate, log);
 }
 
 void AudioPipeline::stopHardware(Print &log) {
@@ -86,6 +94,8 @@ void AudioPipeline::stopHardware(Print &log) {
     codec_ = nullptr;
   }
   hardwareActive_ = false;
+  hardwareMode_ = HardwareMode::none;
+  hardwareSampleRate_ = 0;
   log.println("{\"event\":\"audio_power\",\"active\":false}");
 }
 
@@ -104,7 +114,12 @@ size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
 }
 
 bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
-  if (!available_ || playing_ || !startHardware(log)) return false;
+  if (!available_ || playing_) return false;
+  // A completed capture may leave the shared clock alive until the end of the
+  // current loop.  The UI has already established that nobody owns the mic,
+  // so close that idle capture mode before switching the codec to playback.
+  if (hardwareActive_) stopHardware(log);
+  if (hardwareActive_) return false;
   File file = fs.open(path, FILE_READ);
   uint8_t header[kWavHeaderBytes];
   uint32_t dataBytes = 0;
@@ -112,14 +127,21 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
       file.read(header, sizeof(header)) != sizeof(header) ||
       !validCapsuleWavHeader(header, sizeof(header), file.size(), dataBytes)) {
     if (file) file.close();
-    stopHardware(log);
     log.println("{\"event\":\"playback_error\",\"stage\":\"wav_header\"}");
+    return false;
+  }
+  if (!startHardware(HardwareMode::playback, kCapsuleSampleRate, log)) {
+    file.close();
+    log.println("{\"event\":\"playback_error\",\"stage\":\"hardware\"}");
     return false;
   }
   playbackFile_ = file;
   playbackRemaining_ = dataBytes;
   playing_ = true;
   digitalWrite(kSpeakerAmpPin, HIGH);
+  // Give the board amplifier a short, deterministic settling interval before
+  // the first speech sample.  This is paid once per playback, not per frame.
+  delay(15);
   log.printf("{\"event\":\"playback_started\",\"bytes\":%lu}\n",
              static_cast<unsigned long>(dataBytes));
   return true;
@@ -134,14 +156,12 @@ void AudioPipeline::pumpPlayback(Print &log) {
     stopPlayback(log);
     return;
   }
-  size_t output = 0;
-  for (size_t offset = 0; offset < count; offset += 2) {
-    for (uint8_t repeat = 0; repeat < 3; ++repeat) {
-      playbackOutput_[output++] = playbackInput_[offset];
-      playbackOutput_[output++] = playbackInput_[offset + 1];
-      playbackOutput_[output++] = playbackInput_[offset];
-      playbackOutput_[output++] = playbackInput_[offset + 1];
-    }
+  const size_t output = mono16LittleEndianToStereo16LittleEndian(
+      playbackInput_, count, playbackOutput_, sizeof(playbackOutput_));
+  if (output == 0) {
+    log.println("{\"event\":\"playback_error\",\"stage\":\"pcm_format\"}");
+    stopPlayback(log);
+    return;
   }
   if (i2s_.write(playbackOutput_, output) != output) {
     log.println("{\"event\":\"playback_error\",\"stage\":\"i2s_write\"}");

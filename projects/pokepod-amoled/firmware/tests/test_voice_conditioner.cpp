@@ -33,6 +33,12 @@ static std::vector<int32_t> conditionTone(double frequency, int32_t amplitude,
 }
 
 int main() {
+  VoiceConditionerMetrics quietVoiceMetrics;
+  const std::vector<int32_t> quietVoice = conditionTone(
+      1000.0, 48, &quietVoiceMetrics);
+  assert(rmsTail(quietVoice) > 100.0);
+  assert(quietVoiceMetrics.outputPeak > 0);
+
   VoiceConditionerMetrics voiceMetrics;
   const std::vector<int32_t> voice = conditionTone(1000.0, 800, &voiceMetrics);
   assert(rmsTail(voice) > 2500.0);

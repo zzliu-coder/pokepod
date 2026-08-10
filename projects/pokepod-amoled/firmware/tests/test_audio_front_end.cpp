@@ -66,6 +66,11 @@ int main() {
   const std::vector<int16_t> quiet = processTone(1000.0, 8);
   assert(rmsTail(quiet) < 80.0);
 
+  // The V1 microphone can produce weak post-decimation speech.  It must stay
+  // audible instead of being flattened into an all-zero capsule.
+  const std::vector<int16_t> weakVoice = processTone(1000.0, 48);
+  assert(rmsTail(weakVoice) > 100.0);
+
   const std::vector<int16_t> passband = processTone(1000.0, 4000);
   const std::vector<int16_t> voiceStopband = processTone(6000.0, 4000);
   assert(rmsTail(voiceStopband) < rmsTail(passband) / 30.0);

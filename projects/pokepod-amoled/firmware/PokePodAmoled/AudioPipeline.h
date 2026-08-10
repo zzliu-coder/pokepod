@@ -28,15 +28,19 @@ class AudioPipeline {
   void copyEnvelope(uint16_t *output, size_t count) const {
     peakWindow_.copyEnvelope(output, count);
   }
-  void resetPeakWindow() { peakWindow_.reset(); }
+ void resetPeakWindow() { peakWindow_.reset(); }
 
  private:
-  bool startHardware(Print &log);
+  enum class HardwareMode : uint8_t { none, capture, playback };
+
+  bool startHardware(HardwareMode mode, uint32_t sampleRate, Print &log);
 
   I2SClass i2s_;
   void *codec_ = nullptr;
   bool available_ = false;
   bool hardwareActive_ = false;
+  HardwareMode hardwareMode_ = HardwareMode::none;
+  uint32_t hardwareSampleRate_ = 0;
   uint64_t bytesRead_ = 0;
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;
@@ -44,7 +48,7 @@ class AudioPipeline {
   uint32_t playbackRemaining_ = 0;
   bool playing_ = false;
   uint8_t playbackInput_[96] = {};
-  uint8_t playbackOutput_[576] = {};
+  uint8_t playbackOutput_[192] = {};
 };
 
 }  // namespace pokepod

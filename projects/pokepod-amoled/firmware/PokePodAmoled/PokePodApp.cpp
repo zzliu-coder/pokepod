@@ -782,9 +782,10 @@ void pollTouch() {
         if (audio.playing()) {
           audio.stopPlayback(usb.log());
           showMessage("已停止播放");
-        } else if (!captureRouter.available() || recorder.recording() ||
-                   tencentWorker.working()) {
+        } else if (!captureRouter.available() || recorder.recording()) {
           showMessage("麦克风使用中，暂时无法播放");
+        } else if (tencentWorker.working()) {
+          showMessage("正在转写，完成后可播放");
         } else if (!safeCapsuleFileName(selected->audioFile.c_str()) ||
                    !audio.startPlayback(
                        SD_MMC, selected->directory + "/" + selected->audioFile,
