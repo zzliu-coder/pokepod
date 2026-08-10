@@ -2,23 +2,13 @@
 
 #include <new>
 
+#include "WifiUiPolicy.h"
+
 namespace pokepod {
 namespace {
 
-String wifiLabel(WifiPhase phase, bool automaticEnabled) {
-  switch (phase) {
-    case WifiPhase::online: return "已连接";
-    case WifiPhase::connecting: return "连接中";
-    case WifiPhase::grace: return "已连接";
-    case WifiPhase::provisioning: return "配网中";
-    case WifiPhase::error: return "需要检查";
-    case WifiPhase::off: return automaticEnabled ? "省电休眠" : "已关闭";
-    case WifiPhase::disabled: return "未设置";
-  }
-  return "";
-}
-
 String capsuleStatus(const CapsuleSummary &record) {
+  if (record.readOnly) return "只读";
   if (record.status == CapsuleStatus::queued && !record.error.isEmpty()) {
     return "网络重试";
   }
@@ -169,11 +159,15 @@ void Dashboard::draw(const DashboardView &view) {
       view.library->scope() == CapsuleScope::trash;
   state_.undoAvailable = view.undoAvailable;
   if ((view.recording || view.wirelessHolding) && !view.provisioning &&
-      (state_.page != RootPage::home || state_.capsuleDetail)) {
+      (state_.page != RootPage::home || state_.capsuleDetail ||
+       state_.bluetoothPairing)) {
     state_.page = RootPage::home;
     state_.capsuleDetail = false;
+    state_.bluetoothPairing = false;
     state_.capsuleScopeOverlay = false;
     state_.detailMoreOverlay = false;
+    state_.purgeConfirmOverlay = false;
+    purgeConfirmCount_ = 0;
     browserState_.clearFocus();
     invalidated_ = true;
   }
@@ -238,6 +232,7 @@ void Dashboard::draw(const DashboardView &view) {
 void Dashboard::drawBody(const DashboardView &view) {
   switch (state_.screen()) {
     case UiScreen::capsuleDetail: drawCapsuleDetail(view); break;
+    case UiScreen::bluetoothPairing: drawBluetoothPairing(view); break;
     case UiScreen::provisioning: drawProvisioning(view); break;
     case UiScreen::provisioningLog: drawProvisioningLog(view); break;
     case UiScreen::home: drawHome(view); drawPageIndicator(); break;
@@ -246,7 +241,9 @@ void Dashboard::drawBody(const DashboardView &view) {
   }
   if (state_.capsuleScopeOverlay) drawScopePicker(view);
   if (state_.detailMoreOverlay) drawDetailMore(view);
+  if (state_.purgeConfirmOverlay) drawPurgeConfirm();
   if (!state_.capsuleScopeOverlay && !state_.detailMoreOverlay &&
+      !state_.purgeConfirmOverlay &&
       shouldDrawToast(!view.message.isEmpty(), view.recording,
                       view.wirelessHolding,
                       state_.screen() == UiScreen::provisioning)) {
@@ -268,9 +265,8 @@ void Dashboard::drawTopBar(const DashboardView &view) {
       ? String(board.batteryPercent) + "%" : String("--");
   renderer_.drawText(battery, 56, 13, 62, 1, ui::kInk, ui::kBackground);
   drawUiIcon(*display_, UiIcon::wifi, 238, 8, wifiColor(view.wifiPhase));
-  if (view.wifiPhase == WifiPhase::disabled ||
-      view.wifiPhase == WifiPhase::off) {
-    display_->drawLine(241, 11, 258, 28, ui::kMuted);
+  if (wifiUiShowsDisconnectedSlash(view.wifiPhase)) {
+    display_->drawLine(241, 11, 258, 28, wifiColor(view.wifiPhase));
   }
   if (view.transcribing) display_->fillCircle(272, 18, 4, ui::kWaiting);
   drawUiIcon(*display_, UiIcon::bluetooth, 282, 8,
@@ -365,7 +361,8 @@ void Dashboard::drawCapsules(const DashboardView &view) {
     if (y >= listBottom) break;
     const CapsuleSummary *record = view.library->at(index);
     if (record == nullptr) break;
-    const uint16_t stateColor = capsuleStatusColor(record->status);
+    const uint16_t stateColor = record->readOnly
+        ? ui::kWaiting : capsuleStatusColor(record->status);
     if (browserState_.selectionMode() && y + 13 >= ui::kCapsuleListTop &&
         y + 13 < listBottom) {
       display_->drawCircle(25, y + 13, 9,
@@ -418,9 +415,9 @@ void Dashboard::drawCapsules(const DashboardView &view) {
                        64, 1, ui::kInk, ui::kSurfaceRaised);
     renderer_.drawText(view.library != nullptr &&
                                view.library->scope() == CapsuleScope::trash
-                           ? "" : "删除",
+                           ? "永久删除" : "删除",
                        278, ui::kCapsuleSelectionBarTop + 25,
-                       56, 1, ui::kError, ui::kSurfaceRaised);
+                       70, 1, ui::kError, ui::kSurfaceRaised);
   }
 }
 
@@ -432,7 +429,8 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
     drawCenteredText("胶囊需要检查", 190, UiTextSize::body, ui::kError, true);
     return;
   }
-  const String status = capsuleStatus(*record);
+  const String status = record->readOnly ? String("版本过新 · 只读")
+                                         : capsuleStatus(*record);
   const int16_t statusWidth = renderer_.measureTextWidth(status);
   renderer_.drawText(status, 348 - statusWidth, 20, statusWidth, 1,
                      capsuleStatusColor(record->status), ui::kBackground);
@@ -466,22 +464,26 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
                      true, UiTextSize::body, false, pixelOffset,
                      ui::kDetailTextTop, ui::kDetailTextBottom);
 
-  const bool needsRetry =
+  const bool needsRetry = !record->readOnly &&
       (record->status == CapsuleStatus::failed ||
        (record->status == CapsuleStatus::queued && !record->error.isEmpty())) &&
       !record->trashed;
   state_.detailRetryEnabled = needsRetry;
-  state_.detailTrashEnabled = !record->trashed &&
+  state_.detailTrashEnabled = !record->readOnly &&
       record->status != CapsuleStatus::transcribing;
+  const uint16_t mutationColor = record->readOnly ? ui::kDisabled : ui::kMuted;
   drawDetailAction(6, view.playing ? UiIcon::stop : UiIcon::play,
-                   view.playing ? "停止" : "播放", true, ui::kAccent);
+                   view.playing ? "停止" : "播放", !record->readOnly,
+                   record->readOnly ? ui::kDisabled : ui::kAccent);
   drawDetailAction(98, UiIcon::star,
                    record->favorite ? "已收藏" : "收藏", false,
-                   record->favorite ? ui::kWaiting : ui::kMuted);
+                   record->readOnly ? ui::kDisabled :
+                       (record->favorite ? ui::kWaiting : ui::kMuted));
   drawDetailAction(190, UiIcon::archive,
                    record->trashed ? "恢复" :
-                   (record->archived ? "移回" : "归档"), false, ui::kMuted);
-  drawDetailAction(282, UiIcon::chevron, "更多", false, ui::kMuted);
+                   (record->archived ? "移回" : "归档"), false,
+                   mutationColor);
+  drawDetailAction(282, UiIcon::chevron, "更多", false, mutationColor);
 }
 
 void Dashboard::drawScopePicker(const DashboardView &view) {
@@ -545,10 +547,35 @@ void Dashboard::drawDetailMore(const DashboardView &view) {
       ? ui::kError : ui::kDisabled;
   drawUiIcon(*display_, UiIcon::warning, ui::kDetailMoreLeft + 22,
              dividerY + 22, trashColor);
-  renderer_.drawText(record->trashed ? "已在回收站" : "移入回收站",
+  renderer_.drawText(record->trashed ? "永久删除" : "移入回收站",
                      ui::kDetailMoreLeft + 64, dividerY + 22, 200, 1,
                      trashColor, ui::kSurfaceRaised, 0, false,
                      UiTextSize::body, true);
+}
+
+void Dashboard::drawPurgeConfirm() {
+  display_->fillRoundRect(ui::kPurgeConfirmLeft, ui::kPurgeConfirmTop,
+                          ui::kPurgeConfirmRight - ui::kPurgeConfirmLeft,
+                          ui::kPurgeConfirmBottom - ui::kPurgeConfirmTop,
+                          26, ui::kSurfaceRaised);
+  display_->drawRoundRect(ui::kPurgeConfirmLeft, ui::kPurgeConfirmTop,
+                          ui::kPurgeConfirmRight - ui::kPurgeConfirmLeft,
+                          ui::kPurgeConfirmBottom - ui::kPurgeConfirmTop,
+                          26, ui::kError);
+  drawUiIcon(*display_, UiIcon::warning, 52, 158, ui::kError);
+  renderer_.drawText(String("永久删除 ") + purgeConfirmCount_ + " 条？",
+                     92, 154, 220, 1, ui::kInk, ui::kSurfaceRaised,
+                     0, false, UiTextSize::display, true);
+  renderer_.drawText("录音和文字将无法恢复", 52, 212, 264, 2,
+                     ui::kMuted, ui::kSurfaceRaised, 0, true,
+                     UiTextSize::body, false);
+  display_->drawFastHLine(48, ui::kPurgeConfirmActionsTop, 272, ui::kDivider);
+  display_->drawFastVLine(ui::kPurgeConfirmActionSplit,
+                          ui::kPurgeConfirmActionsTop, 54, ui::kDivider);
+  renderer_.drawText("取消", 82, 294, 72, 1, ui::kInk,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
+  renderer_.drawText("永久删除", 214, 294, 100, 1, ui::kError,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
 }
 
 void Dashboard::drawDevice(const DashboardView &view) {
@@ -565,7 +592,7 @@ void Dashboard::drawDevice(const DashboardView &view) {
   health.audio = view.audioReady;
   health.usb = view.usbReady;
   health.fullTextFont = renderer_.sdFontReady();
-  const String healthText = health.ready() ? "状态正常" : "需要检查";
+  const String healthText = health.ready() ? "硬件正常" : "硬件需检查";
   const int16_t healthWidth = renderer_.measureTextWidth(healthText);
   renderer_.drawText(healthText, 348 - healthWidth, 66, healthWidth, 1,
                      health.ready() ? ui::kAccent : ui::kError,
@@ -574,9 +601,10 @@ void Dashboard::drawDevice(const DashboardView &view) {
   const bool wifiEnabled = view.settings != nullptr &&
       view.settings->wifiEnabled;
   drawSettingRow(ui::kDeviceWifiTop, UiIcon::wifi, "无线网络",
-                 wifiLabel(view.wifiPhase, wifiEnabled),
+                 wifiUiDetail(view.wifiPhase, wifiEnabled),
                  wifiColor(view.wifiPhase),
-                 SettingAccessory::toggle, wifiEnabled);
+                 SettingAccessory::toggle,
+                 wifiUiSwitchOn(view.wifiPhase));
   char pairingLabel[24];
   snprintf(pairingLabel, sizeof(pairingLabel), "配对码 %06lu",
            static_cast<unsigned long>(view.bleVoicePasskey));
@@ -595,7 +623,7 @@ void Dashboard::drawDevice(const DashboardView &view) {
   } else {
     voiceDetail = view.bleVoiceBonded ? "等待 Mac" : "轻触配对";
   }
-  drawSettingRow(ui::kDeviceMacTop, UiIcon::bluetooth, "无线语音",
+  drawSettingRow(ui::kDeviceMacTop, UiIcon::bluetooth, "蓝牙配对",
                  voiceDetail,
                  view.bleVoiceReady || view.bleVoicePairing
                      ? ui::kWireless : ui::kMuted,
@@ -634,6 +662,65 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  SettingAccessory::toggle, raiseEnabled);
   drawSettingRow(ui::kDeviceProvisionTop, UiIcon::phone, "手机配网",
                  "", ui::kMuted, SettingAccessory::chevron);
+}
+
+void Dashboard::drawBluetoothPairing(const DashboardView &view) {
+  drawBackButton();
+  renderer_.drawText("蓝牙配对", 64, 18, 220, 1, ui::kInk,
+                     ui::kBackground, 0, false, UiTextSize::body, true);
+
+  String status;
+  uint16_t statusColor = ui::kMuted;
+  if (view.bleVoiceReady) {
+    status = "已连接 · 可以语音输入";
+    statusColor = ui::kWireless;
+  } else if (view.bleVoiceConnected) {
+    status = "已连接 · 质量不足";
+    statusColor = ui::kWaiting;
+  } else if (view.bleVoiceBonded) {
+    status = "已配对 · 等待 Mac";
+  } else {
+    status = "尚未配对";
+  }
+  display_->fillRoundRect(20, 72, 328, 62, 18, ui::kSurface);
+  drawUiIcon(*display_, UiIcon::bluetooth, 38, 91, statusColor);
+  renderer_.drawText(status, 76, 91, 248, 1, statusColor, ui::kSurface,
+                     0, false, UiTextSize::body, true);
+
+  display_->fillRoundRect(20, ui::kBluetoothPairTop, 328,
+                          ui::kBluetoothPairBottom - ui::kBluetoothPairTop,
+                          20, ui::kSurfaceRaised);
+  display_->drawRoundRect(20, ui::kBluetoothPairTop, 328,
+                          ui::kBluetoothPairBottom - ui::kBluetoothPairTop,
+                          20, view.bleVoicePairing ? ui::kWaiting
+                                                   : ui::kWireless);
+  renderer_.drawText(view.bleVoicePairing ? "取消配对" : "开始配对",
+                     40, ui::kBluetoothPairTop + 15, 200, 1, ui::kInk,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
+  const String pairingDetail = view.bleVoicePairing
+      ? String("配对码 ") + String(view.bleVoicePasskey)
+      : String("两分钟内连接 PokePod Voice");
+  renderer_.drawText(pairingDetail, 40, ui::kBluetoothPairTop + 48, 280, 1,
+                     view.bleVoicePairing ? ui::kWaiting : ui::kMuted,
+                     ui::kSurfaceRaised);
+
+  const uint16_t forgetColor = view.bleVoiceBonded ? ui::kError
+                                                    : ui::kDisabled;
+  display_->fillRoundRect(20, ui::kBluetoothForgetTop, 328,
+                          ui::kBluetoothForgetBottom -
+                              ui::kBluetoothForgetTop,
+                          20, ui::kSurfaceRaised);
+  display_->drawRoundRect(20, ui::kBluetoothForgetTop, 328,
+                          ui::kBluetoothForgetBottom -
+                              ui::kBluetoothForgetTop,
+                          20, forgetColor);
+  renderer_.drawText("忘记 Mac", 40, ui::kBluetoothForgetTop + 15, 200, 1,
+                     forgetColor, ui::kSurfaceRaised, 0, false,
+                     UiTextSize::body, true);
+  renderer_.drawText(view.bleVoiceBonded ? "清除已保存的电脑"
+                                         : "当前没有已配对电脑",
+                     40, ui::kBluetoothForgetTop + 48, 280, 1,
+                     ui::kMuted, ui::kSurfaceRaised);
 }
 
 void Dashboard::drawProvisioning(const DashboardView &view) {
@@ -759,7 +846,8 @@ void Dashboard::drawCapsuleOrb(int16_t centerY, uint16_t accent,
 void Dashboard::drawToast(const String &message) {
   const bool warning = message.indexOf("失败") >= 0 ||
       message.indexOf("异常") >= 0 || message.indexOf("检查") >= 0 ||
-      message.indexOf("尚未") >= 0 || message.indexOf("请插入") >= 0;
+      message.indexOf("尚未") >= 0 || message.indexOf("无法") >= 0 ||
+      message.indexOf("版本过新") >= 0 || message.indexOf("请插入") >= 0;
   const uint16_t statusColor = warning ? ui::kError : ui::kAccent;
   display_->fillRoundRect(20, 366, 328, 52, 18, ui::kSurfaceRaised);
   drawUiIcon(*display_, warning ? UiIcon::warning : UiIcon::check,
@@ -899,7 +987,10 @@ void Dashboard::drawRecordingDynamic(const DashboardView &view,
 
 void Dashboard::drawDynamicRegions(const DashboardView &view) {
   const UiScreen screen = state_.screen();
-  if (screen == UiScreen::capsuleDetail || screen == UiScreen::provisioning) {
+  if (screen == UiScreen::capsuleDetail ||
+      screen == UiScreen::bluetoothPairing ||
+      screen == UiScreen::provisioning ||
+      screen == UiScreen::provisioningLog) {
     return;
   }
   const String currentTopBar = topBarSignature(view);
@@ -1025,6 +1116,10 @@ String Dashboard::signature(const DashboardView &view,
   value += state_.capsuleScopeOverlay;
   value += ':';
   value += state_.detailMoreOverlay;
+  value += ':';
+  value += state_.purgeConfirmOverlay;
+  value += ':';
+  value += purgeConfirmCount_;
   if (state_.screen() == UiScreen::capsuleDetail ||
       state_.screen() == UiScreen::capsules) {
     value += ':';
@@ -1045,6 +1140,8 @@ String Dashboard::signature(const DashboardView &view,
         value += ':';
         value += record->favorite;
         value += ':';
+        value += record->readOnly;
+        value += ':';
         value += record->durationMs;
         value += ':';
         value += browserState_.selected(record->id.c_str());
@@ -1058,10 +1155,13 @@ String Dashboard::signature(const DashboardView &view,
         value += record->preview;
         value += ':';
         value += record->favorite;
+        value += ':';
+        value += record->readOnly;
       }
     }
   }
   if (state_.screen() == UiScreen::device ||
+      state_.screen() == UiScreen::bluetoothPairing ||
       state_.screen() == UiScreen::provisioning ||
       state_.screen() == UiScreen::provisioningLog) {
     value += ':';
@@ -1124,6 +1224,7 @@ void Dashboard::swipeHorizontal(int16_t deltaX, bool locked, int16_t startX) {
   if (state_.capsuleScopeOverlay || state_.detailMoreOverlay) return;
   if (locked || browserState_.rootSwipeLocked()) return;
   if (state_.screen() == UiScreen::capsuleDetail ||
+      state_.screen() == UiScreen::bluetoothPairing ||
       state_.screen() == UiScreen::provisioning ||
       state_.screen() == UiScreen::provisioningLog) {
     if (isBackEdgeSwipe(startX, deltaX)) back();
@@ -1252,7 +1353,8 @@ bool Dashboard::beginCapsuleSelectionAt(
   const size_t index = static_cast<size_t>((capsuleScroll_.positionPx() + y -
       ui::kCapsuleListTop) / ui::kCapsuleRowStride);
   const CapsuleSummary *record = library.at(index);
-  if (record == nullptr || record->status == CapsuleStatus::transcribing) {
+  if (record == nullptr || record->readOnly ||
+      record->status == CapsuleStatus::transcribing) {
     return false;
   }
   const bool changed = browserState_.toggle(record->id.c_str(), true);
@@ -1298,7 +1400,13 @@ void Dashboard::back() {
     invalidated_ = true;
     return;
   }
-  if (state_.capsuleScopeOverlay || state_.detailMoreOverlay) {
+  if (state_.bluetoothPairing) {
+    state_.bluetoothPairing = false;
+    invalidated_ = true;
+    return;
+  }
+  if (state_.capsuleScopeOverlay || state_.detailMoreOverlay ||
+      state_.purgeConfirmOverlay) {
     closeOverlays();
     return;
   }
@@ -1324,6 +1432,12 @@ void Dashboard::openProvisioningLog() {
   invalidated_ = true;
 }
 
+void Dashboard::openBluetoothPairing() {
+  if (state_.screen() != UiScreen::device) return;
+  state_.bluetoothPairing = true;
+  invalidated_ = true;
+}
+
 void Dashboard::scopeChanged() {
   closeOverlays();
   browserState_.clearSelection();
@@ -1345,6 +1459,7 @@ void Dashboard::openScopePicker() {
   capsuleScroll_.cancelMotion();
   state_.capsuleScopeOverlay = true;
   state_.detailMoreOverlay = false;
+  state_.purgeConfirmOverlay = false;
   invalidated_ = true;
 }
 
@@ -1353,19 +1468,37 @@ void Dashboard::openDetailMore() {
   detailScroll_.cancelMotion();
   state_.detailMoreOverlay = true;
   state_.capsuleScopeOverlay = false;
+  state_.purgeConfirmOverlay = false;
   invalidated_ = true;
 }
 
-void Dashboard::closeOverlays() {
-  if (!state_.capsuleScopeOverlay && !state_.detailMoreOverlay) return;
+void Dashboard::openPurgeConfirm(size_t count) {
+  if (count == 0) return;
+  if (state_.screen() != UiScreen::capsules &&
+      state_.screen() != UiScreen::capsuleDetail) return;
+  if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
+  purgeConfirmCount_ = count;
+  state_.purgeConfirmOverlay = true;
   state_.capsuleScopeOverlay = false;
   state_.detailMoreOverlay = false;
   invalidated_ = true;
 }
 
+void Dashboard::closeOverlays() {
+  if (!state_.capsuleScopeOverlay && !state_.detailMoreOverlay &&
+      !state_.purgeConfirmOverlay) return;
+  state_.capsuleScopeOverlay = false;
+  state_.detailMoreOverlay = false;
+  state_.purgeConfirmOverlay = false;
+  purgeConfirmCount_ = 0;
+  invalidated_ = true;
+}
+
 void Dashboard::navigate(RootPage page) {
-  if (state_.capsuleDetail || state_.provisioning ||
+  if (state_.capsuleDetail || state_.bluetoothPairing ||
+      state_.provisioning ||
       state_.capsuleScopeOverlay || state_.detailMoreOverlay ||
+      state_.purgeConfirmOverlay ||
       state_.page == page) return;
   if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
   state_.page = page;

@@ -88,7 +88,9 @@ class Dashboard {
   void scopeChanged();
   void openScopePicker();
   void openDetailMore();
+  void openPurgeConfirm(size_t count);
   void openProvisioningLog();
+  void openBluetoothPairing();
   void closeOverlays();
   void back();
   void navigate(RootPage page);
@@ -117,7 +119,9 @@ class Dashboard {
   void drawCapsuleDetail(const DashboardView &view);
   void drawScopePicker(const DashboardView &view);
   void drawDetailMore(const DashboardView &view);
+  void drawPurgeConfirm();
   void drawDevice(const DashboardView &view);
+  void drawBluetoothPairing(const DashboardView &view);
   void drawProvisioning(const DashboardView &view);
   void drawProvisioningLog(const DashboardView &view);
   void drawCapsuleOrb(int16_t centerY, uint16_t accent,
@@ -171,6 +175,7 @@ class Dashboard {
   ScrollPhysics provisioningLogScroll_;
   String detailBodyCache_;
   String detailBodyCacheKey_;
+  size_t purgeConfirmCount_ = 0;
   uint32_t lastLibraryRevision_ = 0xffffffffU;
   uint8_t provisioningLogCount_ = 0;
 };

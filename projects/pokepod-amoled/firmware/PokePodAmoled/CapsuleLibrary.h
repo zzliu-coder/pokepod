@@ -25,15 +25,25 @@ struct CapsuleSummary {
   String folder;
   String title;
   String createdAt;
+  String updatedAt;
   String preview;
   String audioFile;
+  String audioFormat;
   String errorStage;
   String error;
   CapsuleStatus status = CapsuleStatus::damaged;
   bool favorite = false;
   bool archived = false;
   bool trashed = false;
+  bool readOnly = false;
+  int capsuleSchemaVersion = -1;
+  int processingSchemaVersion = -1;
+  int revision = -1;
+  int processingRevision = -1;
   uint32_t durationMs = 0;
+  uint32_t sampleRateHz = 0;
+  uint8_t channels = 0;
+  uint8_t bitsPerSample = 0;
 };
 
 enum class CapsuleBatchAction : uint8_t {
@@ -73,6 +83,7 @@ class CapsuleLibrary {
   bool unarchive(const String &id);
   bool trash(const String &id, const String &trashedAt);
   bool restore(const String &id);
+  CapsuleBatchResult purge(const std::vector<String> &ids);
   CapsuleBatchResult batch(const std::vector<String> &ids,
                            CapsuleBatchAction action,
                            const String &changedAt);
@@ -92,6 +103,7 @@ class CapsuleLibrary {
                         const String &rawTextFile, const String &errorStage,
                         const String &error, bool incrementAttempts);
   bool updateFavorite(const String &id, bool favorite);
+  bool removeTree(const String &path);
   void rebuildVisible();
   String safeRestoreDirectory(const String &folder) const;
 

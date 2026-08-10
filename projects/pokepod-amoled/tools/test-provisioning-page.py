@@ -56,7 +56,8 @@ assert "function showSuccess()" in source
 assert r'\"validating\":' in source
 assert r'\"saved\":' in source
 assert "ProvisioningState ProvisioningPortal::state() const" in source
-assert "statusMessage_ = \"正在连接 \" + next.wifiSsid;" in source
+assert "statusMessage_ = \"正在连接网络\";" in source
+assert "statusMessage_ = \"正在连接 \" + next.wifiSsid;" not in source
 assert "statusMessage_ = \"Wi-Fi 已连接\";" in source
 assert "view.portalStatus = provisioningPortal.statusMessage();" in main_source
 assert "view.portalState = provisioningPortal.state();" in main_source

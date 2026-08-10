@@ -94,6 +94,22 @@ Mac 端通过 `DeviceTransport` 共用镜像、离线队列和 DeepSeek 回写�
 PokePod 使用 `PokePodTransport`，Android/Poke3 使用 `ADBTransport`。设备不启用
 USB Mass Storage，避免 Mac 与固件同时写 SD。
 
+### Android / PokePod 胶囊语义
+
+Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊目录与 schema，
+再由 Mac 统一汇总。维护边界固定如下：
+
+| 共享语义 | PokePod 小屏 | Mac / Android |
+| --- | --- | --- |
+| v1/v2 processing、WAV/M4A、状态和 revision | 读取并保护未知版本 | 完整读取和迁移 |
+| 收藏、归档、回收站、恢复 | 单条和长按多选 | 单条和批量 |
+| 永久删除 | 仅回收站，二次确认，事务暂存后删除 | 仅回收站，二次确认 |
+| 未知 schema 或损坏元数据 | 可浏览，所有写操作只读 | 提示升级或修复 |
+| 标签、搜索、复制、文件夹和正文编辑 | 不进入设备界面 | 完整管理 |
+
+永久删除先把整批胶囊移入 `.staging/purge-*`；暂存未全部完成时回滚，全部
+完成后才清理文件。掉电后已提交的暂存残留由启动清理处理。
+
 首次准备 SD 卡时，把完整中文字库通过 Link v2 安装到设备：
 
 ```sh

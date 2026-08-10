@@ -28,6 +28,7 @@
 #include "UsbLinkBridge.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
+#include "WifiUiPolicy.h"
 #include "WirelessSyncIdentity.h"
 #include "WirelessSyncService.h"
 
@@ -62,7 +63,6 @@ uint8_t audioBuffer[kAudioBytesPerChunk];
 TouchGestureTracker touchGesture;
 bool touchWirelessHolding = false;
 bool touchWirelessAttempted = false;
-bool touchDeviceForgetAttempted = false;
 bool touchCapsuleSelectionAttempted = false;
 bool touchVerticalScrolling = false;
 bool scrollRedrawPending = false;
@@ -82,6 +82,7 @@ bool lastUsbHostConnected = false;
 String transientMessage;
 uint32_t transientUntilMs = 0;
 CapsuleUndoState trashUndo;
+std::vector<String> pendingPurgeIds;
 PowerDecision currentPowerDecision;
 
 void noteUserActivity(uint32_t nowMs = millis()) {
@@ -367,14 +368,13 @@ void pollTouch() {
     noteUserActivity(now);
     touchGesture.begin(x, y, now);
     touchWirelessAttempted = false;
-    touchDeviceForgetAttempted = false;
     touchCapsuleSelectionAttempted = false;
     touchVerticalScrolling = false;
     touchAction = dashboard.actionAt(x, y, bleVoice.appReady());
   } else if (touched) {
     touchGesture.update(x, y);
     if (!touchVerticalScrolling && !touchWirelessHolding &&
-        !touchDeviceForgetAttempted && !touchCapsuleSelectionAttempted &&
+        !touchCapsuleSelectionAttempted &&
         touchGesture.verticalSwipe()) {
       touchVerticalScrolling = dashboard.beginVerticalScroll(
           touchGesture.startY, touchGesture.startedAtMs, capsuleLibrary);
@@ -391,14 +391,6 @@ void pollTouch() {
         touchGesture.wirelessHoldReady(now)) {
       touchWirelessAttempted = true;
       touchWirelessHolding = startWirelessHold();
-    } else if (touchAction == UiAction::wirelessSettings &&
-               !touchDeviceForgetAttempted && touchGesture.tapEligible() &&
-               now - touchGesture.startedAtMs >= ui::kDeviceForgetHoldMs) {
-      touchDeviceForgetAttempted = true;
-      bleVoice.forgetMac();
-      showMessage("已忘记 Mac");
-      dashboard.invalidate();
-      drawDashboard();
     } else if (touchAction == UiAction::openCapsule &&
                !touchCapsuleSelectionAttempted &&
                !dashboard.capsuleSelectionMode() &&
@@ -408,7 +400,7 @@ void pollTouch() {
       touchCapsuleSelectionAttempted = true;
       if (!dashboard.beginCapsuleSelectionAt(touchGesture.startY,
                                              capsuleLibrary)) {
-        showMessage("正在转写，暂时不能选择");
+        showMessage("转写中或版本只读，暂时不能选择");
       }
       drawDashboard();
     }
@@ -435,7 +427,6 @@ void pollTouch() {
       stopWirelessHold();
       return;
     }
-    if (touchDeviceForgetAttempted) return;
     if (touchCapsuleSelectionAttempted) return;
     if (horizontalSwipe) {
       if (provisioningCoordinator.visible() &&
@@ -462,7 +453,7 @@ void pollTouch() {
     else if (action == UiAction::openCapsule) {
       if (dashboard.capsuleSelectionMode()) {
         if (!dashboard.toggleCapsuleSelectionAt(startY, capsuleLibrary)) {
-          showMessage("正在转写，暂时不能选择");
+          showMessage("转写中或版本只读，暂时不能选择");
         }
       } else {
         dashboard.openCapsuleAt(startY, capsuleLibrary);
@@ -479,15 +470,31 @@ void pollTouch() {
       dashboard.openProvisioningLog();
       drawDashboard();
     } else if (action == UiAction::wifiToggle) {
-      const bool enabled = !deviceConfig.settings().wifiEnabled;
-      if (deviceConfig.setWifiEnabled(enabled, usb.log())) {
-        wifi.configurationChanged();
-        if (enabled) tencentWorker.wake();
-        showMessage(enabled ? "Wi-Fi 已开启" : "Wi-Fi 已关闭");
+      if (wifiUiSwitchOn(wifi.phase())) {
+        if (wirelessSync.openWindow()) wirelessSync.close();
+        if (deviceConfig.setWifiEnabled(false, usb.log())) {
+          wifi.configurationChanged();
+          showMessage("Wi-Fi 已关闭");
+        }
+      } else if (!deviceConfig.hasWifi()) {
+        showMessage("请先完成手机配网");
+      } else {
+        bool enabled = deviceConfig.settings().wifiEnabled;
+        if (!enabled) {
+          enabled = deviceConfig.setWifiEnabled(true, usb.log());
+        }
+        if (enabled) {
+          wifi.requestConnection();
+          tencentWorker.wake();
+          showMessage("正在连接 Wi-Fi");
+        }
       }
       dashboard.invalidate();
       drawDashboard();
-    } else if (action == UiAction::wirelessSettings) {
+    } else if (action == UiAction::openBluetoothPairing) {
+      dashboard.openBluetoothPairing();
+      drawDashboard();
+    } else if (action == UiAction::toggleBluetoothPairing) {
       if (bleVoice.pairingMode(now)) {
         bleVoice.cancelPairingMode();
         showMessage("已取消配对");
@@ -497,6 +504,15 @@ void pollTouch() {
         snprintf(pairMessage, sizeof(pairMessage), "配对码 %06lu · 长按忘记",
                  static_cast<unsigned long>(bleVoice.passkey()));
         showMessage(String(pairMessage), 5000);
+      }
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (action == UiAction::forgetBluetoothMac) {
+      if (bleVoice.bonded()) {
+        bleVoice.forgetMac();
+        showMessage("已忘记 Mac");
+      } else {
+        showMessage("当前没有已配对 Mac");
       }
       dashboard.invalidate();
       drawDashboard();
@@ -541,7 +557,54 @@ void pollTouch() {
     } else if (action == UiAction::openDetailMore) {
       dashboard.openDetailMore();
       drawDashboard();
+    } else if (action == UiAction::requestPurge) {
+      pendingPurgeIds.clear();
+      if (dashboard.capsuleSelectionMode()) {
+        pendingPurgeIds = dashboard.selectedCapsuleIds(capsuleLibrary);
+      } else {
+        const CapsuleSummary *selected = dashboard.selected(capsuleLibrary);
+        if (selected != nullptr) pendingPurgeIds.push_back(selected->id);
+      }
+      bool safe = !pendingPurgeIds.empty();
+      for (const String &id : pendingPurgeIds) {
+        const CapsuleSummary *record = capsuleLibrary.find(id);
+        if (record == nullptr || !record->trashed || record->readOnly ||
+            record->status == CapsuleStatus::transcribing) {
+          safe = false;
+          break;
+        }
+      }
+      if (safe) {
+        dashboard.openPurgeConfirm(pendingPurgeIds.size());
+      } else {
+        pendingPurgeIds.clear();
+        showMessage("版本过新或状态忙，请在 Mac 处理");
+      }
+      drawDashboard();
+    } else if (action == UiAction::confirmPurge) {
+      const CapsuleBatchResult result = capsuleLibrary.purge(pendingPurgeIds);
+      const size_t requested = pendingPurgeIds.size();
+      pendingPurgeIds.clear();
+      dashboard.closeOverlays();
+      dashboard.clearCapsuleSelection();
+      if (result.ok) {
+        if (dashboard.state().screen() == UiScreen::capsuleDetail) {
+          dashboard.back();
+        }
+        showMessage(String("已永久删除 ") + result.changed + " 条");
+      } else if (result.rolledBackFully) {
+        showMessage("永久删除失败，已完整回滚");
+      } else if (result.rollbackFailed > 0) {
+        showMessage(String("删除回滚失败 ") + result.rollbackFailed +
+                    " 条，请到 Mac 处理");
+      } else {
+        showMessage(requested == 0 ? "没有可删除的胶囊"
+                                   : "永久删除未完成");
+      }
+      dashboard.invalidate();
+      drawDashboard();
     } else if (action == UiAction::closeOverlay) {
+      pendingPurgeIds.clear();
       dashboard.closeOverlays();
       drawDashboard();
     } else if (action == UiAction::bulkFavorite ||
@@ -579,6 +642,14 @@ void pollTouch() {
       const CapsuleSummary *selected = dashboard.selected(capsuleLibrary);
       if (selected == nullptr) return;
       const String id = selected->id;
+      if (selected->readOnly &&
+          (action == UiAction::favorite || action == UiAction::archive ||
+           action == UiAction::trash || action == UiAction::retry ||
+           action == UiAction::play)) {
+        showMessage("版本过新，请在 Mac 处理");
+        drawDashboard();
+        return;
+      }
       if (action == UiAction::favorite) {
         capsuleLibrary.toggleFavorite(id);
         dashboard.invalidate();

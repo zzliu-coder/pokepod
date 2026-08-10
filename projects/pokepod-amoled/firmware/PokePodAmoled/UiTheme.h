@@ -76,6 +76,10 @@ constexpr int16_t kDeviceStorageTop = 216;
 constexpr int16_t kDeviceRaiseTop = 280;
 constexpr int16_t kDeviceProvisionTop = 344;
 constexpr int16_t kDeviceRowsBottom = 416;
+constexpr int16_t kBluetoothPairTop = 156;
+constexpr int16_t kBluetoothPairBottom = 240;
+constexpr int16_t kBluetoothForgetTop = 260;
+constexpr int16_t kBluetoothForgetBottom = 344;
 constexpr int16_t kSettingIconLeft = 20;
 constexpr int16_t kSettingTextLeft = 58;
 constexpr int16_t kSettingTrailingLeft = 302;
@@ -106,6 +110,12 @@ constexpr int16_t kDetailMoreTop = 202;
 constexpr int16_t kDetailMoreRowHeight = 68;
 constexpr int16_t kDetailMoreBottom =
     kDetailMoreTop + kDetailMoreRowHeight * 2;
+constexpr int16_t kPurgeConfirmLeft = 28;
+constexpr int16_t kPurgeConfirmRight = 340;
+constexpr int16_t kPurgeConfirmTop = 132;
+constexpr int16_t kPurgeConfirmBottom = 344;
+constexpr int16_t kPurgeConfirmActionsTop = 274;
+constexpr int16_t kPurgeConfirmActionSplit = 184;
 constexpr int16_t kRecordingDynamicTop = 72;
 constexpr int16_t kRecordingDynamicBottom = 326;
 constexpr uint32_t kRecordingFrameIntervalMs = 80;
@@ -118,7 +128,6 @@ constexpr int16_t kTouchTapSlop = 12;
 constexpr int16_t kTouchSwipeThreshold = 32;
 constexpr int16_t kTouchVerticalThreshold = 12;
 constexpr uint32_t kWirelessHoldDelayMs = 280;
-constexpr uint32_t kDeviceForgetHoldMs = 900;
 
 }  // namespace ui
 }  // namespace pokepod

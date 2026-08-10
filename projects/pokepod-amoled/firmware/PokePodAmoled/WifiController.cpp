@@ -31,7 +31,10 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
                           bool charging, bool provisioning,
                           bool wirelessSync) {
   if (config_ == nullptr) return;
-  const bool demand = recording || pendingWork || charging || wirelessSync;
+  connected_ = WiFi.status() == WL_CONNECTED;
+  if (connected_) manualWakeRequested_ = false;
+  const bool demand = recording || pendingWork || charging || wirelessSync ||
+      manualWakeRequested_;
   if ((!previousDemand_ && demand) || (!previousCharging_ && charging)) {
     exhausted_ = false;
     failedAttempts_ = 0;
@@ -41,7 +44,6 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
   previousDemand_ = demand;
   previousCharging_ = charging;
 
-  connected_ = WiFi.status() == WL_CONNECTED;
   WifiInputs inputs;
   inputs.configured = config_->hasWifi();
   inputs.manuallyDisabled = !config_->settings().wifiEnabled;
@@ -49,6 +51,7 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
   inputs.recording = recording;
   inputs.pendingWork = pendingWork;
   inputs.wirelessSync = wirelessSync;
+  inputs.manualWake = manualWakeRequested_;
   inputs.connected = connected_;
   inputs.provisioning = provisioning;
   inputs.connectionFailed = connectionFailed_ || exhausted_;
@@ -111,7 +114,16 @@ void WifiController::configurationChanged() {
   lastMruPersistAttemptMs_ = 0;
   candidateOrder_.clear();
   candidatePosition_ = 0;
+  manualWakeRequested_ = false;
   WiFi.scanDelete();
+}
+
+void WifiController::requestConnection() {
+  configurationChanged();
+  manualWakeRequested_ = true;
+  if (log_ != nullptr) {
+    log_->println("{\"event\":\"wifi_manual_connect\"}");
+  }
 }
 
 void WifiController::quiesceForProvisioning(Print &log) {

@@ -23,6 +23,7 @@ struct WifiInputs {
   bool recording = false;
   bool pendingWork = false;
   bool wirelessSync = false;
+  bool manualWake = false;
   bool connected = false;
   bool provisioning = false;
   bool connectionFailed = false;
@@ -55,7 +56,7 @@ inline WifiDecision nextWifiDecision(const WifiDecision &previous,
   }
 
   const bool demand = inputs.charging || inputs.recording ||
-      inputs.pendingWork || inputs.wirelessSync;
+      inputs.pendingWork || inputs.wirelessSync || inputs.manualWake;
   if (demand) {
     result.phase = inputs.connected ? WifiPhase::online :
         (inputs.connectionFailed ? WifiPhase::error : WifiPhase::connecting);

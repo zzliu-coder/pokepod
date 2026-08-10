@@ -952,7 +952,7 @@ String PokePodLinkService::folderDirectory(const char *value) const {
 
 String PokePodLinkService::activeCapsuleDirectory(const String &id) const {
   const CapsuleSummary *record = library_->find(id);
-  return record == nullptr ? String() : record->directory;
+  return record == nullptr || record->readOnly ? String() : record->directory;
 }
 
 bool PokePodLinkService::collectCommandIds(void *jsonRoot,
@@ -1168,8 +1168,26 @@ bool PokePodLinkService::trashOperation(void *jsonRoot, const char *operation,
                                         String &message) {
   cJSON *root = asJson(jsonRoot);
   const bool trash = strcmp(operation, "deleteCapsules") != 0;
+  for (const String &id : ids) {
+    const CapsuleSummary *record = library_->find(id);
+    if (record != nullptr && record->readOnly) {
+      message = "future schema capsule is read-only";
+      return false;
+    }
+  }
   if (ids.empty() || !validateExpectedRevisions(
           root, ids, false, trash, message)) return false;
+  if (strcmp(operation, "purgeCapsules") == 0) {
+    const CapsuleBatchResult result = library_->purge(ids);
+    if (!result.ok) {
+      message = result.rollbackFailed > 0
+          ? "purge rollback failed for " + result.rollbackFailedId
+          : "purge failed for " + result.failedId;
+      return false;
+    }
+    message = "committed";
+    return true;
+  }
   for (const String &id : ids) {
     if (strcmp(operation, "deleteCapsules") == 0) {
       const String source = activeCapsuleDirectory(id);
@@ -1205,27 +1223,6 @@ bool PokePodLinkService::trashOperation(void *jsonRoot, const char *operation,
           !fs_->rename(source, target) || !touchCapsule(target)) {
         message = "trash restore failed";
         return false;
-      }
-    } else if (strcmp(operation, "purgeCapsules") == 0) {
-      const String source = String(kCapsuleTrash) + "/" + id;
-      const String transaction = String(kCapsuleStaging) + "/purge-" + newUuid();
-      if (!ensureDirectoryTree(transaction)) {
-        message = "purge staging failed";
-        return false;
-      }
-      const String staged = transaction + "/" + id;
-      const bool stagedForDeletion = fs_->rename(source, staged);
-      const bool removed = stagedForDeletion && removeTree(staged);
-      const PurgeOutcome outcome = purgeOutcome(stagedForDeletion, removed);
-      if (outcome == PurgeOutcome::rejected) {
-        message = "purge failed";
-        return false;
-      }
-      if (outcome == PurgeOutcome::committedCleanupDeferred) {
-        log_->printf("{\"event\":\"purge_cleanup_deferred\",\"capsuleId\":\"%s\"}\n",
-                     id.c_str());
-      } else {
-        fs_->rmdir(transaction);
       }
     }
   }

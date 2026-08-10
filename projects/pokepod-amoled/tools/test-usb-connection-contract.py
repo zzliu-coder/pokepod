@@ -34,6 +34,7 @@ assert re.search(
     r"view\.usbConnected\s*\?\s*ui::kAccent\s*:\s*ui::kMuted",
     top_bar,
 )
-assert 'UiIcon::bluetooth, "无线语音"' in dashboard
+assert 'UiIcon::bluetooth, "蓝牙配对"' in dashboard
+assert "void Dashboard::drawBluetoothPairing" in dashboard
 
 print("PASS test_usb_connection_contract (mounted USB, distinct BLE/USB icons)")

@@ -487,7 +487,10 @@ void ProvisioningPortal::saveRequest() {
   if (scanned != networks_.end()) candidateRssi_ = scanned->rssi;
   ++validationAttempt_;
   saved_ = false;
-  statusMessage_ = "正在连接 " + next.wifiSsid;
+  // This compact device status uses the fixed 16 px font. Keep the runtime
+  // SSID in the full-font diagnostics and phone portal so arbitrary network
+  // names can never render as missing glyph boxes here.
+  statusMessage_ = "正在连接网络";
   validating_ = true;
   validatingSinceMs_ = millis();
   transitionPending_ = true;

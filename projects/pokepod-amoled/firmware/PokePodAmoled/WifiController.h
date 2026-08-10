@@ -14,6 +14,7 @@ class WifiController {
   void loop(uint32_t nowMs, bool recording, bool pendingWork, bool charging,
             bool provisioning, bool wirelessSync);
   void configurationChanged();
+  void requestConnection();
   void quiesceForProvisioning(Print &log);
 
   WifiPhase phase() const { return decision_.phase; }
@@ -47,6 +48,7 @@ class WifiController {
   bool exhausted_ = false;
   bool previousDemand_ = false;
   bool previousCharging_ = false;
+  bool manualWakeRequested_ = false;
   bool ntpStarted_ = false;
   bool scanning_ = false;
   bool successfulNetworkNoted_ = false;

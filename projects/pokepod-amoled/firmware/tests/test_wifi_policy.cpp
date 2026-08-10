@@ -31,6 +31,11 @@ int main() {
   assert(state.phase == WifiPhase::off && !state.radioOn);
 
   input.connected = false;
+  input.manualWake = true;
+  state = nextWifiDecision(state, input, 390000);
+  assert(state.phase == WifiPhase::connecting && state.radioOn);
+  input.manualWake = false;
+
   input.wirelessSync = true;
   state = nextWifiDecision(state, input, 400000);
   assert(state.phase == WifiPhase::connecting && state.radioOn);

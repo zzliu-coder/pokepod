@@ -14,6 +14,7 @@ enum class UiScreen : uint8_t {
   capsules,
   home,
   device,
+  bluetoothPairing,
   capsuleDetail,
   provisioning,
   provisioningLog,
@@ -23,11 +24,13 @@ struct UiState {
   RootPage page = RootPage::home;
   HomeMode homeMode = HomeMode::idle;
   bool capsuleDetail = false;
+  bool bluetoothPairing = false;
   bool provisioning = false;
   bool provisioningLog = false;
   bool detailRetryEnabled = false;
   bool detailTrashEnabled = false;
   bool detailMoreOverlay = false;
+  bool purgeConfirmOverlay = false;
   bool capsuleScopeOverlay = false;
   bool capsuleSelectionMode = false;
   bool capsuleTrashScope = false;
@@ -36,6 +39,7 @@ struct UiState {
   UiScreen screen() const {
     if (provisioning && provisioningLog) return UiScreen::provisioningLog;
     if (provisioning) return UiScreen::provisioning;
+    if (bluetoothPairing) return UiScreen::bluetoothPairing;
     if (capsuleDetail) return UiScreen::capsuleDetail;
     if (page == RootPage::capsules) return UiScreen::capsules;
     if (page == RootPage::device) return UiScreen::device;
@@ -165,7 +169,9 @@ enum class UiAction : uint8_t {
   openProvisioning,
   openProvisioningLog,
   wifiToggle,
-  wirelessSettings,
+  openBluetoothPairing,
+  toggleBluetoothPairing,
+  forgetBluetoothMac,
   toggleComputerSync,
   raiseToWakeToggle,
   openCapsule,
@@ -184,6 +190,8 @@ enum class UiAction : uint8_t {
   archive,
   retry,
   trash,
+  requestPurge,
+  confirmPurge,
   bulkFavorite,
   bulkArchive,
   bulkTrash,
@@ -205,6 +213,7 @@ inline int8_t capsuleScopeIndexForAction(UiAction action) {
 inline void reconcileMissingCapsule(UiState &state) {
   state.capsuleDetail = false;
   state.detailMoreOverlay = false;
+  state.purgeConfirmOverlay = false;
   state.detailRetryEnabled = false;
   state.detailTrashEnabled = false;
 }
@@ -215,6 +224,18 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     return UiAction::none;
   }
   const UiScreen screen = state.screen();
+  if (screen == UiScreen::bluetoothPairing) {
+    if (x < ui::kBackTargetSize && y < ui::kBackTargetSize) {
+      return UiAction::back;
+    }
+    if (y >= ui::kBluetoothPairTop && y < ui::kBluetoothPairBottom) {
+      return UiAction::toggleBluetoothPairing;
+    }
+    if (y >= ui::kBluetoothForgetTop && y < ui::kBluetoothForgetBottom) {
+      return UiAction::forgetBluetoothMac;
+    }
+    return UiAction::none;
+  }
   if (screen == UiScreen::provisioning) {
     const bool backButton = x < ui::kBackTargetSize &&
         y < ui::kBackTargetSize;
@@ -244,6 +265,17 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     return UiAction::closeOverlay;
   }
+  if (state.purgeConfirmOverlay) {
+    if (x < ui::kPurgeConfirmLeft || x >= ui::kPurgeConfirmRight ||
+        y < ui::kPurgeConfirmTop || y >= ui::kPurgeConfirmBottom) {
+      return UiAction::closeOverlay;
+    }
+    if (y >= ui::kPurgeConfirmActionsTop) {
+      return x < ui::kPurgeConfirmActionSplit ? UiAction::closeOverlay
+                                               : UiAction::confirmPurge;
+    }
+    return UiAction::none;
+  }
   if (state.detailMoreOverlay) {
     if (x < ui::kDetailMoreLeft || x >= ui::kDetailMoreRight ||
         y < ui::kDetailMoreTop || y >= ui::kDetailMoreBottom) {
@@ -254,7 +286,8 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     if (row == 0) {
       return state.detailRetryEnabled ? UiAction::retry : UiAction::none;
     }
-    return state.detailTrashEnabled ? UiAction::trash : UiAction::none;
+    if (!state.detailTrashEnabled) return UiAction::none;
+    return state.capsuleTrashScope ? UiAction::requestPurge : UiAction::trash;
   }
   if (state.undoAvailable && x >= 20 && x < 348 &&
       y >= 366 && y < 418) return UiAction::undoTrash;
@@ -288,7 +321,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return UiAction::wifiToggle;
     }
     if (y >= ui::kDeviceMacTop && y < ui::kDeviceStorageTop) {
-      return UiAction::wirelessSettings;
+      return UiAction::openBluetoothPairing;
     }
     if (y >= ui::kDeviceStorageTop && y < ui::kDeviceRaiseTop) {
       return UiAction::toggleComputerSync;
@@ -311,7 +344,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
         y < ui::kCapsuleSelectionBarBottom) {
       if (x < 123) return UiAction::bulkFavorite;
       if (x < 245) return UiAction::bulkArchive;
-      return state.capsuleTrashScope ? UiAction::none
+      return state.capsuleTrashScope ? UiAction::requestPurge
                                      : UiAction::bulkTrash;
     }
     const int16_t listBottom = state.capsuleSelectionMode

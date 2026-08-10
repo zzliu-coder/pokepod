@@ -101,6 +101,19 @@ int main() {
   assert(uiActionAt(state, 180,
                     ui::kDetailMoreTop + ui::kDetailMoreRowHeight + 10,
                     true) == UiAction::trash);
+  state.capsuleTrashScope = true;
+  assert(uiActionAt(state, 180,
+                    ui::kDetailMoreTop + ui::kDetailMoreRowHeight + 10,
+                    true) == UiAction::requestPurge);
+  state.detailMoreOverlay = false;
+  state.purgeConfirmOverlay = true;
+  assert(uiActionAt(state, 100, ui::kPurgeConfirmActionsTop + 10, true) ==
+         UiAction::closeOverlay);
+  assert(uiActionAt(state, 260, ui::kPurgeConfirmActionsTop + 10, true) ==
+         UiAction::confirmPurge);
+  assert(uiActionAt(state, 10, 100, true) == UiAction::closeOverlay);
+  state.purgeConfirmOverlay = false;
+  state.capsuleTrashScope = false;
 
   // Provisioning owns the whole screen and masks every underlying device hit.
   state.provisioning = true;
@@ -120,6 +133,7 @@ int main() {
   state.provisioningLog = false;
   state.provisioning = false;
   state.detailMoreOverlay = false;
+  state.purgeConfirmOverlay = false;
   state.undoAvailable = false;
   state.detailRetryEnabled = false;
   state.capsuleDetail = false;
@@ -128,8 +142,22 @@ int main() {
   assert(uiActionAt(state, 180, 120, false) == UiAction::wifiToggle);
   assert(uiActionAt(state, 180, 300, false) == UiAction::raiseToWakeToggle);
   assert(uiActionAt(state, 180, 380, false) == UiAction::openProvisioning);
-  assert(uiActionAt(state, 180, 200, false) == UiAction::wirelessSettings);
+  assert(uiActionAt(state, 180, 200, false) ==
+         UiAction::openBluetoothPairing);
   assert(uiActionAt(state, 180, 240, false) == UiAction::toggleComputerSync);
+
+  state.bluetoothPairing = true;
+  assert(state.screen() == UiScreen::bluetoothPairing);
+  assert(uiActionAt(state, 20, 20, false) == UiAction::back);
+  assert(uiActionAt(state, 180, ui::kBluetoothPairTop, false) ==
+         UiAction::toggleBluetoothPairing);
+  assert(uiActionAt(state, 180, ui::kBluetoothPairBottom, false) ==
+         UiAction::none);
+  assert(uiActionAt(state, 180, ui::kBluetoothForgetTop, false) ==
+         UiAction::forgetBluetoothMac);
+  assert(uiActionAt(state, 180, ui::kBluetoothForgetBottom, false) ==
+         UiAction::none);
+  state.bluetoothPairing = false;
 
   state.page = RootPage::capsules;
   assert(uiActionAt(state, 180, 70, false) == UiAction::openCapsuleScope);
@@ -165,18 +193,20 @@ int main() {
          UiAction::bulkTrash);
   state.capsuleTrashScope = true;
   assert(uiActionAt(state, 300, ui::kCapsuleSelectionBarTop, false) ==
-         UiAction::none);
+         UiAction::requestPurge);
   state.undoAvailable = true;
   assert(uiActionAt(state, 180, 390, false) == UiAction::undoTrash);
 
   UiState missingDetail;
   missingDetail.capsuleDetail = true;
   missingDetail.detailMoreOverlay = true;
+  missingDetail.purgeConfirmOverlay = true;
   missingDetail.detailRetryEnabled = true;
   missingDetail.detailTrashEnabled = true;
   reconcileMissingCapsule(missingDetail);
   assert(!missingDetail.capsuleDetail);
   assert(!missingDetail.detailMoreOverlay);
+  assert(!missingDetail.purgeConfirmOverlay);
   assert(!missingDetail.detailRetryEnabled);
   assert(!missingDetail.detailTrashEnabled);
   assert(uiActionAt(missingDetail, 180, ui::kDetailMoreTop + 10, false) ==

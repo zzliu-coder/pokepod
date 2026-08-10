@@ -48,8 +48,11 @@ for field in (
     "asr_psram_free_before_tls",
 ):
     require(link, field, f"Link status is missing {field}")
-require(dashboard, 'return automaticEnabled ? "省电休眠" : "已关闭";',
-        "Wi-Fi master policy is still shown as a live radio switch")
+wifi_ui = source("WifiUiPolicy.h")
+require(wifi_ui, 'return automaticEnabled ? "省电休眠" : "已关闭";',
+        "Wi-Fi sleep and manual-off labels are not distinct")
+require(wifi_ui, "wifiUiSwitchOn(WifiPhase phase)",
+        "Wi-Fi toggle is not driven by the live radio phase")
 require(dashboard, "等待网络重试",
         "retryable queued capsules have no visible status")
 require(main, "selected->status == CapsuleStatus::queued",
