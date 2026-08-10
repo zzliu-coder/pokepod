@@ -606,8 +606,14 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"audio_frontend_left_peak\":" + String(frontEnd.leftPeak);
     extra += ",\"audio_frontend_right_peak\":" + String(frontEnd.rightPeak);
     extra += ",\"audio_frontend_output_peak\":" + String(frontEnd.outputPeak);
+    extra += ",\"audio_frontend_noise_floor\":" +
+        String(frontEnd.estimatedNoiseFloor);
+    extra += ",\"audio_frontend_suppressed_samples\":" +
+        String(frontEnd.suppressedSamples);
     extra += ",\"audio_frontend_limited_samples\":" +
         String(frontEnd.limitedSamples);
+    extra += ",\"audio_frontend_max_gain_q12\":" +
+        String(frontEnd.maximumGainQ12);
     extra += ",\"tencentConfigured\":" +
         String(config_->hasTencent() ? "true" : "false");
     extra += ",\"wifiNetworkCount\":" +

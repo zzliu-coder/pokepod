@@ -67,6 +67,9 @@ int main() {
   assert(rmsTail(quiet) < 80.0);
 
   const std::vector<int16_t> passband = processTone(1000.0, 4000);
+  const std::vector<int16_t> voiceStopband = processTone(6000.0, 4000);
+  assert(rmsTail(voiceStopband) < rmsTail(passband) / 30.0);
+
   const std::vector<int16_t> stopband = processTone(12000.0, 4000);
   assert(rmsTail(stopband) < rmsTail(passband) / 20.0);
 

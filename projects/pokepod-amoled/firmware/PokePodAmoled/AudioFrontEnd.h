@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "VoiceConditioner.h"
+
 namespace pokepod {
 
 enum class AudioInputChannel : uint8_t { undecided, left, right };
@@ -16,29 +18,25 @@ inline const char *audioInputChannelName(AudioInputChannel channel) {
   return "undecided";
 }
 
-struct AudioFrontEndMetrics {
+struct AudioFrontEndMetrics : public VoiceConditionerMetrics {
   AudioInputChannel selectedChannel = AudioInputChannel::undecided;
   uint64_t inputFrames = 0;
-  uint64_t outputSamples = 0;
   uint64_t leftEnergy = 0;
   uint64_t rightEnergy = 0;
-  uint32_t gatedSamples = 0;
-  uint32_t limitedSamples = 0;
   uint32_t clippedInputSamples = 0;
   uint16_t leftPeak = 0;
   uint16_t rightPeak = 0;
-  uint16_t outputPeak = 0;
-  uint32_t maximumGainQ12 = 4096;
 };
 
 // Shared capsule/BLE voice front end. It performs a short deterministic slot
-// probe, a 79-tap anti-alias FIR, 3:1 decimation, an 85 Hz DC blocker, a
-// restrained voice gate/AGC and a final limiter. No heap allocation is used.
+// probe, a 79-tap anti-alias FIR and 3:1 decimation. The independent
+// VoiceConditioner owns the 16 kHz speech cleanup and dynamics. No heap
+// allocation is used.
 class AudioFrontEnd {
  public:
   static constexpr size_t kSelectionFrames = 96;
   static constexpr size_t kFirTaps = 79;
-  static constexpr int32_t kLimiter = 30000;
+  static constexpr int32_t kLimiter = VoiceConditioner::kLimiter;
 
   void reset() {
     selectedChannel_ = AudioInputChannel::undecided;
@@ -48,14 +46,8 @@ class AudioFrontEnd {
     ringIndex_ = 0;
     sampleCount_ = 0;
     decimationPhase_ = 0;
-    previousHighPassInput_ = 0;
-    previousHighPassOutput_ = 0;
-    envelopeQ8_ = 0;
-    gateOpen_ = false;
-    gateGainQ12_ = kClosedGateGainQ12;
-    gainQ12_ = kInitialGainQ12;
     metrics_ = {};
-    metrics_.maximumGainQ12 = static_cast<uint32_t>(gainQ12_);
+    conditioner_.reset(&metrics_);
     for (auto &sample : selection_) sample = 0;
     for (auto &sample : ring_) sample = 0;
   }
@@ -105,15 +97,6 @@ class AudioFrontEnd {
       8878, 7821, 5116, 1886, -647, -1750, -1459, -420, 549, 914, 631,
       45, -415, -504, -265, 73, 277, 259, 89, -88, -161, -116, -15,
       64, 79, 43, -7, -35, -32, -11, 7, 14, 9, 1, -3, -3, -1, 0, 0, 0};
-  static constexpr int32_t kHighPassFeedbackQ15 = 31690;
-  static constexpr int32_t kGateOpenLevel = 48;
-  static constexpr int32_t kGateCloseLevel = 32;
-  static constexpr int32_t kClosedGateGainQ12 = 512;
-  static constexpr int32_t kOpenGateGainQ12 = 4096;
-  static constexpr int32_t kInitialGainQ12 = 4 * 4096;
-  static constexpr int32_t kMaximumGainQ12 = 16 * 4096;
-  static constexpr int32_t kTargetEnvelope = 4600;
-
   static int16_t decode(const uint8_t *bytes) {
     return static_cast<int16_t>(static_cast<uint16_t>(bytes[0]) |
                                 static_cast<uint16_t>(bytes[1]) << 8);
@@ -122,14 +105,6 @@ class AudioFrontEnd {
   static uint16_t magnitude(int16_t value) {
     const int32_t wide = value;
     return static_cast<uint16_t>(wide < 0 ? -wide : wide);
-  }
-
-  static int32_t approach(int32_t current, int32_t target, uint8_t shift) {
-    const int32_t delta = target - current;
-    if (delta == 0) return current;
-    int32_t step = delta >> shift;
-    if (step == 0) step = delta > 0 ? 1 : -1;
-    return current + step;
   }
 
   void observeInput(int16_t left, int16_t right) {
@@ -171,64 +146,12 @@ class AudioFrontEnd {
     }
     int32_t filtered = static_cast<int32_t>(
         (accumulator + (accumulator >= 0 ? 16384 : -16384)) / 32768);
-    filtered = processVoiceSample(filtered);
+    filtered = conditioner_.process(filtered);
     const uint16_t encoded = static_cast<uint16_t>(
         static_cast<int16_t>(filtered));
     mono[outputBytes++] = static_cast<uint8_t>(encoded & 0xff);
     mono[outputBytes++] = static_cast<uint8_t>((encoded >> 8) & 0xff);
     return true;
-  }
-
-  int32_t processVoiceSample(int32_t sample) {
-    int32_t highPassed = sample - previousHighPassInput_ +
-        static_cast<int32_t>(
-            static_cast<int64_t>(kHighPassFeedbackQ15) *
-            previousHighPassOutput_ / 32768);
-    previousHighPassInput_ = sample;
-    previousHighPassOutput_ = highPassed;
-
-    const int32_t absolute = highPassed < 0 ? -highPassed : highPassed;
-    const int32_t envelopeTarget = absolute << 8;
-    envelopeQ8_ = approach(envelopeQ8_, envelopeTarget,
-                           envelopeTarget > envelopeQ8_ ? 4 : 10);
-    const int32_t envelope = envelopeQ8_ >> 8;
-    if (!gateOpen_ && envelope >= kGateOpenLevel) gateOpen_ = true;
-    if (gateOpen_ && envelope <= kGateCloseLevel) gateOpen_ = false;
-    const int32_t gateTarget = gateOpen_ ? kOpenGateGainQ12
-                                         : kClosedGateGainQ12;
-    gateGainQ12_ = approach(gateGainQ12_, gateTarget,
-                            gateOpen_ ? 4 : 6);
-    if (!gateOpen_) ++metrics_.gatedSamples;
-
-    int32_t targetGain = 4096;
-    if (gateOpen_ && envelope > 0) {
-      targetGain = static_cast<int32_t>(
-          static_cast<int64_t>(kTargetEnvelope) * 4096 / envelope);
-      if (targetGain < 4096) targetGain = 4096;
-      if (targetGain > kMaximumGainQ12) targetGain = kMaximumGainQ12;
-    }
-    gainQ12_ = approach(gainQ12_, targetGain,
-                        targetGain < gainQ12_ ? 3 : 8);
-    if (static_cast<uint32_t>(gainQ12_) > metrics_.maximumGainQ12) {
-      metrics_.maximumGainQ12 = static_cast<uint32_t>(gainQ12_);
-    }
-
-    int64_t scaled = static_cast<int64_t>(highPassed) * gainQ12_ / 4096;
-    scaled = scaled * gateGainQ12_ / 4096;
-    if (scaled > kLimiter) {
-      scaled = kLimiter;
-      ++metrics_.limitedSamples;
-    } else if (scaled < -kLimiter) {
-      scaled = -kLimiter;
-      ++metrics_.limitedSamples;
-    }
-    const uint16_t outputMagnitude = static_cast<uint16_t>(
-        scaled < 0 ? -scaled : scaled);
-    if (outputMagnitude > metrics_.outputPeak) {
-      metrics_.outputPeak = outputMagnitude;
-    }
-    ++metrics_.outputSamples;
-    return static_cast<int32_t>(scaled);
   }
 
   AudioInputChannel selectedChannel_ = AudioInputChannel::undecided;
@@ -240,12 +163,7 @@ class AudioFrontEnd {
   size_t ringIndex_ = 0;
   uint64_t sampleCount_ = 0;
   uint8_t decimationPhase_ = 0;
-  int32_t previousHighPassInput_ = 0;
-  int32_t previousHighPassOutput_ = 0;
-  int32_t envelopeQ8_ = 0;
-  bool gateOpen_ = false;
-  int32_t gateGainQ12_ = kClosedGateGainQ12;
-  int32_t gainQ12_ = kInitialGainQ12;
+  VoiceConditioner conditioner_;
   AudioFrontEndMetrics metrics_;
 };
 

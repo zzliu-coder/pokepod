@@ -18,6 +18,7 @@ recorder = source("WavRecorder.cpp") + source("WavRecorder.h")
 voice = source("VoiceSessionController.h")
 link = source("PokePodLinkService.cpp")
 audio = source("AudioFrontEnd.h")
+conditioner = source("VoiceConditioner.h")
 
 assert "formatUtcOffsetShort(record.createdAt.c_str()" in dashboard
 assert "kChinaStandardTimeOffsetMinutes" in dashboard
@@ -31,11 +32,19 @@ assert "audioFrontEnd_.processStereo16" in recorder
 assert "audioFrontEnd_.processStereo16" in voice
 assert "AudioDecimator" not in recorder + voice
 assert "kFirTaps = 79" in audio
-assert "kHighPassFeedbackQ15" in audio
-assert "kMaximumGainQ12" in audio
-assert "kLimiter = 30000" in audio
+assert '#include "VoiceConditioner.h"' in audio
+assert "VoiceConditioner conditioner_" in audio
+assert "kSpeechFirTaps = 31" in conditioner
+assert "kHighPassFeedbackQ15" in conditioner
+assert "kMaximumGainQ12 = 6 * 4096" in conditioner
+assert "kLimiter = 30000" in conditioner
+assert "kClosedGateGainQ12 = 128" in conditioner
 assert "audio_frontend_channel" in main
 assert "audio_frontend_channel" in link
+assert "audio_frontend_noise_floor" in main
+assert "audio_frontend_noise_floor" in link
+assert "audio_frontend_suppressed_samples" in main
+assert "audio_frontend_suppressed_samples" in link
 
 assert "PageTransition pageTransition_" in source("Dashboard.h")
 assert "dashboard.advancePageTransition(now)" in main

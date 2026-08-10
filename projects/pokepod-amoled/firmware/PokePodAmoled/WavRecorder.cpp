@@ -150,11 +150,12 @@ bool WavRecorder::stop(Print &log) {
   if (ok) ok = writeProcessingMetadata(log, "queued", 2, nullptr, nullptr);
   if (ok) ok = commitStagingDirectory(log);
   const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
-  log.printf("{\"event\":\"recording_stopped\",\"ok\":%s,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
+  log.printf("{\"event\":\"recording_stopped\",\"ok\":%s,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"noise_floor\":%u,\"suppressed_samples\":%lu,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
              ok ? "true" : "false", static_cast<unsigned long>(durationMs()),
              static_cast<unsigned long>(dataBytes_), finalPath_.c_str(),
              audioInputChannelName(audio.selectedChannel), audio.leftPeak,
-             audio.rightPeak, audio.outputPeak,
+             audio.rightPeak, audio.outputPeak, audio.estimatedNoiseFloor,
+             static_cast<unsigned long>(audio.suppressedSamples),
              static_cast<unsigned long>(audio.limitedSamples),
              static_cast<unsigned long>(audio.maximumGainQ12));
   return ok;
