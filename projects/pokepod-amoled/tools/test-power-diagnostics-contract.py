@@ -14,8 +14,11 @@ policy = (firmware / "PowerPolicy.h").read_text(encoding="utf-8")
 wifi = (firmware / "WifiController.cpp").read_text(encoding="utf-8")
 portal = (firmware / "ProvisioningPortal.cpp").read_text(encoding="utf-8")
 diagnostics = (firmware / "ProvisioningDiagnostics.cpp").read_text(encoding="utf-8")
+power_diagnostics = (firmware / "PowerDiagnostics.cpp").read_text(encoding="utf-8")
+power_codec = (firmware / "PowerDiagnosticsCodec.h").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
 dashboard = (firmware / "Dashboard.cpp").read_text(encoding="utf-8")
+cdc_status = (root / "cdc-status.py").read_text(encoding="utf-8")
 
 assert "i2s_.end()" in audio
 assert "es8311_delete" in audio
@@ -48,6 +51,10 @@ assert "WIFI_PS_NONE" in portal
 assert "provisioning-diagnostics" in link
 assert "get-provisioning-diagnostics" in link
 assert "clear-provisioning-diagnostics" in link
+assert "power-diagnostics" in link
+assert "get-power-diagnostics" in link
+assert "clear-power-diagnostics" in link
+assert "powerDiagnosticsJson" in link
 assert "provisioning-start" in link
 assert "provisioning-stop" in link
 assert "resetReason" in link
@@ -75,6 +82,33 @@ export_body = link[
 ]
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in export_body
+
+assert 'preferences_.begin("pokepod_diag", false)' in power_diagnostics
+assert 'kPowerLogKey[] = "power_log_v1"' in power_diagnostics
+assert "shouldPersistBlockedObservation" in power_diagnostics
+assert "shouldPersistLightWake" in power_diagnostics
+assert "recordAutomaticScreenWake" in main
+assert "AutomaticScreenWakeSource::touchInterrupt" in main
+assert "AutomaticScreenWakeSource::motionInterrupt" in main
+assert "AutomaticScreenWakeSource::raiseToWakePolicy" in main
+assert "recordDeepSleepIntent" in main
+assert main.index("recordDeepSleepIntent") < main.index("SD_MMC.end()")
+assert "kPowerErrorBootWakeLineHeld" in power
+assert "digitalRead(kBootButtonPin) == LOW" in power
+assert "esp_sleep_get_ext1_wakeup_status" in power
+assert "esp_sleep_get_wakeup_causes" in power
+assert "sizeof(StoredPowerLog) < 768" in power_codec
+assert "kPowerLogCapacity = 10" in power_codec
+assert 'operation == "get-power-diagnostics"' in cdc_status
+assert 'record["blockers"]' in cdc_status
+for secret in ("password", "secretId", "secretKey", "hotword"):
+    assert secret not in power_diagnostics
+power_export = link[
+    link.index("String PokePodLinkService::powerDiagnosticsJson") :
+    link.index("bool PokePodLinkService::executeCommand")
+]
+for secret in ("password", "secretId", "secretKey", "hotword"):
+    assert secret not in power_export
 
 assert "!input.bleConnected" in policy
 assert "!input.wifiRadioOn" in policy

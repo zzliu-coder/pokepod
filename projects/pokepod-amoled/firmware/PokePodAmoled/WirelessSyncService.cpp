@@ -8,6 +8,7 @@
 #include "Dashboard.h"
 #include "DeviceConfig.h"
 #include "ProvisioningDiagnostics.h"
+#include "PowerDiagnostics.h"
 #include "RuntimePowerManager.h"
 #include "TencentWorker.h"
 #include "UsbLinkBridge.h"
@@ -27,6 +28,7 @@ bool WirelessSyncService::begin(
     CapsuleLibrary &library, WavRecorder &recorder, DeviceConfig &config,
     WifiController &wifi, TencentWorker &tencent,
     ProvisioningDiagnostics &provisioningDiagnostics,
+    PowerDiagnostics &powerDiagnostics,
     RuntimePowerManager &power, WirelessSyncIdentity &identity,
     LinkServiceCoordinator &coordinator, Print &log) {
   identity_ = &identity;
@@ -34,7 +36,8 @@ bool WirelessSyncService::begin(
   authenticator_.begin(identity, replay_, log);
   begun_ = link_.begin(tls_, fs, board, audio, captureRouter, usb, bleVoice,
                        dashboard, library, recorder, config, wifi, tencent,
-                       provisioningDiagnostics, power, log, &coordinator,
+                       provisioningDiagnostics, powerDiagnostics, power, log,
+                       &coordinator,
                        LinkTransport::wifi, nullptr,
                        &window_.transferGate(), nullptr);
   observedMaintenanceStartRevision_ = link_.maintenanceStartRevision();

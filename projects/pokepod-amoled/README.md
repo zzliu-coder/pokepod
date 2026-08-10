@@ -63,6 +63,19 @@ PokePod 本机“连接手机”页直接显示扫描、连接、验证、保存
 `get-provisioning-diagnostics` 和 `clear-provisioning-diagnostics`。诊断记录不
 保存 Wi-Fi 密码、腾讯密钥、音频或请求正文。
 
+电源诊断使用另一个 CRC 环形 NVS blob，记录启动、休眠阻塞、轻睡眠唤醒或
+错误、深睡眠意图、安全关机，以及触摸中断、IMU 中断、姿态算法导致的自动
+亮屏。记录只在状态变化和受控抽样点写入，不会在主循环持续磨损 Flash，也不
+包含凭据或胶囊正文。设备重新接入 Mac 后读取：
+
+```sh
+./cdc-status.py --command get-power-diagnostics
+```
+
+脚本会把 `blockerMask` 自动解码为 `blockers`。它指出 Wi-Fi、BLE、USB、
+VBUS、音频、同步、配网、UI 动画、自动亮屏或等待超时中的真实阻塞项。确认已保存
+诊断后可用 `--command clear-power-diagnostics` 清空。
+
 腾讯请求使用 TLS 证书校验和 TC3-HMAC-SHA256。WAV 以两遍流式方式完成
 签名与 Base64 上传，不在内存中保存完整音频或完整请求体。转写在后台任务中
 运行，屏幕、按键、BLE 和 Link 主循环保持响应；本地录音占用麦克风或文件提交

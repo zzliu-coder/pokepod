@@ -21,6 +21,9 @@ bool RuntimePowerManager::begin(Print &log) {
   snapshot_.cpuMhz = static_cast<uint16_t>(getCpuFrequencyMhz());
   snapshot_.lastWakeCause =
       static_cast<uint8_t>(esp_sleep_get_wakeup_cause());
+  snapshot_.wakeCauses = esp_sleep_get_wakeup_causes();
+  snapshot_.ext1WakeMask = snapshot_.lastWakeCause == ESP_SLEEP_WAKEUP_EXT1
+      ? esp_sleep_get_ext1_wakeup_status() : 0;
   snapshot_.wokeFromDeepSleep = esp_reset_reason() == ESP_RST_DEEPSLEEP;
   if (snapshot_.wokeFromDeepSleep) ++retainedDeepSleepWakeCount;
   snapshot_.deepSleepWakeCount = retainedDeepSleepWakeCount;
@@ -30,13 +33,15 @@ bool RuntimePowerManager::begin(Print &log) {
 #if CONFIG_BT_CTRL_MODEM_SLEEP
   snapshot_.bleModemSleepSupported = true;
 #endif
-  log.printf("{\"event\":\"power_manager\",\"ok\":true,\"cpu_mhz\":%u,\"automatic_pm\":%s,\"ble_modem_sleep\":%s,\"deep_wake\":%s,\"wake_count\":%lu,\"wake_cause\":%u}\n",
+  log.printf("{\"event\":\"power_manager\",\"ok\":true,\"cpu_mhz\":%u,\"automatic_pm\":%s,\"ble_modem_sleep\":%s,\"deep_wake\":%s,\"wake_count\":%lu,\"wake_cause\":%u,\"wake_causes\":%lu,\"ext1_mask\":%llu}\n",
              snapshot_.cpuMhz,
              snapshot_.automaticPmSupported ? "true" : "false",
              snapshot_.bleModemSleepSupported ? "true" : "false",
              snapshot_.wokeFromDeepSleep ? "true" : "false",
              static_cast<unsigned long>(snapshot_.deepSleepWakeCount),
-             snapshot_.lastWakeCause);
+             snapshot_.lastWakeCause,
+             static_cast<unsigned long>(snapshot_.wakeCauses),
+             static_cast<unsigned long long>(snapshot_.ext1WakeMask));
   return true;
 }
 
@@ -78,6 +83,8 @@ bool RuntimePowerManager::enterLightSleep(
       verifiedDecision.lightSleepTimerUs == 0) {
     return false;
   }
+  ++snapshot_.lightSleepAttempts;
+  snapshot_.lastError = 0;
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   (void)gpio_wakeup_disable(static_cast<gpio_num_t>(kBootButtonPin));
   (void)gpio_wakeup_disable(static_cast<gpio_num_t>(kTouchInterruptPin));
@@ -94,6 +101,7 @@ bool RuntimePowerManager::enterLightSleep(
   if (error == ESP_OK) error = esp_sleep_enable_gpio_wakeup();
   if (error != ESP_OK) {
     snapshot_.lastError = error;
+    ++snapshot_.lightSleepFailures;
     log.printf("{\"event\":\"light_sleep\",\"ok\":false,\"error\":%ld}\n",
                static_cast<long>(error));
     return false;
@@ -103,20 +111,37 @@ bool RuntimePowerManager::enterLightSleep(
   const int64_t elapsed = esp_timer_get_time() - started;
   if (error != ESP_OK) {
     snapshot_.lastError = error;
+    ++snapshot_.lightSleepFailures;
     return false;
   }
   ++snapshot_.lightSleepCount;
   if (elapsed > 0) snapshot_.lightSleepUs += static_cast<uint64_t>(elapsed);
+  snapshot_.lastLightSleepMs = elapsed > 0
+      ? static_cast<uint32_t>(elapsed / 1000) : 0;
   snapshot_.lastWakeCause =
       static_cast<uint8_t>(esp_sleep_get_wakeup_cause());
+  snapshot_.wakeCauses = esp_sleep_get_wakeup_causes();
   return true;
 }
 
 bool RuntimePowerManager::armDeepSleepWakeSources(bool touchWakeEnabled,
                                                    Print &log) {
+  ++snapshot_.deepSleepArmAttempts;
+  snapshot_.lastError = 0;
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   uint64_t wakeMask = 1ULL << kBootButtonPin;
   pinMode(kBootButtonPin, INPUT_PULLUP);
+  if (digitalRead(kBootButtonPin) == LOW) {
+    snapshot_.lastError = kPowerErrorBootWakeLineHeld;
+    ++snapshot_.deepSleepArmFailures;
+    snapshot_.deepSleepBootWakeArmed = false;
+    snapshot_.deepSleepTouchWakeArmed = false;
+    snapshot_.deepSleepWakeMask = 0;
+    log.printf(
+        "{\"event\":\"deep_sleep_arm\",\"ok\":false,\"error\":%ld,\"reason\":\"boot_wake_line_held\"}\n",
+        static_cast<long>(snapshot_.lastError));
+    return false;
+  }
   if (touchWakeEnabled) {
     pinMode(kTouchInterruptPin, INPUT_PULLUP);
     // A held-low touch IRQ would immediately reboot the device. Consume the
@@ -125,12 +150,18 @@ bool RuntimePowerManager::armDeepSleepWakeSources(bool touchWakeEnabled,
       wakeMask |= 1ULL << kTouchInterruptPin;
     }
   }
+  snapshot_.deepSleepBootWakeArmed = true;
   snapshot_.deepSleepTouchWakeArmed =
       (wakeMask & (1ULL << kTouchInterruptPin)) != 0;
+  snapshot_.deepSleepWakeMask = wakeMask;
   const esp_err_t error = esp_sleep_enable_ext1_wakeup_io(
       wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
   if (error != ESP_OK) {
     snapshot_.lastError = error;
+    ++snapshot_.deepSleepArmFailures;
+    snapshot_.deepSleepBootWakeArmed = false;
+    snapshot_.deepSleepTouchWakeArmed = false;
+    snapshot_.deepSleepWakeMask = 0;
     log.printf("{\"event\":\"deep_sleep_arm\",\"ok\":false,\"error\":%ld}\n",
                static_cast<long>(error));
     return false;

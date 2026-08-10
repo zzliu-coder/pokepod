@@ -24,6 +24,7 @@ class BleVoiceService;
 class WavRecorder;
 class WifiController;
 class ProvisioningDiagnostics;
+class PowerDiagnostics;
 class ProvisioningCoordinator;
 class RuntimePowerManager;
 class WirelessSyncPairingProvider;
@@ -39,6 +40,7 @@ class PokePodLinkService {
              WavRecorder &recorder, DeviceConfig &config,
              WifiController &wifi, TencentWorker &tencent,
              ProvisioningDiagnostics &provisioningDiagnostics,
+             PowerDiagnostics &powerDiagnostics,
              RuntimePowerManager &power, Print &log,
              LinkServiceCoordinator *coordinator = nullptr,
              LinkTransport transport = LinkTransport::none,
@@ -130,6 +132,7 @@ class PokePodLinkService {
   bool rewriteCopiedMetadata(const String &directory, const String &id);
   String newUuid() const;
   String provisioningDiagnosticsJson() const;
+  String powerDiagnosticsJson() const;
   bool transferPermitted() const;
 
   Stream *stream_ = nullptr;
@@ -146,6 +149,7 @@ class PokePodLinkService {
   WifiController *wifi_ = nullptr;
   TencentWorker *tencent_ = nullptr;
   ProvisioningDiagnostics *provisioningDiagnostics_ = nullptr;
+  PowerDiagnostics *powerDiagnostics_ = nullptr;
   ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
   RuntimePowerManager *power_ = nullptr;
   Print *log_ = nullptr;

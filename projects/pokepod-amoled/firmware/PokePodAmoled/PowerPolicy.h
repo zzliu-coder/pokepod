@@ -43,6 +43,76 @@ struct PowerInputs {
   uint32_t idleMs = 0;
 };
 
+using PowerBlockerMask = uint32_t;
+
+enum class PowerBlocker : uint8_t {
+  screenOn = 0,
+  audioActive = 1,
+  bleRadio = 2,
+  bleStreaming = 3,
+  wifiRadio = 4,
+  usbHost = 5,
+  vbusPresent = 6,
+  linkBusy = 7,
+  storageBusy = 8,
+  networkBusy = 9,
+  provisioning = 10,
+  uiAnimating = 11,
+  raiseToWake = 12,
+  criticalBattery = 13,
+  beforeLightTimeout = 14,
+  beforeDeepTimeout = 15,
+};
+
+constexpr PowerBlockerMask powerBlockerBit(PowerBlocker blocker) {
+  return 1UL << static_cast<uint8_t>(blocker);
+}
+
+inline const char *powerBlockerKey(PowerBlocker blocker) {
+  switch (blocker) {
+    case PowerBlocker::screenOn: return "screen_on";
+    case PowerBlocker::audioActive: return "audio_active";
+    case PowerBlocker::bleRadio: return "ble_radio";
+    case PowerBlocker::bleStreaming: return "ble_streaming";
+    case PowerBlocker::wifiRadio: return "wifi_radio";
+    case PowerBlocker::usbHost: return "usb_host";
+    case PowerBlocker::vbusPresent: return "vbus_present";
+    case PowerBlocker::linkBusy: return "link_busy";
+    case PowerBlocker::storageBusy: return "storage_busy";
+    case PowerBlocker::networkBusy: return "network_busy";
+    case PowerBlocker::provisioning: return "provisioning";
+    case PowerBlocker::uiAnimating: return "ui_animating";
+    case PowerBlocker::raiseToWake: return "raise_to_wake";
+    case PowerBlocker::criticalBattery: return "critical_battery";
+    case PowerBlocker::beforeLightTimeout: return "before_light_timeout";
+    case PowerBlocker::beforeDeepTimeout: return "before_deep_timeout";
+  }
+  return "unknown";
+}
+
+inline PowerBlockerMask activePowerFacts(const PowerInputs &input) {
+  PowerBlockerMask mask = 0;
+  if (input.screenOn) mask |= powerBlockerBit(PowerBlocker::screenOn);
+  if (input.audioActive) mask |= powerBlockerBit(PowerBlocker::audioActive);
+  if (input.bleConnected) mask |= powerBlockerBit(PowerBlocker::bleRadio);
+  if (input.bleStreaming) mask |= powerBlockerBit(PowerBlocker::bleStreaming);
+  if (input.wifiRadioOn) mask |= powerBlockerBit(PowerBlocker::wifiRadio);
+  if (input.usbHostConnected) mask |= powerBlockerBit(PowerBlocker::usbHost);
+  if (input.vbusPresent) mask |= powerBlockerBit(PowerBlocker::vbusPresent);
+  if (input.linkBusy) mask |= powerBlockerBit(PowerBlocker::linkBusy);
+  if (input.storageBusy) mask |= powerBlockerBit(PowerBlocker::storageBusy);
+  if (input.networkBusy) mask |= powerBlockerBit(PowerBlocker::networkBusy);
+  if (input.provisioning) mask |= powerBlockerBit(PowerBlocker::provisioning);
+  if (input.uiAnimating) mask |= powerBlockerBit(PowerBlocker::uiAnimating);
+  if (input.automaticWakeEnabled) {
+    mask |= powerBlockerBit(PowerBlocker::raiseToWake);
+  }
+  if (input.criticalBattery) {
+    mask |= powerBlockerBit(PowerBlocker::criticalBattery);
+  }
+  return mask;
+}
+
 struct PowerDecision {
   PowerMode mode = PowerMode::balanced;
   uint16_t cpuMhz = 80;
@@ -58,6 +128,57 @@ struct PowerDecision {
 constexpr uint32_t kLightSleepTimeoutMs = 60000;
 constexpr uint32_t kDeepSleepTimeoutMs = 180000;
 constexpr uint32_t kChargingLightSleepCheckMs = 30000;
+
+inline PowerBlockerMask lightSleepBlockers(const PowerInputs &input) {
+  PowerBlockerMask mask = 0;
+  if (input.idleMs < kLightSleepTimeoutMs) {
+    mask |= powerBlockerBit(PowerBlocker::beforeLightTimeout);
+  }
+  const PowerBlockerMask facts = activePowerFacts(input);
+  const PowerBlockerMask relevant =
+      powerBlockerBit(PowerBlocker::screenOn) |
+      powerBlockerBit(PowerBlocker::audioActive) |
+      powerBlockerBit(PowerBlocker::bleRadio) |
+      powerBlockerBit(PowerBlocker::bleStreaming) |
+      powerBlockerBit(PowerBlocker::wifiRadio) |
+      powerBlockerBit(PowerBlocker::usbHost) |
+      powerBlockerBit(PowerBlocker::linkBusy) |
+      powerBlockerBit(PowerBlocker::storageBusy) |
+      powerBlockerBit(PowerBlocker::networkBusy) |
+      powerBlockerBit(PowerBlocker::provisioning) |
+      powerBlockerBit(PowerBlocker::uiAnimating) |
+      powerBlockerBit(PowerBlocker::raiseToWake) |
+      powerBlockerBit(PowerBlocker::criticalBattery);
+  return mask | (facts & relevant);
+}
+
+inline PowerBlockerMask deepSleepBlockers(const PowerInputs &input) {
+  PowerBlockerMask mask = 0;
+  if (input.idleMs < kDeepSleepTimeoutMs) {
+    mask |= powerBlockerBit(PowerBlocker::beforeDeepTimeout);
+  }
+  const PowerBlockerMask facts = activePowerFacts(input);
+  const PowerBlockerMask relevant =
+      powerBlockerBit(PowerBlocker::screenOn) |
+      powerBlockerBit(PowerBlocker::audioActive) |
+      powerBlockerBit(PowerBlocker::bleRadio) |
+      powerBlockerBit(PowerBlocker::bleStreaming) |
+      powerBlockerBit(PowerBlocker::wifiRadio) |
+      powerBlockerBit(PowerBlocker::usbHost) |
+      powerBlockerBit(PowerBlocker::vbusPresent) |
+      powerBlockerBit(PowerBlocker::linkBusy) |
+      powerBlockerBit(PowerBlocker::storageBusy) |
+      powerBlockerBit(PowerBlocker::networkBusy) |
+      powerBlockerBit(PowerBlocker::provisioning) |
+      powerBlockerBit(PowerBlocker::uiAnimating) |
+      powerBlockerBit(PowerBlocker::criticalBattery);
+  return mask | (facts & relevant);
+}
+
+inline PowerBlockerMask currentSleepBlockers(const PowerInputs &input) {
+  return input.idleMs >= kDeepSleepTimeoutMs
+      ? deepSleepBlockers(input) : lightSleepBlockers(input);
+}
 
 inline bool powerForegroundBusy(const PowerInputs &input) {
   return input.audioActive || input.bleStreaming || input.linkBusy ||

@@ -21,6 +21,7 @@ class CapsuleLibrary;
 class Dashboard;
 class DeviceConfig;
 class ProvisioningDiagnostics;
+class PowerDiagnostics;
 class RuntimePowerManager;
 class TencentWorker;
 class UsbLinkBridge;
@@ -37,6 +38,7 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
              DeviceConfig &config, WifiController &wifi,
              TencentWorker &tencent,
              ProvisioningDiagnostics &provisioningDiagnostics,
+             PowerDiagnostics &powerDiagnostics,
              RuntimePowerManager &power, WirelessSyncIdentity &identity,
              LinkServiceCoordinator &coordinator, Print &log);
   void poll(uint32_t nowMs, bool networkConnected);

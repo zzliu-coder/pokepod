@@ -22,6 +22,7 @@
 #include "UsbLinkBridge.h"
 #include "BleVoiceService.h"
 #include "ProvisioningDiagnostics.h"
+#include "PowerDiagnostics.h"
 #include "ProvisioningCoordinator.h"
 #include "RuntimePowerManager.h"
 #include "WavRecorder.h"
@@ -132,6 +133,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                DeviceConfig &config, WifiController &wifi,
                                TencentWorker &tencent,
                                ProvisioningDiagnostics &provisioningDiagnostics,
+                               PowerDiagnostics &powerDiagnostics,
                                RuntimePowerManager &power, Print &log,
                                LinkServiceCoordinator *coordinator,
                                LinkTransport transport,
@@ -152,6 +154,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   wifi_ = &wifi;
   tencent_ = &tencent;
   provisioningDiagnostics_ = &provisioningDiagnostics;
+  powerDiagnostics_ = &powerDiagnostics;
   provisioningCoordinator_ = provisioningCoordinator;
   power_ = &power;
   log_ = &log;
@@ -519,8 +522,8 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
-        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"reboot\"]";
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
+        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
     const BoardStatus &status = board_->status();
@@ -661,16 +664,42 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"powerMode\":\"" + String(powerModeName(power.mode)) + "\"";
     extra += ",\"cpuMhz\":" + String(power.cpuMhz);
     extra += ",\"powerTransitions\":" + String(power.transitions);
+    extra += ",\"lightSleepAttempts\":" +
+        String(power.lightSleepAttempts);
     extra += ",\"lightSleepCount\":" + String(power.lightSleepCount);
+    extra += ",\"lightSleepFailures\":" +
+        String(power.lightSleepFailures);
     extra += ",\"lightSleepMs\":" +
         String(static_cast<unsigned long>(power.lightSleepUs / 1000ULL));
     extra += ",\"deepSleepWakeCount\":" +
         String(power.deepSleepWakeCount);
+    extra += ",\"deepSleepArmAttempts\":" +
+        String(power.deepSleepArmAttempts);
+    extra += ",\"deepSleepArmFailures\":" +
+        String(power.deepSleepArmFailures);
     extra += ",\"wokeFromDeepSleep\":" +
         String(power.wokeFromDeepSleep ? "true" : "false");
     extra += ",\"deepSleepTouchWakeArmed\":" +
         String(power.deepSleepTouchWakeArmed ? "true" : "false");
     extra += ",\"lastWakeCause\":" + String(power.lastWakeCause);
+    extra += ",\"wakeCauses\":" + String(power.wakeCauses);
+    const PowerDiagnosticsSnapshot &powerDiagnostic =
+        powerDiagnostics_->snapshot();
+    extra += ",\"powerActiveFacts\":" +
+        String(powerDiagnostic.activeFacts);
+    extra += ",\"powerLightBlockers\":" +
+        String(powerDiagnostic.lightBlockers);
+    extra += ",\"powerDeepBlockers\":" +
+        String(powerDiagnostic.deepBlockers);
+    extra += ",\"powerCurrentBlockers\":" +
+        String(powerDiagnostic.currentBlockers);
+    extra += ",\"powerIdleMs\":" + String(powerDiagnostic.idleMs);
+    extra += ",\"powerDiagnosticCount\":" +
+        String(static_cast<unsigned>(powerDiagnostics_->count()));
+    extra += ",\"powerDiagnosticPersistFailures\":" +
+        String(powerDiagnostic.persistFailures);
+    extra += ",\"powerAutomaticScreenWakes\":" +
+        String(powerDiagnostic.automaticScreenWakes);
     extra += ",\"resetReason\":" +
         String(static_cast<unsigned>(esp_reset_reason()));
     extra += ",\"internalHeapFree\":" + String(static_cast<unsigned>(
@@ -719,6 +748,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     if (foregroundBusy()) sendBusy(requestId);
     else if (provisioningDiagnostics_->clear(*log_)) sendOk(requestId);
     else sendError(requestId, "provisioning diagnostics clear failed");
+  } else if (strcmp(operation, "get-power-diagnostics") == 0) {
+    sendJson(requestId, powerDiagnosticsJson());
+  } else if (strcmp(operation, "clear-power-diagnostics") == 0) {
+    if (foregroundBusy()) sendBusy(requestId);
+    else if (powerDiagnostics_->clear(*log_)) sendOk(requestId);
+    else sendError(requestId, "power diagnostics clear failed");
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
         "\",\"displayName\":\"PokePod\",\"platform\":\"pokepod\",\"manufacturer\":\"PokeCapsule\",\"model\":\"" +
@@ -1500,6 +1535,51 @@ String PokePodLinkService::provisioningDiagnosticsJson() const {
       cJSON_AddNumberToObject(item, "reason", record->reason);
       cJSON_AddStringToObject(item, "reasonKind",
                               wifiFailureKey(record->reason));
+      cJSON_AddItemToArray(records, item);
+    }
+  }
+  const String result = printed(root);
+  cJSON_Delete(root);
+  return result;
+}
+
+String PokePodLinkService::powerDiagnosticsJson() const {
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "status", "ok");
+  cJSON_AddNumberToObject(root, "version", kLinkVersion);
+  cJSON_AddNumberToObject(root, "schemaVersion", 1);
+  cJSON *blockerKeys = cJSON_AddArrayToObject(root, "blockerKeys");
+  for (uint8_t bit = 0;
+       bit <= static_cast<uint8_t>(PowerBlocker::beforeDeepTimeout); ++bit) {
+    cJSON_AddItemToArray(blockerKeys, cJSON_CreateString(powerBlockerKey(
+        static_cast<PowerBlocker>(bit))));
+  }
+  cJSON *records = cJSON_AddArrayToObject(root, "records");
+  if (powerDiagnostics_ != nullptr) {
+    for (size_t index = 0; index < powerDiagnostics_->count(); ++index) {
+      const StoredPowerLogRecord *record = powerDiagnostics_->newest(index);
+      if (record == nullptr) continue;
+      cJSON *item = cJSON_CreateObject();
+      cJSON_AddNumberToObject(item, "sequence", record->sequence);
+      cJSON_AddNumberToObject(item, "epoch", record->epoch);
+      cJSON_AddNumberToObject(item, "uptimeMs", record->uptimeMs);
+      cJSON_AddNumberToObject(item, "durationMs", record->durationMs);
+      cJSON_AddStringToObject(item, "event", powerLogEventKey(
+          static_cast<PowerLogEvent>(record->event)));
+      cJSON_AddStringToObject(item, "mode", powerModeName(
+          static_cast<PowerMode>(record->mode)));
+      cJSON_AddNumberToObject(item, "blockerMask", record->blockers);
+      cJSON_AddNumberToObject(item, "detail", record->detail);
+      char wakeMask[19];
+      snprintf(wakeMask, sizeof(wakeMask), "%016llx",
+               static_cast<unsigned long long>(record->ext1WakeMask));
+      cJSON_AddStringToObject(item, "wakeMask", wakeMask);
+      cJSON_AddNumberToObject(item, "error", record->error);
+      cJSON_AddNumberToObject(item, "flags", record->flags);
+      cJSON_AddNumberToObject(item, "resetReason", record->resetReason);
+      cJSON_AddNumberToObject(item, "wakeCause", record->wakeCause);
+      cJSON_AddNumberToObject(item, "batteryPercent",
+                              record->batteryPercent);
       cJSON_AddItemToArray(records, item);
     }
   }

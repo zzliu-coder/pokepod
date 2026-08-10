@@ -22,6 +22,7 @@
 #include "PokePodLinkService.h"
 #include "LinkServiceCoordinator.h"
 #include "PowerPolicy.h"
+#include "PowerDiagnostics.h"
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
 #include "TencentWorker.h"
@@ -52,6 +53,7 @@ WifiController wifi;
 TencentWorker tencentWorker;
 ProvisioningPortal provisioningPortal;
 ProvisioningDiagnostics provisioningDiagnostics;
+PowerDiagnostics powerDiagnostics;
 ProvisioningCoordinator provisioningCoordinator;
 PokePodLinkService linkService;
 LinkServiceCoordinator linkCoordinator;
@@ -160,13 +162,19 @@ bool pauseIdleRadios() {
   return bleReady && !wifi.radioOn();
 }
 
-void enterDeepSleep() {
+void enterDeepSleep(const PowerInputs &inputs) {
   (void)board.takeTouchInterrupt();
   if (!runtimePower.armDeepSleepWakeSources(automaticWakeEnabled(),
                                              usb.log())) {
+    powerDiagnostics.recordDeepSleepArmError(
+        millis(), runtimePower.snapshot().lastError, inputs,
+        board.status().batteryPercent, usb.log());
     noteUserActivity();
     return;
   }
+  powerDiagnostics.recordDeepSleepIntent(
+      millis(), inputs, runtimePower.snapshot().deepSleepWakeMask,
+      board.status().batteryPercent, usb.log());
   wifi.prepareForSleep();
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
@@ -177,6 +185,9 @@ void enterDeepSleep() {
 }
 
 [[noreturn]] void performSafeShutdown() {
+  const PowerInputs inputs = currentPowerInputs();
+  powerDiagnostics.recordSafeShutdown(
+      millis(), inputs, board.status().batteryPercent, usb.log());
   wifi.prepareForSleep();
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
@@ -440,6 +451,10 @@ void pollTouch() {
   if (!board.status().screenOn) {
     const bool touchInterrupt = board.takeTouchInterrupt();
     if (automaticWakeEnabled() && touchInterrupt && board.readTouch(x, y)) {
+      const PowerInputs inputs = currentPowerInputs(now);
+      powerDiagnostics.recordAutomaticScreenWake(
+          now, AutomaticScreenWakeSource::touchInterrupt, inputs,
+          board.status().batteryPercent, usb.log());
       ignoreTouchUntilRelease = true;
       setScreenState(true);
     }
@@ -813,6 +828,13 @@ void setup() {
       Serial, static_cast<uint16_t>(esp_reset_reason()));
   audio.begin(Serial);
   const bool usbStarted = usb.begin(board.status().variant);
+  runtimePower.begin(usb.log());
+  const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();
+  powerDiagnostics.begin(
+      usb.log(), static_cast<uint16_t>(esp_reset_reason()),
+      bootPower.lastWakeCause, bootPower.wakeCauses,
+      bootPower.ext1WakeMask, bootPower.automaticPmSupported,
+      bootPower.bleModemSleepSupported, board.status().batteryPercent);
   const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
   deviceConfig.begin(usb.log());
   const bool syncIdentityStarted =
@@ -825,19 +847,20 @@ void setup() {
   wifi.begin(deviceConfig, usb.log());
   provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
                                 provisioningDiagnostics, usb.log());
-  runtimePower.begin(usb.log());
   linkService.begin(usb.stream(), SD_MMC, board, audio, captureRouter,
                     usb, bleVoice,
                     dashboard,
                     capsuleLibrary, recorder,
                     deviceConfig, wifi, tencentWorker,
-                    provisioningDiagnostics, runtimePower, usb.log(),
+                    provisioningDiagnostics, powerDiagnostics,
+                    runtimePower, usb.log(),
                     &linkCoordinator, LinkTransport::usb, &wirelessSync,
                     nullptr, &provisioningCoordinator);
   const bool wifiSyncStarted = wirelessSync.begin(
       SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
       capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
-      provisioningDiagnostics, runtimePower, wirelessSyncIdentity,
+      provisioningDiagnostics, powerDiagnostics, runtimePower,
+      wirelessSyncIdentity,
       linkCoordinator, usb.log());
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
   if (provisioningDiagnostics.recoveredInterruptedSession()) {
@@ -994,16 +1017,19 @@ void loop() {
                                                    wirelessSync.linkBusy()) ||
                          lowBatteryShutdown.critical(),
                      board.status().charging);
-  currentPowerDecision = runtimePower.apply(currentPowerInputs(now), usb.log());
+  PowerInputs finalPowerInputs = currentPowerInputs(now);
+  currentPowerDecision = runtimePower.apply(finalPowerInputs, usb.log());
   if (currentPowerDecision.requestIdleRadioPause) {
     (void)pauseIdleRadios();
-    currentPowerDecision = runtimePower.apply(currentPowerInputs(now),
-                                               usb.log());
+    finalPowerInputs = currentPowerInputs(now);
+    currentPowerDecision = runtimePower.apply(finalPowerInputs, usb.log());
   }
+  powerDiagnostics.observe(now, finalPowerInputs, currentPowerDecision,
+                           board.status().batteryPercent, usb.log());
   if (currentPowerDecision.requestSafeShutdown) performSafeShutdown();
   if (currentPowerDecision.requestDeepSleep && !bleVoice.connected() &&
       !wifi.radioOn()) {
-    enterDeepSleep();
+    enterDeepSleep(finalPowerInputs);
   }
   if (now - lastTouchMs >= currentPowerDecision.touchPollMs) {
     lastTouchMs = now;
@@ -1039,11 +1065,19 @@ void loop() {
     bleVoice.setBatteryPercent(status.batteryPercent);
     if (!status.screenOn && automaticWakeEnabled() &&
         board.pollMotionWake()) {
+      const PowerInputs inputs = currentPowerInputs(now);
+      powerDiagnostics.recordAutomaticScreenWake(
+          now, AutomaticScreenWakeSource::motionInterrupt, inputs,
+          status.batteryPercent, usb.log());
       setScreenState(true);
     } else if (raiseToWake.update(now, automaticWakeEnabled(),
                                   status.screenOn, status.accelerationX,
                                   status.accelerationY,
                                   status.accelerationZ)) {
+      const PowerInputs inputs = currentPowerInputs(now);
+      powerDiagnostics.recordAutomaticScreenWake(
+          now, AutomaticScreenWakeSource::raiseToWakePolicy, inputs,
+          status.batteryPercent, usb.log());
       setScreenState(true);
     }
     const PowerKeyEvent powerKey = board.pollPowerKey();
@@ -1086,9 +1120,24 @@ void loop() {
   }
   if (currentPowerDecision.allowLightSleep) {
     const PowerInputs verifiedInputs = currentPowerInputs(now);
-    if (runtimePower.enterLightSleep(verifiedInputs, currentPowerDecision,
-                                     usb.log()) &&
-        runtimePower.snapshot().lastWakeCause == ESP_SLEEP_WAKEUP_GPIO) {
+    const uint32_t attemptsBefore =
+        runtimePower.snapshot().lightSleepAttempts;
+    const uint32_t failuresBefore =
+        runtimePower.snapshot().lightSleepFailures;
+    const bool slept = runtimePower.enterLightSleep(
+        verifiedInputs, currentPowerDecision, usb.log());
+    const RuntimePowerSnapshot &afterSleep = runtimePower.snapshot();
+    if (slept) {
+      powerDiagnostics.recordLightSleepWake(
+          millis(), afterSleep.lastLightSleepMs, afterSleep.lastWakeCause,
+          board.status().batteryPercent, usb.log());
+    } else if (afterSleep.lightSleepAttempts != attemptsBefore &&
+               afterSleep.lightSleepFailures != failuresBefore) {
+      powerDiagnostics.recordLightSleepError(
+          millis(), afterSleep.lastError, verifiedInputs,
+          board.status().batteryPercent, usb.log());
+    }
+    if (slept && afterSleep.lastWakeCause == ESP_SLEEP_WAKEUP_GPIO) {
       setScreenState(true);
       noteUserActivity();
     }

@@ -197,7 +197,8 @@ def main() -> int:
     parser.add_argument("--command", default="status",
                         choices=("hello", "status", "record", "stop",
                                  "provisioning-start", "provisioning-stop",
-                                 "reboot"))
+                                 "get-power-diagnostics",
+                                 "clear-power-diagnostics", "reboot"))
     parser.add_argument(
         "--install-font", metavar="PATH",
         help="install a PKF2 20px A4 font over PokePod Link v2",
@@ -231,6 +232,17 @@ def main() -> int:
                 UnicodeDecodeError, json.JSONDecodeError) as error:
             last_error = str(error)
             continue
+        if operation == "get-power-diagnostics":
+            blocker_keys = result.get("blockerKeys", [])
+            if isinstance(blocker_keys, list):
+                for record in result.get("records", []):
+                    if not isinstance(record, dict):
+                        continue
+                    mask = int(record.get("blockerMask", 0))
+                    record["blockers"] = [
+                        key for bit, key in enumerate(blocker_keys)
+                        if isinstance(key, str) and mask & (1 << bit)
+                    ]
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))
         return 0
     print(f"PokePod Link v2 did not answer: {last_error or 'no CDC port'}",
