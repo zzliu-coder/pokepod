@@ -20,6 +20,11 @@ struct TencentAsrResult {
   uint32_t connectElapsedMs = 0;
   uint32_t uploadElapsedMs = 0;
   uint32_t totalElapsedMs = 0;
+  int32_t networkError = 0;
+  String networkErrorDetail;
+  uint32_t internalHeapFreeBeforeTls = 0;
+  uint32_t internalHeapLargestBeforeTls = 0;
+  uint32_t psramFreeBeforeTls = 0;
 };
 
 class TencentAsr {

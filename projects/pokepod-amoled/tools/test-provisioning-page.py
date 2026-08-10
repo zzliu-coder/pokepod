@@ -57,7 +57,7 @@ assert r'\"validating\":' in source
 assert r'\"saved\":' in source
 assert "ProvisioningState ProvisioningPortal::state() const" in source
 assert "statusMessage_ = \"正在连接 \" + next.wifiSsid;" in source
-assert "statusMessage_ = \"已连接 \" + candidate_.wifiSsid;" in source
+assert "statusMessage_ = \"Wi-Fi 已连接\";" in source
 assert "view.portalStatus = provisioningPortal.statusMessage();" in main_source
 assert "view.portalState = provisioningPortal.state();" in main_source
 assert "String portalStatus;" in dashboard_header
@@ -72,6 +72,8 @@ assert "provisioningColor(view.portalState)" in provisioning_draw
 assert "诊断记录" in provisioning_draw
 assert "void Dashboard::drawProvisioningLog" in dashboard_source
 assert "provisioningLogStageLabel" in dashboard_source
+assert "renderer_.drawText(String(record->ssid)" in dashboard_source
+assert "UiTextSize::body" in dashboard_source
 signature = dashboard_source[
     dashboard_source.index("String Dashboard::signature"):
     dashboard_source.index("String Dashboard::topBarSignature")

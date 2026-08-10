@@ -62,6 +62,25 @@ String printed(cJSON *root) {
   return result;
 }
 
+String jsonEscaped(const String &value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t index = 0; index < value.length(); ++index) {
+    const char character = value[index];
+    switch (character) {
+      case '\\': escaped += "\\\\"; break;
+      case '"': escaped += "\\\""; break;
+      case '\n': escaped += "\\n"; break;
+      case '\r': escaped += "\\r"; break;
+      case '\t': escaped += "\\t"; break;
+      default:
+        if (static_cast<uint8_t>(character) >= 0x20) escaped += character;
+        break;
+    }
+  }
+  return escaped;
+}
+
 void replaceStringOrNull(cJSON *root, const char *name, const char *value) {
   cJSON *replacement = value == nullptr ? cJSON_CreateNull()
                                          : cJSON_CreateString(value);
@@ -527,6 +546,16 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"asr_connect_ms\":" + String(tencent_->lastConnectElapsedMs());
     extra += ",\"asr_upload_ms\":" + String(tencent_->lastUploadElapsedMs());
     extra += ",\"asr_total_ms\":" + String(tencent_->lastTotalElapsedMs());
+    extra += ",\"asr_last_code\":\"" + jsonEscaped(tencent_->lastCode()) + "\"";
+    extra += ",\"asr_tls_error\":" + String(tencent_->lastNetworkError());
+    extra += ",\"asr_tls_detail\":\"" +
+        jsonEscaped(tencent_->lastNetworkErrorDetail()) + "\"";
+    extra += ",\"asr_heap_free_before_tls\":" +
+        String(tencent_->lastInternalHeapFreeBeforeTls());
+    extra += ",\"asr_heap_largest_before_tls\":" +
+        String(tencent_->lastInternalHeapLargestBeforeTls());
+    extra += ",\"asr_psram_free_before_tls\":" +
+        String(tencent_->lastPsramFreeBeforeTls());
     extra += ",\"sdReady\":";
     extra += status.sdCard ? "true" : "false";
     extra += ",\"variant\":\"" + String(variantName(status.variant)) + "\"";

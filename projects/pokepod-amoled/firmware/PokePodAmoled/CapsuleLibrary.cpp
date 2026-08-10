@@ -155,9 +155,13 @@ bool CapsuleLibrary::readRecord(const String &directory, const String &folder,
     const char *title = jsonString(capsule, "title");
     const char *createdAt = jsonString(capsule, "createdAt");
     const char *audioFile = jsonString(processing, "audioFile");
+    const char *errorStage = jsonString(processing, "errorStage");
+    const char *error = jsonString(processing, "error");
     record.title = title == nullptr ? "语音胶囊" : title;
     record.createdAt = createdAt == nullptr ? "" : createdAt;
     record.audioFile = audioFile == nullptr ? "" : audioFile;
+    record.errorStage = errorStage == nullptr ? "" : errorStage;
+    record.error = error == nullptr ? "" : error;
     record.favorite = jsonBool(capsule, "favorite");
     record.archived = folder == "Archive" || folder.startsWith("Archive/");
     record.trashed = folder == ".trash" || folder.startsWith(".trash/");

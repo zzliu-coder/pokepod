@@ -71,13 +71,22 @@ class AutoScreenOffPolicy {
   bool shouldTurnOff(uint32_t nowMs, bool screenOn, bool keepAwake,
                      uint32_t timeoutMs = kDefaultTimeoutMs) const {
     return screenOn && !keepAwake &&
-        static_cast<uint32_t>(nowMs - lastActivityMs_) >= timeoutMs;
+        elapsedSinceActivity(nowMs) >= timeoutMs;
   }
   uint32_t idleMs(uint32_t nowMs) const {
-    return static_cast<uint32_t>(nowMs - lastActivityMs_);
+    return elapsedSinceActivity(nowMs);
   }
 
  private:
+  uint32_t elapsedSinceActivity(uint32_t nowMs) const {
+    // Touch handling can sample millis() a few milliseconds after the main
+    // loop captured nowMs. Treat that small future timestamp as zero idle
+    // time instead of letting unsigned subtraction look like 49 days. The
+    // signed delta still preserves the normal millis() wrap-around case.
+    const int32_t elapsed = static_cast<int32_t>(nowMs - lastActivityMs_);
+    return elapsed > 0 ? static_cast<uint32_t>(elapsed) : 0;
+  }
+
   uint32_t lastActivityMs_ = 0;
 };
 

@@ -50,5 +50,10 @@ int main() {
   autoOff.noteActivity(100);
   assert(!autoOff.shouldTurnOff(129, true, false, 30));
   assert(autoOff.shouldTurnOff(130, true, false, 30));
+  autoOff.noteActivity(1001);
+  assert(autoOff.idleMs(1000) == 0);
+  assert(!autoOff.shouldTurnOff(1000, true, false, 30));
+  assert(!autoOff.shouldTurnOff(1001, true, false, 30));
+  assert(autoOff.shouldTurnOff(1031, true, false, 30));
   return 0;
 }

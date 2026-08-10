@@ -92,7 +92,10 @@ class Dashboard {
   void closeOverlays();
   void back();
   void navigate(RootPage page);
-  void invalidate() { invalidated_ = true; }
+  void invalidate() {
+    invalidated_ = true;
+    scrollFramePending_ = false;
+  }
   const UiState &state() const { return state_; }
   const CapsuleSummary *selected(const CapsuleLibrary &library) const;
   bool sdFontReady() const { return renderer_.sdFontReady(); }
@@ -133,8 +136,9 @@ class Dashboard {
   void drawRecordingDynamic(const DashboardView &view, bool presentPartial);
   void drawDynamicRegions(const DashboardView &view);
   void presentFrame();
+  void presentScrollRegion();
   void presentRegion(int16_t x, int16_t y, int16_t width, int16_t height);
-  String signature(const DashboardView &view) const;
+  String signature(const DashboardView &view, bool includeScroll) const;
   String topBarSignature(const DashboardView &view) const;
   void reconcileCapsules(const CapsuleLibrary *library);
   ScrollPhysics *activeScroll();
@@ -149,7 +153,9 @@ class Dashboard {
   ChineseRenderer renderer_;
   UiState state_;
   bool invalidated_ = true;
+  bool scrollFramePending_ = false;
   String lastSignature_;
+  String lastStableSignature_;
   String lastTopBarSignature_;
   bool lastWirelessHolding_ = false;
   bool lastRecording_ = false;

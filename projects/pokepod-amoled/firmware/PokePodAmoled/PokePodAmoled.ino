@@ -24,6 +24,7 @@
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
 #include "TencentWorker.h"
+#include "TlsExternalMemory.h"
 #include "UsbLinkBridge.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
@@ -380,6 +381,7 @@ void pollTouch() {
     }
     if (touchVerticalScrolling) {
       if (dashboard.updateVerticalScroll(y, now, capsuleLibrary)) {
+        noteUserActivity(now);
         scrollRedrawPending = true;
       }
       return;
@@ -605,7 +607,9 @@ void pollTouch() {
           showMessage("删除失败");
         }
       } else if (action == UiAction::retry) {
-        if (selected->status != CapsuleStatus::failed) return;
+        if (selected->status != CapsuleStatus::failed &&
+            !(selected->status == CapsuleStatus::queued &&
+              !selected->error.isEmpty())) return;
         if (capsuleLibrary.requeue(id)) {
           dashboard.closeOverlays();
           tencentWorker.wake();
@@ -642,6 +646,7 @@ void setup() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
 
   board.begin(Serial);
+  beginTlsExternalMemory(Serial);
   provisioningDiagnostics.begin(
       Serial, static_cast<uint16_t>(esp_reset_reason()));
   audio.begin(Serial);
@@ -858,7 +863,8 @@ void loop() {
     }
   }
   const bool keepScreenAwake = recorder.recording() || wirelessUiActive ||
-      audio.playing() || provisioningCoordinator.visible();
+      audio.playing() || provisioningCoordinator.visible() ||
+      touchVerticalScrolling || dashboard.scrollActive();
   if (autoScreenOff.shouldTurnOff(now, board.status().screenOn,
                                  keepScreenAwake)) {
     setScreenState(false);

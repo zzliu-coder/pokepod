@@ -34,6 +34,12 @@ require(main, "dashboard.advanceVerticalScroll(now, capsuleLibrary)",
         "inertial scrolling is not serviced")
 require(main, "ui::kScrollFrameIntervalMs",
         "scroll frame pacing is missing")
+require(dashboard, "presentScrollRegion()",
+        "scroll frames still present the entire AMOLED frame")
+require(dashboard, "currentStableSignature == lastStableSignature_",
+        "scroll-only presentation is not guarded against structural changes")
+require(main, "touchVerticalScrolling || dashboard.scrollActive()",
+        "active scrolling can still trigger screen timeout")
 require(power, "input.uiAnimating", "scrolling does not request performance")
 require(renderer, "loadSdCache(codepoint, glyph)",
         "SD glyph cache is not used")

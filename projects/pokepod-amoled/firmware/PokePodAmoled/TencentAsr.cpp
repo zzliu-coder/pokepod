@@ -1,7 +1,9 @@
 #include "TencentAsr.h"
 
 #include <NetworkClientSecure.h>
+#include <Network.h>
 #include <cJSON.h>
+#include <esp_heap_caps.h>
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
 #include <time.h>
@@ -140,15 +142,43 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     return false;
   }
 
+  IPAddress resolvedAddress;
+  if (!Network.hostByName(kHost, resolvedAddress)) {
+    audio.close();
+    result.transient = true;
+    result.code = "DNS_FAILED";
+    result.message = "腾讯云域名解析失败";
+    log.println("{\"event\":\"tencent_asr_network\",\"stage\":\"dns\",\"ok\":false}");
+    return false;
+  }
+
+  result.internalHeapFreeBeforeTls = heap_caps_get_free_size(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  result.internalHeapLargestBeforeTls = heap_caps_get_largest_free_block(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  result.psramFreeBeforeTls = heap_caps_get_free_size(
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  log.printf(
+      "{\"event\":\"tencent_asr_network\",\"stage\":\"tls_begin\",\"internal_free\":%lu,\"internal_largest\":%lu,\"psram_free\":%lu}\n",
+      static_cast<unsigned long>(result.internalHeapFreeBeforeTls),
+      static_cast<unsigned long>(result.internalHeapLargestBeforeTls),
+      static_cast<unsigned long>(result.psramFreeBeforeTls));
+
   NetworkClientSecure client;
   client.setCACert(kTencentRootCa);
   client.setHandshakeTimeout(15);
   client.setTimeout(kSocketIoTimeoutMs);
   if (!client.connect(kHost, 443, 15000)) {
+    char networkError[160] = {};
+    result.networkError = client.lastError(networkError, sizeof(networkError));
+    result.networkErrorDetail = networkError;
     audio.close();
     result.transient = true;
     result.code = "NETWORK_CONNECT_FAILED";
     result.message = "腾讯云 TLS 连接失败";
+    log.printf(
+        "{\"event\":\"tencent_asr_network\",\"stage\":\"tls\",\"ok\":false,\"error\":%ld}\n",
+        static_cast<long>(result.networkError));
     return false;
   }
   result.connectElapsedMs = millis() - startedAtMs;

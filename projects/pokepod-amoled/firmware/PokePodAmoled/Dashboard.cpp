@@ -5,21 +5,24 @@
 namespace pokepod {
 namespace {
 
-String wifiLabel(WifiPhase phase) {
+String wifiLabel(WifiPhase phase, bool automaticEnabled) {
   switch (phase) {
     case WifiPhase::online: return "已连接";
     case WifiPhase::connecting: return "连接中";
     case WifiPhase::grace: return "已连接";
     case WifiPhase::provisioning: return "配网中";
     case WifiPhase::error: return "需要检查";
-    case WifiPhase::off: return "已关闭";
+    case WifiPhase::off: return automaticEnabled ? "省电休眠" : "已关闭";
     case WifiPhase::disabled: return "未设置";
   }
   return "";
 }
 
-String capsuleStatus(CapsuleStatus status) {
-  switch (status) {
+String capsuleStatus(const CapsuleSummary &record) {
+  if (record.status == CapsuleStatus::queued && !record.error.isEmpty()) {
+    return "网络重试";
+  }
+  switch (record.status) {
     case CapsuleStatus::queued: return "待转写";
     case CapsuleStatus::transcribing: return "转写中";
     case CapsuleStatus::rawReady: return "转写完成";
@@ -76,6 +79,9 @@ bool generatedVoiceTitle(const String &title) {
 }
 
 String capsuleDisplayText(const CapsuleSummary &record) {
+  if (record.status == CapsuleStatus::queued && !record.error.isEmpty()) {
+    return "等待网络重试";
+  }
   if (!record.preview.isEmpty() &&
       !(record.preview == record.title && generatedVoiceTitle(record.title))) {
     return record.preview;
@@ -139,7 +145,8 @@ void Dashboard::draw(const DashboardView &view) {
   if (display_ == nullptr || view.board == nullptr) return;
   const uint32_t libraryRevision =
       view.library == nullptr ? 0 : view.library->revision();
-  if (libraryRevision != lastLibraryRevision_) {
+  const bool libraryChanged = libraryRevision != lastLibraryRevision_;
+  if (libraryChanged) {
     detailBodyCacheKey_ = "";
     reconcileCapsules(view.library);
     lastLibraryRevision_ = libraryRevision;
@@ -172,9 +179,13 @@ void Dashboard::draw(const DashboardView &view) {
   }
   state_.homeMode = view.recording ? HomeMode::recording :
       (view.transcribing ? HomeMode::transcribing : HomeMode::idle);
-  const String currentSignature = signature(view);
+  const String currentSignature = signature(view, true);
+  const String currentStableSignature = signature(view, false);
   bool bodyRepainted = false;
   if (invalidated_) {
+    const bool scrollOnly = scrollFramePending_ && frame_ != nullptr &&
+        !libraryChanged && !lastSignature_.isEmpty() &&
+        currentStableSignature == lastStableSignature_;
     display_->fillScreen(ui::kBackground);
     if (state_.screen() == UiScreen::home ||
         state_.screen() == UiScreen::capsules ||
@@ -184,13 +195,20 @@ void Dashboard::draw(const DashboardView &view) {
     if (plan.composeRecordingBeforeFullPresent) {
       drawRecordingDynamic(view, false);
     }
-    presentFrame();
+    if (scrollOnly) {
+      presentScrollRegion();
+      ++partialRedrawCount_;
+    } else {
+      presentFrame();
+      ++fullRedrawCount_;
+    }
     bodyRepainted = true;
-    ++fullRedrawCount_;
     lastSignature_ = currentSignature;
+    lastStableSignature_ = currentStableSignature;
     lastTopBarSignature_ = topBarSignature(view);
     lastWirelessHolding_ = view.wirelessHolding;
     invalidated_ = false;
+    scrollFramePending_ = false;
   } else if (currentSignature != lastSignature_) {
     display_->fillScreen(ui::kBackground);
     if (state_.screen() == UiScreen::home ||
@@ -205,6 +223,7 @@ void Dashboard::draw(const DashboardView &view) {
     bodyRepainted = true;
     ++bodyRedrawCount_;
     lastSignature_ = currentSignature;
+    lastStableSignature_ = currentStableSignature;
     lastTopBarSignature_ = topBarSignature(view);
     lastWirelessHolding_ = view.wirelessHolding;
   }
@@ -364,7 +383,7 @@ void Dashboard::drawCapsules(const DashboardView &view) {
                        0, true, UiTextSize::body, false, 0,
                        ui::kCapsuleListTop, listBottom);
     String metadata = capsuleTime(*record) + "  " +
-        capsuleStatus(record->status);
+        capsuleStatus(*record);
     const String duration = durationLabel(record->durationMs);
     if (!duration.isEmpty()) metadata += "  " + duration;
     renderer_.drawText(metadata, 42, y + 34, 276, 1,
@@ -413,7 +432,7 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
     drawCenteredText("胶囊需要检查", 190, UiTextSize::body, ui::kError, true);
     return;
   }
-  const String status = capsuleStatus(record->status);
+  const String status = capsuleStatus(*record);
   const int16_t statusWidth = renderer_.measureTextWidth(status);
   renderer_.drawText(status, 348 - statusWidth, 20, statusWidth, 1,
                      capsuleStatusColor(record->status), ui::kBackground);
@@ -447,7 +466,9 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
                      true, UiTextSize::body, false, pixelOffset,
                      ui::kDetailTextTop, ui::kDetailTextBottom);
 
-  const bool needsRetry = record->status == CapsuleStatus::failed &&
+  const bool needsRetry =
+      (record->status == CapsuleStatus::failed ||
+       (record->status == CapsuleStatus::queued && !record->error.isEmpty())) &&
       !record->trashed;
   state_.detailRetryEnabled = needsRetry;
   state_.detailTrashEnabled = !record->trashed &&
@@ -553,7 +574,8 @@ void Dashboard::drawDevice(const DashboardView &view) {
   const bool wifiEnabled = view.settings != nullptr &&
       view.settings->wifiEnabled;
   drawSettingRow(ui::kDeviceWifiTop, UiIcon::wifi, "无线网络",
-                 wifiLabel(view.wifiPhase), wifiColor(view.wifiPhase),
+                 wifiLabel(view.wifiPhase, wifiEnabled),
+                 wifiColor(view.wifiPhase),
                  SettingAccessory::toggle, wifiEnabled);
   char pairingLabel[24];
   snprintf(pairingLabel, sizeof(pairingLabel), "配对码 %06lu",
@@ -700,12 +722,22 @@ void Dashboard::drawProvisioningLog(const DashboardView &view) {
                        UiTextSize::compact, false, 0,
                        ui::kProvisionLogListTop,
                        ui::kProvisionLogListBottom);
-    String detail = provisioningLogReasonLabel(*record);
-    if (record->ssid[0] != '\0') detail = String(record->ssid) + " · " + detail;
-    renderer_.drawText(detail, 40, top + 42, 300, 2, color,
-                       ui::kBackground, 0, false, UiTextSize::compact,
-                       false, 0, ui::kProvisionLogListTop,
-                       ui::kProvisionLogListBottom);
+    const String reason = provisioningLogReasonLabel(*record);
+    if (record->ssid[0] != '\0') {
+      renderer_.drawText(String(record->ssid), 40, top + 34, 300, 1, color,
+                         ui::kBackground, 0, false, UiTextSize::body,
+                         true, 0, ui::kProvisionLogListTop,
+                         ui::kProvisionLogListBottom);
+      renderer_.drawText(reason, 40, top + 63, 300, 1, color,
+                         ui::kBackground, 0, false, UiTextSize::compact,
+                         false, 0, ui::kProvisionLogListTop,
+                         ui::kProvisionLogListBottom);
+    } else {
+      renderer_.drawText(reason, 40, top + 42, 300, 2, color,
+                         ui::kBackground, 0, false, UiTextSize::compact,
+                         false, 0, ui::kProvisionLogListTop,
+                         ui::kProvisionLogListBottom);
+    }
     if (top + 86 >= ui::kProvisionLogListTop &&
         top + 86 < ui::kProvisionLogListBottom) {
       display_->drawFastHLine(40, top + 86, 308, ui::kDivider);
@@ -894,6 +926,25 @@ void Dashboard::presentFrame() {
   if (frame_ != nullptr) frame_->flush();
 }
 
+void Dashboard::presentScrollRegion() {
+  UiScrollSurface surface = UiScrollSurface::none;
+  switch (state_.screen()) {
+    case UiScreen::capsules: surface = UiScrollSurface::capsules; break;
+    case UiScreen::capsuleDetail: surface = UiScrollSurface::detail; break;
+    case UiScreen::provisioningLog:
+      surface = UiScrollSurface::provisioningLog;
+      break;
+    default: break;
+  }
+  const UiPresentRegion region = scrollPresentRegion(
+      surface, browserState_.selectionMode());
+  if (region.valid()) {
+    presentRegion(region.x, region.y, region.width, region.height);
+  } else {
+    presentFrame();
+  }
+}
+
 void Dashboard::presentRegion(int16_t x, int16_t y,
                               int16_t width, int16_t height) {
   if (frame_ == nullptr || output_ == nullptr) return;
@@ -903,7 +954,8 @@ void Dashboard::presentRegion(int16_t x, int16_t y,
                              width, height, ui::kScreenWidth - width);
 }
 
-String Dashboard::signature(const DashboardView &view) const {
+String Dashboard::signature(const DashboardView &view,
+                            bool includeScroll) const {
   String value;
   value.reserve(320);
   value += static_cast<int>(state_.screen());
@@ -912,9 +964,9 @@ String Dashboard::signature(const DashboardView &view) const {
   value += ':';
   value += browserState_.focusedId().c_str();
   value += ':';
-  value += capsuleScroll_.positionPx();
+  value += includeScroll ? capsuleScroll_.positionPx() : 0;
   value += ':';
-  value += detailScroll_.positionPx();
+  value += includeScroll ? detailScroll_.positionPx() : 0;
   value += ':';
   value += view.recording;
   value += ':';
@@ -977,7 +1029,8 @@ String Dashboard::signature(const DashboardView &view) const {
       state_.screen() == UiScreen::capsules) {
     value += ':';
     value += view.library == nullptr ? 0 : view.library->count();
-    if (view.library != nullptr && state_.screen() == UiScreen::capsules) {
+    if (includeScroll && view.library != nullptr &&
+        state_.screen() == UiScreen::capsules) {
       const size_t firstIndex = static_cast<size_t>(
           capsuleScroll_.positionPx() / ui::kCapsuleRowStride);
       for (uint8_t row = 0; row < ui::kCapsuleVisibleRows + 2; ++row) {
@@ -1040,7 +1093,7 @@ String Dashboard::signature(const DashboardView &view) const {
     value += view.provisioningDiagnostics == nullptr
         ? 0 : view.provisioningDiagnostics->revision();
     value += ':';
-    value += provisioningLogScroll_.positionPx();
+    value += includeScroll ? provisioningLogScroll_.positionPx() : 0;
   }
   return value;
 }
@@ -1140,7 +1193,10 @@ bool Dashboard::updateVerticalScroll(int16_t y, uint32_t nowMs,
   ScrollPhysics *scroll = activeScroll();
   if (scroll == nullptr) return false;
   const bool changed = scroll->dragTo(y, nowMs);
-  if (changed) invalidated_ = true;
+  if (changed) {
+    invalidated_ = true;
+    scrollFramePending_ = true;
+  }
   return changed;
 }
 
@@ -1155,7 +1211,10 @@ bool Dashboard::advanceVerticalScroll(uint32_t nowMs,
   ScrollPhysics *scroll = activeScroll();
   if (scroll == nullptr) return false;
   const bool changed = scroll->tick(nowMs);
-  if (changed) invalidated_ = true;
+  if (changed) {
+    invalidated_ = true;
+    scrollFramePending_ = true;
+  }
   return changed;
 }
 

@@ -203,7 +203,7 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
       if (config_->save(candidate_, *log_)) {
         changed_ = true;
         saved_ = true;
-        statusMessage_ = "已连接 " + candidate_.wifiSsid;
+        statusMessage_ = "Wi-Fi 已连接";
         closeAtMs_ = nowMs + 1800;
         diagnostics_->record(ProvisioningLogStage::configSaved,
                              ProvisioningLogOutcome::success,

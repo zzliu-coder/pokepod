@@ -27,6 +27,16 @@ class TencentWorker {
   uint32_t lastConnectElapsedMs() const { return lastConnectElapsedMs_; }
   uint32_t lastUploadElapsedMs() const { return lastUploadElapsedMs_; }
   uint32_t lastTotalElapsedMs() const { return lastTotalElapsedMs_; }
+  const String &lastCode() const { return lastCode_; }
+  const String &lastNetworkErrorDetail() const { return lastNetworkErrorDetail_; }
+  int32_t lastNetworkError() const { return lastNetworkError_; }
+  uint32_t lastInternalHeapFreeBeforeTls() const {
+    return lastInternalHeapFreeBeforeTls_;
+  }
+  uint32_t lastInternalHeapLargestBeforeTls() const {
+    return lastInternalHeapLargestBeforeTls_;
+  }
+  uint32_t lastPsramFreeBeforeTls() const { return lastPsramFreeBeforeTls_; }
 
  private:
   static void taskEntry(void *context);
@@ -53,6 +63,12 @@ class TencentWorker {
   uint32_t lastConnectElapsedMs_ = 0;
   uint32_t lastUploadElapsedMs_ = 0;
   uint32_t lastTotalElapsedMs_ = 0;
+  String lastCode_;
+  String lastNetworkErrorDetail_;
+  int32_t lastNetworkError_ = 0;
+  uint32_t lastInternalHeapFreeBeforeTls_ = 0;
+  uint32_t lastInternalHeapLargestBeforeTls_ = 0;
+  uint32_t lastPsramFreeBeforeTls_ = 0;
 };
 
 }  // namespace pokepod

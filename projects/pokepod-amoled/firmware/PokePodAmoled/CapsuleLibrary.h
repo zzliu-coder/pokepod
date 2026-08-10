@@ -27,6 +27,8 @@ struct CapsuleSummary {
   String createdAt;
   String preview;
   String audioFile;
+  String errorStage;
+  String error;
   CapsuleStatus status = CapsuleStatus::damaged;
   bool favorite = false;
   bool archived = false;

@@ -1,5 +1,7 @@
 #include "TencentWorker.h"
 
+#include <esp_heap_caps.h>
+
 #include "CapsulePolicy.h"
 #include "WifiPolicy.h"
 
@@ -51,8 +53,9 @@ void TencentWorker::loop(uint32_t nowMs, bool networkReady, bool timeReady,
   taskResult_ = TencentAsrResult();
   resultReady_.store(false, std::memory_order_relaxed);
   working_.store(true, std::memory_order_release);
-  if (xTaskCreatePinnedToCore(taskEntry, "pokepod-asr", 16384, this, 1,
-                             nullptr, 0) != pdPASS) {
+  if (xTaskCreatePinnedToCoreWithCaps(
+          taskEntry, "pokepod-asr", 16384, this, 1, nullptr, 0,
+          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
     working_.store(false, std::memory_order_release);
     library_->markRetryable(id, "transcription", "无法启动转写后台任务");
     nextAttemptMs_ = nowMs + wifiRetryDelayMs(0);
@@ -61,7 +64,7 @@ void TencentWorker::loop(uint32_t nowMs, bool networkReady, bool timeReady,
 
 void TencentWorker::taskEntry(void *context) {
   static_cast<TencentWorker *>(context)->runAttempt();
-  vTaskDelete(nullptr);
+  vTaskDeleteWithCaps(nullptr);
 }
 
 void TencentWorker::runAttempt() {
@@ -78,6 +81,12 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
   lastConnectElapsedMs_ = result.connectElapsedMs;
   lastUploadElapsedMs_ = result.uploadElapsedMs;
   lastTotalElapsedMs_ = result.totalElapsedMs;
+  lastCode_ = result.code;
+  lastNetworkError_ = result.networkError;
+  lastNetworkErrorDetail_ = result.networkErrorDetail;
+  lastInternalHeapFreeBeforeTls_ = result.internalHeapFreeBeforeTls;
+  lastInternalHeapLargestBeforeTls_ = result.internalHeapLargestBeforeTls;
+  lastPsramFreeBeforeTls_ = result.psramFreeBeforeTls;
   if (result.ok) {
     if (!library_->commitRawText(id, result.text)) {
       library_->markFailure(id, "storage", "转写成功但 raw.txt 提交失败");
