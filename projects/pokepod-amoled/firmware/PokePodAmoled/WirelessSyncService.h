@@ -88,6 +88,7 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
   bool authenticationObserved_ = false;
   bool networkConnected_ = false;
   uint32_t clientStartedAtMs_ = 0;
+  uint32_t observedMaintenanceStartRevision_ = 0;
   uint32_t observedMaintenanceCompletionRevision_ = 0;
   uint32_t lastCompletedAtMs_ = 0;
   String lastError_;

@@ -37,6 +37,7 @@ bool WirelessSyncService::begin(
                        provisioningDiagnostics, power, log, &coordinator,
                        LinkTransport::wifi, nullptr,
                        &window_.transferGate(), nullptr);
+  observedMaintenanceStartRevision_ = link_.maintenanceStartRevision();
   observedMaintenanceCompletionRevision_ =
       link_.maintenanceCompletionRevision();
   log.printf("{\"event\":\"wifi_sync_service\",\"ok\":%s,\"tls_identity\":%s}\n",
@@ -170,15 +171,22 @@ void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
       }
     }
     link_.poll(nowMs);
+    const uint32_t startRevision = link_.maintenanceStartRevision();
+    if (startRevision != observedMaintenanceStartRevision_) {
+      observedMaintenanceStartRevision_ = startRevision;
+      lastCompletedAtMs_ = 0;
+    }
     const uint32_t completionRevision =
         link_.maintenanceCompletionRevision();
     if (completionRevision != observedMaintenanceCompletionRevision_) {
       observedMaintenanceCompletionRevision_ = completionRevision;
-      lastCompletedAtMs_ = nowMs == 0 ? 1 : nowMs;
-      lastError_ = "";
-      if (log_ != nullptr) {
-        log_->println(
-            "{\"event\":\"wifi_sync_session\",\"completed\":true}");
+      if (link_.maintenanceCompletedStartRevision() == startRevision) {
+        lastCompletedAtMs_ = nowMs == 0 ? 1 : nowMs;
+        lastError_ = "";
+        if (log_ != nullptr) {
+          log_->println(
+              "{\"event\":\"wifi_sync_session\",\"completed\":true}");
+        }
       }
     }
     if (tls_.failed() || tls_.closed()) {
@@ -219,6 +227,7 @@ void WirelessSyncService::acceptClient(uint32_t nowMs) {
   clientPresent_ = true;
   authenticationObserved_ = false;
   clientStartedAtMs_ = nowMs == 0 ? 1 : nowMs;
+  lastCompletedAtMs_ = 0;
   lastError_ = "";
 }
 

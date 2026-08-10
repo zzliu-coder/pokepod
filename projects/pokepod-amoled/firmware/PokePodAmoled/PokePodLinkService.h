@@ -8,6 +8,7 @@
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkTransferGate.h"
+#include "MaintenanceCompletionTracker.h"
 
 namespace pokepod {
 
@@ -49,8 +50,14 @@ class PokePodLinkService {
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
+  uint32_t maintenanceStartRevision() const {
+    return maintenanceCompletion_.startRevision();
+  }
   uint32_t maintenanceCompletionRevision() const {
-    return maintenanceCompletionRevision_;
+    return maintenanceCompletion_.completionRevision();
+  }
+  uint32_t maintenanceCompletedStartRevision() const {
+    return maintenanceCompletion_.completedStartRevision();
   }
 
  private:
@@ -74,7 +81,7 @@ class PokePodLinkService {
   bool executeCommand(const String &path, const String &transactionId,
                       String &message);
 
-  void sendOk(uint32_t requestId, const char *extraJson = nullptr);
+  bool sendOk(uint32_t requestId, const char *extraJson = nullptr);
   void sendBusy(uint32_t requestId, uint32_t retryAfterMs = 150);
   void sendError(uint32_t requestId, const char *message);
   bool sendJson(uint32_t requestId, const String &json);
@@ -174,7 +181,7 @@ class PokePodLinkService {
   uint32_t incomingLastByteMs_ = 0;
   uint32_t rebootAtMs_ = 0;
   String activeMaintenance_;
-  uint32_t maintenanceCompletionRevision_ = 0;
+  MaintenanceCompletionTracker maintenanceCompletion_;
 };
 
 }  // namespace pokepod

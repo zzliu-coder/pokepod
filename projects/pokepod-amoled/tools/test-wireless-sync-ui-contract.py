@@ -14,9 +14,24 @@ ui_policy = (source / "UiPolicy.h").read_text()
 assert "maintenanceCompletionRevision() const" in link_header
 assert 'strcmp(operation, "endMaintenance") == 0' in link_source
 assert "completedMaintenance = true;" in link_source
-assert "if (persisted && completedMaintenance)" in link_source
+assert "maintenanceCompletion_.endResultPersisted" in link_source
+assert "maintenanceCompletion_.resultFetched(transactionId, fullySent)" in link_source
+assert "maintenanceCompletion_.beginAccepted();" in link_source
+assert "beginResultPersisted" not in link_source
+begin_assignment = link_source.index("activeMaintenance_ = maintenanceId;")
+begin_revision = link_source.index(
+    "maintenanceCompletion_.beginAccepted();", begin_assignment
+)
+begin_success = link_source.index("success = true;", begin_assignment)
+assert begin_assignment < begin_revision < begin_success
+assert "persisted && beganMaintenance" not in link_source
+assert "maintenanceCompletion_.disconnect();" in link_source
+assert "++maintenanceCompletionRevision_" not in link_source
 assert "link_.maintenanceCompletionRevision()" in sync_source
+assert "link_.maintenanceStartRevision()" in sync_source
+assert "link_.maintenanceCompletedStartRevision() == startRevision" in sync_source
 assert "lastCompletedAtMs_ = nowMs == 0 ? 1 : nowMs;" in sync_source
+assert "lastCompletedAtMs_ = 0;" in sync_source
 assert 'lastError_ == "listener-start-failed"' in sync_source
 assert 'lastError_ == "bonjour-start-failed"' in sync_source
 

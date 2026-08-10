@@ -197,6 +197,7 @@ void PokePodLinkService::disconnect() {
   incomingTemporaryPath_ = incomingFinalPath_ = incomingTransactionId_ = "";
   incomingLastByteMs_ = 0;
   activeMaintenance_ = "";
+  maintenanceCompletion_.disconnect();
   sessionActive_ = false;
   completed_.clear();
   resetFrame();
@@ -715,8 +716,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     }
     const String path = String(kCapsuleSystem) + "/commands/results/" +
         transactionId + ".json";
-    if (!fs_->exists(path)) sendOk(requestId, "\"available\":false");
-    else sendFile(requestId, path);
+    if (!fs_->exists(path)) {
+      sendOk(requestId, "\"available\":false");
+    } else {
+      const bool fullySent = sendFile(requestId, path);
+      maintenanceCompletion_.resultFetched(transactionId, fullySent);
+    }
   } else if (strcmp(operation, "configure") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
     else handleConfigure(requestId, root);
@@ -1482,6 +1487,10 @@ bool PokePodLinkService::executeCommand(const String &path,
           message = "another maintenance session is active";
         } else {
           activeMaintenance_ = maintenanceId;
+          // A newly accepted transaction immediately invalidates the prior
+          // session's completed presentation, even if persisting this command
+          // result later fails.
+          maintenanceCompletion_.beginAccepted();
           success = true;
           message = "committed";
         }
@@ -1693,18 +1702,20 @@ bool PokePodLinkService::executeCommand(const String &path,
   cJSON_Delete(result);
   cJSON_Delete(root);
   library_->scan();
-  if (persisted && completedMaintenance) ++maintenanceCompletionRevision_;
+  if (persisted && completedMaintenance) {
+    maintenanceCompletion_.endResultPersisted(transactionId.c_str());
+  }
   return persisted;
 }
 
-void PokePodLinkService::sendOk(uint32_t requestId, const char *extraJson) {
+bool PokePodLinkService::sendOk(uint32_t requestId, const char *extraJson) {
   String value = "{\"status\":\"ok\",\"version\":2";
   if (extraJson != nullptr && extraJson[0] != '\0') {
     value += ',';
     value += extraJson;
   }
   value += '}';
-  sendJson(requestId, value);
+  return sendJson(requestId, value);
 }
 
 void PokePodLinkService::sendBusy(uint32_t requestId, uint32_t retryAfterMs) {
@@ -1742,7 +1753,12 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
     return false;
   }
   const size_t length = file.size();
-  sendOk(requestId, ("\"available\":true,\"binaryLength\":" + String(length)).c_str());
+  if (!sendOk(requestId,
+              ("\"available\":true,\"binaryLength\":" +
+               String(length)).c_str())) {
+    file.close();
+    return false;
+  }
   size_t sent = 0;
   while (sent < length) {
     if (!transferPermitted()) {
