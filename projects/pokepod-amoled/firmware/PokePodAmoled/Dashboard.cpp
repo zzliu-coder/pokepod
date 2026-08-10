@@ -108,6 +108,91 @@ uint16_t provisioningColor(ProvisioningState state) {
   return ui::kMuted;
 }
 
+WirelessSyncPresentationInput wirelessSyncInput(const DashboardView &view) {
+  WirelessSyncPresentationInput input;
+  input.secureReady = view.wifiSyncSecureReady;
+  input.paired = view.wifiSyncPaired;
+  input.windowOpen = view.wifiSyncOpen;
+  input.networkConnected = view.wifiSyncNetworkConnected;
+  input.listenerActive = view.wifiSyncListener;
+  input.bonjourActive = view.wifiSyncBonjour;
+  input.clientConnected = view.wifiSyncClient;
+  input.authenticated = view.wifiSyncAuthenticated;
+  input.linkBusy = view.wifiSyncBusy;
+  input.completed = view.wifiSyncCompleted;
+  input.hasError = !view.wifiSyncLastError.isEmpty();
+  input.remainingSeconds = view.wifiSyncRemainingSeconds;
+  return input;
+}
+
+String syncClock(uint32_t seconds) {
+  char value[16];
+  snprintf(value, sizeof(value), "%lu:%02lu",
+           static_cast<unsigned long>(seconds / 60),
+           static_cast<unsigned long>(seconds % 60));
+  return String(value);
+}
+
+String syncPhaseTitle(WirelessSyncPresentationPhase phase) {
+  switch (phase) {
+    case WirelessSyncPresentationPhase::unpaired: return "等待配对";
+    case WirelessSyncPresentationPhase::idle: return "同步已关闭";
+    case WirelessSyncPresentationPhase::opening: return "正在开启";
+    case WirelessSyncPresentationPhase::waiting: return "等待 Mac";
+    case WirelessSyncPresentationPhase::authenticating: return "正在认证";
+    case WirelessSyncPresentationPhase::syncing: return "正在同步";
+    case WirelessSyncPresentationPhase::completed: return "同步完成";
+    case WirelessSyncPresentationPhase::failed: return "连接失败";
+  }
+  return "电脑同步";
+}
+
+String syncEntryLabel(WirelessSyncPresentationPhase phase,
+                      uint32_t remainingSeconds) {
+  switch (phase) {
+    case WirelessSyncPresentationPhase::opening: return "开启中";
+    case WirelessSyncPresentationPhase::waiting:
+      return syncClock(remainingSeconds);
+    case WirelessSyncPresentationPhase::authenticating: return "认证中";
+    case WirelessSyncPresentationPhase::syncing: return "同步中";
+    case WirelessSyncPresentationPhase::completed: return "已完成";
+    case WirelessSyncPresentationPhase::failed: return "失败";
+    case WirelessSyncPresentationPhase::unpaired:
+    case WirelessSyncPresentationPhase::idle: return "同步";
+  }
+  return "同步";
+}
+
+uint16_t syncPhaseColor(WirelessSyncPresentationPhase phase) {
+  switch (phase) {
+    case WirelessSyncPresentationPhase::waiting:
+    case WirelessSyncPresentationPhase::syncing:
+    case WirelessSyncPresentationPhase::completed: return ui::kAccent;
+    case WirelessSyncPresentationPhase::opening:
+    case WirelessSyncPresentationPhase::authenticating: return ui::kWaiting;
+    case WirelessSyncPresentationPhase::failed: return ui::kError;
+    case WirelessSyncPresentationPhase::unpaired:
+    case WirelessSyncPresentationPhase::idle: return ui::kMuted;
+  }
+  return ui::kMuted;
+}
+
+String syncErrorLabel(const String &error) {
+  if (error == "network-unavailable") return "Wi-Fi 连接中断";
+  if (error == "secure-server-unavailable") return "安全服务未就绪";
+  if (error == "listener-start-failed") return "监听服务启动失败";
+  if (error == "bonjour-start-failed") return "局域网发现启动失败";
+  if (error == "tls-initialization-failed" || error == "tls-failed") {
+    return "安全连接失败";
+  }
+  if (error == "authentication-failed") return "Mac 认证失败";
+  if (error == "authentication-timeout") return "Mac 认证超时";
+  if (error == "peer-closed" || error == "link-disconnected") {
+    return "Mac 已断开";
+  }
+  return error.isEmpty() ? String("等待连接") : String("同步服务异常");
+}
+
 }  // namespace
 
 void Dashboard::begin(Arduino_GFX *display, fs::FS *fs) {
@@ -160,9 +245,10 @@ void Dashboard::draw(const DashboardView &view) {
   state_.undoAvailable = view.undoAvailable;
   if ((view.recording || view.wirelessHolding) && !view.provisioning &&
       (state_.page != RootPage::home || state_.capsuleDetail ||
-       state_.bluetoothPairing)) {
+       state_.computerSync || state_.bluetoothPairing)) {
     state_.page = RootPage::home;
     state_.capsuleDetail = false;
+    state_.computerSync = false;
     state_.bluetoothPairing = false;
     state_.capsuleScopeOverlay = false;
     state_.detailMoreOverlay = false;
@@ -232,6 +318,7 @@ void Dashboard::draw(const DashboardView &view) {
 void Dashboard::drawBody(const DashboardView &view) {
   switch (state_.screen()) {
     case UiScreen::capsuleDetail: drawCapsuleDetail(view); break;
+    case UiScreen::computerSync: drawComputerSync(view); break;
     case UiScreen::bluetoothPairing: drawBluetoothPairing(view); break;
     case UiScreen::provisioning: drawProvisioning(view); break;
     case UiScreen::provisioningLog: drawProvisioningLog(view); break;
@@ -264,6 +351,22 @@ void Dashboard::drawTopBar(const DashboardView &view) {
   const String battery = board.batteryPercent >= 0
       ? String(board.batteryPercent) + "%" : String("--");
   renderer_.drawText(battery, 56, 13, 62, 1, ui::kInk, ui::kBackground);
+  const WirelessSyncPresentationPhase syncPhase =
+      wirelessSyncPresentationPhase(wirelessSyncInput(view));
+  const uint16_t syncColor = syncPhaseColor(syncPhase);
+  display_->fillRoundRect(ui::kSyncEntryLeft, 7,
+                          ui::kSyncEntryRight - ui::kSyncEntryLeft,
+                          34, 17, ui::kSurface);
+  display_->drawRoundRect(ui::kSyncEntryLeft, 7,
+                          ui::kSyncEntryRight - ui::kSyncEntryLeft,
+                          34, 17, syncColor);
+  drawUiIcon(*display_, UiIcon::mac, ui::kSyncEntryLeft + 8, 11, syncColor);
+  renderer_.drawText(syncEntryLabel(syncPhase,
+                                    view.wifiSyncRemainingSeconds),
+                     ui::kSyncEntryLeft + 38, 15,
+                     ui::kSyncEntryRight - ui::kSyncEntryLeft - 44, 1,
+                     syncColor, ui::kSurface, 0, false,
+                     UiTextSize::compact, true);
   drawUiIcon(*display_, UiIcon::wifi, 238, 8, wifiColor(view.wifiPhase));
   if (wifiUiShowsDisconnectedSlash(view.wifiPhase)) {
     display_->drawLine(241, 11, 258, 28, wifiColor(view.wifiPhase));
@@ -628,33 +731,17 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  view.bleVoiceReady || view.bleVoicePairing
                      ? ui::kWireless : ui::kMuted,
                  SettingAccessory::value);
-  char syncRemaining[16];
-  snprintf(syncRemaining, sizeof(syncRemaining), "%lu:%02lu",
-           static_cast<unsigned long>(view.wifiSyncRemainingSeconds / 60),
-           static_cast<unsigned long>(view.wifiSyncRemainingSeconds % 60));
-  String syncDetail;
-  uint16_t syncColor = ui::kMuted;
-  if (!view.wifiSyncSecureReady) {
-    syncDetail = "安全服务未就绪";
-    syncColor = ui::kError;
-  } else if (!view.wifiSyncOpen) {
-    syncDetail = "轻触开启 5 分钟";
-  } else if (view.wifiSyncAuthenticated) {
-    syncDetail = String("同步中 · ") + syncRemaining;
-    syncColor = ui::kAccent;
-  } else if (view.wifiSyncClient) {
-    syncDetail = String("正在验证 · ") + syncRemaining;
-    syncColor = ui::kWaiting;
-  } else if (view.wifiSyncListener && view.wifiSyncBonjour) {
-    syncDetail = String("等待 Mac · ") + syncRemaining;
-    syncColor = ui::kWaiting;
+  const WirelessSyncPresentationPhase syncPhase =
+      wirelessSyncPresentationPhase(wirelessSyncInput(view));
+  String syncDetail = syncPhaseTitle(syncPhase);
+  if (view.wifiSyncOpen) {
+    syncDetail += String(" · ") + syncClock(view.wifiSyncRemainingSeconds);
   } else {
-    syncDetail = String("连接 Wi-Fi · ") + syncRemaining;
-    syncColor = ui::kWaiting;
+    syncDetail = "轻触开启 5 分钟";
   }
   drawSettingRow(ui::kDeviceStorageTop, UiIcon::mac, "与电脑同步",
-                 syncDetail, syncColor, SettingAccessory::toggle,
-                 view.wifiSyncOpen);
+                 syncDetail, syncPhaseColor(syncPhase),
+                 SettingAccessory::chevron);
   const bool raiseEnabled = view.settings != nullptr &&
       view.settings->raiseToWake;
   drawSettingRow(ui::kDeviceRaiseTop, UiIcon::raise, "抬起亮屏",
@@ -662,6 +749,96 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  SettingAccessory::toggle, raiseEnabled);
   drawSettingRow(ui::kDeviceProvisionTop, UiIcon::phone, "手机配网",
                  "", ui::kMuted, SettingAccessory::chevron);
+}
+
+void Dashboard::drawComputerSync(const DashboardView &view) {
+  drawBackButton();
+  renderer_.drawText("电脑同步", 64, 18, 220, 1, ui::kInk,
+                     ui::kBackground, 0, false, UiTextSize::body, true);
+
+  const WirelessSyncPresentationPhase phase =
+      wirelessSyncPresentationPhase(wirelessSyncInput(view));
+  const uint16_t color = syncPhaseColor(phase);
+  display_->fillRoundRect(20, 72, 328, 108, 24, ui::kSurface);
+  display_->drawRoundRect(20, 72, 328, 108, 24, color);
+  drawUiIcon(*display_, phase == WirelessSyncPresentationPhase::failed
+                           ? UiIcon::warning : UiIcon::mac,
+             42, 92, color);
+  renderer_.drawText(syncPhaseTitle(phase), 82, 86, 238, 1, ui::kInk,
+                     ui::kSurface, 0, false, UiTextSize::display, true);
+  String detail;
+  switch (phase) {
+    case WirelessSyncPresentationPhase::unpaired:
+      detail = "请用 USB 在 Mac 完成配对";
+      break;
+    case WirelessSyncPresentationPhase::idle:
+      detail = "从顶栏一击开启五分钟";
+      break;
+    case WirelessSyncPresentationPhase::opening:
+      detail = view.wifiSyncNetworkConnected
+          ? "正在启动局域网安全服务" : "正在连接 Wi-Fi";
+      break;
+    case WirelessSyncPresentationPhase::waiting:
+      detail = view.wifiSyncAuthenticated
+          ? "Mac 已认证，等待同步事务" : "等待同一网络的 Mac";
+      break;
+    case WirelessSyncPresentationPhase::authenticating:
+      detail = "正在验证已配对的 Mac";
+      break;
+    case WirelessSyncPresentationPhase::syncing:
+      detail = "正在传输和提交胶囊";
+      break;
+    case WirelessSyncPresentationPhase::completed:
+      detail = "本轮同步事务已经完成";
+      break;
+    case WirelessSyncPresentationPhase::failed:
+      detail = syncErrorLabel(view.wifiSyncLastError);
+      break;
+  }
+  renderer_.drawText(detail, 42, 132, 284, 2, color, ui::kSurface,
+                     0, true, UiTextSize::compact, false);
+
+  const int16_t rows[] = {198, 246, 294};
+  const UiIcon icons[] = {UiIcon::mac, UiIcon::wifi, UiIcon::retry};
+  const String labels[] = {"USB", "Wi-Fi", "剩余时间"};
+  const String values[] = {
+      view.usbConnected ? String("已连接") : String("未连接"),
+      view.wifiSyncNetworkConnected ? String("已连接")
+                                    : String("未连接"),
+      view.wifiSyncOpen ? syncClock(view.wifiSyncRemainingSeconds)
+                        : String("--:--")};
+  const uint16_t colors[] = {
+      view.usbConnected ? ui::kAccent : ui::kMuted,
+      view.wifiSyncNetworkConnected ? ui::kAccent : ui::kMuted,
+      view.wifiSyncOpen ? ui::kWaiting : ui::kMuted};
+  for (uint8_t index = 0; index < 3; ++index) {
+    drawUiIcon(*display_, icons[index], 24, rows[index], colors[index]);
+    renderer_.drawText(labels[index], 60, rows[index] + 2, 130, 1,
+                       ui::kMuted, ui::kBackground, 0, false,
+                       UiTextSize::body, true);
+    const int16_t width = renderer_.measureTextWidth(values[index]);
+    renderer_.drawText(values[index], 344 - width, rows[index] + 2,
+                       width, 1, colors[index], ui::kBackground, 0,
+                       false, UiTextSize::body, true);
+    display_->drawFastHLine(60, rows[index] + 34, 284, ui::kDivider);
+  }
+
+  display_->fillRoundRect(20, ui::kComputerSyncCloseTop, 328,
+                          ui::kComputerSyncCloseBottom -
+                              ui::kComputerSyncCloseTop,
+                          20, ui::kSurfaceRaised);
+  display_->drawRoundRect(20, ui::kComputerSyncCloseTop, 328,
+                          ui::kComputerSyncCloseBottom -
+                              ui::kComputerSyncCloseTop,
+                          20, view.wifiSyncOpen ? ui::kError : ui::kDivider);
+  const String closeLabel = view.wifiSyncOpen ? "关闭同步" : "返回";
+  const int16_t closeWidth = renderer_.measureTextWidth(
+      closeLabel, UiTextSize::body);
+  renderer_.drawText(closeLabel,
+                     (ui::kScreenWidth - closeWidth) / 2,
+                     ui::kComputerSyncCloseTop + 22, closeWidth, 1,
+                     view.wifiSyncOpen ? ui::kError : ui::kInk,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
 }
 
 void Dashboard::drawBluetoothPairing(const DashboardView &view) {
@@ -988,6 +1165,7 @@ void Dashboard::drawRecordingDynamic(const DashboardView &view,
 void Dashboard::drawDynamicRegions(const DashboardView &view) {
   const UiScreen screen = state_.screen();
   if (screen == UiScreen::capsuleDetail ||
+      screen == UiScreen::computerSync ||
       screen == UiScreen::bluetoothPairing ||
       screen == UiScreen::provisioning ||
       screen == UiScreen::provisioningLog) {
@@ -1089,20 +1267,6 @@ String Dashboard::signature(const DashboardView &view,
   value += ':';
   value += view.bleVoiceStreamTimeouts;
   value += ':';
-  value += view.wifiSyncOpen;
-  value += ':';
-  value += view.wifiSyncSecureReady;
-  value += ':';
-  value += view.wifiSyncListener;
-  value += ':';
-  value += view.wifiSyncBonjour;
-  value += ':';
-  value += view.wifiSyncClient;
-  value += ':';
-  value += view.wifiSyncAuthenticated;
-  value += ':';
-  value += view.wifiSyncRemainingSeconds;
-  value += ':';
   value += view.wirelessHolding;
   value += ':';
   value += view.message;
@@ -1161,11 +1325,38 @@ String Dashboard::signature(const DashboardView &view,
     }
   }
   if (state_.screen() == UiScreen::device ||
+      state_.screen() == UiScreen::computerSync ||
       state_.screen() == UiScreen::bluetoothPairing ||
       state_.screen() == UiScreen::provisioning ||
       state_.screen() == UiScreen::provisioningLog) {
     value += ':';
     value += static_cast<int>(view.wifiPhase);
+    value += ':';
+    value += view.wifiSyncOpen;
+    value += ':';
+    value += view.wifiSyncSecureReady;
+    value += ':';
+    value += view.wifiSyncPaired;
+    value += ':';
+    value += view.wifiSyncNetworkConnected;
+    value += ':';
+    value += view.wifiSyncListener;
+    value += ':';
+    value += view.wifiSyncBonjour;
+    value += ':';
+    value += view.wifiSyncClient;
+    value += ':';
+    value += view.wifiSyncAuthenticated;
+    value += ':';
+    value += view.wifiSyncBusy;
+    value += ':';
+    value += view.wifiSyncCompleted;
+    value += ':';
+    value += view.wifiSyncRemainingSeconds;
+    value += ':';
+    value += view.wifiSyncLastCompletedAtMs;
+    value += ':';
+    value += view.wifiSyncLastError;
     value += ':';
     value += view.portalSsid;
     value += ':';
@@ -1212,6 +1403,26 @@ String Dashboard::topBarSignature(const DashboardView &view) const {
   value += view.bleVoiceReady;
   value += ':';
   value += static_cast<int>(view.wifiPhase);
+  value += ':';
+  value += view.wifiSyncOpen;
+  value += ':';
+  value += view.wifiSyncSecureReady;
+  value += ':';
+  value += view.wifiSyncPaired;
+  value += ':';
+  value += view.wifiSyncNetworkConnected;
+  value += ':';
+  value += view.wifiSyncClient;
+  value += ':';
+  value += view.wifiSyncAuthenticated;
+  value += ':';
+  value += view.wifiSyncBusy;
+  value += ':';
+  value += view.wifiSyncCompleted;
+  value += ':';
+  value += view.wifiSyncRemainingSeconds;
+  value += ':';
+  value += view.wifiSyncLastError;
   return value;
 }
 
@@ -1224,6 +1435,7 @@ void Dashboard::swipeHorizontal(int16_t deltaX, bool locked, int16_t startX) {
   if (state_.capsuleScopeOverlay || state_.detailMoreOverlay) return;
   if (locked || browserState_.rootSwipeLocked()) return;
   if (state_.screen() == UiScreen::capsuleDetail ||
+      state_.screen() == UiScreen::computerSync ||
       state_.screen() == UiScreen::bluetoothPairing ||
       state_.screen() == UiScreen::provisioning ||
       state_.screen() == UiScreen::provisioningLog) {
@@ -1405,6 +1617,11 @@ void Dashboard::back() {
     invalidated_ = true;
     return;
   }
+  if (state_.computerSync) {
+    state_.computerSync = false;
+    invalidated_ = true;
+    return;
+  }
   if (state_.capsuleScopeOverlay || state_.detailMoreOverlay ||
       state_.purgeConfirmOverlay) {
     closeOverlays();
@@ -1435,6 +1652,18 @@ void Dashboard::openProvisioningLog() {
 void Dashboard::openBluetoothPairing() {
   if (state_.screen() != UiScreen::device) return;
   state_.bluetoothPairing = true;
+  invalidated_ = true;
+}
+
+void Dashboard::openComputerSync() {
+  const UiScreen screen = state_.screen();
+  if (screen != UiScreen::home && screen != UiScreen::capsules &&
+      screen != UiScreen::device) return;
+  if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
+  state_.computerSync = true;
+  state_.capsuleScopeOverlay = false;
+  state_.detailMoreOverlay = false;
+  state_.purgeConfirmOverlay = false;
   invalidated_ = true;
 }
 
@@ -1495,7 +1724,8 @@ void Dashboard::closeOverlays() {
 }
 
 void Dashboard::navigate(RootPage page) {
-  if (state_.capsuleDetail || state_.bluetoothPairing ||
+  if (state_.capsuleDetail || state_.computerSync ||
+      state_.bluetoothPairing ||
       state_.provisioning ||
       state_.capsuleScopeOverlay || state_.detailMoreOverlay ||
       state_.purgeConfirmOverlay ||

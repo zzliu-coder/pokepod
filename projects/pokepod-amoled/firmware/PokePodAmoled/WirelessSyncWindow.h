@@ -67,6 +67,10 @@ class WirelessSyncWindow {
   }
 
   bool opened() const { return open_; }
+  uint32_t remainingMs(uint32_t nowMs) const {
+    if (!open_ || deadlineReached(nowMs)) return 0;
+    return static_cast<uint32_t>(deadlineMs() - nowMs);
+  }
   bool deadlineReached(uint32_t nowMs) const {
     return open_ && deadlineGate_.expired(nowMs);
   }

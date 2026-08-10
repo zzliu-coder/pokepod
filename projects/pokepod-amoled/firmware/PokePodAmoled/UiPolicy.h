@@ -14,6 +14,7 @@ enum class UiScreen : uint8_t {
   capsules,
   home,
   device,
+  computerSync,
   bluetoothPairing,
   capsuleDetail,
   provisioning,
@@ -24,6 +25,7 @@ struct UiState {
   RootPage page = RootPage::home;
   HomeMode homeMode = HomeMode::idle;
   bool capsuleDetail = false;
+  bool computerSync = false;
   bool bluetoothPairing = false;
   bool provisioning = false;
   bool provisioningLog = false;
@@ -39,6 +41,7 @@ struct UiState {
   UiScreen screen() const {
     if (provisioning && provisioningLog) return UiScreen::provisioningLog;
     if (provisioning) return UiScreen::provisioning;
+    if (computerSync) return UiScreen::computerSync;
     if (bluetoothPairing) return UiScreen::bluetoothPairing;
     if (capsuleDetail) return UiScreen::capsuleDetail;
     if (page == RootPage::capsules) return UiScreen::capsules;
@@ -172,7 +175,8 @@ enum class UiAction : uint8_t {
   openBluetoothPairing,
   toggleBluetoothPairing,
   forgetBluetoothMac,
-  toggleComputerSync,
+  openComputerSync,
+  closeComputerSync,
   raiseToWakeToggle,
   openCapsule,
   openCapsuleScope,
@@ -224,6 +228,16 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     return UiAction::none;
   }
   const UiScreen screen = state.screen();
+  if (screen == UiScreen::computerSync) {
+    if (x < ui::kBackTargetSize && y < ui::kBackTargetSize) {
+      return UiAction::back;
+    }
+    if (y >= ui::kComputerSyncCloseTop &&
+        y < ui::kComputerSyncCloseBottom) {
+      return UiAction::closeComputerSync;
+    }
+    return UiAction::none;
+  }
   if (screen == UiScreen::bluetoothPairing) {
     if (x < ui::kBackTargetSize && y < ui::kBackTargetSize) {
       return UiAction::back;
@@ -303,6 +317,13 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     return UiAction::none;
   }
+  const bool rootScreen = screen == UiScreen::home ||
+      screen == UiScreen::capsules || screen == UiScreen::device;
+  if (rootScreen && state.homeMode != HomeMode::recording &&
+      x >= ui::kSyncEntryLeft &&
+      x < ui::kSyncEntryRight && y < ui::kTopBarHeight) {
+    return UiAction::openComputerSync;
+  }
   if (screen == UiScreen::home) {
     if (state.homeMode == HomeMode::recording) {
       return y >= ui::kRootContentTop && y < ui::kRootContentBottom
@@ -324,7 +345,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return UiAction::openBluetoothPairing;
     }
     if (y >= ui::kDeviceStorageTop && y < ui::kDeviceRaiseTop) {
-      return UiAction::toggleComputerSync;
+      return UiAction::openComputerSync;
     }
     if (y >= ui::kDeviceRaiseTop && y < ui::kDeviceProvisionTop) {
       return UiAction::raiseToWakeToggle;

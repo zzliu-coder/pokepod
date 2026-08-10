@@ -9,6 +9,7 @@ int main() {
   assert(window.update(1, input).phase == WirelessSyncWindowPhase::closed);
 
   window.open(100);
+  assert(window.remainingMs(100) == kWirelessSyncWindowMs);
   auto result = window.update(100, input);
   assert(result.wifiDemand && !result.listener && !result.bonjour);
   assert(result.phase == WirelessSyncWindowPhase::waitingForNetwork);
@@ -27,11 +28,13 @@ int main() {
   result = window.update(100 + kWirelessSyncWindowMs - 1, input);
   assert(result.phase == WirelessSyncWindowPhase::connected);
   assert(result.remainingMs == 1);
+  assert(window.remainingMs(100 + kWirelessSyncWindowMs - 1) == 1);
   assert(window.deadlineMs() == fixedDeadline);
 
   result = window.update(100 + kWirelessSyncWindowMs, input);
   assert(result.phase == WirelessSyncWindowPhase::closed);
   assert(!result.wifiDemand && !result.listener && !result.bonjour);
+  assert(window.remainingMs(100 + kWirelessSyncWindowMs) == 0);
 
   window.open(0);
   assert(!window.deadlineReached(kWirelessSyncWindowMs - 1));

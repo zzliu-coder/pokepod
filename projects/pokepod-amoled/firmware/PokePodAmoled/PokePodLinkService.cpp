@@ -1457,6 +1457,7 @@ bool PokePodLinkService::executeCommand(const String &path,
   const String source = readText(path, kMaxCommandJsonBytes);
   cJSON *root = cJSON_ParseWithLength(source.c_str(), source.length());
   bool success = false;
+  bool completedMaintenance = false;
   if (root == nullptr || !cJSON_IsObject(root)) {
     message = "command JSON is malformed";
   } else if (jsonInt64(root, "schemaVersion") != 2 ||
@@ -1490,6 +1491,7 @@ bool PokePodLinkService::executeCommand(const String &path,
         } else {
           activeMaintenance_ = "";
           success = true;
+          completedMaintenance = true;
           message = "committed";
         }
       } else if (activeMaintenance_.isEmpty() ||
@@ -1691,6 +1693,7 @@ bool PokePodLinkService::executeCommand(const String &path,
   cJSON_Delete(result);
   cJSON_Delete(root);
   library_->scan();
+  if (persisted && completedMaintenance) ++maintenanceCompletionRevision_;
   return persisted;
 }
 

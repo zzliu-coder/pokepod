@@ -56,7 +56,13 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
   bool bonjourActive() const { return bonjour_.active(); }
   bool listenerActive() const { return listenerActive_; }
   bool secureReady() const;
-  uint32_t remainingSeconds() const;
+  bool paired() const;
+  bool networkConnected() const { return networkConnected_; }
+  bool completed() const {
+    return window_.opened() && lastCompletedAtMs_ != 0 && lastError_.isEmpty();
+  }
+  uint32_t lastCompletedAtMs() const { return lastCompletedAtMs_; }
+  uint32_t remainingSeconds(uint32_t nowMs) const;
   WirelessSyncWindowPhase phase() const { return decision_.phase; }
   const char *lastError() const { return lastError_.c_str(); }
 
@@ -80,7 +86,10 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
   bool listenerActive_ = false;
   bool clientPresent_ = false;
   bool authenticationObserved_ = false;
+  bool networkConnected_ = false;
   uint32_t clientStartedAtMs_ = 0;
+  uint32_t observedMaintenanceCompletionRevision_ = 0;
+  uint32_t lastCompletedAtMs_ = 0;
   String lastError_;
 };
 

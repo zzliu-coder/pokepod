@@ -170,6 +170,7 @@ void restoreRecentTrash() {
 
 void drawDashboard() {
   if (!board.status().screenOn) return;
+  const uint32_t now = millis();
   DashboardView view;
   view.board = &board.status();
   view.library = &capsuleLibrary;
@@ -180,7 +181,7 @@ void drawDashboard() {
   view.bleVoiceConnected = bleVoice.connected();
   view.bleVoiceReady = bleVoice.appReady();
   view.bleVoiceBonded = bleVoice.bonded();
-  view.bleVoicePairing = bleVoice.pairingMode(millis());
+  view.bleVoicePairing = bleVoice.pairingMode(now);
   view.bleVoicePasskey = bleVoice.passkey();
   view.bleVoiceMtu = bleVoice.mtu();
   const BleVoiceQualitySnapshot bleQuality = bleVoice.quality();
@@ -191,17 +192,23 @@ void drawDashboard() {
   view.bleVoiceStreamTimeouts = bleQuality.streamTimeouts;
   view.wifiSyncOpen = wirelessSync.openWindow();
   view.wifiSyncSecureReady = wirelessSync.secureReady();
+  view.wifiSyncPaired = wirelessSync.paired();
+  view.wifiSyncNetworkConnected = wirelessSync.networkConnected();
   view.wifiSyncListener = wirelessSync.listenerActive();
   view.wifiSyncBonjour = wirelessSync.bonjourActive();
   view.wifiSyncClient = wirelessSync.clientConnected();
   view.wifiSyncAuthenticated = wirelessSync.authenticated();
-  view.wifiSyncRemainingSeconds = wirelessSync.remainingSeconds();
+  view.wifiSyncBusy = wirelessSync.linkBusy();
+  view.wifiSyncCompleted = wirelessSync.completed();
+  view.wifiSyncRemainingSeconds = wirelessSync.remainingSeconds(now);
+  view.wifiSyncLastCompletedAtMs = wirelessSync.lastCompletedAtMs();
+  view.wifiSyncLastError = wirelessSync.lastError();
   view.wirelessHolding = wirelessUiActive;
   view.recording = recorder.recording();
   view.transcribing = tencentWorker.working();
   view.playing = audio.playing();
   view.provisioning = provisioningCoordinator.visible();
-  view.undoAvailable = trashUndo.available(millis());
+  view.undoAvailable = trashUndo.available(now);
   view.recordingMs = recorder.durationMs();
   view.audioPeak = audio.consumePeakWindow();
   audio.copyEnvelope(view.audioEnvelope, PeakWindow::kEnvelopeSamples);
@@ -213,7 +220,7 @@ void drawDashboard() {
   view.portalStatus = provisioningPortal.statusMessage();
   view.portalState = provisioningPortal.state();
   view.provisioningDiagnostics = &provisioningDiagnostics;
-  if (deadlinePending(millis(), transientUntilMs)) view.message = transientMessage;
+  if (deadlinePending(now, transientUntilMs)) view.message = transientMessage;
   dashboard.draw(view);
 }
 
@@ -344,7 +351,7 @@ void emitStatus() {
       wirelessSync.bonjourActive() ? "true" : "false",
       wirelessSync.clientConnected() ? "true" : "false",
       wirelessSync.authenticated() ? "true" : "false",
-      static_cast<unsigned long>(wirelessSync.remainingSeconds()),
+      static_cast<unsigned long>(wirelessSync.remainingSeconds(millis())),
       wirelessSync.lastError());
 }
 
@@ -516,18 +523,18 @@ void pollTouch() {
       }
       dashboard.invalidate();
       drawDashboard();
-    } else if (action == UiAction::toggleComputerSync) {
-      if (wirelessSync.openWindow()) {
-        wirelessSync.close();
-        showMessage("电脑同步已关闭");
-      } else if (!wirelessSync.secureReady()) {
-        showMessage("无线同步安全服务未就绪");
-      } else {
+    } else if (action == UiAction::openComputerSync) {
+      if (computerSyncEntryDecision(wirelessSync.openWindow()) ==
+          ComputerSyncEntryDecision::openAndNavigate) {
         wirelessSync.open(now);
-        showMessage(deviceConfig.hasWifi()
-                        ? "电脑同步已开启 5 分钟"
-                        : "已开启 · 请先完成手机配网");
       }
+      dashboard.openComputerSync();
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (action == UiAction::closeComputerSync) {
+      if (wirelessSync.openWindow()) wirelessSync.close();
+      dashboard.back();
+      showMessage("电脑同步已关闭");
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {

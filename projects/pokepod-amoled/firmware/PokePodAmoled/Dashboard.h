@@ -18,6 +18,7 @@
 #include "UiRenderPolicy.h"
 #include "UiTheme.h"
 #include "WifiPolicy.h"
+#include "WirelessSyncPresentation.h"
 
 namespace pokepod {
 
@@ -41,11 +42,17 @@ struct DashboardView {
   uint32_t bleVoiceStreamTimeouts = 0;
   bool wifiSyncOpen = false;
   bool wifiSyncSecureReady = false;
+  bool wifiSyncPaired = false;
+  bool wifiSyncNetworkConnected = false;
   bool wifiSyncListener = false;
   bool wifiSyncBonjour = false;
   bool wifiSyncClient = false;
   bool wifiSyncAuthenticated = false;
+  bool wifiSyncBusy = false;
+  bool wifiSyncCompleted = false;
   uint32_t wifiSyncRemainingSeconds = 0;
+  uint32_t wifiSyncLastCompletedAtMs = 0;
+  String wifiSyncLastError;
   bool wirelessHolding = false;
   bool recording = false;
   bool transcribing = false;
@@ -91,6 +98,7 @@ class Dashboard {
   void openPurgeConfirm(size_t count);
   void openProvisioningLog();
   void openBluetoothPairing();
+  void openComputerSync();
   void closeOverlays();
   void back();
   void navigate(RootPage page);
@@ -121,6 +129,7 @@ class Dashboard {
   void drawDetailMore(const DashboardView &view);
   void drawPurgeConfirm();
   void drawDevice(const DashboardView &view);
+  void drawComputerSync(const DashboardView &view);
   void drawBluetoothPairing(const DashboardView &view);
   void drawProvisioning(const DashboardView &view);
   void drawProvisioningLog(const DashboardView &view);

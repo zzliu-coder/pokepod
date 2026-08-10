@@ -37,6 +37,8 @@ bool WirelessSyncService::begin(
                        provisioningDiagnostics, power, log, &coordinator,
                        LinkTransport::wifi, nullptr,
                        &window_.transferGate(), nullptr);
+  observedMaintenanceCompletionRevision_ =
+      link_.maintenanceCompletionRevision();
   log.printf("{\"event\":\"wifi_sync_service\",\"ok\":%s,\"tls_identity\":%s}\n",
              begun_ ? "true" : "false", identity.ready() ? "true" : "false");
   return begun_;
@@ -46,6 +48,7 @@ void WirelessSyncService::open(uint32_t nowMs) {
   if (!begun_) return;
   window_.open(nowMs);
   lastError_ = "";
+  lastCompletedAtMs_ = 0;
   if (log_ != nullptr) {
     log_->println("{\"event\":\"wifi_sync_window\",\"open\":true,\"seconds\":300}");
   }
@@ -79,9 +82,13 @@ bool WirelessSyncService::secureReady() const {
   return begun_ && identity_ != nullptr && identity_->ready();
 }
 
-uint32_t WirelessSyncService::remainingSeconds() const {
-  return decision_.remainingMs == 0 ? 0 :
-      (decision_.remainingMs + 999) / 1000;
+bool WirelessSyncService::paired() const {
+  return secureReady() && identity_->paired();
+}
+
+uint32_t WirelessSyncService::remainingSeconds(uint32_t nowMs) const {
+  const uint32_t remaining = window_.remainingMs(nowMs);
+  return remaining == 0 ? 0 : (remaining + 999) / 1000;
 }
 
 void WirelessSyncService::enforceDeadline(uint32_t nowMs) {
@@ -90,6 +97,7 @@ void WirelessSyncService::enforceDeadline(uint32_t nowMs) {
 
 void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
   if (!begun_) return;
+  networkConnected_ = networkConnected;
   enforceDeadline(nowMs);
   if (!window_.opened()) return;
   WirelessSyncWindowInputs inputs;
@@ -100,14 +108,20 @@ void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
 
   if (!decision_.listener) {
     stopListener();
-  } else if (!listenerActive_ && !startListener()) {
-    lastError_ = "listener-start-failed";
+  } else if (!listenerActive_) {
+    if (!startListener()) {
+      lastError_ = "listener-start-failed";
+    } else if (lastError_ == "listener-start-failed") {
+      lastError_ = "";
+    }
   }
   if (decision_.bonjour && listenerActive_) {
     const bool paired = identity_ != nullptr && identity_->paired();
     if (!bonjour_.active() || bonjour_.pairedAdvertised() != paired) {
       if (!bonjour_.start(kWirelessSyncPort, paired, *log_)) {
         lastError_ = "bonjour-start-failed";
+      } else if (lastError_ == "bonjour-start-failed") {
+        lastError_ = "";
       }
     }
   } else {
@@ -156,6 +170,17 @@ void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
       }
     }
     link_.poll(nowMs);
+    const uint32_t completionRevision =
+        link_.maintenanceCompletionRevision();
+    if (completionRevision != observedMaintenanceCompletionRevision_) {
+      observedMaintenanceCompletionRevision_ = completionRevision;
+      lastCompletedAtMs_ = nowMs == 0 ? 1 : nowMs;
+      lastError_ = "";
+      if (log_ != nullptr) {
+        log_->println(
+            "{\"event\":\"wifi_sync_session\",\"completed\":true}");
+      }
+    }
     if (tls_.failed() || tls_.closed()) {
       closeClient("link-disconnected");
     }
@@ -208,7 +233,10 @@ void WirelessSyncService::closeClient(const char *reason) {
   clientPresent_ = false;
   authenticationObserved_ = false;
   clientStartedAtMs_ = 0;
-  if (reason != nullptr) lastError_ = reason;
+  const bool expectedAfterCompletion = completed() && reason != nullptr &&
+      (strcmp(reason, "peer-closed") == 0 ||
+       strcmp(reason, "link-disconnected") == 0);
+  if (reason != nullptr && !expectedAfterCompletion) lastError_ = reason;
   if (log_ != nullptr && reason != nullptr) {
     log_->printf("{\"event\":\"wifi_sync_session\",\"closed\":true,\"reason\":\"%s\"}\n",
                  reason);
