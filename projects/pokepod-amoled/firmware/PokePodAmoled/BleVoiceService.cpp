@@ -444,6 +444,36 @@ void BleVoiceService::forgetMac() {
   }
 }
 
+bool BleVoiceService::pauseForIdleSleep() {
+  if (controller_.active() || pairingUntilMs_ != 0) return false;
+  idlePaused_ = true;
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  if (advertising != nullptr) advertising->stop();
+  if (connected_ && server_ != nullptr) {
+    server_->disconnect(connectionPolicy_.currentConnectionId());
+    return false;
+  }
+  return true;
+}
+
+void BleVoiceService::resumeAfterIdleSleep() {
+  if (!idlePaused_) return;
+  idlePaused_ = false;
+  restartAdvertising();
+}
+
+void BleVoiceService::prepareForDeepSleep() {
+  idlePaused_ = true;
+  controller_.complete();
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  if (advertising != nullptr) advertising->stop();
+  if (connected_ && server_ != nullptr) {
+    server_->disconnect(connectionPolicy_.currentConnectionId());
+  }
+  BLEDevice::deinit(false);
+  connected_ = authenticated_ = appReady_ = false;
+}
+
 bool BleVoiceService::startSession(uint32_t sessionId, uint32_t nowMs,
                                    AudioCaptureRouter &router) {
   if (!appReady() || !authenticated_ ||
@@ -517,7 +547,7 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_disconnected\"}");
   if (startPairing) {
     activatePairingMode(millis());
-  } else {
+  } else if (!idlePaused_) {
     restartAdvertising();
   }
 }
@@ -658,7 +688,7 @@ bool BleVoiceService::notifyControl(BleVoiceEventType type, uint32_t sessionId,
 }
 
 void BleVoiceService::restartAdvertising() {
-  if (connectionPolicy_.hasCurrent()) return;
+  if (idlePaused_ || connectionPolicy_.hasCurrent()) return;
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   if (advertising != nullptr) advertising->start();
 }

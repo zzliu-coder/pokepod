@@ -34,8 +34,13 @@ class BleVoiceService {
   void cancelPairingMode();
   void forgetMac();
   void setBatteryPercent(int batteryPercent);
+  bool pauseForIdleSleep();
+  void resumeAfterIdleSleep();
+  void prepareForDeepSleep();
 
   bool connected() const { return connected_; }
+  bool idlePaused() const { return idlePaused_; }
+  bool radioActive() const { return connected_ || !idlePaused_; }
   bool appReady() const { return connected_ && appReady_ && mtuReady(); }
   bool mtuReady() const { return bleVoiceMtuReady(mtu_); }
   uint16_t mtu() const { return mtu_; }
@@ -110,6 +115,7 @@ class BleVoiceService {
   int batteryPercent_ = -1;
   BleConnectionPowerMode connectionPowerMode_ =
       BleConnectionPowerMode::idle;
+  bool idlePaused_ = false;
 };
 
 }  // namespace pokepod

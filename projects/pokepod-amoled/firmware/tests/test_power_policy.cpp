@@ -20,21 +20,32 @@ int main() {
   input.audioActive = false;
   input.screenOn = false;
   decision = decidePower(input);
-  assert(decision.mode == PowerMode::lightSleep);
-  assert(decision.allowLightSleep);
+  assert(decision.mode == PowerMode::screenOffIdle);
+  assert(!decision.allowLightSleep);
 
+  input.idleMs = kLightSleepTimeoutMs;
   input.bleConnected = true;
   decision = decidePower(input);
   assert(decision.mode == PowerMode::screenOffIdle);
   assert(!decision.allowLightSleep);
+  assert(decision.requestIdleRadioPause);
 
   input.bleConnected = false;
+  assert(!decidePower(input).allowLightSleep);
+  input.automaticWakeEnabled = false;
+  decision = decidePower(input);
+  assert(decision.mode == PowerMode::lightSleep);
+  assert(decision.allowLightSleep);
+  assert(decision.lightSleepTimerUs == 120000000ULL);
   input.usbHostConnected = true;
   assert(!decidePower(input).allowLightSleep);
   input.usbHostConnected = false;
   input.vbusPresent = true;
-  assert(!decidePower(input).allowLightSleep);
+  decision = decidePower(input);
+  assert(decision.allowLightSleep);
+  assert(decision.lightSleepTimerUs == 30000000ULL);
   input.vbusPresent = false;
+  input.automaticWakeEnabled = true;
   input.wifiRadioOn = true;
   decision = decidePower(input);
   assert(decision.mode == PowerMode::screenOffIdle);
@@ -50,6 +61,34 @@ int main() {
   input.uiAnimating = true;
   assert(decidePower(input).mode == PowerMode::performance);
   assert(decidePower(input).cpuMhz == 240);
+  input.uiAnimating = false;
+
+  input.idleMs = kDeepSleepTimeoutMs;
+  input.wifiRadioOn = true;
+  decision = decidePower(input);
+  assert(decision.mode == PowerMode::deepSleepPending);
+  assert(decision.requestDeepSleep);
+  assert(decision.requestIdleRadioPause);
+  input.vbusPresent = true;
+  assert(!decidePower(input).requestDeepSleep);
+  input.vbusPresent = false;
+  input.criticalBattery = true;
+  input.idleMs = 1;
+  decision = decidePower(input);
+  assert(decision.mode == PowerMode::safeShutdownPending);
+  assert(decision.requestSafeShutdown);
+  input.audioActive = true;
+  assert(decidePower(input).mode == PowerMode::performance);
+
+  LowBatteryShutdownPolicy battery;
+  assert(!battery.update(5, false));
+  assert(!battery.update(5, false));
+  assert(battery.update(5, false));
+  assert(battery.critical());
+  assert(!battery.update(5, true));
+  assert(!battery.critical());
+  assert(!battery.update(6, false));
+  assert(!battery.update(7, false));
 
   AutoScreenOffPolicy autoOff;
   autoOff.begin(0xfffffff0U);

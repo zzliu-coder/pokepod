@@ -26,7 +26,11 @@ assert "lastVbusPresent" in main
 
 assert "automaticWakeEnabled() && touchInterrupt" in main
 assert "verifiedInputs.automaticWakeEnabled" in power
-assert "kLightSleepSliceUs = 500000" in power
+assert "kLightSleepTimeoutMs = 60000" in policy
+assert "kDeepSleepTimeoutMs = 180000" in policy
+assert "verifiedDecision.lightSleepTimerUs" in power
+assert "esp_sleep_enable_ext1_wakeup_io" in power
+assert "wakeMask = 1ULL << kBootButtonPin" in power
 assert "!input.wifiRadioOn" in policy
 assert "input.wifiRadioOn || input.linkBusy" not in policy
 
@@ -35,5 +39,7 @@ assert '"触摸或抬起"' in dashboard
 assert "kDimScreenBrightness" in main
 assert "BleConnectionPowerMode::voice" in ble
 assert "BleConnectionPowerMode::idle" in ble
+assert "input.usbHostConnected = usb.hostConnected()" in main
+assert "input.usbHostConnected = usbCableConnected()" not in main
 
 print("PASS test_runtime_power_time_usb_contract")

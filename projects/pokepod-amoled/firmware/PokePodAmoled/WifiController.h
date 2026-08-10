@@ -17,6 +17,7 @@ class WifiController {
   void configurationChanged();
   void requestConnection();
   void quiesceForProvisioning(Print &log);
+  void prepareForSleep();
 
   WifiPhase phase() const { return decision_.phase; }
   bool connected() const { return connected_; }

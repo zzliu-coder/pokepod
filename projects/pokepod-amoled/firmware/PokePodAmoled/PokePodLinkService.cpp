@@ -618,6 +618,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"lightSleepCount\":" + String(power.lightSleepCount);
     extra += ",\"lightSleepMs\":" +
         String(static_cast<unsigned long>(power.lightSleepUs / 1000ULL));
+    extra += ",\"deepSleepWakeCount\":" +
+        String(power.deepSleepWakeCount);
+    extra += ",\"wokeFromDeepSleep\":" +
+        String(power.wokeFromDeepSleep ? "true" : "false");
+    extra += ",\"deepSleepTouchWakeArmed\":" +
+        String(power.deepSleepTouchWakeArmed ? "true" : "false");
     extra += ",\"lastWakeCause\":" + String(power.lastWakeCause);
     extra += ",\"resetReason\":" +
         String(static_cast<unsigned>(esp_reset_reason()));

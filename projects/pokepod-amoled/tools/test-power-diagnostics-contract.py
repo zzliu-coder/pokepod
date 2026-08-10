@@ -32,7 +32,12 @@ assert "input.vbusPresent" in main
 assert "input.usbHostConnected" in main
 assert "input.linkBusy" in main
 assert "esp_light_sleep_start" in power
-assert "kLightSleepSliceUs = 500000" in power
+assert "esp_deep_sleep_start" in power
+assert "kLightSleepTimeoutMs = 60000" in policy
+assert "kDeepSleepTimeoutMs = 180000" in policy
+assert "prepareForDeepSleep" in board
+assert "LowBatteryShutdownPolicy" in policy
+assert "performSafeShutdown" in main
 assert "setCpuFrequencyMhz" in power
 assert "CONFIG_PM_ENABLE" in power
 assert "CONFIG_BT_CTRL_MODEM_SLEEP" in power
@@ -75,4 +80,5 @@ assert "!input.bleConnected" in policy
 assert "!input.wifiRadioOn" in policy
 assert "!input.usbHostConnected" in policy
 assert "!input.vbusPresent" in policy
+assert "!input.automaticWakeEnabled" in policy
 print("PASS test_power_diagnostics_contract")

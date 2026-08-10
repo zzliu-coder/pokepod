@@ -283,6 +283,22 @@ void BoardServices::setScreenBrightness(uint8_t brightness) {
   }
 }
 
+void BoardServices::prepareForDeepSleep(bool keepTouchPowered, Print &log) {
+  setScreenOn(false);
+  (void)configureScreenOffSensors(true, false, log);
+  if (status_.ioExpander) {
+    // LCD reset and DSI power off. The touch controller remains powered only
+    // when its direct GPIO21 interrupt is an armed deep-sleep wake source.
+    expander_.digitalWrite(0, LOW);
+    expander_.digitalWrite(1, LOW);
+    expander_.digitalWrite(2, keepTouchPowered ? HIGH : LOW);
+    expander_.digitalWrite(7, HIGH);
+  }
+  digitalWrite(kSpeakerAmpPin, LOW);
+  log.printf("{\"event\":\"board_deep_sleep\",\"touch_powered\":%s}\n",
+             keepTouchPowered ? "true" : "false");
+}
+
 void BoardServices::safeShutdown() {
   setScreenOn(false);
   if (status_.pmu) pmu_.shutdown();

@@ -1,7 +1,10 @@
 #include "RuntimePowerManager.h"
 
 #include <driver/gpio.h>
+#include <driver/rtc_io.h>
+#include <esp_attr.h>
 #include <esp_sleep.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <esp32-hal-cpu.h>
 
@@ -10,22 +13,30 @@
 namespace pokepod {
 namespace {
 
-constexpr uint64_t kLightSleepSliceUs = 500000;
+RTC_DATA_ATTR uint32_t retainedDeepSleepWakeCount = 0;
 
 }  // namespace
 
 bool RuntimePowerManager::begin(Print &log) {
   snapshot_.cpuMhz = static_cast<uint16_t>(getCpuFrequencyMhz());
+  snapshot_.lastWakeCause =
+      static_cast<uint8_t>(esp_sleep_get_wakeup_cause());
+  snapshot_.wokeFromDeepSleep = esp_reset_reason() == ESP_RST_DEEPSLEEP;
+  if (snapshot_.wokeFromDeepSleep) ++retainedDeepSleepWakeCount;
+  snapshot_.deepSleepWakeCount = retainedDeepSleepWakeCount;
 #if CONFIG_PM_ENABLE
   snapshot_.automaticPmSupported = true;
 #endif
 #if CONFIG_BT_CTRL_MODEM_SLEEP
   snapshot_.bleModemSleepSupported = true;
 #endif
-  log.printf("{\"event\":\"power_manager\",\"ok\":true,\"cpu_mhz\":%u,\"automatic_pm\":%s,\"ble_modem_sleep\":%s}\n",
+  log.printf("{\"event\":\"power_manager\",\"ok\":true,\"cpu_mhz\":%u,\"automatic_pm\":%s,\"ble_modem_sleep\":%s,\"deep_wake\":%s,\"wake_count\":%lu,\"wake_cause\":%u}\n",
              snapshot_.cpuMhz,
              snapshot_.automaticPmSupported ? "true" : "false",
-             snapshot_.bleModemSleepSupported ? "true" : "false");
+             snapshot_.bleModemSleepSupported ? "true" : "false",
+             snapshot_.wokeFromDeepSleep ? "true" : "false",
+             static_cast<unsigned long>(snapshot_.deepSleepWakeCount),
+             snapshot_.lastWakeCause);
   return true;
 }
 
@@ -59,15 +70,19 @@ PowerDecision RuntimePowerManager::apply(const PowerInputs &inputs,
 }
 
 bool RuntimePowerManager::enterLightSleep(
-    const PowerInputs &verifiedInputs, Print &log) {
+    const PowerInputs &verifiedInputs,
+    const PowerDecision &verifiedDecision, Print &log) {
   const PowerDecision verified = decidePower(verifiedInputs);
-  if (!verified.allowLightSleep || verified.mode != PowerMode::lightSleep) {
+  if (!verified.allowLightSleep || verified.mode != PowerMode::lightSleep ||
+      !verifiedDecision.allowLightSleep ||
+      verifiedDecision.lightSleepTimerUs == 0) {
     return false;
   }
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   (void)gpio_wakeup_disable(static_cast<gpio_num_t>(kBootButtonPin));
   (void)gpio_wakeup_disable(static_cast<gpio_num_t>(kTouchInterruptPin));
-  esp_err_t error = esp_sleep_enable_timer_wakeup(kLightSleepSliceUs);
+  esp_err_t error = esp_sleep_enable_timer_wakeup(
+      verifiedDecision.lightSleepTimerUs);
   if (error == ESP_OK) {
     error = gpio_wakeup_enable(static_cast<gpio_num_t>(kBootButtonPin),
                                GPIO_INTR_LOW_LEVEL);
@@ -95,6 +110,41 @@ bool RuntimePowerManager::enterLightSleep(
   snapshot_.lastWakeCause =
       static_cast<uint8_t>(esp_sleep_get_wakeup_cause());
   return true;
+}
+
+bool RuntimePowerManager::armDeepSleepWakeSources(bool touchWakeEnabled,
+                                                   Print &log) {
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  uint64_t wakeMask = 1ULL << kBootButtonPin;
+  pinMode(kBootButtonPin, INPUT_PULLUP);
+  if (touchWakeEnabled) {
+    pinMode(kTouchInterruptPin, INPUT_PULLUP);
+    // A held-low touch IRQ would immediately reboot the device. Consume the
+    // interrupt and only arm the optional source once the line is released.
+    if (digitalRead(kTouchInterruptPin) == HIGH) {
+      wakeMask |= 1ULL << kTouchInterruptPin;
+    }
+  }
+  snapshot_.deepSleepTouchWakeArmed =
+      (wakeMask & (1ULL << kTouchInterruptPin)) != 0;
+  const esp_err_t error = esp_sleep_enable_ext1_wakeup_io(
+      wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (error != ESP_OK) {
+    snapshot_.lastError = error;
+    log.printf("{\"event\":\"deep_sleep_arm\",\"ok\":false,\"error\":%ld}\n",
+               static_cast<long>(error));
+    return false;
+  }
+  log.printf("{\"event\":\"deep_sleep_arm\",\"ok\":true,\"boot\":true,\"touch\":%s}\n",
+             snapshot_.deepSleepTouchWakeArmed
+                 ? "true" : "false");
+  return true;
+}
+
+[[noreturn]] void RuntimePowerManager::startDeepSleep(Print &log) {
+  log.flush();
+  esp_deep_sleep_start();
+  while (true) delay(1000);
 }
 
 }  // namespace pokepod

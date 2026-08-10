@@ -160,6 +160,10 @@ void WifiController::quiesceForProvisioning(Print &log) {
       static_cast<unsigned>(mode));
 }
 
+void WifiController::prepareForSleep() {
+  stopRadio();
+}
+
 void WifiController::startConnection(uint32_t nowMs) {
   if (config_ == nullptr || !config_->hasWifi()) return;
   if (candidateOrder_.empty()) {

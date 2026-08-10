@@ -51,6 +51,7 @@ class BoardServices {
   PowerKeyEvent pollPowerKey();
   void setScreenOn(bool enabled);
   void setScreenBrightness(uint8_t brightness);
+  void prepareForDeepSleep(bool keepTouchPowered, Print &log);
   void safeShutdown();
   String utcNow();
   bool setUtcEpoch(time_t epoch);
