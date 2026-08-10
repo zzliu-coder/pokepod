@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <FS.h>
 
-#include "AudioDecimator.h"
+#include "AudioFrontEnd.h"
 #include "BoardConfig.h"
 
 namespace pokepod {
@@ -20,6 +20,9 @@ class WavRecorder {
   uint32_t durationMs() const;
   const String &finalPath() const { return finalPath_; }
   const String &capsuleId() const { return recordingId_; }
+  const AudioFrontEndMetrics &audioMetrics() const {
+    return audioFrontEnd_.metrics();
+  }
 
  private:
   bool ensureDirectory(const char *path, Print &log);
@@ -43,7 +46,7 @@ class WavRecorder {
   String finalPath_;
   uint32_t dataBytes_ = 0;
   bool recording_ = false;
-  AudioDecimator3 decimator_;
+  AudioFrontEnd audioFrontEnd_;
 };
 
 }  // namespace pokepod

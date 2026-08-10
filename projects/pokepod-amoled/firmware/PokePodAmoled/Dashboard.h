@@ -8,6 +8,7 @@
 #include "CapsuleLibrary.h"
 #include "ChineseRenderer.h"
 #include "DeviceConfig.h"
+#include "PageTransition.h"
 #include "PeakWindow.h"
 #include "ProvisioningPolicy.h"
 #include "ProvisioningDiagnostics.h"
@@ -86,6 +87,8 @@ class Dashboard {
   bool advanceVerticalScroll(uint32_t nowMs,
                              const CapsuleLibrary &library);
   bool scrollActive() const;
+  bool advancePageTransition(uint32_t nowMs);
+  bool pageTransitionActive() const { return pageTransition_.running(); }
   bool openCapsuleAt(int16_t y, const CapsuleLibrary &library);
   bool beginCapsuleSelectionAt(int16_t y, const CapsuleLibrary &library);
   bool toggleCapsuleSelectionAt(int16_t y, const CapsuleLibrary &library);
@@ -124,7 +127,10 @@ class Dashboard {
   void drawBackButton();
   void drawHome(const DashboardView &view);
   void drawCapsules(const DashboardView &view);
+  void drawCapsuleRows(const DashboardView &view);
   void drawCapsuleDetail(const DashboardView &view);
+  void drawCapsuleDetailText(const DashboardView &view,
+                             const CapsuleSummary &record);
   void drawScopePicker(const DashboardView &view);
   void drawDetailMore(const DashboardView &view);
   void drawPurgeConfirm();
@@ -133,6 +139,8 @@ class Dashboard {
   void drawBluetoothPairing(const DashboardView &view);
   void drawProvisioning(const DashboardView &view);
   void drawProvisioningLog(const DashboardView &view);
+  void drawProvisioningRows(const DashboardView &view);
+  bool drawActiveScrollSurface(const DashboardView &view);
   void drawCapsuleOrb(int16_t centerY, uint16_t accent,
                       uint16_t dimAccent, int16_t scale = 100);
   void drawHomeAction(int16_t top, int16_t bottom, bool wireless,
@@ -149,7 +157,10 @@ class Dashboard {
   void drawRecordingDynamic(const DashboardView &view, bool presentPartial);
   void drawDynamicRegions(const DashboardView &view);
   void presentFrame();
+  bool beginPreparedPageTransition(uint32_t nowMs);
+  bool composeAndPresentScrollFrame(const DashboardView &view);
   void presentScrollRegion();
+  UiPresentRegion activeScrollPresentRegion() const;
   void presentRegion(int16_t x, int16_t y, int16_t width, int16_t height);
   String signature(const DashboardView &view, bool includeScroll) const;
   String topBarSignature(const DashboardView &view) const;
@@ -182,6 +193,7 @@ class Dashboard {
   ScrollPhysics capsuleScroll_;
   ScrollPhysics detailScroll_;
   ScrollPhysics provisioningLogScroll_;
+  PageTransition pageTransition_;
   String detailBodyCache_;
   String detailBodyCacheKey_;
   size_t purgeConfirmCount_ = 0;

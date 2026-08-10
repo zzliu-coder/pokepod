@@ -29,8 +29,8 @@ bool AudioPipeline::startHardware(Print &log) {
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"i2s\"}");
     return false;
   }
-  // Read one 1 ms stereo I2S interval at a time. USB later selects the physical
-  // microphone channel and emits a 96-byte mono packet; SD keeps both I2S slots.
+  // Read one 1 ms stereo I2S interval at a time. The shared AudioFrontEnd
+  // selects the physical microphone slot and emits 16 kHz mono samples.
   i2s_.setTimeout(50);
 
   es8311_handle_t codec = es8311_create(0, ES8311_ADDRESS_0);
@@ -62,7 +62,7 @@ bool AudioPipeline::startHardware(Print &log) {
   }
   codec_ = codec;
   hardwareActive_ = true;
-  log.printf("{\"event\":\"audio\",\"ok\":true,\"sample_rate\":%lu,\"channels\":%u}\n",
+  log.printf("{\"event\":\"audio\",\"ok\":true,\"sample_rate\":%lu,\"channels\":%u,\"microphone_gain_db\":30,\"frontend\":\"voice_v1\"}\n",
              static_cast<unsigned long>(kAudioSampleRate), kAudioChannels);
   return true;
 }

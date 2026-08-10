@@ -83,24 +83,27 @@ class ScrollPhysics {
 
   bool tick(uint32_t nowMs) {
     if (!coasting_) return false;
-    uint32_t elapsed = static_cast<uint32_t>(nowMs - lastSampleMs_);
+    const uint32_t elapsed = static_cast<uint32_t>(nowMs - lastSampleMs_);
     if (elapsed == 0) return false;
-    if (elapsed > 50) elapsed = 50;
     lastSampleMs_ = nowMs;
     const int32_t before = positionQ8_;
-    positionQ8_ += static_cast<int64_t>(velocityPxPerSecond_) * elapsed *
-        256 / 1000;
+
+    const int32_t direction = velocityPxPerSecond_ < 0 ? -1 : 1;
+    const int32_t speed = absolute(velocityPxPerSecond_);
+    const uint32_t stopMs = static_cast<uint32_t>(
+        (static_cast<int64_t>(speed) * 1000 + kDeceleration - 1) /
+        kDeceleration);
+    const uint32_t motionMs = elapsed < stopMs ? elapsed : stopMs;
+    int64_t distanceQ8 = static_cast<int64_t>(speed) * motionMs * 256 / 1000;
+    distanceQ8 -= static_cast<int64_t>(kDeceleration) * motionMs *
+        motionMs * 256 / 2000000;
+    positionQ8_ += static_cast<int32_t>(direction * distanceQ8);
     clampPosition();
 
-    const int32_t deceleration =
-        static_cast<int32_t>(kDeceleration * elapsed / 1000);
-    if (velocityPxPerSecond_ > 0) {
-      velocityPxPerSecond_ -= deceleration;
-      if (velocityPxPerSecond_ < 0) velocityPxPerSecond_ = 0;
-    } else {
-      velocityPxPerSecond_ += deceleration;
-      if (velocityPxPerSecond_ > 0) velocityPxPerSecond_ = 0;
-    }
+    int32_t remainingSpeed = speed - static_cast<int32_t>(
+        static_cast<int64_t>(kDeceleration) * elapsed / 1000);
+    if (remainingSpeed < 0) remainingSpeed = 0;
+    velocityPxPerSecond_ = direction * remainingSpeed;
     if (positionQ8_ == 0 || positionQ8_ == maximumPx_ * 256 ||
         absolute(velocityPxPerSecond_) < kMinimumCoastVelocity) {
       velocityPxPerSecond_ = 0;

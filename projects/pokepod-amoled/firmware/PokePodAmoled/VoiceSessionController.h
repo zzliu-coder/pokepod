@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "AudioCaptureRouter.h"
-#include "AudioDecimator.h"
+#include "AudioFrontEnd.h"
 #include "BleVoiceProtocol.h"
 
 namespace pokepod {
@@ -57,7 +57,7 @@ class VoiceSessionController {
     startedAtMs_ = nowMs;
     lastAudioAtMs_ = nowMs;
     sessionEndSentAtMs_ = 0;
-    decimator_.reset();
+    audioFrontEnd_.reset();
     queue_.clear();
     return true;
   }
@@ -81,7 +81,7 @@ class VoiceSessionController {
       size_t chunk = bytes - offset;
       if (chunk > 192) chunk = 192;
       chunk -= chunk % 4;
-      const size_t converted = decimator_.processStereo16(
+      const size_t converted = audioFrontEnd_.processStereo16(
           data + offset, chunk, monoBytes, sizeof(monoBytes));
       for (size_t monoOffset = 0; monoOffset + 1 < converted; monoOffset += 2) {
         pcm_[pcmUsed_++] = static_cast<int16_t>(
@@ -217,7 +217,7 @@ class VoiceSessionController {
   VoiceSessionState state_ = VoiceSessionState::idle;
   VoiceSessionError error_ = VoiceSessionError::none;
   AudioCaptureRouter *router_ = nullptr;
-  AudioDecimator3 decimator_;
+  AudioFrontEnd audioFrontEnd_;
   BleVoiceFrameQueue<kQueueFrames> queue_;
   int16_t pcm_[kBleVoiceSamplesPerFrame] = {};
   size_t pcmUsed_ = 0;

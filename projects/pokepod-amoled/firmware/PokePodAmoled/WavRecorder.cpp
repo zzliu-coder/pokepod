@@ -100,7 +100,7 @@ bool WavRecorder::start(Print &log, const String &recordingId,
     return false;
   }
   dataBytes_ = 0;
-  decimator_.reset();
+  audioFrontEnd_.reset();
   if (!writeHeader(0)) {
     file_.close();
     fs_->remove(partialPath_);
@@ -120,7 +120,7 @@ bool WavRecorder::append(const uint8_t *data, size_t length, Print &log) {
     size_t inputBytes = length - offset;
     if (inputBytes > kAudioBytesPerChunk) inputBytes = kAudioBytesPerChunk;
     inputBytes -= inputBytes % 4;
-    const size_t converted = decimator_.processStereo16(
+    const size_t converted = audioFrontEnd_.processStereo16(
         data + offset, inputBytes, mono, sizeof(mono));
     if (converted > 0) {
       const size_t written = file_.write(mono, converted);
@@ -149,9 +149,14 @@ bool WavRecorder::stop(Print &log) {
   if (ok) ok = writeCapsuleMetadata(log, createdAt_);
   if (ok) ok = writeProcessingMetadata(log, "queued", 2, nullptr, nullptr);
   if (ok) ok = commitStagingDirectory(log);
-  log.printf("{\"event\":\"recording_stopped\",\"ok\":%s,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\"}\n",
+  const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
+  log.printf("{\"event\":\"recording_stopped\",\"ok\":%s,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
              ok ? "true" : "false", static_cast<unsigned long>(durationMs()),
-             static_cast<unsigned long>(dataBytes_), finalPath_.c_str());
+             static_cast<unsigned long>(dataBytes_), finalPath_.c_str(),
+             audioInputChannelName(audio.selectedChannel), audio.leftPeak,
+             audio.rightPeak, audio.outputPeak,
+             static_cast<unsigned long>(audio.limitedSamples),
+             static_cast<unsigned long>(audio.maximumGainQ12));
   return ok;
 }
 

@@ -51,5 +51,25 @@ int main() {
   assert(scroll.positionPx() == 0);
   scroll.endDrag(2020);
   assert(!scroll.coasting());
+
+  // A slow UI frame must advance the same physical clock instead of silently
+  // discarding everything after the former 50 ms clamp.
+  ScrollPhysics stepped;
+  ScrollPhysics delayed;
+  stepped.setMaximum(1000);
+  delayed.setMaximum(1000);
+  assert(stepped.beginDrag(200, 3000));
+  assert(delayed.beginDrag(200, 3000));
+  assert(stepped.dragTo(170, 3020));
+  assert(delayed.dragTo(170, 3020));
+  stepped.endDrag(3020);
+  delayed.endDrag(3020);
+  for (uint32_t now = 3040; now <= 3180; now += 20) stepped.tick(now);
+  assert(delayed.tick(3180));
+  const int32_t positionDifference = stepped.positionPx() - delayed.positionPx();
+  assert(positionDifference >= -3 && positionDifference <= 3);
+  const int32_t velocityDifference =
+      stepped.velocityPxPerSecond() - delayed.velocityPxPerSecond();
+  assert(velocityDifference >= -3 && velocityDifference <= 3);
   return 0;
 }

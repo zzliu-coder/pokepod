@@ -145,7 +145,8 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
   input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy() ||
       wifi.phase() == WifiPhase::connecting;
   input.provisioning = provisioningCoordinator.visible();
-  input.uiAnimating = dashboard.scrollActive();
+  input.uiAnimating = dashboard.scrollActive() ||
+      dashboard.pageTransitionActive();
   input.automaticWakeEnabled = automaticWakeEnabled();
   input.criticalBattery = lowBatteryShutdown.critical();
   input.idleMs = autoScreenOff.idleMs(nowMs);
@@ -364,8 +365,9 @@ void emitStatus() {
   const BoardStatus &s = board.status();
   const BleVoiceQualitySnapshot quality = bleVoice.quality();
   const RuntimePowerSnapshot &power = runtimePower.snapshot();
+  const AudioFrontEndMetrics &frontEnd = recorder.audioMetrics();
   usb.log().printf(
-      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"deep_sleep_wake_count\":%lu,\"woke_from_deep_sleep\":%s,\"deep_sleep_touch_wake\":%s,\"critical_battery\":%s,\"idle_ms\":%lu,\"last_wake_cause\":%u,\"reset_reason\":%u,\"internal_heap_free\":%u,\"internal_heap_largest\":%u,\"psram_free\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_startup_phase\":\"%s\",\"provisioning_diagnostic_count\":%u}\n",
+      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"audio_frontend_channel\":\"%s\",\"audio_frontend_left_peak\":%u,\"audio_frontend_right_peak\":%u,\"audio_frontend_output_peak\":%u,\"audio_frontend_limited_samples\":%lu,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"deep_sleep_wake_count\":%lu,\"woke_from_deep_sleep\":%s,\"deep_sleep_touch_wake\":%s,\"critical_battery\":%s,\"idle_ms\":%lu,\"last_wake_cause\":%u,\"reset_reason\":%u,\"internal_heap_free\":%u,\"internal_heap_largest\":%u,\"psram_free\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_startup_phase\":\"%s\",\"provisioning_diagnostic_count\":%u}\n",
       variantName(s.variant), s.display ? "true" : "false", s.touch ? "true" : "false",
       s.sdCard ? "true" : "false", audio.ready() ? "true" : "false",
       audio.active() ? "true" : "false",
@@ -384,6 +386,9 @@ void emitStatus() {
       static_cast<unsigned>(quality.lastErrorCode),
       static_cast<unsigned long long>(audio.bytesRead()),
       static_cast<unsigned long>(audio.readFailures()), audio.peakSample(),
+      audioInputChannelName(frontEnd.selectedChannel), frontEnd.leftPeak,
+      frontEnd.rightPeak, frontEnd.outputPeak,
+      static_cast<unsigned long>(frontEnd.limitedSamples),
       recorder.recording() ? "true" : "false",
       static_cast<unsigned long>(recorder.durationMs()), s.batteryPercent,
       s.charging ? "true" : "false", s.vbusPresent ? "true" : "false",
@@ -435,6 +440,10 @@ void pollTouch() {
       ignoreTouchUntilRelease = true;
       setScreenState(true);
     }
+    return;
+  }
+  if (dashboard.pageTransitionActive()) {
+    if (board.readTouch(x, y)) ignoreTouchUntilRelease = true;
     return;
   }
   const bool touched = board.readTouch(x, y);
@@ -1006,6 +1015,11 @@ void loop() {
     lastDashboardMs = now;
     drawDashboard();
   }
+  if (dashboard.pageTransitionActive() &&
+      now - lastScrollFrameMs >= ui::kScrollFrameIntervalMs) {
+    lastScrollFrameMs = now;
+    if (dashboard.advancePageTransition(now)) lastDashboardMs = now;
+  }
 
   const uint32_t sensorIntervalMs = currentPowerDecision.sensorPollMs;
   if (now - lastSensorMs >= sensorIntervalMs) {
@@ -1045,7 +1059,8 @@ void loop() {
   }
   const bool keepScreenAwake = recorder.recording() || wirelessUiActive ||
       audio.playing() || provisioningCoordinator.visible() ||
-      touchVerticalScrolling || dashboard.scrollActive();
+      touchVerticalScrolling || dashboard.scrollActive() ||
+      dashboard.pageTransitionActive();
   if (!screenDimmed &&
       autoScreenOff.shouldDim(now, board.status().screenOn,
                               keepScreenAwake)) {

@@ -121,7 +121,9 @@ constexpr int16_t kPurgeConfirmActionSplit = 184;
 constexpr int16_t kRecordingDynamicTop = 72;
 constexpr int16_t kRecordingDynamicBottom = 326;
 constexpr uint32_t kRecordingFrameIntervalMs = 80;
-constexpr uint32_t kScrollFrameIntervalMs = 40;
+// The 368x448 AMOLED can sustain a clipped indexed-buffer transfer at 50 fps.
+// Full-page animation remains separately paced at the lower recording rate.
+constexpr uint32_t kScrollFrameIntervalMs = 20;
 
 constexpr int16_t kStatusIconSize = 20;
 constexpr int16_t kActionIconSize = 24;

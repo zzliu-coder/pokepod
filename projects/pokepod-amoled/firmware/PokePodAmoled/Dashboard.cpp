@@ -2,6 +2,7 @@
 
 #include <new>
 
+#include "TimePolicy.h"
 #include "WifiUiPolicy.h"
 
 namespace pokepod {
@@ -40,9 +41,11 @@ uint16_t capsuleStatusColor(CapsuleStatus status) {
 }
 
 String capsuleTime(const CapsuleSummary &record) {
-  if (record.createdAt.length() >= 16) {
-    return record.createdAt.substring(5, 10) + " " +
-        record.createdAt.substring(11, 16);
+  char local[12];
+  if (formatUtcOffsetShort(record.createdAt.c_str(),
+                           kChinaStandardTimeOffsetMinutes,
+                           local, sizeof(local))) {
+    return String(local);
   }
   return record.createdAt.isEmpty() ? String("刚刚") : record.createdAt;
 }
@@ -250,20 +253,19 @@ void Dashboard::draw(const DashboardView &view) {
     const bool scrollOnly = scrollFramePending_ && frame_ != nullptr &&
         !libraryChanged && !lastSignature_.isEmpty() &&
         currentStableSignature == lastStableSignature_;
-    display_->fillScreen(ui::kBackground);
-    if (state_.screen() == UiScreen::home ||
-        state_.screen() == UiScreen::capsules ||
-        state_.screen() == UiScreen::device) drawTopBar(view);
-    drawBody(view);
-    const UiRenderPlan plan = uiRenderPlan(view.recording, true);
-    if (plan.composeRecordingBeforeFullPresent) {
-      drawRecordingDynamic(view, false);
-    }
-    if (scrollOnly) {
-      presentScrollRegion();
+    if (scrollOnly && composeAndPresentScrollFrame(view)) {
       ++partialRedrawCount_;
     } else {
-      presentFrame();
+      display_->fillScreen(ui::kBackground);
+      if (state_.screen() == UiScreen::home ||
+          state_.screen() == UiScreen::capsules ||
+          state_.screen() == UiScreen::device) drawTopBar(view);
+      drawBody(view);
+      const UiRenderPlan plan = uiRenderPlan(view.recording, true);
+      if (plan.composeRecordingBeforeFullPresent) {
+        drawRecordingDynamic(view, false);
+      }
+      if (!beginPreparedPageTransition(millis())) presentFrame();
       ++fullRedrawCount_;
     }
     bodyRepainted = true;
@@ -419,6 +421,37 @@ void Dashboard::drawCapsules(const DashboardView &view) {
     drawCenteredText("暂无胶囊", 326, UiTextSize::body, ui::kMuted, true);
     return;
   }
+  drawCapsuleRows(view);
+  if (browserState_.selectionMode()) {
+    display_->fillRoundRect(20, ui::kCapsuleSelectionBarTop, 328,
+                            ui::kCapsuleSelectionBarBottom -
+                                ui::kCapsuleSelectionBarTop,
+                            18, ui::kSurfaceRaised);
+    display_->drawFastVLine(123, ui::kCapsuleSelectionBarTop + 12, 48,
+                            ui::kDivider);
+    display_->drawFastVLine(245, ui::kCapsuleSelectionBarTop + 12, 48,
+                            ui::kDivider);
+    renderer_.drawText("收藏", 48, ui::kCapsuleSelectionBarTop + 25,
+                       56, 1, ui::kInk, ui::kSurfaceRaised);
+    renderer_.drawText(view.library != nullptr &&
+                               view.library->scope() == CapsuleScope::trash
+                           ? "恢复" :
+                           (view.library != nullptr &&
+                                view.library->scope() == CapsuleScope::archive
+                                ? "移回" : "归档"),
+                       157, ui::kCapsuleSelectionBarTop + 25,
+                       64, 1, ui::kInk, ui::kSurfaceRaised);
+    renderer_.drawText(view.library != nullptr &&
+                               view.library->scope() == CapsuleScope::trash
+                           ? "永久删除" : "删除",
+                       278, ui::kCapsuleSelectionBarTop + 25,
+                       70, 1, ui::kError, ui::kSurfaceRaised);
+  }
+}
+
+void Dashboard::drawCapsuleRows(const DashboardView &view) {
+  const size_t count = view.library == nullptr ? 0 : view.library->count();
+  if (count == 0) return;
   const int16_t listBottom = browserState_.selectionMode()
       ? ui::kCapsuleSelectionBarTop : ui::kCapsuleListBottom;
   const int32_t scrollPx = capsuleScroll_.positionPx();
@@ -465,31 +498,6 @@ void Dashboard::drawCapsules(const DashboardView &view) {
       display_->drawFastHLine(42, y + 67, 306, ui::kDivider);
     }
   }
-  if (browserState_.selectionMode()) {
-    display_->fillRoundRect(20, ui::kCapsuleSelectionBarTop, 328,
-                            ui::kCapsuleSelectionBarBottom -
-                                ui::kCapsuleSelectionBarTop,
-                            18, ui::kSurfaceRaised);
-    display_->drawFastVLine(123, ui::kCapsuleSelectionBarTop + 12, 48,
-                            ui::kDivider);
-    display_->drawFastVLine(245, ui::kCapsuleSelectionBarTop + 12, 48,
-                            ui::kDivider);
-    renderer_.drawText("收藏", 48, ui::kCapsuleSelectionBarTop + 25,
-                       56, 1, ui::kInk, ui::kSurfaceRaised);
-    renderer_.drawText(view.library != nullptr &&
-                               view.library->scope() == CapsuleScope::trash
-                           ? "恢复" :
-                           (view.library != nullptr &&
-                                view.library->scope() == CapsuleScope::archive
-                                ? "移回" : "归档"),
-                       157, ui::kCapsuleSelectionBarTop + 25,
-                       64, 1, ui::kInk, ui::kSurfaceRaised);
-    renderer_.drawText(view.library != nullptr &&
-                               view.library->scope() == CapsuleScope::trash
-                           ? "永久删除" : "删除",
-                       278, ui::kCapsuleSelectionBarTop + 25,
-                       70, 1, ui::kError, ui::kSurfaceRaised);
-  }
 }
 
 void Dashboard::drawCapsuleDetail(const DashboardView &view) {
@@ -507,33 +515,7 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
                      capsuleStatusColor(record->status), ui::kBackground);
   renderer_.drawText(capsuleTime(*record), 20, 58, 180, 1,
                      ui::kMuted, ui::kBackground);
-  const String bodyCacheKey = record->id + ":" +
-      static_cast<int>(record->status) + ":" + record->preview;
-  if (bodyCacheKey != detailBodyCacheKey_) {
-    detailBodyCache_ = view.library->readBestText(*record);
-    if (detailBodyCache_ == record->title &&
-        generatedVoiceTitle(record->title)) {
-      detailBodyCache_ = capsuleDisplayText(*record);
-    }
-    detailBodyCacheKey_ = bodyCacheKey;
-  }
-  const int16_t lineHeight = renderer_.textLineHeight(UiTextSize::body);
-  const int32_t contentHeight = static_cast<int32_t>(
-      renderer_.wrappedLineCount(detailBodyCache_, 328, UiTextSize::body)) *
-      lineHeight;
-  const int32_t viewportHeight =
-      ui::kDetailTextBottom - ui::kDetailTextTop;
-  detailScroll_.setMaximum(contentHeight > viewportHeight
-                               ? contentHeight - viewportHeight : 0);
-  const int32_t scrollPx = detailScroll_.positionPx();
-  const uint16_t skipLines = static_cast<uint16_t>(scrollPx / lineHeight);
-  const int16_t pixelOffset = static_cast<int16_t>(scrollPx % lineHeight);
-  const uint8_t visibleLines = static_cast<uint8_t>(
-      viewportHeight / lineHeight + 2);
-  renderer_.drawText(detailBodyCache_, 20, ui::kDetailTextTop, 328,
-                     visibleLines, ui::kInk, ui::kBackground, skipLines,
-                     true, UiTextSize::body, false, pixelOffset,
-                     ui::kDetailTextTop, ui::kDetailTextBottom);
+  drawCapsuleDetailText(view, *record);
 
   const bool needsRetry = !record->readOnly &&
       (record->status == CapsuleStatus::failed ||
@@ -555,6 +537,37 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
                    (record->archived ? "移回" : "归档"), false,
                    mutationColor);
   drawDetailAction(282, UiIcon::chevron, "更多", false, mutationColor);
+}
+
+void Dashboard::drawCapsuleDetailText(const DashboardView &view,
+                                      const CapsuleSummary &record) {
+  const String bodyCacheKey = record.id + ":" +
+      static_cast<int>(record.status) + ":" + record.preview;
+  if (bodyCacheKey != detailBodyCacheKey_) {
+    detailBodyCache_ = view.library->readBestText(record);
+    if (detailBodyCache_ == record.title &&
+        generatedVoiceTitle(record.title)) {
+      detailBodyCache_ = capsuleDisplayText(record);
+    }
+    detailBodyCacheKey_ = bodyCacheKey;
+  }
+  const int16_t lineHeight = renderer_.textLineHeight(UiTextSize::body);
+  const int32_t contentHeight = static_cast<int32_t>(
+      renderer_.wrappedLineCount(detailBodyCache_, 328, UiTextSize::body)) *
+      lineHeight;
+  const int32_t viewportHeight =
+      ui::kDetailTextBottom - ui::kDetailTextTop;
+  detailScroll_.setMaximum(contentHeight > viewportHeight
+                               ? contentHeight - viewportHeight : 0);
+  const int32_t scrollPx = detailScroll_.positionPx();
+  const uint16_t skipLines = static_cast<uint16_t>(scrollPx / lineHeight);
+  const int16_t pixelOffset = static_cast<int16_t>(scrollPx % lineHeight);
+  const uint8_t visibleLines = static_cast<uint8_t>(
+      viewportHeight / lineHeight + 2);
+  renderer_.drawText(detailBodyCache_, 20, ui::kDetailTextTop, 328,
+                     visibleLines, ui::kInk, ui::kBackground, skipLines,
+                     true, UiTextSize::body, false, pixelOffset,
+                     ui::kDetailTextTop, ui::kDetailTextBottom);
 }
 
 void Dashboard::drawScopePicker(const DashboardView &view) {
@@ -922,6 +935,13 @@ void Dashboard::drawProvisioningLog(const DashboardView &view) {
     drawCenteredText("暂无配网记录", 220, UiTextSize::body, ui::kMuted, true);
     return;
   }
+  drawProvisioningRows(view);
+}
+
+void Dashboard::drawProvisioningRows(const DashboardView &view) {
+  const ProvisioningDiagnostics *diagnostics = view.provisioningDiagnostics;
+  const size_t count = diagnostics == nullptr ? 0 : diagnostics->count();
+  if (count == 0) return;
   const int32_t scrollPx = provisioningLogScroll_.positionPx();
   const size_t firstOffset = static_cast<size_t>(
       scrollPx / ui::kProvisionLogRowStride);
@@ -1164,7 +1184,65 @@ void Dashboard::presentFrame() {
   if (frame_ != nullptr) frame_->flush();
 }
 
+bool Dashboard::beginPreparedPageTransition(uint32_t nowMs) {
+  if (frame_ == nullptr || !pageTransition_.pending()) return false;
+  const PageTransitionRegion region = pageTransition_.begin(
+      nowMs, ui::kScreenWidth);
+  if (!region.valid()) return false;
+  presentRegion(region.x, 0, region.width, ui::kScreenHeight);
+  return true;
+}
+
+bool Dashboard::advancePageTransition(uint32_t nowMs) {
+  const PageTransitionRegion region = pageTransition_.advance(nowMs);
+  if (!region.valid()) return false;
+  presentRegion(region.x, 0, region.width, ui::kScreenHeight);
+  ++partialRedrawCount_;
+  return true;
+}
+
+bool Dashboard::composeAndPresentScrollFrame(const DashboardView &view) {
+  const UiPresentRegion region = activeScrollPresentRegion();
+  if (!region.valid()) return false;
+  // Keep the top bar and fixed actions intact. Only the clipped viewport is
+  // cleared, recomposed in the indexed canvas and transferred to the panel.
+  display_->fillRect(region.x, region.y, region.width, region.height,
+                     ui::kBackground);
+  if (!drawActiveScrollSurface(view)) return false;
+  presentRegion(region.x, region.y, region.width, region.height);
+  return true;
+}
+
+bool Dashboard::drawActiveScrollSurface(const DashboardView &view) {
+  switch (state_.screen()) {
+    case UiScreen::capsules:
+      drawCapsuleRows(view);
+      return true;
+    case UiScreen::capsuleDetail: {
+      const CapsuleSummary *record = view.library == nullptr
+          ? nullptr : selected(*view.library);
+      if (record == nullptr) return false;
+      drawCapsuleDetailText(view, *record);
+      return true;
+    }
+    case UiScreen::provisioningLog:
+      drawProvisioningRows(view);
+      return true;
+    default:
+      return false;
+  }
+}
+
 void Dashboard::presentScrollRegion() {
+  const UiPresentRegion region = activeScrollPresentRegion();
+  if (region.valid()) {
+    presentRegion(region.x, region.y, region.width, region.height);
+  } else {
+    presentFrame();
+  }
+}
+
+UiPresentRegion Dashboard::activeScrollPresentRegion() const {
   UiScrollSurface surface = UiScrollSurface::none;
   switch (state_.screen()) {
     case UiScreen::capsules: surface = UiScrollSurface::capsules; break;
@@ -1174,13 +1252,7 @@ void Dashboard::presentScrollRegion() {
       break;
     default: break;
   }
-  const UiPresentRegion region = scrollPresentRegion(
-      surface, browserState_.selectionMode());
-  if (region.valid()) {
-    presentRegion(region.x, region.y, region.width, region.height);
-  } else {
-    presentFrame();
-  }
+  return scrollPresentRegion(surface, browserState_.selectionMode());
 }
 
 void Dashboard::presentRegion(int16_t x, int16_t y,
@@ -1522,6 +1594,7 @@ bool Dashboard::openCapsuleAt(int16_t y,
   detailScroll_.reset();
   detailBodyCache_ = "";
   detailBodyCacheKey_ = "";
+  pageTransition_.prepare(PageTransitionDirection::fromRight);
   invalidated_ = true;
   return true;
 }
@@ -1570,11 +1643,13 @@ void Dashboard::back() {
   if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
   if (state_.provisioning) {
     if (state_.provisioningLog) {
+      pageTransition_.prepare(PageTransitionDirection::fromLeft);
       state_.provisioningLog = false;
       provisioningLogScroll_.reset();
       invalidated_ = true;
       return;
     }
+    pageTransition_.prepare(PageTransitionDirection::fromLeft);
     state_.provisioning = false;
     state_.capsuleScopeOverlay = false;
     state_.detailMoreOverlay = false;
@@ -1582,11 +1657,13 @@ void Dashboard::back() {
     return;
   }
   if (state_.bluetoothPairing) {
+    pageTransition_.prepare(PageTransitionDirection::fromLeft);
     state_.bluetoothPairing = false;
     invalidated_ = true;
     return;
   }
   if (state_.computerSync) {
+    pageTransition_.prepare(PageTransitionDirection::fromLeft);
     state_.computerSync = false;
     invalidated_ = true;
     return;
@@ -1600,6 +1677,7 @@ void Dashboard::back() {
     clearCapsuleSelection();
     return;
   }
+  pageTransition_.prepare(PageTransitionDirection::fromLeft);
   state_.provisioning = false;
   state_.capsuleDetail = false;
   state_.detailRetryEnabled = false;
@@ -1614,12 +1692,14 @@ void Dashboard::back() {
 void Dashboard::openProvisioningLog() {
   if (state_.screen() != UiScreen::provisioning) return;
   provisioningLogScroll_.reset();
+  pageTransition_.prepare(PageTransitionDirection::fromRight);
   state_.provisioningLog = true;
   invalidated_ = true;
 }
 
 void Dashboard::openBluetoothPairing() {
   if (state_.screen() != UiScreen::device) return;
+  pageTransition_.prepare(PageTransitionDirection::fromRight);
   state_.bluetoothPairing = true;
   invalidated_ = true;
 }
@@ -1629,6 +1709,7 @@ void Dashboard::openComputerSync() {
   if (screen != UiScreen::home && screen != UiScreen::capsules &&
       screen != UiScreen::device) return;
   if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
+  pageTransition_.prepare(PageTransitionDirection::fromRight);
   state_.computerSync = true;
   state_.capsuleScopeOverlay = false;
   state_.detailMoreOverlay = false;
@@ -1700,6 +1781,10 @@ void Dashboard::navigate(RootPage page) {
       state_.purgeConfirmOverlay ||
       state_.page == page) return;
   if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
+  pageTransition_.prepare(
+      static_cast<uint8_t>(page) > static_cast<uint8_t>(state_.page)
+          ? PageTransitionDirection::fromRight
+          : PageTransitionDirection::fromLeft);
   state_.page = page;
   invalidated_ = true;
 }

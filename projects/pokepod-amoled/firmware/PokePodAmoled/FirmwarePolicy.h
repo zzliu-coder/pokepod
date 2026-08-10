@@ -9,8 +9,8 @@ constexpr int kDisplayWidth = 368;
 constexpr int kDisplayHeight = 448;
 
 constexpr uint32_t kAudioSampleRate = 48000;
-// ES8311 exposes one physical microphone. I2S carries the same sample in two
-// slots; local WAV and BLE routing select the left slot.
+// ES8311 exposes one physical microphone through two I2S slots. The shared
+// AudioFrontEnd probes both slots briefly and locks the active one.
 constexpr uint16_t kAudioChannels = 2;
 constexpr uint16_t kAudioBitsPerSample = 16;
 constexpr uint32_t kCapsuleSampleRate = 16000;

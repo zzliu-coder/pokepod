@@ -36,10 +36,22 @@ require(main, "ui::kScrollFrameIntervalMs",
         "scroll frame pacing is missing")
 require(dashboard, "presentScrollRegion()",
         "scroll frames still present the entire AMOLED frame")
+require(dashboard, "composeAndPresentScrollFrame(view)",
+        "scroll frames do not use the clipped composition path")
+require(dashboard, "drawActiveScrollSurface(view)",
+        "scroll frames still compose the entire page body")
+require(dashboard, "display_->fillRect(region.x, region.y, region.width",
+        "scroll frames still clear the entire indexed canvas")
 require(dashboard, "currentStableSignature == lastStableSignature_",
         "scroll-only presentation is not guarded against structural changes")
 require(main, "touchVerticalScrolling || dashboard.scrollActive()",
         "active scrolling can still trigger screen timeout")
+require(main, "dashboard.advancePageTransition(now)",
+        "page transitions are not serviced by the main loop")
+require(main, "dashboard.pageTransitionActive()",
+        "page transitions do not hold the performance and awake policy")
+require(dashboard, "beginPreparedPageTransition(millis())",
+        "page changes still replace the full panel immediately")
 require(power, "input.uiAnimating", "scrolling does not request performance")
 require(renderer, "loadSdCache(codepoint, glyph)",
         "SD glyph cache is not used")
@@ -48,5 +60,9 @@ require(renderer, "storeSdCache(codepoint, glyph)",
 
 if "dashboard.swipeVertical" in main:
     raise SystemExit("FAIL scroll_contract: legacy release-only scrolling remains")
+
+theme = (FIRMWARE / "UiTheme.h").read_text(encoding="utf-8")
+require(theme, "kScrollFrameIntervalMs = 20",
+        "scroll cadence is below the 50 fps target")
 
 print("PASS scroll_contract")

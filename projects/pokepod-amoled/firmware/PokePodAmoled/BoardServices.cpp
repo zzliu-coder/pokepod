@@ -5,6 +5,8 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "TimePolicy.h"
+
 namespace pokepod {
 namespace {
 
@@ -345,18 +347,17 @@ void BoardServices::ensureRtcTime(Print &log) {
     setSystemClock(current);
     return;
   }
-  static const char *months = "JanFebMarAprMayJunJulAugSepOctNovDec";
-  const char *match = strstr(months, String(__DATE__).substring(0, 3).c_str());
-  const uint8_t month = match == nullptr ? 1 :
-      static_cast<uint8_t>((match - months) / 3 + 1);
-  const uint8_t day = static_cast<uint8_t>(atoi(__DATE__ + 4));
-  const uint16_t year = static_cast<uint16_t>(atoi(__DATE__ + 7));
-  const uint8_t hour = static_cast<uint8_t>(atoi(__TIME__));
-  const uint8_t minute = static_cast<uint8_t>(atoi(__TIME__ + 3));
-  const uint8_t second = static_cast<uint8_t>(atoi(__TIME__ + 6));
-  rtc_.setDateTime(year, month, day, hour, minute, second);
-  setSystemClock(RTC_DateTime(year, month, day, hour, minute, second));
-  log.println("{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_time\"}");
+  int64_t utcEpoch = 0;
+  if (buildLocalDateTimeToUtcEpoch(__DATE__, __TIME__,
+                                   kChinaStandardTimeOffsetMinutes,
+                                   utcEpoch) &&
+      setUtcEpoch(static_cast<time_t>(utcEpoch))) {
+    log.println(
+        "{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_time_local\",\"utc_offset_minutes\":480}");
+  } else {
+    log.println(
+        "{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_time_local\",\"ok\":false}");
+  }
 }
 
 }  // namespace pokepod
