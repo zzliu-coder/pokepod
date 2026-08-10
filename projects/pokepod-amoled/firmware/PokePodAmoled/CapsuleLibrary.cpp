@@ -2,7 +2,9 @@
 
 #include <cJSON.h>
 #include <algorithm>
+#include <esp_timer.h>
 #include <esp_system.h>
+#include <utility>
 
 #include "CapsuleCompatibilityPolicy.h"
 #include "CapsulePolicy.h"
@@ -54,6 +56,8 @@ void replaceStringOrNull(cJSON *root, const char *name, const String &value) {
 bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
   fs_ = &fs;
   log_ = &log;
+  records_.reserve(kMaxCapsulesOnDevice);
+  visible_.reserve(kMaxCapsulesOnDevice);
   if (!scan()) return false;
 
   std::vector<String> interrupted;
@@ -75,6 +79,7 @@ bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
 
 bool CapsuleLibrary::scan() {
   if (fs_ == nullptr) return false;
+  const int64_t startedUs = esp_timer_get_time();
   records_.clear();
   scanFolder(kCapsuleInbox, "Inbox", 0);
   scanFolder(kCapsuleArchive, "Archive", 0);
@@ -96,17 +101,23 @@ bool CapsuleLibrary::scan() {
     }
     root.close();
   }
-  std::sort(records_.begin(), records_.end(),
-            [](const CapsuleSummary &left, const CapsuleSummary &right) {
-              return left.createdAt > right.createdAt;
-            });
-  rebuildVisible();
+  requestPublish();
+  const uint32_t elapsedUs = static_cast<uint32_t>(
+      esp_timer_get_time() - startedUs);
+  lastScanUs_ = elapsedUs;
+  if (elapsedUs > maxScanUs_) maxScanUs_ = elapsedUs;
+  ++fullScanCount_;
   if (log_ != nullptr) {
     log_->printf("{\"event\":\"capsule_scan\",\"count\":%u,\"pending\":%u}\n",
                  static_cast<unsigned>(records_.size()),
                  static_cast<unsigned>(pendingCount()));
   }
   return true;
+}
+
+bool CapsuleLibrary::includeInboxCapsule(const String &id) {
+  if (!isUuid(id.c_str())) return false;
+  return refreshRecord(id, String(kCapsuleInbox) + "/" + id, "Inbox");
 }
 
 void CapsuleLibrary::scanFolder(const String &path, const String &folder,
@@ -238,34 +249,39 @@ const CapsuleSummary *CapsuleLibrary::find(const String &id) const {
 }
 
 bool CapsuleLibrary::markTranscribing(const String &id) {
-  return updateProcessing(id, CapsuleStatus::transcribing, "", "", "", true) && scan();
+  return updateProcessing(id, CapsuleStatus::transcribing, "", "", "", true) &&
+      refreshExisting(id);
 }
 
 bool CapsuleLibrary::commitRawText(const String &id, const String &text) {
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly || text.isEmpty() ||
       !writeTextAtomic(record->directory + "/raw.txt", text + "\n")) return false;
-  return updateProcessing(id, CapsuleStatus::rawReady, "raw.txt", "", "", false) && scan();
+  return updateProcessing(id, CapsuleStatus::rawReady, "raw.txt", "", "", false) &&
+      refreshExisting(id);
 }
 
 bool CapsuleLibrary::markFailure(const String &id, const String &stage,
                                  const String &error) {
-  return updateProcessing(id, CapsuleStatus::failed, "", stage, error, false) && scan();
+  return updateProcessing(id, CapsuleStatus::failed, "", stage, error, false) &&
+      refreshExisting(id);
 }
 
 bool CapsuleLibrary::markRetryable(const String &id, const String &stage,
                                    const String &error) {
-  return updateProcessing(id, CapsuleStatus::queued, "", stage, error, false) && scan();
+  return updateProcessing(id, CapsuleStatus::queued, "", stage, error, false) &&
+      refreshExisting(id);
 }
 
 bool CapsuleLibrary::requeue(const String &id) {
-  return updateProcessing(id, CapsuleStatus::queued, "", "", "", false) && scan();
+  return updateProcessing(id, CapsuleStatus::queued, "", "", "", false) &&
+      refreshExisting(id);
 }
 
 bool CapsuleLibrary::toggleFavorite(const String &id) {
   const CapsuleSummary *record = find(id);
   return record != nullptr && !record->readOnly &&
-      updateFavorite(id, !record->favorite) && scan();
+      updateFavorite(id, !record->favorite) && refreshExisting(id);
 }
 
 bool CapsuleLibrary::archive(const String &id) {
@@ -292,7 +308,7 @@ bool CapsuleLibrary::archive(const String &id) {
     fs_->remove(metadataPath);
     return false;
   }
-  return scan();
+  return refreshRecord(id, target, "Archive");
 }
 
 bool CapsuleLibrary::unarchive(const String &id) {
@@ -318,7 +334,10 @@ bool CapsuleLibrary::unarchive(const String &id) {
     return false;
   }
   fs_->remove(target + "/" + kCapsuleArchiveMetadata);
-  return scan();
+  String folder = targetDirectory == kCapsuleInbox
+      ? String("Inbox")
+      : targetDirectory.substring(String(kCapsuleRoot).length() + 1);
+  return refreshRecord(id, target, folder);
 }
 
 bool CapsuleLibrary::trash(const String &id, const String &trashedAt) {
@@ -344,7 +363,7 @@ bool CapsuleLibrary::trash(const String &id, const String &trashedAt) {
     fs_->remove(record->directory + "/trash.json");
     return false;
   }
-  return scan();
+  return refreshRecord(id, target, ".trash");
 }
 
 bool CapsuleLibrary::restore(const String &id) {
@@ -368,7 +387,10 @@ bool CapsuleLibrary::restore(const String &id) {
     return false;
   }
   fs_->remove(target + "/trash.json");
-  return scan();
+  String folder = targetDirectory == kCapsuleInbox
+      ? String("Inbox")
+      : targetDirectory.substring(String(kCapsuleRoot).length() + 1);
+  return refreshRecord(id, target, folder);
 }
 
 CapsuleBatchResult CapsuleLibrary::purge(const std::vector<String> &ids) {
@@ -435,7 +457,9 @@ CapsuleBatchResult CapsuleLibrary::purge(const std::vector<String> &ids) {
 
   result.ok = true;
   result.changed = staged.size();
-  scan();
+  deferredPublish_.begin();
+  for (const String &id : staged) removeIndexedRecord(id);
+  finishDeferredPublish();
   bool cleanupDeferred = false;
   for (const String &id : staged) {
     if (!removeTree(transaction + "/" + id)) {
@@ -483,6 +507,11 @@ CapsuleBatchResult CapsuleLibrary::batch(
 
   std::vector<String> changed;
   changed.reserve(ids.size());
+  deferredPublish_.begin();
+  const auto finish = [this](CapsuleBatchResult value) {
+    finishDeferredPublish();
+    return value;
+  };
   for (const String &id : ids) {
     const CapsuleSummary *record = find(id);
     bool ok = false;
@@ -529,19 +558,82 @@ CapsuleBatchResult CapsuleLibrary::batch(
       result.rollbackFailed = rollback.failed;
       result.rolledBackFully = rollback.fullyRolledBack();
       result.changed = rollback.failed;
-      return result;
+      return finish(result);
     }
     if (changedThisItem) changed.push_back(id);
   }
   result.ok = true;
   result.changed = changed.size();
-  return result;
+  return finish(result);
 }
 
 void CapsuleLibrary::setScope(CapsuleScope scope) {
   if (scope_ == scope) return;
   scope_ = scope;
   rebuildVisible();
+}
+
+size_t CapsuleLibrary::recordIndex(const String &id) const {
+  for (size_t index = 0; index < records_.size(); ++index) {
+    if (records_[index].id.equalsIgnoreCase(id)) return index;
+  }
+  return records_.size();
+}
+
+bool CapsuleLibrary::refreshRecord(const String &id, const String &directory,
+                                   const String &folder) {
+  CapsuleSummary refreshed;
+  if (!readRecord(directory, folder, refreshed) ||
+      !refreshed.id.equalsIgnoreCase(id)) {
+    ++refreshFallbackCount_;
+    return scan() && find(id) != nullptr;
+  }
+  const size_t index = recordIndex(id);
+  if (index < records_.size()) {
+    records_[index] = std::move(refreshed);
+  } else if (records_.size() < kMaxCapsulesOnDevice) {
+    records_.push_back(std::move(refreshed));
+  } else {
+    ++refreshFallbackCount_;
+    return scan();
+  }
+  ++incrementalRefreshCount_;
+  requestPublish();
+  return true;
+}
+
+bool CapsuleLibrary::refreshExisting(const String &id) {
+  const size_t index = recordIndex(id);
+  if (index >= records_.size()) {
+    ++refreshFallbackCount_;
+    return scan();
+  }
+  const String directory = records_[index].directory;
+  const String folder = records_[index].folder;
+  return refreshRecord(id, directory, folder);
+}
+
+void CapsuleLibrary::removeIndexedRecord(const String &id) {
+  const size_t index = recordIndex(id);
+  if (index >= records_.size()) return;
+  records_.erase(records_.begin() + index);
+  requestPublish();
+}
+
+void CapsuleLibrary::requestPublish() {
+  if (deferredPublish_.request()) publishRecords();
+}
+
+void CapsuleLibrary::publishRecords() {
+  std::sort(records_.begin(), records_.end(),
+            [](const CapsuleSummary &left, const CapsuleSummary &right) {
+              return left.createdAt > right.createdAt;
+            });
+  rebuildVisible();
+}
+
+void CapsuleLibrary::finishDeferredPublish() {
+  if (deferredPublish_.finish()) publishRecords();
 }
 
 void CapsuleLibrary::rebuildVisible() {
@@ -596,8 +688,13 @@ String CapsuleLibrary::readText(const String &path, size_t maxBytes) const {
     file.close();
     return String();
   }
+  uint8_t chunk[512];
   while (file.available() && value.length() < wanted) {
-    value += static_cast<char>(file.read());
+    const size_t remaining = wanted - value.length();
+    const size_t request = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+    const size_t count = file.read(chunk, request);
+    if (count == 0) break;
+    value.concat(reinterpret_cast<const char *>(chunk), count);
   }
   file.close();
   value.trim();

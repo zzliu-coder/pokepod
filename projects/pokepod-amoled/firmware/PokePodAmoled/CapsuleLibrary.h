@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "CapsuleBrowserState.h"
+#include "DeferredPublish.h"
 
 namespace pokepod {
 
@@ -66,8 +67,14 @@ class CapsuleLibrary {
  public:
   bool begin(fs::FS &fs, Print &log);
   bool scan();
+  bool includeInboxCapsule(const String &id);
   size_t count() const { return visible_.size(); }
   uint32_t revision() const { return revision_; }
+  uint32_t fullScanCount() const { return fullScanCount_; }
+  uint32_t incrementalRefreshCount() const { return incrementalRefreshCount_; }
+  uint32_t refreshFallbackCount() const { return refreshFallbackCount_; }
+  uint32_t lastScanUs() const { return lastScanUs_; }
+  uint32_t maxScanUs() const { return maxScanUs_; }
   size_t pendingCount() const;
   const CapsuleSummary *at(size_t index) const;
   const CapsuleSummary *nextQueued() const;
@@ -104,6 +111,14 @@ class CapsuleLibrary {
                         const String &error, bool incrementAttempts);
   bool updateFavorite(const String &id, bool favorite);
   bool removeTree(const String &path);
+  size_t recordIndex(const String &id) const;
+  bool refreshRecord(const String &id, const String &directory,
+                     const String &folder);
+  bool refreshExisting(const String &id);
+  void removeIndexedRecord(const String &id);
+  void requestPublish();
+  void publishRecords();
+  void finishDeferredPublish();
   void rebuildVisible();
   String safeRestoreDirectory(const String &folder) const;
 
@@ -113,6 +128,12 @@ class CapsuleLibrary {
   std::vector<size_t> visible_;
   CapsuleScope scope_ = CapsuleScope::inbox;
   uint32_t revision_ = 0;
+  DeferredPublish deferredPublish_;
+  uint32_t fullScanCount_ = 0;
+  uint32_t incrementalRefreshCount_ = 0;
+  uint32_t refreshFallbackCount_ = 0;
+  uint32_t lastScanUs_ = 0;
+  uint32_t maxScanUs_ = 0;
 };
 
 }  // namespace pokepod

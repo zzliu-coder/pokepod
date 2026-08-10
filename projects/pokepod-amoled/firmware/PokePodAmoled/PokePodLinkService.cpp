@@ -606,6 +606,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         String(audio_->playbackStartFailures());
     extra += ",\"playback_heap_largest_before_start\":" +
         String(audio_->playbackHeapLargestBeforeStart());
+    extra += ",\"playback_file_reads\":" +
+        String(audio_->playbackFileReadCount());
+    extra += ",\"playback_pump_count\":" +
+        String(audio_->playbackPumpCount());
+    extra += ",\"playback_max_file_read_us\":" +
+        String(audio_->playbackMaxFileReadUs());
     const AudioFrontEndMetrics &frontEnd = recorder_->audioMetrics();
     extra += ",\"audio_frontend_channel\":\"" +
         String(audioInputChannelName(frontEnd.selectedChannel)) + "\"";
@@ -627,6 +633,26 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"ui_full_redraws\":" + String(dashboard_->fullRedrawCount());
     extra += ",\"ui_body_redraws\":" + String(dashboard_->bodyRedrawCount());
     extra += ",\"ui_partial_redraws\":" + String(dashboard_->partialRedrawCount());
+    extra += ",\"ui_scroll_frame_last_us\":" +
+        String(dashboard_->scrollFrameLastUs());
+    extra += ",\"ui_scroll_frame_max_us\":" +
+        String(dashboard_->scrollFrameMaxUs());
+    extra += ",\"ui_scroll_compose_max_us\":" +
+        String(dashboard_->scrollComposeMaxUs());
+    extra += ",\"ui_scroll_transfer_max_us\":" +
+        String(dashboard_->scrollTransferMaxUs());
+    extra += ",\"ui_scroll_frames_over_budget\":" +
+        String(dashboard_->scrollFramesOverBudget());
+    extra += ",\"capsule_full_scans\":" +
+        String(library_->fullScanCount());
+    extra += ",\"capsule_incremental_refreshes\":" +
+        String(library_->incrementalRefreshCount());
+    extra += ",\"capsule_refresh_fallbacks\":" +
+        String(library_->refreshFallbackCount());
+    extra += ",\"capsule_last_scan_us\":" +
+        String(library_->lastScanUs());
+    extra += ",\"capsule_max_scan_us\":" +
+        String(library_->maxScanUs());
     extra += ",\"ui_frame_buffer\":" +
         String(dashboard_->frameBufferReady() ? "true" : "false");
     extra += ",\"ui_animation_buffer\":" +

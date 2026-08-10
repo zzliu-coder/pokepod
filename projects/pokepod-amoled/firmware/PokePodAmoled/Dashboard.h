@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <array>
 #include "PokePodGfx.h"
 #include <FS.h>
 
@@ -9,14 +10,17 @@
 #include "ChineseRenderer.h"
 #include "DeviceConfig.h"
 #include "PageTransition.h"
+#include "PerformanceMetric.h"
 #include "PeakWindow.h"
 #include "ProvisioningPolicy.h"
 #include "ProvisioningDiagnostics.h"
 #include "ScrollPhysics.h"
+#include "ScrollFrameReuse.h"
 #include "UiIcons.h"
 #include "UiMotionPolicy.h"
 #include "UiPolicy.h"
 #include "UiRenderPolicy.h"
+#include "UiSignature.h"
 #include "UiTheme.h"
 #include "WifiPolicy.h"
 #include "WirelessSyncPresentation.h"
@@ -117,6 +121,13 @@ class Dashboard {
   uint32_t partialRedrawCount() const { return partialRedrawCount_; }
   bool frameBufferReady() const { return frame_ != nullptr; }
   bool animationBufferReady() const { return frame_ != nullptr; }
+  uint32_t scrollFrameLastUs() const { return scrollFrameMetric_.lastUs(); }
+  uint32_t scrollFrameMaxUs() const { return scrollFrameMetric_.maxUs(); }
+  uint32_t scrollComposeMaxUs() const { return scrollComposeMetric_.maxUs(); }
+  uint32_t scrollTransferMaxUs() const { return scrollTransferMetric_.maxUs(); }
+  uint32_t scrollFramesOverBudget() const {
+    return scrollFrameMetric_.overBudgetCount();
+  }
 
  private:
   enum class SettingAccessory : uint8_t { value, toggle, chevron };
@@ -127,10 +138,14 @@ class Dashboard {
   void drawBackButton();
   void drawHome(const DashboardView &view);
   void drawCapsules(const DashboardView &view);
-  void drawCapsuleRows(const DashboardView &view);
+  void drawCapsuleRows(const DashboardView &view,
+                       int16_t clipTop = ui::kCapsuleListTop,
+                       int16_t clipBottom = ui::kCapsuleListBottom);
   void drawCapsuleDetail(const DashboardView &view);
   void drawCapsuleDetailText(const DashboardView &view,
-                             const CapsuleSummary &record);
+                             const CapsuleSummary &record,
+                             int16_t clipTop = ui::kDetailTextTop,
+                             int16_t clipBottom = ui::kDetailTextBottom);
   void drawScopePicker(const DashboardView &view);
   void drawDetailMore(const DashboardView &view);
   void drawPurgeConfirm();
@@ -139,8 +154,11 @@ class Dashboard {
   void drawBluetoothPairing(const DashboardView &view);
   void drawProvisioning(const DashboardView &view);
   void drawProvisioningLog(const DashboardView &view);
-  void drawProvisioningRows(const DashboardView &view);
-  bool drawActiveScrollSurface(const DashboardView &view);
+  void drawProvisioningRows(const DashboardView &view,
+                            int16_t clipTop = ui::kProvisionLogListTop,
+                            int16_t clipBottom = ui::kProvisionLogListBottom);
+  bool drawActiveScrollSurface(const DashboardView &view,
+                               int16_t clipTop, int16_t clipBottom);
   void drawCapsuleOrb(int16_t centerY, uint16_t accent,
                       uint16_t dimAccent, int16_t scale = 100);
   void drawHomeAction(int16_t top, int16_t bottom, bool wireless,
@@ -159,17 +177,27 @@ class Dashboard {
   void presentFrame();
   bool beginPreparedPageTransition(uint32_t nowMs);
   bool composeAndPresentScrollFrame(const DashboardView &view);
+  void captureScrollBaseline();
   void presentScrollRegion();
   UiPresentRegion activeScrollPresentRegion() const;
   void presentRegion(int16_t x, int16_t y, int16_t width, int16_t height);
-  String signature(const DashboardView &view, bool includeScroll) const;
-  String topBarSignature(const DashboardView &view) const;
+  uint64_t signature(const DashboardView &view, bool includeScroll) const;
+  uint64_t topBarSignature(const DashboardView &view) const;
   void reconcileCapsules(const CapsuleLibrary *library);
   ScrollPhysics *activeScroll();
   const ScrollPhysics *activeScroll() const;
   void updateScrollBounds(const CapsuleLibrary &library);
   int32_t capsuleScrollMaximum(const CapsuleLibrary &library) const;
   int32_t provisioningScrollMaximum() const;
+  struct CapsuleRowPresentation {
+    String id;
+    uint64_t key = 0;
+    String preview;
+    String metadata;
+    uint32_t age = 0;
+  };
+  const CapsuleRowPresentation &rowPresentation(
+      const CapsuleSummary &record);
 
   Arduino_GFX *output_ = nullptr;
   Arduino_GFX *display_ = nullptr;
@@ -178,9 +206,11 @@ class Dashboard {
   UiState state_;
   bool invalidated_ = true;
   bool scrollFramePending_ = false;
-  String lastSignature_;
-  String lastStableSignature_;
-  String lastTopBarSignature_;
+  uint64_t lastSignature_ = 0;
+  uint64_t lastStableSignature_ = 0;
+  uint64_t lastTopBarSignature_ = 0;
+  bool lastSignatureValid_ = false;
+  bool lastTopBarSignatureValid_ = false;
   bool lastWirelessHolding_ = false;
   bool lastRecording_ = false;
   uint16_t smoothedPeak_ = 0;
@@ -195,10 +225,20 @@ class Dashboard {
   ScrollPhysics provisioningLogScroll_;
   PageTransition pageTransition_;
   String detailBodyCache_;
-  String detailBodyCacheKey_;
+  uint64_t detailBodyCacheKey_ = 0;
+  bool detailBodyCacheValid_ = false;
   size_t purgeConfirmCount_ = 0;
   uint32_t lastLibraryRevision_ = 0xffffffffU;
   uint8_t provisioningLogCount_ = 0;
+  std::array<CapsuleRowPresentation, ui::kCapsuleVisibleRows + 2>
+      capsuleRowCache_;
+  uint32_t capsuleRowCacheAge_ = 0;
+  UiScreen lastScrollScreen_ = UiScreen::home;
+  int32_t lastScrollPositionPx_ = 0;
+  bool scrollBaselineValid_ = false;
+  PerformanceMetric scrollFrameMetric_;
+  PerformanceMetric scrollComposeMetric_;
+  PerformanceMetric scrollTransferMetric_;
 };
 
 }  // namespace pokepod

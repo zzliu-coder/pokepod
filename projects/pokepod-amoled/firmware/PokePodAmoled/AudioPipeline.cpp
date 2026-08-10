@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <esp_check.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <es8311.h>
 
 #include "AudioI2sRoute.h"
@@ -159,7 +160,12 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
     return false;
   }
   playbackFile_ = file;
-  playbackRemaining_ = dataBytes;
+  playbackFileRemaining_ = dataBytes;
+  playbackBufferedBytes_ = 0;
+  playbackBufferOffset_ = 0;
+  playbackFileReadCount_ = 0;
+  playbackPumpCount_ = 0;
+  playbackMaxFileReadUs_ = 0;
   playing_ = true;
   digitalWrite(kSpeakerAmpPin, HIGH);
   // Give the board amplifier a short, deterministic settling interval before
@@ -172,15 +178,39 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
 
 void AudioPipeline::pumpPlayback(Print &log) {
   if (!playing_) return;
-  const size_t wanted = playbackRemaining_ < sizeof(playbackInput_)
-      ? playbackRemaining_ : sizeof(playbackInput_);
-  const size_t count = playbackFile_.read(playbackInput_, wanted);
-  if (count == 0 || count % 2 != 0) {
+  ++playbackPumpCount_;
+  if (playbackBufferOffset_ >= playbackBufferedBytes_) {
+    if (playbackFileRemaining_ == 0) {
+      stopPlayback(log);
+      return;
+    }
+    const size_t wanted = playbackReadSize(playbackFileRemaining_);
+    const int64_t startedUs = esp_timer_get_time();
+    const size_t count = playbackFile_.read(playbackInput_, wanted);
+    const uint32_t elapsedUs = static_cast<uint32_t>(
+        esp_timer_get_time() - startedUs);
+    if (elapsedUs > playbackMaxFileReadUs_) playbackMaxFileReadUs_ = elapsedUs;
+    ++playbackFileReadCount_;
+    if (count == 0 || count % 2 != 0) {
+      lastPlaybackError_ = "file_read";
+      log.println("{\"event\":\"playback_error\",\"stage\":\"file_read\"}");
+      stopPlayback(log);
+      return;
+    }
+    playbackFileRemaining_ -= count;
+    playbackBufferedBytes_ = count;
+    playbackBufferOffset_ = 0;
+  }
+  const size_t count = playbackFeedSize(
+      playbackBufferedBytes_ - playbackBufferOffset_);
+  if (count == 0) {
+    lastPlaybackError_ = "pcm_format";
     stopPlayback(log);
     return;
   }
   const size_t output = mono16LittleEndianToStereo16LittleEndian(
-      playbackInput_, count, playbackOutput_, sizeof(playbackOutput_));
+      playbackInput_ + playbackBufferOffset_, count,
+      playbackOutput_, sizeof(playbackOutput_));
   if (output == 0) {
     lastPlaybackError_ = "pcm_format";
     log.println("{\"event\":\"playback_error\",\"stage\":\"pcm_format\"}");
@@ -193,14 +223,17 @@ void AudioPipeline::pumpPlayback(Print &log) {
     stopPlayback(log);
     return;
   }
-  playbackRemaining_ -= count;
-  if (playbackRemaining_ == 0) stopPlayback(log);
+  playbackBufferOffset_ += count;
+  if (playbackFileRemaining_ == 0 &&
+      playbackBufferOffset_ >= playbackBufferedBytes_) stopPlayback(log);
 }
 
 void AudioPipeline::stopPlayback(Print &log) {
   if (!playing_) return;
   playbackFile_.close();
-  playbackRemaining_ = 0;
+  playbackFileRemaining_ = 0;
+  playbackBufferedBytes_ = 0;
+  playbackBufferOffset_ = 0;
   playing_ = false;
   digitalWrite(kSpeakerAmpPin, LOW);
   log.println("{\"event\":\"playback_stopped\"}");

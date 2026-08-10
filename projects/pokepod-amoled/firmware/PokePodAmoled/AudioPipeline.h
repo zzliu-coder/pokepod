@@ -6,6 +6,7 @@
 
 #include "BoardConfig.h"
 #include "PeakWindow.h"
+#include "PlaybackBufferPolicy.h"
 
 namespace pokepod {
 
@@ -34,6 +35,9 @@ class AudioPipeline {
   uint32_t playbackHeapLargestBeforeStart() const {
     return playbackHeapLargestBeforeStart_;
   }
+  uint32_t playbackFileReadCount() const { return playbackFileReadCount_; }
+  uint32_t playbackPumpCount() const { return playbackPumpCount_; }
+  uint32_t playbackMaxFileReadUs() const { return playbackMaxFileReadUs_; }
 
  private:
   enum class HardwareMode : uint8_t { none, capture, playback };
@@ -51,13 +55,18 @@ class AudioPipeline {
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;
   File playbackFile_;
-  uint32_t playbackRemaining_ = 0;
+  uint32_t playbackFileRemaining_ = 0;
+  size_t playbackBufferedBytes_ = 0;
+  size_t playbackBufferOffset_ = 0;
   bool playing_ = false;
   const char *lastPlaybackError_ = "none";
   uint32_t playbackStartFailures_ = 0;
   uint32_t playbackHeapLargestBeforeStart_ = 0;
-  uint8_t playbackInput_[96] = {};
-  uint8_t playbackOutput_[192] = {};
+  uint32_t playbackFileReadCount_ = 0;
+  uint32_t playbackPumpCount_ = 0;
+  uint32_t playbackMaxFileReadUs_ = 0;
+  uint8_t playbackInput_[kPlaybackReadAheadBytes] = {};
+  uint8_t playbackOutput_[kPlaybackFeedBytes * 2] = {};
 };
 
 }  // namespace pokepod

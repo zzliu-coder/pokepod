@@ -38,8 +38,12 @@ require(dashboard, "presentScrollRegion()",
         "scroll frames still present the entire AMOLED frame")
 require(dashboard, "composeAndPresentScrollFrame(view)",
         "scroll frames do not use the clipped composition path")
-require(dashboard, "drawActiveScrollSurface(view)",
+require(dashboard, "drawActiveScrollSurface(view, clipTop, clipBottom)",
         "scroll frames still compose the entire page body")
+require(dashboard, "std::memmove(base + reuse.destinationRow",
+        "scroll frames do not reuse composed viewport pixels")
+require(dashboard, "reuse.exposedRows, ui::kBackground",
+        "scroll frames do not limit recomposition to the exposed strip")
 require(dashboard, "display_->fillRect(region.x, region.y, region.width",
         "scroll frames still clear the entire indexed canvas")
 require(dashboard, "currentStableSignature == lastStableSignature_",
@@ -57,6 +61,7 @@ require(renderer, "loadSdCache(codepoint, glyph)",
         "SD glyph cache is not used")
 require(renderer, "storeSdCache(codepoint, glyph)",
         "SD glyph cache is not populated")
+require(renderer, "sdCacheLookup_[slot]", "SD glyph cache lacks a hot lookup")
 
 if "dashboard.swipeVertical" in main:
     raise SystemExit("FAIL scroll_contract: legacy release-only scrolling remains")

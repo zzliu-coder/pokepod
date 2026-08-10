@@ -77,6 +77,7 @@ void ChineseRenderer::begin(Arduino_GFX *display, fs::FS *fs) {
   sdGlyphCount_ = 0;
   sdEntrySize_ = 0;
   sdCacheAge_ = 0;
+  std::memset(sdCacheLookup_, 0, sizeof(sdCacheLookup_));
   if (sdCache_ == nullptr) {
     sdCache_ = static_cast<SdGlyphCacheEntry *>(heap_caps_calloc(
         kSdGlyphCacheEntries, sizeof(SdGlyphCacheEntry),
@@ -272,6 +273,19 @@ bool ChineseRenderer::loadSd(uint32_t codepoint, UiTextSize size,
 
 bool ChineseRenderer::loadSdCache(uint32_t codepoint, GlyphData &glyph) {
   if (sdCache_ == nullptr) return false;
+  const uint16_t slot = static_cast<uint16_t>(
+      codepoint % kSdGlyphLookupSlots);
+  const uint16_t mapped = sdCacheLookup_[slot];
+  if (mapped > 0 && mapped <= kSdGlyphCacheEntries) {
+    SdGlyphCacheEntry &entry = sdCache_[mapped - 1];
+    if (entry.valid && entry.codepoint == codepoint) {
+      entry.age = ++sdCacheAge_;
+      glyph.pixels = 20;
+      glyph.advance = entry.advance;
+      std::memcpy(glyph.bitmap, entry.bitmap, kSdGlyphBitmapBytes);
+      return true;
+    }
+  }
   for (uint16_t index = 0; index < kSdGlyphCacheEntries; ++index) {
     SdGlyphCacheEntry &entry = sdCache_[index];
     if (!entry.valid || entry.codepoint != codepoint) continue;
@@ -279,6 +293,7 @@ bool ChineseRenderer::loadSdCache(uint32_t codepoint, GlyphData &glyph) {
     glyph.pixels = 20;
     glyph.advance = entry.advance;
     std::memcpy(glyph.bitmap, entry.bitmap, kSdGlyphBitmapBytes);
+    sdCacheLookup_[slot] = index + 1;
     return true;
   }
   return false;
@@ -306,6 +321,7 @@ void ChineseRenderer::storeSdCache(uint32_t codepoint,
   entry.advance = glyph.advance;
   entry.valid = true;
   std::memcpy(entry.bitmap, glyph.bitmap, kSdGlyphBitmapBytes);
+  sdCacheLookup_[codepoint % kSdGlyphLookupSlots] = target + 1;
 }
 
 uint8_t ChineseRenderer::fixedAdvance(uint32_t codepoint,

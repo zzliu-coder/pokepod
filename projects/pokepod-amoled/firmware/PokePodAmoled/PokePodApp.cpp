@@ -333,7 +333,7 @@ void toggleRecording() {
     const bool ok = recorder.stop(usb.log());
     captureRouter.release(AudioCaptureOwner::localCapsule);
     audio.stopHardware(usb.log());
-    if (ok) capsuleLibrary.scan();
+    if (ok) capsuleLibrary.includeInboxCapsule(recorder.capsuleId());
     showMessage(ok ? "胶囊已进入转写队列" : "录音提交失败");
   } else if (tencentWorker.working()) {
     showMessage("当前胶囊正在转写");
@@ -945,7 +945,7 @@ void loop() {
         if (wasRecording && !recorder.recording()) {
           captureRouter.release(AudioCaptureOwner::localCapsule);
           audio.stopHardware(usb.log());
-          capsuleLibrary.scan();
+          capsuleLibrary.includeInboxCapsule(recorder.capsuleId());
         }
       }
     }

@@ -1,5 +1,7 @@
 #include "Dashboard.h"
 
+#include <cstring>
+#include <esp_timer.h>
 #include <new>
 
 #include "TimePolicy.h"
@@ -209,7 +211,7 @@ void Dashboard::draw(const DashboardView &view) {
       view.library == nullptr ? 0 : view.library->revision();
   const bool libraryChanged = libraryRevision != lastLibraryRevision_;
   if (libraryChanged) {
-    detailBodyCacheKey_ = "";
+    detailBodyCacheValid_ = false;
     reconcileCapsules(view.library);
     lastLibraryRevision_ = libraryRevision;
   }
@@ -246,12 +248,12 @@ void Dashboard::draw(const DashboardView &view) {
   }
   state_.homeMode = view.recording ? HomeMode::recording :
       (view.transcribing ? HomeMode::transcribing : HomeMode::idle);
-  const String currentSignature = signature(view, true);
-  const String currentStableSignature = signature(view, false);
+  const uint64_t currentSignature = signature(view, true);
+  const uint64_t currentStableSignature = signature(view, false);
   bool bodyRepainted = false;
   if (invalidated_) {
     const bool scrollOnly = scrollFramePending_ && frame_ != nullptr &&
-        !libraryChanged && !lastSignature_.isEmpty() &&
+        !libraryChanged && lastSignatureValid_ &&
         currentStableSignature == lastStableSignature_;
     if (scrollOnly && composeAndPresentScrollFrame(view)) {
       ++partialRedrawCount_;
@@ -266,12 +268,15 @@ void Dashboard::draw(const DashboardView &view) {
         drawRecordingDynamic(view, false);
       }
       if (!beginPreparedPageTransition(millis())) presentFrame();
+      captureScrollBaseline();
       ++fullRedrawCount_;
     }
     bodyRepainted = true;
     lastSignature_ = currentSignature;
     lastStableSignature_ = currentStableSignature;
     lastTopBarSignature_ = topBarSignature(view);
+    lastSignatureValid_ = true;
+    lastTopBarSignatureValid_ = true;
     lastWirelessHolding_ = view.wirelessHolding;
     invalidated_ = false;
     scrollFramePending_ = false;
@@ -286,11 +291,14 @@ void Dashboard::draw(const DashboardView &view) {
       drawRecordingDynamic(view, false);
     }
     presentFrame();
+    captureScrollBaseline();
     bodyRepainted = true;
     ++bodyRedrawCount_;
     lastSignature_ = currentSignature;
     lastStableSignature_ = currentStableSignature;
     lastTopBarSignature_ = topBarSignature(view);
+    lastSignatureValid_ = true;
+    lastTopBarSignatureValid_ = true;
     lastWirelessHolding_ = view.wirelessHolding;
   }
   drawDynamicRegions(view);
@@ -449,11 +457,14 @@ void Dashboard::drawCapsules(const DashboardView &view) {
   }
 }
 
-void Dashboard::drawCapsuleRows(const DashboardView &view) {
+void Dashboard::drawCapsuleRows(const DashboardView &view,
+                                int16_t clipTop, int16_t clipBottom) {
   const size_t count = view.library == nullptr ? 0 : view.library->count();
   if (count == 0) return;
   const int16_t listBottom = browserState_.selectionMode()
       ? ui::kCapsuleSelectionBarTop : ui::kCapsuleListBottom;
+  if (clipTop < ui::kCapsuleListTop) clipTop = ui::kCapsuleListTop;
+  if (clipBottom > listBottom) clipBottom = listBottom;
   const int32_t scrollPx = capsuleScroll_.positionPx();
   const size_t firstIndex = static_cast<size_t>(
       scrollPx / ui::kCapsuleRowStride);
@@ -463,6 +474,7 @@ void Dashboard::drawCapsuleRows(const DashboardView &view) {
     const int16_t y = firstY + static_cast<int16_t>(
         (index - firstIndex) * ui::kCapsuleRowStride);
     if (y >= listBottom) break;
+    if (y + ui::kCapsuleRowStride <= clipTop || y >= clipBottom) continue;
     const CapsuleSummary *record = view.library->at(index);
     if (record == nullptr) break;
     const uint16_t stateColor = record->readOnly
@@ -479,18 +491,15 @@ void Dashboard::drawCapsuleRows(const DashboardView &view) {
                y + 13 >= ui::kCapsuleListTop && y + 13 < listBottom) {
       display_->fillCircle(25, y + 13, 3, stateColor);
     }
-    const String preview = capsuleDisplayText(*record);
-    renderer_.drawText(preview, 42, y, 270, 1, ui::kInk, ui::kBackground,
+    const CapsuleRowPresentation &presentation = rowPresentation(*record);
+    renderer_.drawText(presentation.preview, 42, y, 270, 1,
+                       ui::kInk, ui::kBackground,
                        0, true, UiTextSize::body, false, 0,
-                       ui::kCapsuleListTop, listBottom);
-    String metadata = capsuleTime(*record) + "  " +
-        capsuleStatus(*record);
-    const String duration = durationLabel(record->durationMs);
-    if (!duration.isEmpty()) metadata += "  " + duration;
-    renderer_.drawText(metadata, 42, y + 34, 276, 1,
+                       clipTop, clipBottom);
+    renderer_.drawText(presentation.metadata, 42, y + 34, 276, 1,
                        stateColor, ui::kBackground, 0, false,
                        UiTextSize::compact, false, 0,
-                       ui::kCapsuleListTop, listBottom);
+                       clipTop, clipBottom);
     if (record->favorite && y >= ui::kCapsuleListTop && y + 24 < listBottom) {
       drawUiIcon(*display_, UiIcon::star, 322, y, ui::kWaiting);
     }
@@ -498,6 +507,44 @@ void Dashboard::drawCapsuleRows(const DashboardView &view) {
       display_->drawFastHLine(42, y + 67, 306, ui::kDivider);
     }
   }
+}
+
+const Dashboard::CapsuleRowPresentation &Dashboard::rowPresentation(
+    const CapsuleSummary &record) {
+  UiSignatureBuilder signature;
+  signature.add(record.id);
+  signature.add(record.status);
+  signature.add(record.preview);
+  signature.add(record.error);
+  signature.add(record.createdAt);
+  signature.add(record.durationMs);
+  signature.add(record.favorite);
+  signature.add(record.readOnly);
+  signature.add(record.revision);
+  signature.add(record.processingRevision);
+  const uint64_t key = signature.value();
+  ++capsuleRowCacheAge_;
+  if (capsuleRowCacheAge_ == 0) {
+    capsuleRowCacheAge_ = 1;
+    for (CapsuleRowPresentation &entry : capsuleRowCache_) entry.age = 0;
+  }
+
+  CapsuleRowPresentation *victim = &capsuleRowCache_[0];
+  for (CapsuleRowPresentation &entry : capsuleRowCache_) {
+    if (entry.id.equalsIgnoreCase(record.id) && entry.key == key) {
+      entry.age = capsuleRowCacheAge_;
+      return entry;
+    }
+    if (entry.id.isEmpty() || entry.age < victim->age) victim = &entry;
+  }
+  victim->id = record.id;
+  victim->key = key;
+  victim->preview = capsuleDisplayText(record);
+  victim->metadata = capsuleTime(record) + "  " + capsuleStatus(record);
+  const String duration = durationLabel(record.durationMs);
+  if (!duration.isEmpty()) victim->metadata += "  " + duration;
+  victim->age = capsuleRowCacheAge_;
+  return *victim;
 }
 
 void Dashboard::drawCapsuleDetail(const DashboardView &view) {
@@ -540,16 +587,24 @@ void Dashboard::drawCapsuleDetail(const DashboardView &view) {
 }
 
 void Dashboard::drawCapsuleDetailText(const DashboardView &view,
-                                      const CapsuleSummary &record) {
-  const String bodyCacheKey = record.id + ":" +
-      static_cast<int>(record.status) + ":" + record.preview;
-  if (bodyCacheKey != detailBodyCacheKey_) {
+                                      const CapsuleSummary &record,
+                                      int16_t clipTop, int16_t clipBottom) {
+  UiSignatureBuilder cacheSignature;
+  cacheSignature.add(record.id);
+  cacheSignature.add(record.status);
+  cacheSignature.add(record.preview);
+  cacheSignature.add(record.title);
+  cacheSignature.add(record.revision);
+  cacheSignature.add(record.processingRevision);
+  const uint64_t bodyCacheKey = cacheSignature.value();
+  if (!detailBodyCacheValid_ || bodyCacheKey != detailBodyCacheKey_) {
     detailBodyCache_ = view.library->readBestText(record);
     if (detailBodyCache_ == record.title &&
         generatedVoiceTitle(record.title)) {
       detailBodyCache_ = capsuleDisplayText(record);
     }
     detailBodyCacheKey_ = bodyCacheKey;
+    detailBodyCacheValid_ = true;
   }
   const int16_t lineHeight = renderer_.textLineHeight(UiTextSize::body);
   const int32_t contentHeight = static_cast<int32_t>(
@@ -567,7 +622,7 @@ void Dashboard::drawCapsuleDetailText(const DashboardView &view,
   renderer_.drawText(detailBodyCache_, 20, ui::kDetailTextTop, 328,
                      visibleLines, ui::kInk, ui::kBackground, skipLines,
                      true, UiTextSize::body, false, pixelOffset,
-                     ui::kDetailTextTop, ui::kDetailTextBottom);
+                     clipTop, clipBottom);
 }
 
 void Dashboard::drawScopePicker(const DashboardView &view) {
@@ -938,7 +993,8 @@ void Dashboard::drawProvisioningLog(const DashboardView &view) {
   drawProvisioningRows(view);
 }
 
-void Dashboard::drawProvisioningRows(const DashboardView &view) {
+void Dashboard::drawProvisioningRows(const DashboardView &view,
+                                     int16_t clipTop, int16_t clipBottom) {
   const ProvisioningDiagnostics *diagnostics = view.provisioningDiagnostics;
   const size_t count = diagnostics == nullptr ? 0 : diagnostics->count();
   if (count == 0) return;
@@ -953,6 +1009,9 @@ void Dashboard::drawProvisioningRows(const DashboardView &view) {
     const int16_t top = firstTop + static_cast<int16_t>(
         (offset - firstOffset) * ui::kProvisionLogRowStride);
     if (top >= ui::kProvisionLogListBottom) break;
+    if (top + ui::kProvisionLogRowStride <= clipTop || top >= clipBottom) {
+      continue;
+    }
     const bool failed = record->outcome ==
         static_cast<uint8_t>(ProvisioningLogOutcome::failure);
     const uint16_t color = failed ? ui::kError :
@@ -968,28 +1027,23 @@ void Dashboard::drawProvisioningRows(const DashboardView &view) {
     renderer_.drawText(provisioningLogStageLabel(stage), 40, top, 238, 1,
                        ui::kInk, ui::kBackground, 0, true,
                        UiTextSize::body, true, 0,
-                       ui::kProvisionLogListTop,
-                       ui::kProvisionLogListBottom);
+                       clipTop, clipBottom);
     renderer_.drawText(String("#") + record->sequence, 288, top + 2, 60, 1,
                        ui::kMuted, ui::kBackground, 0, false,
                        UiTextSize::compact, false, 0,
-                       ui::kProvisionLogListTop,
-                       ui::kProvisionLogListBottom);
+                       clipTop, clipBottom);
     const String reason = provisioningLogReasonLabel(*record);
     if (record->ssid[0] != '\0') {
       renderer_.drawText(String(record->ssid), 40, top + 34, 300, 1, color,
                          ui::kBackground, 0, false, UiTextSize::body,
-                         true, 0, ui::kProvisionLogListTop,
-                         ui::kProvisionLogListBottom);
+                         true, 0, clipTop, clipBottom);
       renderer_.drawText(reason, 40, top + 63, 300, 1, color,
                          ui::kBackground, 0, false, UiTextSize::compact,
-                         false, 0, ui::kProvisionLogListTop,
-                         ui::kProvisionLogListBottom);
+                         false, 0, clipTop, clipBottom);
     } else {
       renderer_.drawText(reason, 40, top + 42, 300, 2, color,
                          ui::kBackground, 0, false, UiTextSize::compact,
-                         false, 0, ui::kProvisionLogListTop,
-                         ui::kProvisionLogListBottom);
+                         false, 0, clipTop, clipBottom);
     }
     if (top + 86 >= ui::kProvisionLogListTop &&
         top + 86 < ui::kProvisionLogListBottom) {
@@ -1160,13 +1214,14 @@ void Dashboard::drawDynamicRegions(const DashboardView &view) {
       screen == UiScreen::provisioningLog) {
     return;
   }
-  const String currentTopBar = topBarSignature(view);
-  if (currentTopBar != lastTopBarSignature_) {
+  const uint64_t currentTopBar = topBarSignature(view);
+  if (!lastTopBarSignatureValid_ || currentTopBar != lastTopBarSignature_) {
     display_->fillRect(0, 0, ui::kScreenWidth, ui::kTopBarHeight,
                        ui::kBackground);
     drawTopBar(view);
     presentRegion(0, 0, ui::kScreenWidth, ui::kTopBarHeight);
     lastTopBarSignature_ = currentTopBar;
+    lastTopBarSignatureValid_ = true;
     ++partialRedrawCount_;
   }
   if (screen == UiScreen::home && state_.homeMode != HomeMode::recording &&
@@ -1202,35 +1257,88 @@ bool Dashboard::advancePageTransition(uint32_t nowMs) {
 }
 
 bool Dashboard::composeAndPresentScrollFrame(const DashboardView &view) {
+  const int64_t frameStartedUs = esp_timer_get_time();
   const UiPresentRegion region = activeScrollPresentRegion();
   if (!region.valid()) return false;
-  // Keep the top bar and fixed actions intact. Only the clipped viewport is
-  // cleared, recomposed in the indexed canvas and transferred to the panel.
-  display_->fillRect(region.x, region.y, region.width, region.height,
-                     ui::kBackground);
-  if (!drawActiveScrollSurface(view)) return false;
+  const ScrollPhysics *scroll = activeScroll();
+  const int32_t currentPosition = scroll == nullptr ? 0 : scroll->positionPx();
+  const bool sameSurface = scrollBaselineValid_ &&
+      lastScrollScreen_ == state_.screen() &&
+      region.x == 0 && region.width == ui::kScreenWidth;
+  const ScrollFrameReusePlan reuse = sameSurface
+      ? scrollFrameReusePlan(lastScrollPositionPx_, currentPosition,
+                             region.height)
+      : ScrollFrameReusePlan{};
+  int16_t clipTop = region.y;
+  int16_t clipBottom = region.y + region.height;
+  if (reuse.valid && reuse.exposedRows == 0) {
+    lastScrollPositionPx_ = currentPosition;
+    return true;
+  }
+  if (reuse.valid && frame_ != nullptr) {
+    uint8_t *base = frame_->getFramebuffer() +
+        static_cast<int32_t>(region.y) * ui::kScreenWidth;
+    std::memmove(base + reuse.destinationRow * ui::kScreenWidth,
+                 base + reuse.sourceRow * ui::kScreenWidth,
+                 static_cast<size_t>(reuse.moveRows) * ui::kScreenWidth);
+    clipTop = region.y + reuse.exposedRow;
+    clipBottom = clipTop + reuse.exposedRows;
+    display_->fillRect(region.x, clipTop, region.width,
+                       reuse.exposedRows, ui::kBackground);
+  } else {
+    display_->fillRect(region.x, region.y, region.width, region.height,
+                       ui::kBackground);
+  }
+  if (!drawActiveScrollSurface(view, clipTop, clipBottom)) return false;
+  const int64_t composeFinishedUs = esp_timer_get_time();
+  // The controller has no reliable hardware-scroll contract. Pixel reuse
+  // removes layout/glyph work, while the shifted viewport is still sent in
+  // full so the panel remains coherent.
   presentRegion(region.x, region.y, region.width, region.height);
+  const int64_t transferFinishedUs = esp_timer_get_time();
+  scrollComposeMetric_.record(static_cast<uint32_t>(
+      composeFinishedUs - frameStartedUs), ui::kScrollFrameIntervalMs * 1000U);
+  scrollTransferMetric_.record(static_cast<uint32_t>(
+      transferFinishedUs - composeFinishedUs), ui::kScrollFrameIntervalMs * 1000U);
+  scrollFrameMetric_.record(static_cast<uint32_t>(
+      transferFinishedUs - frameStartedUs), ui::kScrollFrameIntervalMs * 1000U);
+  lastScrollScreen_ = state_.screen();
+  lastScrollPositionPx_ = currentPosition;
+  scrollBaselineValid_ = true;
   return true;
 }
 
-bool Dashboard::drawActiveScrollSurface(const DashboardView &view) {
+bool Dashboard::drawActiveScrollSurface(const DashboardView &view,
+                                        int16_t clipTop,
+                                        int16_t clipBottom) {
   switch (state_.screen()) {
     case UiScreen::capsules:
-      drawCapsuleRows(view);
+      drawCapsuleRows(view, clipTop, clipBottom);
       return true;
     case UiScreen::capsuleDetail: {
       const CapsuleSummary *record = view.library == nullptr
           ? nullptr : selected(*view.library);
       if (record == nullptr) return false;
-      drawCapsuleDetailText(view, *record);
+      drawCapsuleDetailText(view, *record, clipTop, clipBottom);
       return true;
     }
     case UiScreen::provisioningLog:
-      drawProvisioningRows(view);
+      drawProvisioningRows(view, clipTop, clipBottom);
       return true;
     default:
       return false;
   }
+}
+
+void Dashboard::captureScrollBaseline() {
+  const ScrollPhysics *scroll = activeScroll();
+  if (scroll == nullptr || frame_ == nullptr) {
+    scrollBaselineValid_ = false;
+    return;
+  }
+  lastScrollScreen_ = state_.screen();
+  lastScrollPositionPx_ = scroll->positionPx();
+  scrollBaselineValid_ = true;
 }
 
 void Dashboard::presentScrollRegion() {
@@ -1264,71 +1372,42 @@ void Dashboard::presentRegion(int16_t x, int16_t y,
                              width, height, ui::kScreenWidth - width);
 }
 
-String Dashboard::signature(const DashboardView &view,
-                            bool includeScroll) const {
-  String value;
-  value.reserve(320);
-  value += static_cast<int>(state_.screen());
-  value += ':';
-  value += static_cast<int>(state_.page);
-  value += ':';
-  value += browserState_.focusedId().c_str();
-  value += ':';
-  value += includeScroll ? capsuleScroll_.positionPx() : 0;
-  value += ':';
-  value += includeScroll ? detailScroll_.positionPx() : 0;
-  value += ':';
-  value += view.recording;
-  value += ':';
-  value += view.transcribing;
-  value += ':';
-  value += view.playing;
-  value += ':';
-  value += view.usbConnected;
-  value += ':';
-  value += view.bleVoiceConnected;
-  value += ':';
-  value += view.bleVoiceReady;
-  value += ':';
-  value += view.bleVoiceBonded;
-  value += ':';
-  value += view.bleVoicePairing;
-  value += ':';
-  value += view.bleVoicePasskey;
-  value += ':';
-  value += view.bleVoiceMtu;
-  value += ':';
-  value += view.bleVoiceNotifyFailures;
-  value += ':';
-  value += view.bleVoiceQueueOverflows;
-  value += ':';
-  value += view.bleVoiceReadyTimeouts;
-  value += ':';
-  value += view.bleVoiceStopAckTimeouts;
-  value += ':';
-  value += view.bleVoiceStreamTimeouts;
-  value += ':';
-  value += view.wirelessHolding;
-  value += ':';
-  value += view.message;
-  value += ':';
-  value += browserState_.selectionMode();
-  value += ':';
-  value += browserState_.selectedCount();
-  value += ':';
-  value += view.undoAvailable;
-  value += ':';
-  value += state_.capsuleScopeOverlay;
-  value += ':';
-  value += state_.detailMoreOverlay;
-  value += ':';
-  value += state_.purgeConfirmOverlay;
-  value += ':';
-  value += purgeConfirmCount_;
+uint64_t Dashboard::signature(const DashboardView &view,
+                              bool includeScroll) const {
+  UiSignatureBuilder value;
+  value.add(state_.screen());
+  value.add(state_.page);
+  value.add(browserState_.focusedId().c_str());
+  value.add(includeScroll ? capsuleScroll_.positionPx() : 0);
+  value.add(includeScroll ? detailScroll_.positionPx() : 0);
+  value.add(view.recording);
+  value.add(view.transcribing);
+  value.add(view.playing);
+  value.add(view.usbConnected);
+  value.add(view.bleVoiceConnected);
+  value.add(view.bleVoiceReady);
+  value.add(view.bleVoiceBonded);
+  value.add(view.bleVoicePairing);
+  value.add(view.bleVoicePasskey);
+  value.add(view.bleVoiceMtu);
+  value.add(view.bleVoiceNotifyFailures);
+  value.add(view.bleVoiceQueueOverflows);
+  value.add(view.bleVoiceReadyTimeouts);
+  value.add(view.bleVoiceStopAckTimeouts);
+  value.add(view.bleVoiceStreamTimeouts);
+  value.add(view.wirelessHolding);
+  value.add(view.message);
+  value.add(browserState_.selectionMode());
+  value.add(browserState_.selectedCount());
+  value.add(view.undoAvailable);
+  value.add(state_.capsuleScopeOverlay);
+  value.add(state_.detailMoreOverlay);
+  value.add(state_.purgeConfirmOverlay);
+  value.add(purgeConfirmCount_);
+
   if (state_.screen() == UiScreen::capsuleDetail ||
       state_.screen() == UiScreen::capsules) {
-    value += ':';
-    value += view.library == nullptr ? 0 : view.library->count();
+    value.add(view.library == nullptr ? 0U : view.library->count());
     if (includeScroll && view.library != nullptr &&
         state_.screen() == UiScreen::capsules) {
       const size_t firstIndex = static_cast<size_t>(
@@ -1336,135 +1415,86 @@ String Dashboard::signature(const DashboardView &view,
       for (uint8_t row = 0; row < ui::kCapsuleVisibleRows + 2; ++row) {
         const CapsuleSummary *record = view.library->at(firstIndex + row);
         if (record == nullptr) break;
-        value += ':';
-        value += record->id;
-        value += ':';
-        value += static_cast<int>(record->status);
-        value += ':';
-        value += record->preview;
-        value += ':';
-        value += record->favorite;
-        value += ':';
-        value += record->readOnly;
-        value += ':';
-        value += record->durationMs;
-        value += ':';
-        value += browserState_.selected(record->id.c_str());
+        value.add(record->id);
+        value.add(record->status);
+        value.add(record->preview);
+        value.add(record->favorite);
+        value.add(record->readOnly);
+        value.add(record->durationMs);
+        value.add(browserState_.selected(record->id.c_str()));
       }
     } else if (view.library != nullptr) {
       const CapsuleSummary *record = selected(*view.library);
       if (record != nullptr) {
-        value += ':';
-        value += static_cast<int>(record->status);
-        value += ':';
-        value += record->preview;
-        value += ':';
-        value += record->favorite;
-        value += ':';
-        value += record->readOnly;
+        value.add(record->status);
+        value.add(record->preview);
+        value.add(record->favorite);
+        value.add(record->readOnly);
       }
     }
   }
+
   if (state_.screen() == UiScreen::device ||
       state_.screen() == UiScreen::computerSync ||
       state_.screen() == UiScreen::bluetoothPairing ||
       state_.screen() == UiScreen::provisioning ||
       state_.screen() == UiScreen::provisioningLog) {
-    value += ':';
-    value += static_cast<int>(view.wifiPhase);
-    value += ':';
-    value += view.wifiSyncOpen;
-    value += ':';
-    value += view.wifiSyncSecureReady;
-    value += ':';
-    value += view.wifiSyncPaired;
-    value += ':';
-    value += view.wifiSyncNetworkConnected;
-    value += ':';
-    value += view.wifiSyncListener;
-    value += ':';
-    value += view.wifiSyncBonjour;
-    value += ':';
-    value += view.wifiSyncClient;
-    value += ':';
-    value += view.wifiSyncAuthenticated;
-    value += ':';
-    value += view.wifiSyncBusy;
-    value += ':';
-    value += view.wifiSyncCompleted;
-    value += ':';
-    value += view.wifiSyncRemainingSeconds;
-    value += ':';
-    value += view.wifiSyncLastCompletedAtMs;
-    value += ':';
-    value += view.wifiSyncLastError;
-    value += ':';
-    value += view.portalSsid;
-    value += ':';
-    value += view.portalPassword;
-    value += ':';
-    value += static_cast<int>(view.portalState);
-    value += ':';
-    value += view.portalStatus;
-    value += ':';
-    value += view.settings == nullptr ? false : view.settings->wifiEnabled;
-    value += ':';
-    value += view.settings == nullptr ? false : view.settings->raiseToWake;
-    value += ':';
-    value += view.board->ioExpander;
-    value += view.board->display;
-    value += view.board->touch;
-    value += view.board->sdCard;
-    value += view.board->rtc;
-    value += view.board->imu;
-    value += view.board->pmu;
-    value += view.audioReady;
-    value += view.usbReady;
-    value += renderer_.sdFontReady();
-    value += ':';
-    value += view.provisioningDiagnostics == nullptr
-        ? 0 : view.provisioningDiagnostics->revision();
-    value += ':';
-    value += includeScroll ? provisioningLogScroll_.positionPx() : 0;
+    value.add(view.wifiPhase);
+    value.add(view.wifiSyncOpen);
+    value.add(view.wifiSyncSecureReady);
+    value.add(view.wifiSyncPaired);
+    value.add(view.wifiSyncNetworkConnected);
+    value.add(view.wifiSyncListener);
+    value.add(view.wifiSyncBonjour);
+    value.add(view.wifiSyncClient);
+    value.add(view.wifiSyncAuthenticated);
+    value.add(view.wifiSyncBusy);
+    value.add(view.wifiSyncCompleted);
+    value.add(view.wifiSyncRemainingSeconds);
+    value.add(view.wifiSyncLastCompletedAtMs);
+    value.add(view.wifiSyncLastError);
+    value.add(view.portalSsid);
+    value.add(view.portalPassword);
+    value.add(view.portalState);
+    value.add(view.portalStatus);
+    value.add(view.settings == nullptr ? false : view.settings->wifiEnabled);
+    value.add(view.settings == nullptr ? false : view.settings->raiseToWake);
+    value.add(view.board->ioExpander);
+    value.add(view.board->display);
+    value.add(view.board->touch);
+    value.add(view.board->sdCard);
+    value.add(view.board->rtc);
+    value.add(view.board->imu);
+    value.add(view.board->pmu);
+    value.add(view.audioReady);
+    value.add(view.usbReady);
+    value.add(renderer_.sdFontReady());
+    value.add(view.provisioningDiagnostics == nullptr
+        ? 0U : view.provisioningDiagnostics->revision());
+    value.add(includeScroll ? provisioningLogScroll_.positionPx() : 0);
   }
-  return value;
+  return value.value();
 }
 
-String Dashboard::topBarSignature(const DashboardView &view) const {
-  String value;
-  value.reserve(64);
-  value += view.board->batteryPercent;
-  value += ':';
-  value += view.board->charging;
-  value += ':';
-  value += view.board->sdCard;
-  value += ':';
-  value += view.usbConnected;
-  value += ':';
-  value += view.bleVoiceReady;
-  value += ':';
-  value += static_cast<int>(view.wifiPhase);
-  value += ':';
-  value += view.wifiSyncOpen;
-  value += ':';
-  value += view.wifiSyncSecureReady;
-  value += ':';
-  value += view.wifiSyncPaired;
-  value += ':';
-  value += view.wifiSyncNetworkConnected;
-  value += ':';
-  value += view.wifiSyncClient;
-  value += ':';
-  value += view.wifiSyncAuthenticated;
-  value += ':';
-  value += view.wifiSyncBusy;
-  value += ':';
-  value += view.wifiSyncCompleted;
-  value += ':';
-  value += view.wifiSyncRemainingSeconds;
-  value += ':';
-  value += view.wifiSyncLastError;
-  return value;
+uint64_t Dashboard::topBarSignature(const DashboardView &view) const {
+  UiSignatureBuilder value;
+  value.add(view.board->batteryPercent);
+  value.add(view.board->charging);
+  value.add(view.board->sdCard);
+  value.add(view.usbConnected);
+  value.add(view.bleVoiceReady);
+  value.add(view.wifiPhase);
+  value.add(view.wifiSyncOpen);
+  value.add(view.wifiSyncSecureReady);
+  value.add(view.wifiSyncPaired);
+  value.add(view.wifiSyncNetworkConnected);
+  value.add(view.wifiSyncClient);
+  value.add(view.wifiSyncAuthenticated);
+  value.add(view.wifiSyncBusy);
+  value.add(view.wifiSyncCompleted);
+  value.add(view.wifiSyncRemainingSeconds);
+  value.add(view.wifiSyncLastError);
+  return value.value();
 }
 
 UiAction Dashboard::actionAt(int16_t x, int16_t y,
@@ -1593,7 +1623,7 @@ bool Dashboard::openCapsuleAt(int16_t y,
   state_.detailTrashEnabled = false;
   detailScroll_.reset();
   detailBodyCache_ = "";
-  detailBodyCacheKey_ = "";
+  detailBodyCacheValid_ = false;
   pageTransition_.prepare(PageTransitionDirection::fromRight);
   invalidated_ = true;
   return true;
@@ -1685,7 +1715,7 @@ void Dashboard::back() {
   browserState_.clearFocus();
   detailScroll_.reset();
   detailBodyCache_ = "";
-  detailBodyCacheKey_ = "";
+  detailBodyCacheValid_ = false;
   invalidated_ = true;
 }
 
@@ -1728,7 +1758,7 @@ void Dashboard::scopeChanged() {
   state_.detailTrashEnabled = false;
   detailScroll_.reset();
   detailBodyCache_ = "";
-  detailBodyCacheKey_ = "";
+  detailBodyCacheValid_ = false;
   invalidated_ = true;
 }
 
@@ -1819,7 +1849,7 @@ void Dashboard::reconcileCapsules(const CapsuleLibrary *library) {
     reconcileMissingCapsule(state_);
     detailScroll_.reset();
     detailBodyCache_ = "";
-    detailBodyCacheKey_ = "";
+    detailBodyCacheValid_ = false;
     invalidated_ = true;
   }
   if (library == nullptr) {

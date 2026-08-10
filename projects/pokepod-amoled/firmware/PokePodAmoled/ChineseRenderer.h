@@ -38,6 +38,7 @@ class ChineseRenderer {
   };
   static constexpr uint16_t kSdGlyphBitmapBytes = (20 * 20 + 1) / 2;
   static constexpr uint16_t kSdGlyphCacheEntries = 128;
+  static constexpr uint16_t kSdGlyphLookupSlots = 256;
   struct SdGlyphCacheEntry {
     uint32_t codepoint = 0;
     uint32_t age = 0;
@@ -61,6 +62,9 @@ class ChineseRenderer {
   uint32_t sdEntrySize_ = 0;
   uint32_t sdCacheAge_ = 0;
   SdGlyphCacheEntry *sdCache_ = nullptr;
+  // Direct-mapped hot lookup. Value is cache index + 1; collisions fall back
+  // to the bounded linear cache scan and repopulate this slot.
+  uint16_t sdCacheLookup_[kSdGlyphLookupSlots] = {};
   bool sdFontReady_ = false;
 };
 

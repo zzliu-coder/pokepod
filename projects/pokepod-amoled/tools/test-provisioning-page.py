@@ -76,8 +76,8 @@ assert "provisioningLogStageLabel" in dashboard_source
 assert "renderer_.drawText(String(record->ssid)" in dashboard_source
 assert "UiTextSize::body" in dashboard_source
 signature = dashboard_source[
-    dashboard_source.index("String Dashboard::signature"):
-    dashboard_source.index("String Dashboard::topBarSignature")
+    dashboard_source.index("uint64_t Dashboard::signature"):
+    dashboard_source.index("uint64_t Dashboard::topBarSignature")
 ]
 assert "view.portalStatus" in signature
 assert "view.portalState" in signature
