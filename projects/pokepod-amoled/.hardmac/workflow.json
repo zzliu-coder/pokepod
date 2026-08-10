@@ -4,7 +4,7 @@
   "profileId": "pokepod-amoled-1.8",
   "displayName": "PokePod AMOLED 1.8",
   "scope": "project",
-  "maturity": "draft",
+  "maturity": "project-verified",
   "adapter": "esp32-esptool",
   "workingDirectory": ".",
   "discovery": {
@@ -64,8 +64,17 @@
     ]
   },
   "flash": {
-    "preferredStrategy": "manifest-verified whole application image at 460800 baud",
-    "fallbackStrategy": "65536-byte application chunks at 115200 baud with three bounded attempts",
+    "preferredStrategy": "manifest-verified resumable ROM application transfer with full readback",
+    "fallbackStrategy": "retry only the failed sector-aligned chunk and preserve the resume ledger",
+    "transfer": {
+      "resetBefore": "usb-reset",
+      "stubPolicy": "disabled",
+      "baud": 115200,
+      "chunkSizeBytes": 16384,
+      "maxAttemptsPerChunk": 3,
+      "resumable": true,
+      "verification": "full-readback"
+    },
     "regions": [
       {
         "name": "app0",

@@ -52,6 +52,8 @@ fi
 MANIFEST_PATH=$(dirname -- "$FIRMWARE_BIN")/artifact.json
 ESPTOOL_BIN=${ESPTOOL_BIN:-$(find "$HOME/Library/Arduino15/packages/esp32/tools/esptool_py" \
   -type f -name esptool -perm +111 -print 2>/dev/null | sort | tail -1)}
+HARDMAC_SKILL_DIR=${HARDMAC_SKILL_DIR:-"${CODEX_HOME:-$HOME/.codex}/skills/hardmac"}
+TRANSFER_SCRIPT=${HARDMAC_ESP32_TRANSFER:-"$HARDMAC_SKILL_DIR/scripts/esp32_region_transfer.py"}
 
 if [ ! -s "$FIRMWARE_BIN" ]; then
   printf 'FAIL firmware_binary_missing path=%s\n' "$FIRMWARE_BIN" >&2
@@ -60,6 +62,16 @@ fi
 if [ -z "$ESPTOOL_BIN" ] || [ ! -x "$ESPTOOL_BIN" ]; then
   printf 'FAIL esptool_missing\n' >&2
   exit 72
+fi
+if [ ! -s "$TRANSFER_SCRIPT" ]; then
+  printf 'FAIL hardmac_transfer_missing path=%s\n' "$TRANSFER_SCRIPT" >&2
+  exit 77
+fi
+TRANSFER_CONTRACT=$(python3 "$TRANSFER_SCRIPT" --version 2>/dev/null || true)
+if [ "$TRANSFER_CONTRACT" != "hardmac.esp32-region-transfer.v1" ]; then
+  printf 'FAIL hardmac_transfer_contract expected=%s actual=%s\n' \
+    'hardmac.esp32-region-transfer.v1' "$TRANSFER_CONTRACT" >&2
+  exit 77
 fi
 if [ ! -s "$MANIFEST_PATH" ]; then
   printf 'FAIL artifact_manifest_missing path=%s\n' "$MANIFEST_PATH" >&2
@@ -148,65 +160,78 @@ if [ -z "$ROM_PORT" ]; then
   exit 73
 fi
 
-WRITE_STARTED_AT=$(date +%s)
-FALLBACK_USED=0
-if ! "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 460800 \
-  --before no-reset --after no-reset write-flash 0x10000 "$FIRMWARE_BIN"
-then
-  FALLBACK_USED=1
-  printf 'WARN whole_image_write_failed; retrying 65536-byte chunks\n' >&2
-  CHUNK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pokepod-flash.XXXXXX")
-  trap 'rm -rf -- "$CHUNK_DIR"' EXIT HUP INT TERM
-  CHUNK_SIZE=65536
-  FIRMWARE_SIZE=$(stat -f %z "$FIRMWARE_BIN")
-  CHUNK_COUNT=$(( (FIRMWARE_SIZE + CHUNK_SIZE - 1) / CHUNK_SIZE ))
-  CHUNK_INDEX=0
-  while [ "$CHUNK_INDEX" -lt "$CHUNK_COUNT" ]; do
-    CHUNK_PATH="$CHUNK_DIR/chunk-$CHUNK_INDEX.bin"
-    dd if="$FIRMWARE_BIN" of="$CHUNK_PATH" bs="$CHUNK_SIZE" \
-      skip="$CHUNK_INDEX" count=1 2>/dev/null
-    CHUNK_OFFSET=$((0x10000 + CHUNK_INDEX * CHUNK_SIZE))
-    CHUNK_OFFSET_HEX=$(printf '0x%x' "$CHUNK_OFFSET")
-    CHUNK_ATTEMPT=1
-    CHUNK_WRITTEN=0
-    while [ "$CHUNK_ATTEMPT" -le 3 ]; do
-      if "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
-        --before no-reset --after no-reset write-flash \
-        "$CHUNK_OFFSET_HEX" "$CHUNK_PATH"
-      then
-        CHUNK_WRITTEN=1
-        break
-      fi
-      printf 'WARN chunk_write_retry index=%s attempt=%s\n' \
-        "$CHUNK_INDEX" "$CHUNK_ATTEMPT" >&2
-      CHUNK_ATTEMPT=$((CHUNK_ATTEMPT + 1))
-    done
-    if [ "$CHUNK_WRITTEN" -ne 1 ]; then
-      printf 'FAIL chunk_write index=%s\n' "$CHUNK_INDEX" >&2
-      exit 76
-    fi
-    CHUNK_INDEX=$((CHUNK_INDEX + 1))
-  done
+RUN_ROOT="$SCRIPT_DIR/work/hardmac-runs"
+mkdir -p "$RUN_ROOT"
+RUN_DIR=$(mktemp -d "$RUN_ROOT/$(date +%Y%m%d-%H%M%S)-flash.XXXXXX")
+IDENTITY_LOG="$RUN_DIR/chip-id.log"
+IDENTITY_OK=0
+IDENTITY_ATTEMPT=1
+while [ "$IDENTITY_ATTEMPT" -le 3 ]; do
+  if "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
+    --before usb-reset --after no-reset --no-stub chip-id \
+    >"$IDENTITY_LOG" 2>&1
+  then
+    IDENTITY_OK=1
+    break
+  fi
+  printf 'WARN chip_identity_retry attempt=%s\n' "$IDENTITY_ATTEMPT" >&2
+  IDENTITY_ATTEMPT=$((IDENTITY_ATTEMPT + 1))
+done
+cat "$IDENTITY_LOG"
+if [ "$IDENTITY_OK" -ne 1 ]; then
+  printf 'FAIL chip_identity_unavailable run_dir=%s\n' "$RUN_DIR" >&2
+  exit 78
 fi
-WRITE_SECONDS=$(( $(date +%s) - WRITE_STARTED_AT ))
-VERIFY_STARTED_AT=$(date +%s)
-VERIFY_FALLBACK_USED=0
-if ! "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 460800 \
-  --before no-reset --after no-reset verify-flash 0x10000 "$FIRMWARE_BIN"
-then
-  VERIFY_FALLBACK_USED=1
-  printf 'WARN whole_image_verify_failed; retrying at 115200 baud\n' >&2
-  "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
-    --before no-reset --after no-reset verify-flash 0x10000 "$FIRMWARE_BIN"
+DEVICE_KEY=$(python3 - "$IDENTITY_LOG" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+match = re.search(r"(?im)^MAC:\s*((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\s*$", text)
+if not match:
+    raise SystemExit(1)
+print("esp32s3-" + match.group(1).lower().replace(":", ""))
+PY
+) || {
+  printf 'FAIL chip_identity_parse run_dir=%s\n' "$RUN_DIR" >&2
+  exit 78
+}
+
+python3 "$TRANSFER_SCRIPT" flash \
+  --esptool "$ESPTOOL_BIN" \
+  --port "$ROM_PORT" \
+  --device-key "$DEVICE_KEY" \
+  --chip esp32s3 \
+  --offset 0x10000 \
+  --run-dir "$RUN_DIR/transfer" \
+  --chunk-size 16384 \
+  --attempts 3 \
+  --baud 115200 \
+  --before usb-reset \
+  --stub disabled \
+  --artifact "$FIRMWARE_BIN" \
+  --max-size 0x300000
+
+# ESP32-S3 native USB reliably leaves ROM mode after a watchdog reset.  Use a
+# read-only chip query to establish the link, then request the full reset.
+RESET_OK=0
+RESET_ATTEMPT=1
+while [ "$RESET_ATTEMPT" -le 3 ]; do
+  if "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
+    --before usb-reset --after watchdog-reset --no-stub chip-id \
+    >>"$RUN_DIR/reset.log" 2>&1
+  then
+    RESET_OK=1
+    break
+  fi
+  printf 'WARN watchdog_reset_retry attempt=%s\n' "$RESET_ATTEMPT" >&2
+  RESET_ATTEMPT=$((RESET_ATTEMPT + 1))
+done
+if [ "$RESET_OK" -ne 1 ]; then
+  printf 'FAIL watchdog_reset run_dir=%s\n' "$RUN_DIR" >&2
+  exit 79
 fi
-VERIFY_SECONDS=$(( $(date +%s) - VERIFY_STARTED_AT ))
-# ESP32-S3's native USB Serial/JTAG RTS reset only resets the cores.  A chip
-# that entered the ROM downloader through USB would keep the sampled BOOT
-# strap and remain in download mode.  The watchdog reset is a full system
-# reset, so the strap is sampled again and the application starts without a
-# manual RESET press.
-"$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" \
-  --before no-reset --after watchdog-reset run >/dev/null
 
 REBOOT_STARTED_AT=$(date +%s)
 DEADLINE=$(( $(date +%s) + 10 ))
@@ -214,13 +239,56 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 0.5
   for port in $(find_ports); do
     if "$SCRIPT_DIR/cdc-status.py" "$port" --timeout 1 >/dev/null 2>&1; then
+      python3 - "$RUN_DIR" "$MANIFEST_PATH" "$FIRMWARE_BIN" "$DEVICE_KEY" \
+        "$APP_PORT" "$ROM_PORT" "$port" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+from datetime import datetime, timezone
+
+run_dir = pathlib.Path(sys.argv[1])
+manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+transfer = json.loads((run_dir / "transfer/result.json").read_text(encoding="utf-8"))
+record = {
+    "schemaVersion": 1,
+    "kind": "hardmac.run",
+    "createdAt": datetime.now(timezone.utc).isoformat(),
+    "profile": ".hardmac/workflow.json",
+    "lane": manifest["lane"],
+    "deviceKey": sys.argv[4],
+    "applicationPortBefore": sys.argv[5],
+    "romPort": sys.argv[6],
+    "applicationPortAfter": sys.argv[7],
+    "artifact": {
+        "path": str(pathlib.Path(sys.argv[3]).resolve()),
+        "sizeBytes": pathlib.Path(sys.argv[3]).stat().st_size,
+        "sha256": hashlib.sha256(pathlib.Path(sys.argv[3]).read_bytes()).hexdigest(),
+    },
+    "transfer": transfer,
+    "runtimeReturn": "passed",
+    "remainingAcceptance": ["run the changed subsystem's real-device checks"],
+}
+(run_dir / "run.json").write_text(
+    json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+      TRANSFER_TIMING=$(python3 - "$RUN_DIR/transfer/result.json" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(f"write_seconds={value['writeSeconds']} readback_seconds={value['readbackSeconds']}")
+PY
+)
       printf 'PASS pokepod_flash_verified port=%s sha256=%s\n' \
         "$port" "$(shasum -a 256 "$FIRMWARE_BIN" | awk '{print $1}')"
-      printf 'TIMING write_seconds=%s verify_seconds=%s reboot_seconds=%s total_seconds=%s write_fallback_used=%s verify_fallback_used=%s\n' \
-        "$WRITE_SECONDS" "$VERIFY_SECONDS" \
-        "$(( $(date +%s) - REBOOT_STARTED_AT ))" \
-        "$(( $(date +%s) - FLASH_STARTED_AT ))" "$FALLBACK_USED" \
-        "$VERIFY_FALLBACK_USED"
+      printf 'TIMING %s reboot_seconds=%s total_seconds=%s\n' \
+        "$TRANSFER_TIMING" "$(( $(date +%s) - REBOOT_STARTED_AT ))" \
+        "$(( $(date +%s) - FLASH_STARTED_AT ))"
+      printf 'EVIDENCE run_dir=%s\n' "$RUN_DIR"
       exit 0
     fi
   done

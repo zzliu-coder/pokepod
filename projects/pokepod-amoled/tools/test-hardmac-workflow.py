@@ -13,6 +13,7 @@ manifest_writer = (ROOT / "tools/write-artifact-manifest.py").read_text(encoding
 
 assert profile["schemaVersion"] == 1
 assert profile["kind"] == "hardmac.workflow"
+assert profile["maturity"] == "project-verified"
 assert profile["safety"] == {
     "storesSecrets": False,
     "storesInstanceIdentifiers": False,
@@ -28,6 +29,24 @@ assert "/release/" in release["artifactPath"]
 assert 'OUTPUT_DIR="$WORK_DIR/output/$BUILD_MODE"' in build
 assert 'FLASH_MODE=release' in flash
 assert 'artifact_manifest_binary_sha256' in flash
+transfer = profile["flash"]["transfer"]
+assert transfer == {
+    "resetBefore": "usb-reset",
+    "stubPolicy": "disabled",
+    "baud": 115200,
+    "chunkSizeBytes": 16384,
+    "maxAttemptsPerChunk": 3,
+    "resumable": True,
+    "verification": "full-readback",
+}
+assert 'HARDMAC_ESP32_TRANSFER' in flash
+assert 'hardmac.esp32-region-transfer.v1' in flash
+assert '--device-key "$DEVICE_KEY"' in flash
+assert '--chunk-size 16384' in flash
+assert '--before usb-reset' in flash
+assert '--stub disabled' in flash
+assert '--max-size 0x300000' in flash
+assert 'work/hardmac-runs' in flash
 assert 'write_artifact_manifest' in build
 assert '"sourceDirty"' in manifest_writer
 
