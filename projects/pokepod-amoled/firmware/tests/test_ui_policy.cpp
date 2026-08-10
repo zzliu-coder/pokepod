@@ -67,14 +67,13 @@ int main() {
 
   UiState state;
   assert(state.screen() == UiScreen::home);
-  assert(uiActionAt(state, ui::kSyncEntryLeft, 20, false) ==
-         UiAction::openComputerSync);
+  assert(uiActionAt(state, 180, 20, false) == UiAction::none);
   assert(uiActionAt(state, 180, 180, false) == UiAction::capsuleRecord);
   assert(uiActionAt(state, 180, 300, false) == UiAction::wechatVoice);
   assert(uiActionAt(state, 180, 300, true) == UiAction::wechatVoice);
   assert(uiActionAt(state, 180, 430, true) == UiAction::none);
   state.homeMode = HomeMode::recording;
-  assert(uiActionAt(state, ui::kSyncEntryLeft, 20, true) == UiAction::none);
+  assert(uiActionAt(state, 180, 20, true) == UiAction::none);
   assert(uiActionAt(state, 180, 300, true) == UiAction::capsuleRecord);
   assert(uiActionAt(state, 180, 430, true) == UiAction::none);
   state.homeMode = HomeMode::transcribing;
@@ -149,8 +148,7 @@ int main() {
          UiAction::openBluetoothPairing);
   assert(uiActionAt(state, 180, 240, false) == UiAction::openComputerSync);
 
-  assert(uiActionAt(state, ui::kSyncEntryLeft, 20, false) ==
-         UiAction::openComputerSync);
+  assert(uiActionAt(state, 180, 20, false) == UiAction::none);
   assert(uiActionAt(state, 338, 20, false) == UiAction::none);
   state.computerSync = true;
   assert(state.screen() == UiScreen::computerSync);
@@ -159,7 +157,7 @@ int main() {
          UiAction::closeComputerSync);
   assert(uiActionAt(state, 180, ui::kComputerSyncCloseBottom, false) ==
          UiAction::none);
-  assert(uiActionAt(state, ui::kSyncEntryLeft, 20, false) == UiAction::none);
+  assert(uiActionAt(state, 180, 20, false) == UiAction::none);
   state.computerSync = false;
 
   state.bluetoothPairing = true;
@@ -176,8 +174,7 @@ int main() {
   state.bluetoothPairing = false;
 
   state.page = RootPage::capsules;
-  assert(uiActionAt(state, ui::kSyncEntryLeft, 20, false) ==
-         UiAction::openComputerSync);
+  assert(uiActionAt(state, 180, 20, false) == UiAction::none);
   assert(uiActionAt(state, 180, 70, false) == UiAction::openCapsuleScope);
   state.capsuleScopeOverlay = true;
   state.undoAvailable = true;

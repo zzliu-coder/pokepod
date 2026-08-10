@@ -317,13 +317,6 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     return UiAction::none;
   }
-  const bool rootScreen = screen == UiScreen::home ||
-      screen == UiScreen::capsules || screen == UiScreen::device;
-  if (rootScreen && state.homeMode != HomeMode::recording &&
-      x >= ui::kSyncEntryLeft &&
-      x < ui::kSyncEntryRight && y < ui::kTopBarHeight) {
-    return UiAction::openComputerSync;
-  }
   if (screen == UiScreen::home) {
     if (state.homeMode == HomeMode::recording) {
       return y >= ui::kRootContentTop && y < ui::kRootContentBottom

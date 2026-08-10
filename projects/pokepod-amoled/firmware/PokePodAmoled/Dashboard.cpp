@@ -147,22 +147,6 @@ String syncPhaseTitle(WirelessSyncPresentationPhase phase) {
   return "电脑同步";
 }
 
-String syncEntryLabel(WirelessSyncPresentationPhase phase,
-                      uint32_t remainingSeconds) {
-  switch (phase) {
-    case WirelessSyncPresentationPhase::opening: return "开启中";
-    case WirelessSyncPresentationPhase::waiting:
-      return syncClock(remainingSeconds);
-    case WirelessSyncPresentationPhase::authenticating: return "认证中";
-    case WirelessSyncPresentationPhase::syncing: return "同步中";
-    case WirelessSyncPresentationPhase::completed: return "已完成";
-    case WirelessSyncPresentationPhase::failed: return "失败";
-    case WirelessSyncPresentationPhase::unpaired:
-    case WirelessSyncPresentationPhase::idle: return "同步";
-  }
-  return "同步";
-}
-
 uint16_t syncPhaseColor(WirelessSyncPresentationPhase phase) {
   switch (phase) {
     case WirelessSyncPresentationPhase::waiting:
@@ -351,22 +335,6 @@ void Dashboard::drawTopBar(const DashboardView &view) {
   const String battery = board.batteryPercent >= 0
       ? String(board.batteryPercent) + "%" : String("--");
   renderer_.drawText(battery, 56, 13, 62, 1, ui::kInk, ui::kBackground);
-  const WirelessSyncPresentationPhase syncPhase =
-      wirelessSyncPresentationPhase(wirelessSyncInput(view));
-  const uint16_t syncColor = syncPhaseColor(syncPhase);
-  display_->fillRoundRect(ui::kSyncEntryLeft, 7,
-                          ui::kSyncEntryRight - ui::kSyncEntryLeft,
-                          34, 17, ui::kSurface);
-  display_->drawRoundRect(ui::kSyncEntryLeft, 7,
-                          ui::kSyncEntryRight - ui::kSyncEntryLeft,
-                          34, 17, syncColor);
-  drawUiIcon(*display_, UiIcon::mac, ui::kSyncEntryLeft + 8, 11, syncColor);
-  renderer_.drawText(syncEntryLabel(syncPhase,
-                                    view.wifiSyncRemainingSeconds),
-                     ui::kSyncEntryLeft + 38, 15,
-                     ui::kSyncEntryRight - ui::kSyncEntryLeft - 44, 1,
-                     syncColor, ui::kSurface, 0, false,
-                     UiTextSize::compact, true);
   drawUiIcon(*display_, UiIcon::wifi, 238, 8, wifiColor(view.wifiPhase));
   if (wifiUiShowsDisconnectedSlash(view.wifiPhase)) {
     display_->drawLine(241, 11, 258, 28, wifiColor(view.wifiPhase));

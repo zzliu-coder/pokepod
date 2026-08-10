@@ -39,9 +39,6 @@ int main() {
   assert(contrast(kErrorRgb, kBackgroundRgb) >= 4.5);
 
   assert(kRootContentBottom < kPageIndicatorTop);
-  assert(kSyncEntryLeft >= 118);
-  assert(kSyncEntryRight <= 238);
-  assert(kSyncEntryRight - kSyncEntryLeft >= kMinimumTouchHeight);
   assert(kPageIndicatorTop < kScreenHeight);
   assert(kHomePrimaryTop < kHomePrimaryConnectedBottom);
   assert(kHomePrimaryConnectedBottom < kHomeSecondaryTop);

@@ -10,6 +10,7 @@ link_source = (source / "PokePodLinkService.cpp").read_text()
 sync_source = (source / "WirelessSyncService.cpp").read_text()
 app_source = (source / "PokePodApp.cpp").read_text()
 ui_policy = (source / "UiPolicy.h").read_text()
+dashboard_source = (source / "Dashboard.cpp").read_text()
 
 assert "maintenanceCompletionRevision() const" in link_header
 assert 'strcmp(operation, "endMaintenance") == 0' in link_source
@@ -41,5 +42,10 @@ assert "dashboard.openComputerSync();" in app_source
 assert "action == UiAction::closeComputerSync" in app_source
 assert "toggleComputerSync" not in app_source
 assert "toggleComputerSync" not in ui_policy
+assert "kSyncEntry" not in ui_policy
+assert "kSyncEntry" not in dashboard_source
+assert "syncEntryLabel" not in dashboard_source
+assert "rootScreen &&" not in ui_policy
+assert "y >= ui::kDeviceStorageTop && y < ui::kDeviceRaiseTop" in ui_policy
 
 print("PASS test_wireless_sync_ui_contract")
