@@ -2,8 +2,10 @@
 
 #include <Wire.h>
 #include <esp_check.h>
+#include <esp_heap_caps.h>
 #include <es8311.h>
 
+#include "AudioI2sRoute.h"
 #include "PlaybackPcm.h"
 #include "WavFormat.h"
 
@@ -15,7 +17,6 @@ bool AudioPipeline::begin(Print &log) {
   // starting I2S. BLE and local WAV both consume the physical microphone, so no
   // playback samples are routed to this TX channel.
   digitalWrite(kSpeakerAmpPin, LOW);
-  i2s_.setPins(kI2sBclk, kI2sWordSelect, kI2sDataOut, kI2sDataIn, kI2sMclk);
   available_ = startHardware(HardwareMode::capture, kAudioSampleRate, log);
   if (available_) stopHardware(log);
   log.printf("{\"event\":\"audio_ready\",\"ok\":%s,\"policy\":\"on_demand\"}\n",
@@ -28,8 +29,20 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   if (hardwareActive_) {
     return hardwareMode_ == mode && hardwareSampleRate_ == sampleRate;
   }
+  lastHardwareError_ = "none";
+  const AudioI2sRoute route = mode == HardwareMode::playback
+      ? AudioI2sRoute::playback : AudioI2sRoute::capture;
+  const AudioI2sDataPins dataPins = audioI2sDataPins(
+      route, static_cast<int8_t>(kI2sDataOut),
+      static_cast<int8_t>(kI2sDataIn));
+  // Capture owns RX only and playback owns TX only. Allocating both directions
+  // wastes a second DMA ring and can fail after a TLS transcription fragments
+  // internal memory, even though the requested direction still fits.
+  i2s_.setPins(kI2sBclk, kI2sWordSelect, dataPins.dataOut,
+               dataPins.dataIn, kI2sMclk);
   if (!i2s_.begin(I2S_MODE_STD, sampleRate, I2S_DATA_BIT_WIDTH_16BIT,
                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
+    lastHardwareError_ = "i2s_begin";
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"i2s\"}");
     return false;
   }
@@ -40,6 +53,7 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   es8311_handle_t codec = es8311_create(0, ES8311_ADDRESS_0);
   if (codec == nullptr) {
     i2s_.end();
+    lastHardwareError_ = "codec_create";
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_create\"}");
     return false;
   }
@@ -62,6 +76,7 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   if (error != ESP_OK) {
     es8311_delete(codec);
     i2s_.end();
+    lastHardwareError_ = "codec_init";
     log.printf("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_init\",\"error\":%d}\n", error);
     return false;
   }
@@ -69,9 +84,10 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   hardwareActive_ = true;
   hardwareMode_ = mode;
   hardwareSampleRate_ = sampleRate;
-  log.printf("{\"event\":\"audio\",\"ok\":true,\"mode\":\"%s\",\"sample_rate\":%lu,\"channels\":%u,\"microphone_gain_db\":30,\"frontend\":\"voice_v1\"}\n",
+  log.printf("{\"event\":\"audio\",\"ok\":true,\"mode\":\"%s\",\"sample_rate\":%lu,\"channels\":%u,\"dma_direction\":\"%s\",\"microphone_gain_db\":30,\"frontend\":\"voice_v1\"}\n",
              mode == HardwareMode::playback ? "playback" : "capture",
-             static_cast<unsigned long>(sampleRate), kAudioChannels);
+             static_cast<unsigned long>(sampleRate), kAudioChannels,
+             mode == HardwareMode::playback ? "tx" : "rx");
   return true;
 }
 
@@ -115,6 +131,9 @@ size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
 
 bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
   if (!available_ || playing_) return false;
+  lastPlaybackError_ = "none";
+  playbackHeapLargestBeforeStart_ = heap_caps_get_largest_free_block(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   // A completed capture may leave the shared clock alive until the end of the
   // current loop.  The UI has already established that nobody owns the mic,
   // so close that idle capture mode before switching the codec to playback.
@@ -127,11 +146,15 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
       file.read(header, sizeof(header)) != sizeof(header) ||
       !validCapsuleWavHeader(header, sizeof(header), file.size(), dataBytes)) {
     if (file) file.close();
+    lastPlaybackError_ = "wav_header";
+    ++playbackStartFailures_;
     log.println("{\"event\":\"playback_error\",\"stage\":\"wav_header\"}");
     return false;
   }
   if (!startHardware(HardwareMode::playback, kCapsuleSampleRate, log)) {
     file.close();
+    lastPlaybackError_ = lastHardwareError_;
+    ++playbackStartFailures_;
     log.println("{\"event\":\"playback_error\",\"stage\":\"hardware\"}");
     return false;
   }
@@ -159,11 +182,13 @@ void AudioPipeline::pumpPlayback(Print &log) {
   const size_t output = mono16LittleEndianToStereo16LittleEndian(
       playbackInput_, count, playbackOutput_, sizeof(playbackOutput_));
   if (output == 0) {
+    lastPlaybackError_ = "pcm_format";
     log.println("{\"event\":\"playback_error\",\"stage\":\"pcm_format\"}");
     stopPlayback(log);
     return;
   }
   if (i2s_.write(playbackOutput_, output) != output) {
+    lastPlaybackError_ = "i2s_write";
     log.println("{\"event\":\"playback_error\",\"stage\":\"i2s_write\"}");
     stopPlayback(log);
     return;

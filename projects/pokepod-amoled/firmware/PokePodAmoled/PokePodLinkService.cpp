@@ -600,6 +600,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     extra += ",\"audio_read_bytes\":" + String(static_cast<unsigned long>(audio_->bytesRead()));
     extra += ",\"audio_read_failures\":" + String(audio_->readFailures());
     extra += ",\"audio_peak\":" + String(audio_->peakSample());
+    extra += ",\"playback_last_error\":\"" +
+        String(audio_->lastPlaybackError()) + "\"";
+    extra += ",\"playback_start_failures\":" +
+        String(audio_->playbackStartFailures());
+    extra += ",\"playback_heap_largest_before_start\":" +
+        String(audio_->playbackHeapLargestBeforeStart());
     const AudioFrontEndMetrics &frontEnd = recorder_->audioMetrics();
     extra += ",\"audio_frontend_channel\":\"" +
         String(audioInputChannelName(frontEnd.selectedChannel)) + "\"";

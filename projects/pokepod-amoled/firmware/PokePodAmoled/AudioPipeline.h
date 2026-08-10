@@ -28,7 +28,12 @@ class AudioPipeline {
   void copyEnvelope(uint16_t *output, size_t count) const {
     peakWindow_.copyEnvelope(output, count);
   }
- void resetPeakWindow() { peakWindow_.reset(); }
+  void resetPeakWindow() { peakWindow_.reset(); }
+  const char *lastPlaybackError() const { return lastPlaybackError_; }
+  uint32_t playbackStartFailures() const { return playbackStartFailures_; }
+  uint32_t playbackHeapLargestBeforeStart() const {
+    return playbackHeapLargestBeforeStart_;
+  }
 
  private:
   enum class HardwareMode : uint8_t { none, capture, playback };
@@ -41,12 +46,16 @@ class AudioPipeline {
   bool hardwareActive_ = false;
   HardwareMode hardwareMode_ = HardwareMode::none;
   uint32_t hardwareSampleRate_ = 0;
+  const char *lastHardwareError_ = "none";
   uint64_t bytesRead_ = 0;
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;
   File playbackFile_;
   uint32_t playbackRemaining_ = 0;
   bool playing_ = false;
+  const char *lastPlaybackError_ = "none";
+  uint32_t playbackStartFailures_ = 0;
+  uint32_t playbackHeapLargestBeforeStart_ = 0;
   uint8_t playbackInput_[96] = {};
   uint8_t playbackOutput_[192] = {};
 };
