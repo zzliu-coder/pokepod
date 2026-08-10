@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "TargetedHissFilter.h"
+
 namespace pokepod {
 
 struct VoiceConditionerMetrics {
@@ -16,12 +18,11 @@ struct VoiceConditionerMetrics {
 };
 
 // Deterministic 16 kHz voice conditioning shared by capsule and BLE capture.
-// The chain is deliberately small: DC/high-pass cleanup, a speech-band FIR,
-// an adaptive noise gate, restrained AGC and a final limiter. It owns no heap
-// memory and can be tested independently from I2S and the decimator.
+// The chain is deliberately small: DC/high-pass cleanup, a targeted hiss
+// rejector, an adaptive noise gate, restrained AGC and a final limiter. It owns
+// no heap memory and can be tested independently from I2S and the decimator.
 class VoiceConditioner {
  public:
-  static constexpr size_t kSpeechFirTaps = 31;
   static constexpr int32_t kLimiter = 30000;
   static constexpr int32_t kInitialGainQ12 = 2 * 4096;
   static constexpr int32_t kMaximumGainQ12 = 6 * 4096;
@@ -30,14 +31,13 @@ class VoiceConditioner {
     metrics_ = metrics;
     previousHighPassInput_ = 0;
     previousHighPassOutput_ = 0;
-    speechRingIndex_ = 0;
+    hissFilter_.reset();
     envelopeQ8_ = 0;
     noiseFloorQ8_ = kInitialNoiseFloor << 8;
     gateOpen_ = false;
     gateHangoverSamples_ = 0;
     gateGainQ12_ = kClosedGateGainQ12;
     gainQ12_ = kInitialGainQ12;
-    for (auto &sample : speechRing_) sample = 0;
     if (metrics_ != nullptr) {
       *metrics_ = {};
       metrics_->maximumGainQ12 = static_cast<uint32_t>(gainQ12_);
@@ -47,8 +47,8 @@ class VoiceConditioner {
 
   int32_t process(int32_t sample) {
     const int32_t highPassed = highPass(sample);
-    const int32_t speechBand = speechLowPass(highPassed);
-    const int32_t absolute = magnitude(speechBand);
+    const int32_t cleaned = hissFilter_.process(highPassed);
+    const int32_t absolute = magnitude(cleaned);
 
     const int32_t envelopeTarget = absolute << 8;
     envelopeQ8_ = approach(envelopeQ8_, envelopeTarget,
@@ -94,7 +94,7 @@ class VoiceConditioner {
       metrics_->maximumGainQ12 = static_cast<uint32_t>(gainQ12_);
     }
 
-    int64_t scaled = static_cast<int64_t>(speechBand) * gainQ12_ / 4096;
+    int64_t scaled = static_cast<int64_t>(cleaned) * gainQ12_ / 4096;
     scaled = scaled * gateGainQ12_ / 4096;
     if (scaled > kLimiter) {
       scaled = kLimiter;
@@ -117,14 +117,6 @@ class VoiceConditioner {
   }
 
  private:
-  // 4.2 kHz speech-band low-pass at 16 kHz. It keeps 3.4 kHz within 0.1 dB,
-  // while rejecting 5 kHz by about 43 dB and the measured 5.7-6.3 kHz hiss
-  // band by about 60 dB. The 0.94 ms group delay is negligible for BLE voice.
-  static constexpr int16_t kSpeechFirQ15[kSpeechFirTaps] = {
-      -10, -48, 50, 126, -153, -242, 366, 388,
-      -762, -545, 1495, 686, -3091, -784, 10302, 17212,
-      10302, -784, -3091, 686, 1495, -545, -762, 388,
-      366, -242, -153, 126, 50, -48, -10};
   static constexpr int32_t kHighPassFeedbackQ15 = 31690;
   // Real V1 microphones can deliver ordinary speech with a post-FIR envelope
   // below 96.  Keep the adaptive threshold close to the measured noise floor
@@ -173,20 +165,6 @@ class VoiceConditioner {
     return output;
   }
 
-  int32_t speechLowPass(int32_t sample) {
-    speechRing_[speechRingIndex_] = sample;
-    speechRingIndex_ = (speechRingIndex_ + 1) % kSpeechFirTaps;
-    int64_t accumulator = 0;
-    size_t index = speechRingIndex_;
-    for (size_t tap = 0; tap < kSpeechFirTaps; ++tap) {
-      accumulator += static_cast<int64_t>(speechRing_[index]) *
-          kSpeechFirQ15[tap];
-      index = (index + 1) % kSpeechFirTaps;
-    }
-    return static_cast<int32_t>(
-        (accumulator + (accumulator >= 0 ? 16384 : -16384)) / 32768);
-  }
-
   void updateNoiseFloor(int32_t absolute, int32_t envelope) {
     const int32_t current = noiseFloorQ8_ >> 8;
     const int32_t trackingCeiling = maximum(kMinimumGateOpenLevel,
@@ -204,8 +182,7 @@ class VoiceConditioner {
   VoiceConditionerMetrics *metrics_ = nullptr;
   int32_t previousHighPassInput_ = 0;
   int32_t previousHighPassOutput_ = 0;
-  int32_t speechRing_[kSpeechFirTaps] = {};
-  size_t speechRingIndex_ = 0;
+  TargetedHissFilter hissFilter_;
   int32_t envelopeQ8_ = 0;
   int32_t noiseFloorQ8_ = kInitialNoiseFloor << 8;
   bool gateOpen_ = false;

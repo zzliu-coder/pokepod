@@ -19,6 +19,7 @@ voice = source("VoiceSessionController.h")
 link = source("PokePodLinkService.cpp")
 audio = source("AudioFrontEnd.h")
 conditioner = source("VoiceConditioner.h")
+hiss_filter = source("TargetedHissFilter.h")
 
 assert "formatUtcOffsetShort(record.createdAt.c_str()" in dashboard
 assert "kChinaStandardTimeOffsetMinutes" in dashboard
@@ -34,7 +35,10 @@ assert "AudioDecimator" not in recorder + voice
 assert "kFirTaps = 79" in audio
 assert '#include "VoiceConditioner.h"' in audio
 assert "VoiceConditioner conditioner_" in audio
-assert "kSpeechFirTaps = 31" in conditioner
+assert '#include "TargetedHissFilter.h"' in conditioner
+assert "TargetedHissFilter hissFilter_" in conditioner
+assert "kTaps = 67" in hiss_filter
+assert "5.05-6.95 kHz ideal band-stop" in hiss_filter
 assert "kHighPassFeedbackQ15" in conditioner
 assert "kMaximumGainQ12 = 6 * 4096" in conditioner
 assert "kLimiter = 30000" in conditioner

@@ -45,6 +45,13 @@ int main() {
   assert(voiceMetrics.maximumGainQ12 <=
          static_cast<uint32_t>(VoiceConditioner::kMaximumGainQ12));
 
+  VoiceConditionerMetrics brightVoiceMetrics;
+  const std::vector<int32_t> brightVoice = conditionTone(
+      4800.0, 800, &brightVoiceMetrics);
+  assert(rmsTail(brightVoice) > 2000.0);
+  assert(brightVoiceMetrics.maximumGainQ12 <=
+         static_cast<uint32_t>(VoiceConditioner::kMaximumGainQ12));
+
   VoiceConditionerMetrics hissMetrics;
   const std::vector<int32_t> hiss = conditionTone(6000.0, 800, &hissMetrics);
   assert(rmsTail(hiss) < rmsTail(voice) / 30.0);
