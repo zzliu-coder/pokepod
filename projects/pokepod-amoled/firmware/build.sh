@@ -12,6 +12,7 @@ GFX_MANIFEST="$SCRIPT_DIR/gfx-minimal-files.txt"
 WAVESHARE_COMMIT="ba32b5cbca96f0e04b0736d04959b6e832268d3f"
 FQBN='esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none'
 FINGERPRINT_TOOL="$PROJECT_DIR/tools/build-input-fingerprint.py"
+ARTIFACT_TOOL="$PROJECT_DIR/tools/write-artifact-manifest.py"
 BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
 FORCE_BUILD=0
 
@@ -58,6 +59,7 @@ esac
 
 BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
 BUILD_LOG="$WORK_DIR/build-$BUILD_MODE.log"
+OUTPUT_DIR="$WORK_DIR/output/$BUILD_MODE"
 CACHE_DIR="$WORK_DIR/cache"
 SUCCESS_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-success.sha256"
 CURRENT_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-current.sha256"
@@ -77,6 +79,10 @@ if [ ! -x "$ARDUINO_CLI" ]; then
 fi
 if [ ! -f "$FINGERPRINT_TOOL" ]; then
   echo "Build fingerprint tool not found: $FINGERPRINT_TOOL" >&2
+  exit 1
+fi
+if [ ! -f "$ARTIFACT_TOOL" ]; then
+  echo "Artifact manifest tool not found: $ARTIFACT_TOOL" >&2
   exit 1
 fi
 if [ ! -f "$GFX_LIBRARY/library.properties" ]; then
@@ -109,7 +115,7 @@ case "$ESP32_CORE_VERSION" in
     ;;
 esac
 
-mkdir -p "$(dirname -- "$VENDOR_DIR")" "$WORK_DIR/output" "$CACHE_DIR" \
+mkdir -p "$(dirname -- "$VENDOR_DIR")" "$OUTPUT_DIR" "$CACHE_DIR" \
   "$SDK_OVERLAY_DIR/$SDK_VARIANT/include"
 
 # Arduino GFX 1.6.5 contains more than 200 source files for unrelated panels
@@ -255,14 +261,41 @@ BUILD_FINGERPRINT=$(python3 "$FINGERPRINT_TOOL" \
   --literal "extra-arguments=$EXTRA_ARGUMENTS_HASH")
 printf '%s\n' "$BUILD_FINGERPRINT" > "$CURRENT_FINGERPRINT"
 
+write_artifact_manifest() {
+  firmware_bin="$OUTPUT_DIR/PokePodAmoled.ino.bin"
+  source_revision=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)
+  if [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+    source_dirty=true
+  else
+    source_dirty=false
+  fi
+  firmware_sha=$(shasum -a 256 "$firmware_bin" | awk '{print $1}')
+  firmware_size=$(stat -f %z "$firmware_bin")
+  created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  python3 "$ARTIFACT_TOOL" \
+    --output "$OUTPUT_DIR/artifact.json" \
+    --lane "$BUILD_MODE" \
+    --source-revision "$source_revision" \
+    --source-dirty "$source_dirty" \
+    --build-input "$BUILD_FINGERPRINT" \
+    --binary-sha256 "$firmware_sha" \
+    --binary-size "$firmware_size" \
+    --created-at "$created_at" \
+    --fqbn "$FQBN" \
+    --core-version "$ESP32_CORE_VERSION" \
+    --vendor-revision "$WAVESHARE_COMMIT"
+}
+
 if [ "$BUILD_MODE" = fast ] && [ "$FORCE_BUILD" -eq 0 ] && [ "$#" -eq 0 ] && \
    [ -f "$SUCCESS_FINGERPRINT" ] && \
    [ "$(cat "$SUCCESS_FINGERPRINT")" = "$BUILD_FINGERPRINT" ] && \
    [ -f "$BUILD_DIR/build.options.json" ] && \
-   [ -f "$WORK_DIR/output/PokePodAmoled.ino.bin" ]; then
+   [ -f "$OUTPUT_DIR/PokePodAmoled.ino.bin" ] && \
+   [ -f "$OUTPUT_DIR/artifact.json" ]; then
   printf 'CACHE HIT pokepod fast build (%s)\n' "$BUILD_FINGERPRINT"
   rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$BUILD_DIR/sdkconfig"
-  shasum -a 256 "$WORK_DIR"/output/*
+  write_artifact_manifest
+  shasum -a 256 "$OUTPUT_DIR"/*
   printf 'Build mode: fast; elapsed: %ss\n' "$(($(date +%s) - STARTED_AT))"
   exit 0
 fi
@@ -286,7 +319,7 @@ if ! "$ARDUINO_CLI" compile $CLEAN_FLAG \
   --library "$VENDOR_DIR/examples/arduino-v2/examples/15_ES8311" \
   "$@" \
   --build-path "$BUILD_DIR" \
-  --output-dir "$WORK_DIR/output" \
+  --output-dir "$OUTPUT_DIR" \
   "$SKETCH_DIR" >"$BUILD_LOG" 2>&1
 then
   cat "$BUILD_LOG"
@@ -304,9 +337,12 @@ if rg -q "${SKETCH_DIR}/.*warning:" "$BUILD_LOG"; then
   exit 2
 fi
 printf '%s\n' "$BUILD_FINGERPRINT" > "$SUCCESS_FINGERPRINT"
-printf '%s\n' "$BUILD_FINGERPRINT" > "$WORK_DIR/output/build-input.sha256"
-printf '%s\n' "$BUILD_MODE" > "$WORK_DIR/output/build-mode.txt"
-cp "$BUILD_LOG" "$WORK_DIR/build.log"
-shasum -a 256 "$WORK_DIR"/output/*
+printf '%s\n' "$BUILD_FINGERPRINT" > "$OUTPUT_DIR/build-input.sha256"
+printf '%s\n' "$BUILD_MODE" > "$OUTPUT_DIR/build-mode.txt"
+if [ "$BUILD_MODE" = release ]; then
+  cp "$BUILD_LOG" "$WORK_DIR/build.log"
+fi
+write_artifact_manifest
+shasum -a 256 "$OUTPUT_DIR"/*
 printf 'Build mode: %s; elapsed: %ss\n' "$BUILD_MODE" \
   "$(($(date +%s) - STARTED_AT))"

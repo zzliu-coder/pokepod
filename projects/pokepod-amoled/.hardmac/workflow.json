@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "kind": "hardmac.workflow",
+  "profileId": "pokepod-amoled-1.8",
+  "displayName": "PokePod AMOLED 1.8",
+  "scope": "project",
+  "maturity": "draft",
+  "adapter": "esp32-esptool",
+  "workingDirectory": ".",
+  "discovery": {
+    "commands": [
+      "system_profiler SPUSBDataType",
+      "./cdc-status.py {port} --timeout 1",
+      "esptool --chip esp32s3 --port {port} chip-id"
+    ],
+    "requiredEvidence": [
+      "chip family is ESP32-S3",
+      "Link identity uses the stable pokepod- prefix",
+      "hardware reports 16 MB flash and the expected AMOLED board variant"
+    ],
+    "runtimeValues": [
+      "port",
+      "deviceIdentity"
+    ]
+  },
+  "lanes": {
+    "fast": {
+      "buildCommand": "./firmware/build.sh --fast",
+      "cleanBuild": false,
+      "artifactPath": "work/pokepod-build/output/fast/PokePodAmoled.ino.bin",
+      "manifestPath": "work/pokepod-build/output/fast/artifact.json",
+      "flashCommand": "./flash.sh --fast",
+      "verification": [
+        "application CDC returns with the expected Link identity",
+        "device acceptance checks the changed subsystem"
+      ]
+    },
+    "release": {
+      "buildCommand": "./firmware/build.sh --release",
+      "cleanBuild": true,
+      "artifactPath": "work/pokepod-build/output/release/PokePodAmoled.ino.bin",
+      "manifestPath": "work/pokepod-build/output/release/artifact.json",
+      "flashCommand": "./flash.sh --release",
+      "verification": [
+        "host checks and clean build pass",
+        "application partition readback matches the release artifact",
+        "complete device acceptance passes"
+      ]
+    }
+  },
+  "backup": {
+    "requiredBeforeFirstWrite": true,
+    "artifactDirectory": "work/hardmac-runs",
+    "reuseRequires": [
+      "exact live Link identity matches the backup record",
+      "deployed application digest or preserved-region state is known",
+      "verified application or full-flash restore path remains available"
+    ],
+    "preserve": [
+      "partition table",
+      "NVS Wi-Fi, Tencent and pairing configuration",
+      "FAT filesystem partition",
+      "SD card capsule data"
+    ]
+  },
+  "flash": {
+    "preferredStrategy": "manifest-verified whole application image at 460800 baud",
+    "fallbackStrategy": "65536-byte application chunks at 115200 baud with three bounded attempts",
+    "regions": [
+      {
+        "name": "app0",
+        "offset": "0x10000",
+        "sizeBytes": 3145728
+      }
+    ]
+  },
+  "acceptance": {
+    "command": "./device-acceptance.sh",
+    "requiredEvidence": [
+      "CDC Link identity and status return",
+      "display, touch, PMU, RTC, IMU, SD and audio checks pass",
+      "changed Wi-Fi or BLE behavior is tested when in scope"
+    ]
+  },
+  "safety": {
+    "storesSecrets": false,
+    "storesInstanceIdentifiers": false
+  }
+}

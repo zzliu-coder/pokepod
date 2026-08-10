@@ -132,8 +132,10 @@ Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊�
 ./verify.sh
 ```
 
-`build.sh` 固定 Waveshare 源码版本，并使用 Arduino-ESP32 3.3.8。产物位于
-`work/pokepod-build/output`。`verify.sh` 运行固件主机测试、干净固件编译、
+`build.sh` 固定 Waveshare 源码版本，并使用 Arduino-ESP32 3.3.8。快速产物位于
+`work/pokepod-build/output/fast`，正式产物位于
+`work/pokepod-build/output/release`。两者都带有记录源码版本、输入指纹、工具链、
+大小和 SHA-256 的 `artifact.json`，互相不会覆盖。`verify.sh` 运行固件主机测试、干净固件编译、
 Mac 测试和 release build、脚本语法检查及 diff 检查。
 
 日常修改固件直接运行默认的快速构建：
@@ -164,6 +166,17 @@ Mac 测试和 release build、脚本语法检查及 diff 检查。
 ```sh
 ./flash.sh
 ```
+
+默认命令只接受带有效清单的正式产物。日常迭代明确使用：
+
+```sh
+./firmware/build.sh --fast
+./flash.sh --fast
+```
+
+整包写入遇到原生 USB 中断时，刷写脚本会自动退到 64 KB 分块和较低速率，
+每块最多尝试三次，最后仍对完整应用分区执行校验。项目本地的通用部署配置位于
+`.hardmac/workflow.json`；其中不保存当前串口、设备 ID、Wi-Fi 或密钥。
 
 应用 CDC 在线时，脚本会用 1200 波特率自动进入 ROM 下载器；写入和校验后使用
 ESP32-S3 原生 USB 所需的 watchdog 系统复位自动回到应用。日常刷写无需按键。

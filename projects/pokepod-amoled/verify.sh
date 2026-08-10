@@ -27,5 +27,5 @@ swift build -c release --disable-sandbox --package-path "$MAC_PROJECT" \
   --scratch-path "$MAC_PROJECT/.build"
 plutil -lint "$MAC_PROJECT/Resources/Info.plist"
 git -C "$WORKTREE_DIR" diff --check
-shasum -a 256 "$SCRIPT_DIR/work/pokepod-build/output/PokePodAmoled.ino.bin"
+shasum -a 256 "$SCRIPT_DIR/work/pokepod-build/output/release/PokePodAmoled.ino.bin"
 printf 'PASS pokepod_software_gate\n'
