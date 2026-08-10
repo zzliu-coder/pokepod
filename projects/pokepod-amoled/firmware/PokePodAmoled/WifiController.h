@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "DeviceConfig.h"
+#include "NetworkTimeSyncState.h"
 #include "WifiPolicy.h"
 
 namespace pokepod {
@@ -24,6 +25,13 @@ class WifiController {
   const char *phaseName() const;
   bool timeReady() const;
   bool networkTimeSynchronized() const;
+  uint32_t networkTimeSyncRevision() const {
+    return timeSyncState_.revision();
+  }
+  uint32_t connectionGeneration() const {
+    return timeSyncState_.connectionGeneration();
+  }
+  void handleTimeSyncNotification();
   uint16_t lastDisconnectReason() const;
   bool radioOn() const { return radioOn_; }
   bool powerSaveEnabled() const { return powerSaveEnabled_; }
@@ -62,6 +70,7 @@ class WifiController {
   bool powerSaveConfigured_ = false;
   bool powerSaveEnabled_ = false;
   int32_t powerSaveError_ = 0;
+  NetworkTimeSyncState timeSyncState_;
 };
 
 }  // namespace pokepod

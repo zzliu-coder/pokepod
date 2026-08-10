@@ -26,10 +26,13 @@ assert "configWakeOnMotion" in board
 assert "ACC_ODR_LOWPOWER_21Hz" in board
 assert "AutoScreenOffPolicy" in main
 assert "runtimePower.enterLightSleep" in main
+assert "automaticWakeEnabled()" in main
+assert "kDimScreenBrightness" in main
 assert "input.vbusPresent" in main
 assert "input.usbHostConnected" in main
 assert "input.linkBusy" in main
 assert "esp_light_sleep_start" in power
+assert "kLightSleepSliceUs = 500000" in power
 assert "setCpuFrequencyMhz" in power
 assert "CONFIG_PM_ENABLE" in power
 assert "CONFIG_BT_CTRL_MODEM_SLEEP" in power
@@ -69,6 +72,7 @@ for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in export_body
 
 assert "!input.bleConnected" in policy
+assert "!input.wifiRadioOn" in policy
 assert "!input.usbHostConnected" in policy
 assert "!input.vbusPresent" in policy
 print("PASS test_power_diagnostics_contract")

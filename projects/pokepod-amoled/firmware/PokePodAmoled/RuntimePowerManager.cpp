@@ -10,7 +10,7 @@
 namespace pokepod {
 namespace {
 
-constexpr uint64_t kLightSleepSliceUs = 100000;
+constexpr uint64_t kLightSleepSliceUs = 500000;
 
 }  // namespace
 
@@ -65,12 +65,14 @@ bool RuntimePowerManager::enterLightSleep(
     return false;
   }
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  (void)gpio_wakeup_disable(static_cast<gpio_num_t>(kBootButtonPin));
+  (void)gpio_wakeup_disable(static_cast<gpio_num_t>(kTouchInterruptPin));
   esp_err_t error = esp_sleep_enable_timer_wakeup(kLightSleepSliceUs);
   if (error == ESP_OK) {
     error = gpio_wakeup_enable(static_cast<gpio_num_t>(kBootButtonPin),
                                GPIO_INTR_LOW_LEVEL);
   }
-  if (error == ESP_OK) {
+  if (error == ESP_OK && verifiedInputs.automaticWakeEnabled) {
     error = gpio_wakeup_enable(static_cast<gpio_num_t>(kTouchInterruptPin),
                                GPIO_INTR_LOW_LEVEL);
   }

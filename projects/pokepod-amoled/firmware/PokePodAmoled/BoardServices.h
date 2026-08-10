@@ -40,6 +40,8 @@ enum class PowerKeyEvent {
 
 class BoardServices {
  public:
+  static constexpr uint8_t kActiveScreenBrightness = 160;
+  static constexpr uint8_t kDimScreenBrightness = 60;
   bool begin(Print &log);
   void refreshSensors();
   bool readTouch(int16_t &x, int16_t &y);
@@ -48,6 +50,7 @@ class BoardServices {
   bool pollMotionWake();
   PowerKeyEvent pollPowerKey();
   void setScreenOn(bool enabled);
+  void setScreenBrightness(uint8_t brightness);
   void safeShutdown();
   String utcNow();
   bool setUtcEpoch(time_t epoch);

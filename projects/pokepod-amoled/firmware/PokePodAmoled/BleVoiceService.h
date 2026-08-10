@@ -13,6 +13,7 @@
 
 #include "AudioCaptureRouter.h"
 #include "BlePeerPolicy.h"
+#include "BleConnectionPowerPolicy.h"
 #include "BleSingleConnectionPolicy.h"
 #include "BleVoiceProtocol.h"
 #include "BleVoiceQuality.h"
@@ -79,6 +80,7 @@ class BleVoiceService {
   void restartAdvertising();
   void activatePairingMode(uint32_t nowMs);
   void updateDeviceInfo();
+  void requestConnectionPowerMode(BleConnectionPowerMode mode);
 
   BLEServer *server_ = nullptr;
   BLECharacteristic *info_ = nullptr;
@@ -106,6 +108,8 @@ class BleVoiceService {
   volatile bool controlNotifyAccepted_ = false;
   VoiceSessionError reportedError_ = VoiceSessionError::none;
   int batteryPercent_ = -1;
+  BleConnectionPowerMode connectionPowerMode_ =
+      BleConnectionPowerMode::idle;
 };
 
 }  // namespace pokepod

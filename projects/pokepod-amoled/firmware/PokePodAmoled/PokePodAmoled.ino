@@ -26,6 +26,7 @@
 #include "TencentWorker.h"
 #include "TlsExternalMemory.h"
 #include "UsbLinkBridge.h"
+#include "UsbPhysicalConnectionPolicy.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
 #include "WifiUiPolicy.h"
@@ -76,9 +77,11 @@ uint32_t lastDashboardMs = 0;
 uint32_t lastScrollFrameMs = 0;
 uint32_t lastSensorMs = 0;
 uint32_t bootPressedAtMs = 0;
-bool rtcSyncedFromNetwork = false;
+uint32_t lastNetworkTimeSyncRevision = 0;
 bool ignoreTouchUntilRelease = false;
 bool lastUsbHostConnected = false;
+bool lastVbusPresent = false;
+bool screenDimmed = false;
 String transientMessage;
 uint32_t transientUntilMs = 0;
 CapsuleUndoState trashUndo;
@@ -87,13 +90,28 @@ PowerDecision currentPowerDecision;
 
 void noteUserActivity(uint32_t nowMs = millis()) {
   autoScreenOff.noteActivity(nowMs);
+  if (board.status().screenOn && screenDimmed) {
+    board.setScreenBrightness(BoardServices::kActiveScreenBrightness);
+    screenDimmed = false;
+  }
+}
+
+bool automaticWakeEnabled() {
+  return deviceConfig.settings().raiseToWake;
+}
+
+bool usbCableConnected() {
+  const BoardStatus &status = board.status();
+  return usbPhysicalConnected(usb.hostConnected(), status.pmu,
+                              status.vbusPresent);
 }
 
 void setScreenState(bool enabled) {
   if (board.status().screenOn == enabled) return;
+  if (!enabled) (void)board.takeTouchInterrupt();
   board.setScreenOn(enabled);
-  board.configureScreenOffSensors(!enabled,
-                                  deviceConfig.settings().raiseToWake,
+  screenDimmed = false;
+  board.configureScreenOffSensors(!enabled, automaticWakeEnabled(),
                                   usb.log());
   if (enabled) {
     noteUserActivity();
@@ -108,14 +126,16 @@ PowerInputs currentPowerInputs() {
   input.bleConnected = bleVoice.connected();
   input.bleStreaming = bleVoice.streaming();
   input.wifiRadioOn = wifi.radioOn() || provisioningCoordinator.ownsWifi();
-  input.usbHostConnected = usb.hostConnected();
+  input.usbHostConnected = usbCableConnected();
   input.vbusPresent = board.status().vbusPresent;
   input.linkBusy = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy();
   input.storageBusy = recorder.recording();
-  input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy();
+  input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy() ||
+      wifi.phase() == WifiPhase::connecting;
   input.provisioning = provisioningCoordinator.visible();
   input.uiAnimating = dashboard.scrollActive();
+  input.automaticWakeEnabled = automaticWakeEnabled();
   return input;
 }
 
@@ -177,7 +197,7 @@ void drawDashboard() {
   view.settings = &deviceConfig.settings();
   view.audioReady = audio.ready();
   view.usbReady = usb.ready();
-  view.usbConnected = usb.hostConnected();
+  view.usbConnected = usbCableConnected();
   view.bleVoiceConnected = bleVoice.connected();
   view.bleVoiceReady = bleVoice.appReady();
   view.bleVoiceBonded = bleVoice.bonded();
@@ -359,14 +379,15 @@ void pollTouch() {
   const uint32_t now = millis();
   int16_t x = 0;
   int16_t y = 0;
-  const bool touched = board.readTouch(x, y);
   if (!board.status().screenOn) {
-    if (touched || board.takeTouchInterrupt()) {
+    const bool touchInterrupt = board.takeTouchInterrupt();
+    if (automaticWakeEnabled() && touchInterrupt && board.readTouch(x, y)) {
       ignoreTouchUntilRelease = true;
       setScreenState(true);
     }
     return;
   }
+  const bool touched = board.readTouch(x, y);
   if (ignoreTouchUntilRelease) {
     if (!touched) ignoreTouchUntilRelease = false;
     return;
@@ -547,9 +568,9 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::raiseToWakeToggle) {
-      const bool enabled = !deviceConfig.settings().raiseToWake;
+      const bool enabled = !automaticWakeEnabled();
       if (deviceConfig.setRaiseToWake(enabled, usb.log())) {
-        showMessage(enabled ? "抬起亮屏已开启" : "抬起亮屏已关闭");
+        showMessage(enabled ? "自动亮屏已开启" : "自动亮屏已关闭");
       }
       dashboard.invalidate();
       drawDashboard();
@@ -770,6 +791,7 @@ void setup() {
   drawDashboard();
   autoScreenOff.begin(millis());
   lastUsbHostConnected = usb.hostConnected();
+  lastVbusPresent = board.status().vbusPresent;
   emitStatus();
 }
 
@@ -891,8 +913,16 @@ void loop() {
             board.status().charging, provisioningCoordinator.ownsWifi(),
             wirelessSync.wifiDemand());
   wirelessSync.poll(now, wifi.connected());
-  if (!rtcSyncedFromNetwork && wifi.networkTimeSynchronized()) {
-    rtcSyncedFromNetwork = board.setUtcEpoch(time(nullptr));
+  const uint32_t timeSyncRevision = wifi.networkTimeSyncRevision();
+  if (timeSyncRevision != lastNetworkTimeSyncRevision) {
+    lastNetworkTimeSyncRevision = timeSyncRevision;
+    const time_t synchronizedEpoch = time(nullptr);
+    const bool rtcUpdated = board.setUtcEpoch(synchronizedEpoch);
+    usb.log().printf(
+        "{\"event\":\"network_time_applied\",\"revision\":%lu,\"generation\":%lu,\"rtc_updated\":%s}\n",
+        static_cast<unsigned long>(timeSyncRevision),
+        static_cast<unsigned long>(wifi.connectionGeneration()),
+        rtcUpdated ? "true" : "false");
   }
   tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                      transcriptionDispatchBusy(recorder.recording(),
@@ -920,11 +950,15 @@ void loop() {
     lastSensorMs = now;
     board.refreshSensors();
     const BoardStatus &status = board.status();
+    if (status.vbusPresent != lastVbusPresent) {
+      lastVbusPresent = status.vbusPresent;
+      dashboard.invalidate();
+    }
     bleVoice.setBatteryPercent(status.batteryPercent);
-    if (!status.screenOn && deviceConfig.settings().raiseToWake &&
+    if (!status.screenOn && automaticWakeEnabled() &&
         board.pollMotionWake()) {
       setScreenState(true);
-    } else if (raiseToWake.update(now, deviceConfig.settings().raiseToWake,
+    } else if (raiseToWake.update(now, automaticWakeEnabled(),
                                   status.screenOn, status.accelerationX,
                                   status.accelerationY,
                                   status.accelerationZ)) {
@@ -947,6 +981,12 @@ void loop() {
   const bool keepScreenAwake = recorder.recording() || wirelessUiActive ||
       audio.playing() || provisioningCoordinator.visible() ||
       touchVerticalScrolling || dashboard.scrollActive();
+  if (!screenDimmed &&
+      autoScreenOff.shouldDim(now, board.status().screenOn,
+                              keepScreenAwake)) {
+    board.setScreenBrightness(BoardServices::kDimScreenBrightness);
+    screenDimmed = true;
+  }
   if (autoScreenOff.shouldTurnOff(now, board.status().screenOn,
                                  keepScreenAwake)) {
     setScreenState(false);

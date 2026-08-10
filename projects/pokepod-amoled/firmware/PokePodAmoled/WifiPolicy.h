@@ -4,7 +4,7 @@
 
 namespace pokepod {
 
-constexpr uint32_t kWifiGraceMs = 3UL * 60UL * 1000UL;
+constexpr uint32_t kWifiGraceMs = 30UL * 1000UL;
 
 enum class WifiPhase {
   disabled,

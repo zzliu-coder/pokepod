@@ -15,6 +15,13 @@ constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiScanTimeoutMs = 8000;
 constexpr uint32_t kWifiCandidateDelayMs = 500;
 constexpr uint32_t kWifiMruPersistRetryMs = 5000;
+WifiController *activeTimeSyncController = nullptr;
+
+void timeSyncNotification(struct timeval *) {
+  if (activeTimeSyncController != nullptr) {
+    activeTimeSyncController->handleTimeSyncNotification();
+  }
+}
 }
 
 bool WifiController::begin(DeviceConfig &config, Print &log) {
@@ -23,6 +30,8 @@ bool WifiController::begin(DeviceConfig &config, Print &log) {
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
   beginWifiDisconnectDiagnostics();
+  activeTimeSyncController = this;
+  sntp_set_time_sync_notification_cb(timeSyncNotification);
   WiFi.mode(WIFI_OFF);
   return true;
 }
@@ -32,6 +41,7 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
                           bool wirelessSync) {
   if (config_ == nullptr) return;
   connected_ = WiFi.status() == WL_CONNECTED;
+  timeSyncState_.noteConnected(connected_);
   if (connected_) manualWakeRequested_ = false;
   const bool demand = recording || pendingWork || charging || wirelessSync ||
       manualWakeRequested_;
@@ -320,6 +330,10 @@ bool WifiController::timeReady() const {
 
 bool WifiController::networkTimeSynchronized() const {
   return ntpStarted_ && sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED;
+}
+
+void WifiController::handleTimeSyncNotification() {
+  timeSyncState_.noteSynchronized();
 }
 
 uint16_t WifiController::lastDisconnectReason() const {

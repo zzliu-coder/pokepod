@@ -113,9 +113,11 @@ bool BoardServices::beginDisplay(Print &log) {
   const bool ok = display_ != nullptr && display_->begin();
   if (ok) {
     if (status_.variant == BoardVariant::v1Sh8601Ft3168) {
-      static_cast<Arduino_SH8601 *>(display_)->setBrightness(180);
+      static_cast<Arduino_SH8601 *>(display_)->setBrightness(
+          kActiveScreenBrightness);
     } else {
-      static_cast<Arduino_CO5300 *>(display_)->setBrightness(180);
+      static_cast<Arduino_CO5300 *>(display_)->setBrightness(
+          kActiveScreenBrightness);
     }
     display_->fillScreen(RGB565_BLACK);
   }
@@ -267,14 +269,18 @@ PowerKeyEvent BoardServices::pollPowerKey() {
 void BoardServices::setScreenOn(bool enabled) {
   if (!status_.display || status_.screenOn == enabled) return;
   if (enabled) display_->displayOn();
-  const uint8_t brightness = enabled ? 180 : 0;
+  setScreenBrightness(enabled ? kActiveScreenBrightness : 0);
+  if (!enabled) display_->displayOff();
+  status_.screenOn = enabled;
+}
+
+void BoardServices::setScreenBrightness(uint8_t brightness) {
+  if (!status_.display) return;
   if (status_.variant == BoardVariant::v1Sh8601Ft3168) {
     static_cast<Arduino_SH8601 *>(display_)->setBrightness(brightness);
   } else if (status_.variant == BoardVariant::v2Co5300Cst820) {
     static_cast<Arduino_CO5300 *>(display_)->setBrightness(brightness);
   }
-  if (!enabled) display_->displayOff();
-  status_.screenOn = enabled;
 }
 
 void BoardServices::safeShutdown() {

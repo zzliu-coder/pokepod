@@ -5,6 +5,7 @@
 
 int main() {
   using namespace pokepod;
+  assert(kWifiGraceMs == 30000);
   WifiDecision state;
   WifiInputs input;
   state = nextWifiDecision(state, input, 0);

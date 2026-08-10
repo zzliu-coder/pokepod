@@ -29,6 +29,10 @@ assert close_guard is not None
 assert "while (cdc_.available() > 0)" in bridge
 assert "tud_cdc_read_flush();" in bridge
 assert "tud_cdc_write_clear();" in bridge
+assert '#include "UsbPhysicalConnectionPolicy.h"' in app
+assert "return usbPhysicalConnected(usb.hostConnected(), status.pmu," in app
+assert "view.usbConnected = usbCableConnected();" in app
+assert "lastVbusPresent" in app
 
 sdk_usb = Path(
     "/Users/zheliu/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/cores/esp32/USB.cpp"

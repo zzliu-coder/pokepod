@@ -34,6 +34,7 @@ struct PowerInputs {
   bool networkBusy = false;
   bool provisioning = false;
   bool uiAnimating = false;
+  bool automaticWakeEnabled = true;
 };
 
 struct PowerDecision {
@@ -46,7 +47,7 @@ struct PowerDecision {
 
 inline PowerDecision decidePower(const PowerInputs &input) {
   const bool foreground = input.audioActive || input.bleStreaming ||
-      input.wifiRadioOn || input.linkBusy || input.storageBusy ||
+      input.linkBusy || input.storageBusy ||
       input.networkBusy || input.provisioning || input.uiAnimating;
   if (foreground) {
     return {PowerMode::performance, 240, 10, 500, false};
@@ -54,8 +55,8 @@ inline PowerDecision decidePower(const PowerInputs &input) {
   if (input.screenOn) {
     return {PowerMode::balanced, 80, 10, 500, false};
   }
-  const bool sleepSafe = !input.bleConnected && !input.usbHostConnected &&
-      !input.vbusPresent;
+  const bool sleepSafe = !input.bleConnected && !input.wifiRadioOn &&
+      !input.usbHostConnected && !input.vbusPresent;
   if (sleepSafe) {
     return {PowerMode::lightSleep, 80, 100, 100, true};
   }
@@ -64,6 +65,7 @@ inline PowerDecision decidePower(const PowerInputs &input) {
 
 class AutoScreenOffPolicy {
  public:
+  static constexpr uint32_t kDefaultDimTimeoutMs = 12000;
   static constexpr uint32_t kDefaultTimeoutMs = 30000;
 
   void begin(uint32_t nowMs) { lastActivityMs_ = nowMs; }
@@ -72,6 +74,10 @@ class AutoScreenOffPolicy {
                      uint32_t timeoutMs = kDefaultTimeoutMs) const {
     return screenOn && !keepAwake &&
         elapsedSinceActivity(nowMs) >= timeoutMs;
+  }
+  bool shouldDim(uint32_t nowMs, bool screenOn, bool keepAwake,
+                 uint32_t timeoutMs = kDefaultDimTimeoutMs) const {
+    return screenOn && !keepAwake && elapsedSinceActivity(nowMs) >= timeoutMs;
   }
   uint32_t idleMs(uint32_t nowMs) const {
     return elapsedSinceActivity(nowMs);

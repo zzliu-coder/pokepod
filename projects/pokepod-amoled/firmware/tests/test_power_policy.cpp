@@ -35,6 +35,15 @@ int main() {
   input.vbusPresent = true;
   assert(!decidePower(input).allowLightSleep);
   input.vbusPresent = false;
+  input.wifiRadioOn = true;
+  decision = decidePower(input);
+  assert(decision.mode == PowerMode::screenOffIdle);
+  assert(decision.cpuMhz == 80);
+  assert(!decision.allowLightSleep);
+  input.wifiRadioOn = false;
+  input.networkBusy = true;
+  assert(decidePower(input).mode == PowerMode::performance);
+  input.networkBusy = false;
   input.provisioning = true;
   assert(decidePower(input).mode == PowerMode::performance);
   input.provisioning = false;
@@ -55,5 +64,9 @@ int main() {
   assert(!autoOff.shouldTurnOff(1000, true, false, 30));
   assert(!autoOff.shouldTurnOff(1001, true, false, 30));
   assert(autoOff.shouldTurnOff(1031, true, false, 30));
+  autoOff.noteActivity(2000);
+  assert(!autoOff.shouldDim(2011, true, false, 12));
+  assert(autoOff.shouldDim(2012, true, false, 12));
+  assert(!autoOff.shouldDim(2012, true, true, 12));
   return 0;
 }

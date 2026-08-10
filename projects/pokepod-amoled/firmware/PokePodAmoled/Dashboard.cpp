@@ -744,8 +744,9 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  SettingAccessory::chevron);
   const bool raiseEnabled = view.settings != nullptr &&
       view.settings->raiseToWake;
-  drawSettingRow(ui::kDeviceRaiseTop, UiIcon::raise, "抬起亮屏",
-                 "", raiseEnabled ? ui::kAccent : ui::kMuted,
+  drawSettingRow(ui::kDeviceRaiseTop, UiIcon::raise, "自动亮屏",
+                 raiseEnabled ? "触摸或抬起" : "仅实体键",
+                 raiseEnabled ? ui::kAccent : ui::kMuted,
                  SettingAccessory::toggle, raiseEnabled);
   drawSettingRow(ui::kDeviceProvisionTop, UiIcon::phone, "手机配网",
                  "", ui::kMuted, SettingAccessory::chevron);

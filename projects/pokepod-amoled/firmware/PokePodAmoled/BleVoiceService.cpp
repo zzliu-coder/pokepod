@@ -379,6 +379,10 @@ void BleVoiceService::poll(uint32_t nowMs) {
                   static_cast<uint16_t>(reportedError_));
   }
   const VoiceSessionState state = controller_.state();
+  if (connected_ && connectionPowerMode_ == BleConnectionPowerMode::voice &&
+      !controller_.active()) {
+    requestConnectionPowerMode(BleConnectionPowerMode::idle);
+  }
   if (!connected_ || !authenticated_ || audio_ == nullptr ||
       (state != VoiceSessionState::streaming &&
        state != VoiceSessionState::ending)) return;
@@ -446,6 +450,7 @@ bool BleVoiceService::startSession(uint32_t sessionId, uint32_t nowMs,
       !controller_.begin(sessionId, nowMs, connected_, mtu_, router)) {
     return false;
   }
+  requestConnectionPowerMode(BleConnectionPowerMode::voice);
   reportedError_ = VoiceSessionError::none;
   if (notifyControl(BleVoiceEventType::sessionStart, sessionId, mtu_)) {
     return true;
@@ -479,11 +484,8 @@ void BleVoiceService::handleConnect(uint16_t connectionId,
   authenticated_ = false;
   appReady_ = false;
   connectionId_ = connectionId;
-  // 1.25 ms units. Slave latency lowers idle wakeups; queued notifications
-  // still use each available connection event during a voice session.
-  if (server_ != nullptr) {
-    server_->requestConnParams(connectionId, 12, 16, 3, 500);
-  }
+  connectionPowerMode_ = BleConnectionPowerMode::voice;
+  requestConnectionPowerMode(BleConnectionPowerMode::idle);
   currentPeerAddressValid_ = peerAddress != nullptr;
   if (currentPeerAddressValid_) {
     memcpy(currentPeerAddress_, peerAddress, sizeof(currentPeerAddress_));
@@ -509,6 +511,7 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
   peerPolicy_.disconnected();
   mtu_ = 23;
   connectionId_ = 0;
+  connectionPowerMode_ = BleConnectionPowerMode::idle;
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_disconnected\"}");
@@ -516,6 +519,22 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
     activatePairingMode(millis());
   } else {
     restartAdvertising();
+  }
+}
+
+void BleVoiceService::requestConnectionPowerMode(
+    BleConnectionPowerMode mode) {
+  if (!connected_ || server_ == nullptr || connectionPowerMode_ == mode) return;
+  const BleConnectionParameters parameters = bleConnectionParameters(mode);
+  if (server_->requestConnParams(connectionId_, parameters.minInterval,
+                                 parameters.maxInterval,
+                                 parameters.latency,
+                                 parameters.timeout)) {
+    connectionPowerMode_ = mode;
+    if (log_ != nullptr) {
+      log_->printf("{\"event\":\"ble_connection_power\",\"mode\":\"%s\"}\n",
+                   mode == BleConnectionPowerMode::voice ? "voice" : "idle");
+    }
   }
 }
 
