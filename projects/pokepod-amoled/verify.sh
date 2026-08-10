@@ -21,7 +21,7 @@ for name in sys.argv[1:]:
     compile(source, name, "exec")
 PY
 zsh -n "$MAC_PROJECT/build-app.sh"
-"$SCRIPT_DIR/firmware/build.sh"
+"$SCRIPT_DIR/firmware/build.sh" --release
 swift test --disable-sandbox --package-path "$MAC_PROJECT"
 swift build -c release --disable-sandbox --package-path "$MAC_PROJECT" \
   --scratch-path "$MAC_PROJECT/.build"

@@ -21,7 +21,7 @@ worker = source("TencentWorker.cpp")
 asr = source("TencentAsr.cpp")
 link = source("PokePodLinkService.cpp")
 dashboard = source("Dashboard.cpp")
-main = source("PokePodAmoled.ino")
+main = source("PokePodApp.cpp")
 
 require(tls, "mbedtls_platform_set_calloc_free(",
         "mbedTLS allocator is not redirected")

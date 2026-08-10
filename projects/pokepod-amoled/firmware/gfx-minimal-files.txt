@@ -1,0 +1,24 @@
+# Source files required by PokePod from Arduino GFX 1.6.5. build.sh creates a
+# symlink-only library view in work/, so upstream remains the single source of
+# truth while Arduino CLI avoids compiling every unrelated display driver.
+Arduino_DataBus.cpp
+Arduino_DataBus.h
+Arduino_G.cpp
+Arduino_G.h
+Arduino_GFX.cpp
+Arduino_GFX.h
+Arduino_OLED.cpp
+Arduino_OLED.h
+Arduino_TFT.cpp
+Arduino_TFT.h
+YCbCr2RGB.h
+gfxfont.h
+font/glcdfont.h
+canvas/Arduino_Canvas_Indexed.cpp
+canvas/Arduino_Canvas_Indexed.h
+databus/Arduino_ESP32QSPI.cpp
+databus/Arduino_ESP32QSPI.h
+display/Arduino_CO5300.cpp
+display/Arduino_CO5300.h
+display/Arduino_SH8601.cpp
+display/Arduino_SH8601.h

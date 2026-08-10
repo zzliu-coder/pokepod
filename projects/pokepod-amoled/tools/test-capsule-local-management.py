@@ -8,7 +8,7 @@ library_h = (FIRMWARE / "CapsuleLibrary.h").read_text()
 library_cpp = (FIRMWARE / "CapsuleLibrary.cpp").read_text()
 ui_policy = (FIRMWARE / "UiPolicy.h").read_text()
 dashboard = (FIRMWARE / "Dashboard.cpp").read_text()
-app = (FIRMWARE / "PokePodAmoled.ino").read_text()
+app = (FIRMWARE / "PokePodApp.cpp").read_text()
 link = (FIRMWARE / "PokePodLinkService.cpp").read_text()
 
 assert "bool readOnly = false" in library_h

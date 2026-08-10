@@ -128,6 +128,7 @@ Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊�
 ```sh
 ./firmware/run-host-tests.sh
 ./firmware/build.sh
+./firmware/build.sh --release
 ./verify.sh
 ```
 
@@ -135,15 +136,28 @@ Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊�
 `work/pokepod-build/output`。`verify.sh` 运行固件主机测试、干净固件编译、
 Mac 测试和 release build、脚本语法检查及 diff 检查。
 
-日常修改固件后可以复用编译缓存：
+日常修改固件直接运行默认的快速构建：
 
 ```sh
-POKEPOD_INCREMENTAL=1 ./firmware/build.sh
+./firmware/build.sh
 ```
 
-脚本只在 NimBLE 配置内容真的改变时更新时间戳，避免 ESP32 核心和整套显示库
-被误判为需要重编。当前机器上相同源码的重复构建由约 283 秒降到约 46 秒；
-正式交付仍使用默认的 clean build。
+它使用独立的持久缓存和确定性输入指纹。输入完全相同时直接返回已有产物；源码
+变化时只重编受影响对象。Arduino 主 `.ino` 保持为极薄入口，稳定应用主体位于
+`PokePodApp.cpp`，避免 Arduino CLI 每次重新生成 `.ino.cpp` 时连带重编整个程序。
+构建脚本还会从 Arduino GFX 1.6.5 原始安装自动生成只含 PokePod 所需 21 个文件
+的符号链接视图；上游源码仍是唯一来源，构建器不会再扫描和编译两百多个无关
+屏幕及总线驱动。
+
+正式交付运行：
+
+```sh
+./firmware/build.sh --release
+```
+
+发布构建使用另一套 build path 并强制 `--clean`，不会清掉日常增量缓存。
+`./verify.sh` 始终调用这条发布路径。需要忽略指纹、主动刷新日常缓存时使用
+`./firmware/build.sh --force`。
 
 设备正常运行并通过 USB 连接时，刷写只需一个命令：
 

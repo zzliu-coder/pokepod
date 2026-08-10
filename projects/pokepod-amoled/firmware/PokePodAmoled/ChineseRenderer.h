@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <Arduino_GFX_Library.h>
+#include "PokePodGfx.h"
 #include <FS.h>
 
 namespace pokepod {

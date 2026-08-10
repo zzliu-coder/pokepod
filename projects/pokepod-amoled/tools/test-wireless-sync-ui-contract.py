@@ -8,7 +8,7 @@ source = root / "firmware" / "PokePodAmoled"
 link_header = (source / "PokePodLinkService.h").read_text()
 link_source = (source / "PokePodLinkService.cpp").read_text()
 sync_source = (source / "WirelessSyncService.cpp").read_text()
-app_source = (source / "PokePodAmoled.ino").read_text()
+app_source = (source / "PokePodApp.cpp").read_text()
 ui_policy = (source / "UiPolicy.h").read_text()
 
 assert "maintenanceCompletionRevision() const" in link_header

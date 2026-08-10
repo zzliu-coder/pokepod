@@ -6,7 +6,7 @@ from pathlib import Path
 
 root = Path(__file__).parents[1]
 firmware = root / "firmware" / "PokePodAmoled"
-main = (firmware / "PokePodAmoled.ino").read_text(encoding="utf-8")
+main = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 wifi = (firmware / "WifiController.cpp").read_text(encoding="utf-8")
 power = (firmware / "RuntimePowerManager.cpp").read_text(encoding="utf-8")
 policy = (firmware / "PowerPolicy.h").read_text(encoding="utf-8")

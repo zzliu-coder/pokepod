@@ -13,7 +13,7 @@ def require(source: str, needle: str, label: str) -> None:
 
 
 dashboard = (FIRMWARE / "Dashboard.cpp").read_text(encoding="utf-8")
-main = (FIRMWARE / "PokePodAmoled.ino").read_text(encoding="utf-8")
+main = (FIRMWARE / "PokePodApp.cpp").read_text(encoding="utf-8")
 renderer = (FIRMWARE / "ChineseRenderer.cpp").read_text(encoding="utf-8")
 power = (FIRMWARE / "PowerPolicy.h").read_text(encoding="utf-8")
 

@@ -8,7 +8,7 @@ import re
 project = Path(__file__).parents[1]
 bridge = (project / "firmware/PokePodAmoled/UsbLinkBridge.cpp").read_text()
 bridge_header = (project / "firmware/PokePodAmoled/UsbLinkBridge.h").read_text()
-app = (project / "firmware/PokePodAmoled/PokePodAmoled.ino").read_text()
+app = (project / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
 assert "return started_ && static_cast<bool>(USB);" in bridge
 assert "ARDUINO_USB_CDC_LINE_STATE_EVENT" in bridge
 assert "data->line_state.dtr" in bridge

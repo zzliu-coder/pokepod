@@ -6,14 +6,68 @@ PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 WORK_DIR="$PROJECT_DIR/work/pokepod-build"
 VENDOR_DIR="$PROJECT_DIR/work/pokepod-vendor/waveshare"
 SKETCH_DIR="$SCRIPT_DIR/PokePodAmoled"
-ARDUINO_CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
-GFX_LIBRARY="/Users/zheliu/Documents/Arduino/libraries/GFX_Library_for_Arduino"
+ARDUINO_CLI=${ARDUINO_CLI:-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"}
+GFX_LIBRARY=${GFX_LIBRARY:-"/Users/zheliu/Documents/Arduino/libraries/GFX_Library_for_Arduino"}
+GFX_MANIFEST="$SCRIPT_DIR/gfx-minimal-files.txt"
 WAVESHARE_COMMIT="ba32b5cbca96f0e04b0736d04959b6e832268d3f"
+FQBN='esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none'
+FINGERPRINT_TOOL="$PROJECT_DIR/tools/build-input-fingerprint.py"
+BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
+FORCE_BUILD=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fast)
+      BUILD_MODE=fast
+      shift
+      ;;
+    --release|--clean)
+      BUILD_MODE=release
+      shift
+      ;;
+    --force)
+      FORCE_BUILD=1
+      shift
+      ;;
+    --help)
+      cat <<'EOF'
+Usage: ./firmware/build.sh [--fast|--release|--force] [arduino-cli options]
+
+  --fast      Reuse the persistent daily cache (default).
+  --release   Use a separate build directory and force a clean build.
+  --force     Run the fast compiler even when the input fingerprint matches.
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+case "$BUILD_MODE" in
+  fast|release) ;;
+  *)
+    echo "Unsupported PokePod build mode: $BUILD_MODE" >&2
+    exit 64
+    ;;
+esac
+
+BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
+BUILD_LOG="$WORK_DIR/build-$BUILD_MODE.log"
+CACHE_DIR="$WORK_DIR/cache"
+SUCCESS_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-success.sha256"
+CURRENT_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-current.sha256"
+STARTED_AT=$(date +%s)
 ESP32_CORE_VERSION=$(
   "$ARDUINO_CLI" core list 2>/dev/null |
     awk '$1 == "esp32:esp32" { print $2; exit }'
 )
 ESP32_S3_SDK_DIR="/Users/zheliu/Library/Arduino15/packages/esp32/tools/esp32s3-libs/$ESP32_CORE_VERSION"
+ESP32_PLATFORM_DIR="/Users/zheliu/Library/Arduino15/packages/esp32/hardware/esp32/$ESP32_CORE_VERSION"
 SDK_OVERLAY_DIR="$WORK_DIR/sdk-single-connection"
 SDK_VARIANT=qio_opi
 
@@ -21,8 +75,16 @@ if [ ! -x "$ARDUINO_CLI" ]; then
   echo "Arduino CLI not found: $ARDUINO_CLI" >&2
   exit 1
 fi
+if [ ! -f "$FINGERPRINT_TOOL" ]; then
+  echo "Build fingerprint tool not found: $FINGERPRINT_TOOL" >&2
+  exit 1
+fi
 if [ ! -f "$GFX_LIBRARY/library.properties" ]; then
   echo "Arduino GFX compatibility library not found: $GFX_LIBRARY" >&2
+  exit 1
+fi
+if [ ! -f "$GFX_MANIFEST" ]; then
+  echo "PokePod GFX source manifest not found: $GFX_MANIFEST" >&2
   exit 1
 fi
 if ! grep -q '^version=1\.6\.5$' "$GFX_LIBRARY/library.properties"; then
@@ -47,8 +109,50 @@ case "$ESP32_CORE_VERSION" in
     ;;
 esac
 
-mkdir -p "$(dirname -- "$VENDOR_DIR")" "$WORK_DIR/build" "$WORK_DIR/output" \
+mkdir -p "$(dirname -- "$VENDOR_DIR")" "$WORK_DIR/output" "$CACHE_DIR" \
   "$SDK_OVERLAY_DIR/$SDK_VARIANT/include"
+
+# Arduino GFX 1.6.5 contains more than 200 source files for unrelated panels
+# and data buses. Build a symlink-only Arduino library containing the exact
+# upstream files PokePod uses. The manifest hash gives changed views a new path
+# while stable views keep stable mtimes and remain cacheable.
+GFX_VIEW_ID=$(
+  { shasum -a 256 "$GFX_MANIFEST" "$GFX_LIBRARY/library.properties"; \
+    printf '%s\n' "$GFX_LIBRARY"; } |
+    shasum -a 256 | awk '{print substr($1, 1, 16)}'
+)
+GFX_MINIMAL_LIBRARY="$WORK_DIR/gfx-minimal/$GFX_VIEW_ID"
+mkdir -p "$GFX_MINIMAL_LIBRARY/src"
+for gfx_metadata in library.properties license.txt; do
+  gfx_source="$GFX_LIBRARY/$gfx_metadata"
+  gfx_target="$GFX_MINIMAL_LIBRARY/$gfx_metadata"
+  if [ ! -L "$gfx_target" ] || [ "$(readlink "$gfx_target")" != "$gfx_source" ]; then
+    ln -sfn "$gfx_source" "$gfx_target"
+  fi
+done
+while IFS= read -r gfx_relative || [ -n "$gfx_relative" ]; do
+  case "$gfx_relative" in
+    ''|'#'*) continue ;;
+  esac
+  gfx_source="$GFX_LIBRARY/src/$gfx_relative"
+  gfx_target="$GFX_MINIMAL_LIBRARY/src/$gfx_relative"
+  if [ ! -f "$gfx_source" ]; then
+    echo "PokePod GFX source is missing: $gfx_source" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname -- "$gfx_target")"
+  if [ ! -L "$gfx_target" ] || [ "$(readlink "$gfx_target")" != "$gfx_source" ]; then
+    ln -sfn "$gfx_source" "$gfx_target"
+  fi
+done < "$GFX_MANIFEST"
+
+# Reuse the historical daily cache once. Release builds always have their own
+# directory, so a clean release can no longer erase the fast edit-build loop.
+if [ "$BUILD_MODE" = fast ] && [ ! -e "$BUILD_DIR" ] && \
+   [ -f "$WORK_DIR/build/build.options.json" ]; then
+  mv "$WORK_DIR/build" "$BUILD_DIR"
+fi
+mkdir -p "$BUILD_DIR"
 
 # Arduino-ESP32 ships a generic SDK configured for three NimBLE controller
 # connections. PokePod Voice has passkey callbacks that do not carry a
@@ -60,17 +164,26 @@ for sdk_item in "$ESP32_S3_SDK_DIR"/*; do
   case "$sdk_name" in
     sdkconfig|"$SDK_VARIANT") continue ;;
   esac
-  ln -sfn "$sdk_item" "$SDK_OVERLAY_DIR/$sdk_name"
+  sdk_link="$SDK_OVERLAY_DIR/$sdk_name"
+  if [ ! -L "$sdk_link" ] || [ "$(readlink "$sdk_link")" != "$sdk_item" ]; then
+    ln -sfn "$sdk_item" "$sdk_link"
+  fi
 done
 for sdk_item in "$ESP32_S3_SDK_DIR/$SDK_VARIANT"/*; do
   sdk_name=$(basename -- "$sdk_item")
   [ "$sdk_name" = include ] && continue
-  ln -sfn "$sdk_item" "$SDK_OVERLAY_DIR/$SDK_VARIANT/$sdk_name"
+  sdk_link="$SDK_OVERLAY_DIR/$SDK_VARIANT/$sdk_name"
+  if [ ! -L "$sdk_link" ] || [ "$(readlink "$sdk_link")" != "$sdk_item" ]; then
+    ln -sfn "$sdk_item" "$sdk_link"
+  fi
 done
 for sdk_item in "$ESP32_S3_SDK_DIR/$SDK_VARIANT/include"/*; do
   sdk_name=$(basename -- "$sdk_item")
   [ "$sdk_name" = sdkconfig.h ] && continue
-  ln -sfn "$sdk_item" "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/$sdk_name"
+  sdk_link="$SDK_OVERLAY_DIR/$SDK_VARIANT/include/$sdk_name"
+  if [ ! -L "$sdk_link" ] || [ "$(readlink "$sdk_link")" != "$sdk_item" ]; then
+    ln -sfn "$sdk_item" "$sdk_link"
+  fi
 done
 awk '
   /^CONFIG_BT_NIMBLE_MAX_CONNECTIONS=/ {
@@ -112,18 +225,59 @@ fi
 if ! git -C "$VENDOR_DIR" cat-file -e "$WAVESHARE_COMMIT^{commit}" 2>/dev/null; then
   git -C "$VENDOR_DIR" fetch origin "$WAVESHARE_COMMIT"
 fi
-git -C "$VENDOR_DIR" checkout --detach "$WAVESHARE_COMMIT"
-
-BUILD_LOG="$WORK_DIR/build.log"
-CLEAN_FLAG=--clean
-if [ "${POKEPOD_INCREMENTAL:-0}" = 1 ]; then
-  CLEAN_FLAG=
+if [ "$(git -C "$VENDOR_DIR" rev-parse HEAD)" != "$WAVESHARE_COMMIT" ]; then
+  git -C "$VENDOR_DIR" checkout --detach "$WAVESHARE_COMMIT"
 fi
+if [ -n "$(git -C "$VENDOR_DIR" status --porcelain --untracked-files=no)" ]; then
+  echo "Pinned Waveshare vendor checkout is dirty: $VENDOR_DIR" >&2
+  exit 1
+fi
+
+EXTRA_ARGUMENTS_HASH=$(printf '%s\0' "$@" | shasum -a 256 | awk '{print $1}')
+CLI_VERSION=$("$ARDUINO_CLI" version | tr '\n' ' ')
+BUILD_FINGERPRINT=$(python3 "$FINGERPRINT_TOOL" \
+  --tree "$SKETCH_DIR" \
+  --tree "$GFX_MINIMAL_LIBRARY/src" \
+  --file "$GFX_MANIFEST" \
+  --file "$GFX_LIBRARY/library.properties" \
+  --file "$SCRIPT_DIR/build.sh" \
+  --file "$ESP32_PLATFORM_DIR/platform.txt" \
+  --file "$ESP32_PLATFORM_DIR/boards.txt" \
+  --file "$SDK_OVERLAY_DIR/sdkconfig" \
+  --file "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h" \
+  --literal "arduino-cli=$CLI_VERSION" \
+  --literal "esp32-core=$ESP32_CORE_VERSION" \
+  --literal "waveshare=$WAVESHARE_COMMIT" \
+  --literal "gfx-source=$GFX_LIBRARY" \
+  --literal "gfx-view=$GFX_VIEW_ID" \
+  --literal "vendor-path=$VENDOR_DIR" \
+  --literal "fqbn=$FQBN" \
+  --literal "extra-arguments=$EXTRA_ARGUMENTS_HASH")
+printf '%s\n' "$BUILD_FINGERPRINT" > "$CURRENT_FINGERPRINT"
+
+if [ "$BUILD_MODE" = fast ] && [ "$FORCE_BUILD" -eq 0 ] && [ "$#" -eq 0 ] && \
+   [ -f "$SUCCESS_FINGERPRINT" ] && \
+   [ "$(cat "$SUCCESS_FINGERPRINT")" = "$BUILD_FINGERPRINT" ] && \
+   [ -f "$BUILD_DIR/build.options.json" ] && \
+   [ -f "$WORK_DIR/output/PokePodAmoled.ino.bin" ]; then
+  printf 'CACHE HIT pokepod fast build (%s)\n' "$BUILD_FINGERPRINT"
+  rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$BUILD_DIR/sdkconfig"
+  shasum -a 256 "$WORK_DIR"/output/*
+  printf 'Build mode: fast; elapsed: %ss\n' "$(($(date +%s) - STARTED_AT))"
+  exit 0
+fi
+
+CLEAN_FLAG=
+if [ "$BUILD_MODE" = release ]; then
+  CLEAN_FLAG=--clean
+fi
+printf 'Build mode: %s; fingerprint: %s\n' "$BUILD_MODE" "$BUILD_FINGERPRINT"
 if ! "$ARDUINO_CLI" compile $CLEAN_FLAG \
+  --jobs 0 \
   --warnings all \
-  --fqbn 'esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none' \
+  --fqbn "$FQBN" \
   --build-property "compiler.sdk.path=$SDK_OVERLAY_DIR" \
-  --library "$GFX_LIBRARY" \
+  --library "$GFX_MINIMAL_LIBRARY" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Arduino_DriveBus" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Adafruit_XCA9554" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Adafruit_BusIO" \
@@ -131,7 +285,7 @@ if ! "$ARDUINO_CLI" compile $CLEAN_FLAG \
   --library "$VENDOR_DIR/examples/arduino/libraries/XPowersLib" \
   --library "$VENDOR_DIR/examples/arduino-v2/examples/15_ES8311" \
   "$@" \
-  --build-path "$WORK_DIR/build" \
+  --build-path "$BUILD_DIR" \
   --output-dir "$WORK_DIR/output" \
   "$SKETCH_DIR" >"$BUILD_LOG" 2>&1
 then
@@ -139,9 +293,9 @@ then
   exit 1
 fi
 cat "$BUILD_LOG"
-rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$WORK_DIR/build/sdkconfig"
+rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$BUILD_DIR/sdkconfig"
 if rg -q '^CONFIG_BT_NIMBLE_MAX_CONNECTIONS=[2-9]' \
-  "$WORK_DIR/build/sdkconfig"; then
+  "$BUILD_DIR/sdkconfig"; then
   printf 'Build used a multi-connection NimBLE configuration\n' >&2
   exit 3
 fi
@@ -149,4 +303,10 @@ if rg -q "${SKETCH_DIR}/.*warning:" "$BUILD_LOG"; then
   printf 'Project source emitted compiler warnings\n' >&2
   exit 2
 fi
+printf '%s\n' "$BUILD_FINGERPRINT" > "$SUCCESS_FINGERPRINT"
+printf '%s\n' "$BUILD_FINGERPRINT" > "$WORK_DIR/output/build-input.sha256"
+printf '%s\n' "$BUILD_MODE" > "$WORK_DIR/output/build-mode.txt"
+cp "$BUILD_LOG" "$WORK_DIR/build.log"
 shasum -a 256 "$WORK_DIR"/output/*
+printf 'Build mode: %s; elapsed: %ss\n' "$BUILD_MODE" \
+  "$(($(date +%s) - STARTED_AT))"

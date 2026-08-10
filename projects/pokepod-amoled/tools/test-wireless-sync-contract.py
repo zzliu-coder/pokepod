@@ -66,7 +66,7 @@ assert "kWirelessSyncDrainLimitMs" not in window
 assert "draining" not in window
 assert "atomicTransactionActive" not in window
 assert "deadlineReached" in window
-main = read("PokePodAmoled.ino")
+main = read("PokePodApp.cpp")
 assert main.index("wirelessSync.enforceDeadline(now);") < main.index(
     "if (linkService.receivingBinary())"
 )
@@ -88,7 +88,7 @@ assert 'static constexpr char kHex[] = "0123456789abcdef"' in link
 assert "output[64] = '\\0'" in link
 assert link.count("transferPermitted()") >= 12
 
-main = read("PokePodAmoled.ino")
+main = read("PokePodApp.cpp")
 assert "LinkTransport::usb, &wirelessSync,\n                    nullptr" in main
 
 identity = read("WirelessSyncIdentity.cpp")

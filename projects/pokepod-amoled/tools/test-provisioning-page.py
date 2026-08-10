@@ -9,7 +9,7 @@ source = (firmware_dir / "ProvisioningPortal.cpp").read_text(encoding="utf-8")
 coordinator = (firmware_dir / "ProvisioningCoordinator.cpp").read_text(encoding="utf-8")
 wifi_source = (firmware_dir / "WifiController.cpp").read_text(encoding="utf-8")
 link_source = (firmware_dir / "PokePodLinkService.cpp").read_text(encoding="utf-8")
-main_source = (firmware_dir / "PokePodAmoled.ino").read_text(encoding="utf-8")
+main_source = (firmware_dir / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
 
