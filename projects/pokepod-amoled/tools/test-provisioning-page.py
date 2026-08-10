@@ -28,6 +28,8 @@ assert "scrollIntoView" not in source
 assert "behavior:'smooth'" not in source
 assert "id='ssid'" in source
 assert "id='rescan'" in source
+assert "b.addEventListener('click',()=>load(true));" in source
+assert "\nload(true);\n</script>" in source
 assert "id='wifi-password'" in source
 assert "id='remembered-wrap'" in source
 assert "id='remembered-list'" in source
@@ -149,7 +151,14 @@ network_section = main_source[
 assert "wifi.loop(now" in network_section
 assert "tencentWorker.loop(now" in network_section
 assert "portal_->loop(millis())" in coordinator
-assert "elapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)" in source
+assert "nowMs = millis();" in source
+assert "if (validating_ && !transitionPending_)" in source
+assert "validatingSinceMs_ = millis();" in source[source.index(
+    "void ProvisioningPortal::beginStationValidation()"):source.index(
+    "void ProvisioningPortal::restorePortalForRetry()")]
+assert "monotonicElapsedAtLeast(nowMs, validatingSinceMs_" in source
+assert "monotonicElapsedOrZero(nowMs, validatingSinceMs_)" in source
+assert "monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)" in source
 assert 'strcmp(operation, "provisioning-start") == 0' in link_source
 assert 'strcmp(operation, "provisioning-stop") == 0' in link_source
 assert "only available over USB" in link_source

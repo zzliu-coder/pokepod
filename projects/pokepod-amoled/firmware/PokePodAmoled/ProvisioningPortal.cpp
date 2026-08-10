@@ -6,6 +6,7 @@
 #include <esp_wifi.h>
 
 #include "ProvisioningPolicy.h"
+#include "MonotonicTime.h"
 #include "WifiDisconnectDiagnostics.h"
 #include "WifiFailurePolicy.h"
 
@@ -16,11 +17,6 @@ constexpr uint32_t kPortalLifetimeMs = 5UL * 60UL * 1000UL;
 constexpr uint32_t kValidationTimeoutMs = 15000;
 constexpr uint32_t kScanTimeoutMs = 8000;
 constexpr size_t kMaximumNetworks = 20;
-
-bool elapsedAtLeast(uint32_t nowMs, uint32_t sinceMs, uint32_t durationMs) {
-  const int32_t elapsed = static_cast<int32_t>(nowMs - sinceMs);
-  return elapsed >= 0 && static_cast<uint32_t>(elapsed) >= durationMs;
-}
 
 void logProvisioningMemory(Print &log, const char *phase) {
   log.printf(
@@ -184,16 +180,22 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
   if (!active_) return;
   dns_.processNextRequest();
   server_.handleClient();
+  // HTTP handlers can create a new validation timestamp. Refresh the clock
+  // after handling the request so this poll can never appear to predate it.
+  nowMs = millis();
   if (transitionPending_ &&
       static_cast<int32_t>(nowMs - transitionAtMs_) >= 0) {
     transitionPending_ = false;
     beginStationValidation();
   }
   pollScan();
-  if (validating_) {
+  // A validation is visible to the web UI while its 202 response drains, but
+  // Wi-Fi outcome/timeout handling starts only after beginStationValidation.
+  if (validating_ && !transitionPending_) {
     if (WiFi.status() == WL_CONNECTED) {
       validating_ = false;
-      const uint32_t elapsed = nowMs - validatingSinceMs_;
+      const uint32_t elapsed =
+          monotonicElapsedOrZero(nowMs, validatingSinceMs_);
       diagnostics_->record(ProvisioningLogStage::connected,
                            ProvisioningLogOutcome::success,
                            candidate_.wifiSsid, WiFi.RSSI(), 0, elapsed,
@@ -217,8 +219,8 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
                              validationAttempt_, *log_);
         restorePortalForRetry();
       }
-    } else if (static_cast<uint32_t>(nowMs - validatingSinceMs_) >=
-               kValidationTimeoutMs) {
+    } else if (monotonicElapsedAtLeast(nowMs, validatingSinceMs_,
+                                       kValidationTimeoutMs)) {
       validating_ = false;
       saved_ = false;
       const uint16_t reason = lastWifiDisconnectReason();
@@ -226,13 +228,14 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
       diagnostics_->record(ProvisioningLogStage::failed,
                            ProvisioningLogOutcome::failure,
                            candidate_.wifiSsid, candidateRssi_, reason,
-                           nowMs - validatingSinceMs_, validationAttempt_,
+                           monotonicElapsedOrZero(nowMs, validatingSinceMs_),
+                           validationAttempt_,
                            *log_);
       restorePortalForRetry();
     }
   }
   if ((closeAtMs_ != 0 && static_cast<int32_t>(nowMs - closeAtMs_) >= 0) ||
-      elapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
+      monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
     stop();
   }
 }
@@ -501,6 +504,7 @@ void ProvisioningPortal::beginStationValidation() {
   WiFi.softAPdisconnect(false);
   WiFi.mode(WIFI_STA);
   esp_wifi_set_ps(WIFI_PS_NONE);
+  validatingSinceMs_ = millis();
   clearWifiDisconnectReason();
   if (diagnostics_ != nullptr && log_ != nullptr) {
     diagnostics_->record(ProvisioningLogStage::connectStarted,
@@ -753,7 +757,9 @@ form.addEventListener('submit',submitForm);
 window.addEventListener('resize',syncViewport);
 if(window.visualViewport){window.visualViewport.addEventListener('resize',syncViewport)}
 syncViewport();
-load(false);
+// The document is already on the phone before this request runs, so the
+// single radio can scan without delaying the captive portal's first paint.
+load(true);
 </script>
 </body>
 </html>)HTML");

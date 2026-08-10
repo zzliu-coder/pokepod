@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "MonotonicTime.h"
+
 namespace pokepod {
 
 enum class ProvisioningStartupPhase : uint8_t {
@@ -62,7 +64,7 @@ class ProvisioningStartupPolicy {
         phase_ == ProvisioningStartupPhase::failed) {
       return ProvisioningStartupAction::none;
     }
-    if (elapsedAtLeast(nowMs, requestedAtMs_, kStartupTimeoutMs)) {
+    if (monotonicElapsedAtLeast(nowMs, requestedAtMs_, kStartupTimeoutMs)) {
       phase_ = ProvisioningStartupPhase::failed;
       pendingAction_ = ProvisioningStartupAction::none;
       return ProvisioningStartupAction::failTimeout;
@@ -71,7 +73,7 @@ class ProvisioningStartupPolicy {
       return ProvisioningStartupAction::none;
     }
     if (phase_ == ProvisioningStartupPhase::requested) {
-      if (!elapsedAtLeast(nowMs, requestedAtMs_, kRequestSettleMs)) {
+      if (!monotonicElapsedAtLeast(nowMs, requestedAtMs_, kRequestSettleMs)) {
         return ProvisioningStartupAction::none;
       }
       phase_ = ProvisioningStartupPhase::quiescing;
@@ -79,17 +81,18 @@ class ProvisioningStartupPolicy {
       return ProvisioningStartupAction::quiesceRadio;
     }
     if (phase_ == ProvisioningStartupPhase::quiescing &&
-        elapsedAtLeast(nowMs, quiescedAtMs_, kMinimumSettleMs)) {
+        monotonicElapsedAtLeast(nowMs, quiescedAtMs_, kMinimumSettleMs)) {
       pendingAction_ = ProvisioningStartupAction::switchRadioMode;
       return pendingAction_;
     }
     if (phase_ == ProvisioningStartupPhase::switchingMode &&
-        elapsedAtLeast(nowMs, stepStartedAtMs_, kModeSettleMs)) {
+        monotonicElapsedAtLeast(nowMs, stepStartedAtMs_, kModeSettleMs)) {
       pendingAction_ = ProvisioningStartupAction::startAccessPoint;
       return pendingAction_;
     }
     if (phase_ == ProvisioningStartupPhase::startingAccessPoint &&
-        elapsedAtLeast(nowMs, stepStartedAtMs_, kAccessPointSettleMs)) {
+        monotonicElapsedAtLeast(nowMs, stepStartedAtMs_,
+                                kAccessPointSettleMs)) {
       pendingAction_ = ProvisioningStartupAction::startPortalServices;
       return pendingAction_;
     }
@@ -148,15 +151,6 @@ class ProvisioningStartupPolicy {
   bool ownsWifi() const { return visible(); }
 
  private:
-  static bool elapsedAtLeast(uint32_t nowMs, uint32_t sinceMs,
-                             uint32_t durationMs) {
-    // A request may be created after the caller captured its loop timestamp.
-    // A slightly older nowMs must wait for the next poll, not look like a
-    // uint32 wrap of almost 49 days. Real timer wrap remains supported.
-    const int32_t elapsed = static_cast<int32_t>(nowMs - sinceMs);
-    return elapsed >= 0 && static_cast<uint32_t>(elapsed) >= durationMs;
-  }
-
   ProvisioningStartupPhase phase_ = ProvisioningStartupPhase::idle;
   uint32_t requestedAtMs_ = 0;
   uint32_t quiescedAtMs_ = 0;
