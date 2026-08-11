@@ -132,18 +132,22 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
   PowerInputs input;
   input.screenOn = board.status().screenOn;
   input.audioActive = audio.active() || recorder.recording() || audio.playing();
-  input.bleConnected = bleVoice.radioActive();
-  input.bleStreaming = bleVoice.streaming();
-  input.wifiRadioOn = wifi.radioOn() || provisioningCoordinator.ownsWifi();
-  // A charger supplies VBUS without opening a Mac CDC host session. Keep the
-  // physical icon semantics in usbCableConnected(), while power policy uses
-  // the real host session and the independent VBUS fact.
-  input.usbHostConnected = usb.hostConnected();
-  input.vbusPresent = board.status().vbusPresent;
-  input.linkBusy = linkService.receivingBinary() ||
+  const bool linkLeaseActive = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy() ||
       wirelessSync.openWindow();
-  input.storageBusy = recorder.recording();
+  const PowerFacts facts = {
+      usb.tinyUsbMounted(),
+      usb.cdcSessionActive(),
+      board.status().vbusPresent,
+      board.status().charging,
+      linkLeaseActive,
+      bleVoice.radioActive(),
+      bleVoice.streaming(),
+      wifi.radioOn() || provisioningCoordinator.ownsWifi(),
+      board.lowPowerWakeSourcesReady(),
+      recorder.recording(),
+  };
+  input = powerInputsWithFacts(input, facts);
   input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy() ||
       wifi.phase() == WifiPhase::connecting;
   input.provisioning = provisioningCoordinator.visible();
@@ -165,6 +169,7 @@ bool pauseIdleRadios() {
 void enterDeepSleep(const PowerInputs &inputs) {
   (void)board.takeTouchInterrupt();
   if (!runtimePower.armDeepSleepWakeSources(automaticWakeEnabled(),
+                                             board.lowPowerWakeSourcesReady(),
                                              usb.log())) {
     powerDiagnostics.recordDeepSleepArmError(
         millis(), runtimePower.snapshot().lastError, inputs,
@@ -192,8 +197,7 @@ void enterDeepSleep(const PowerInputs &inputs) {
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
   if (board.sdReady()) SD_MMC.end();
-  board.safeShutdown();
-  while (true) delay(1000);
+  board.safeShutdown(usb.log());
 }
 
 String recordingId() {
@@ -339,13 +343,46 @@ bool stopWirelessHold() {
   return true;
 }
 
+void releaseLocalCapture() {
+  captureRouter.release(AudioCaptureOwner::localCapsule);
+  audio.stopHardware(usb.log());
+}
+
+bool consumeRecorderTerminal(bool notifyUser) {
+  RecorderOutcome outcome;
+  if (!recorder.takeTerminalResult(outcome)) return false;
+  const bool completed = outcome.success();
+  bool indexed = completed;
+  if (completed) {
+    indexed = capsuleLibrary.includeInboxCapsule(recorder.capsuleId()) ||
+        capsuleLibrary.scan();
+  }
+  if (notifyUser) {
+    const char *message = "录音失败，内容未提交";
+    if (completed) {
+      message = indexed ? "胶囊已进入转写队列" : "胶囊已保存，列表刷新失败";
+    } else if (outcome.failureStage ==
+               RecorderFailureStage::insufficientSpace) {
+      message = "存储空间不足";
+    } else if (outcome.failureStage == RecorderFailureStage::capacityUnknown ||
+               outcome.failureStage == RecorderFailureStage::capacityInvalid) {
+      message = "无法读取存储容量";
+    }
+    showMessage(message);
+  }
+  usb.log().printf(
+      "{\"event\":\"recording_result_consumed\",\"completed\":%s,\"terminal\":%u,\"stage\":\"%s\",\"bytes\":%lu}\n",
+      completed ? "true" : "false", static_cast<unsigned>(outcome.terminal),
+      recorderFailureStageName(outcome.failureStage),
+      static_cast<unsigned long>(outcome.dataBytes));
+  return true;
+}
+
 void toggleRecording() {
   if (recorder.recording()) {
-    const bool ok = recorder.stop(usb.log());
-    captureRouter.release(AudioCaptureOwner::localCapsule);
-    audio.stopHardware(usb.log());
-    if (ok) capsuleLibrary.includeInboxCapsule(recorder.capsuleId());
-    showMessage(ok ? "胶囊已进入转写队列" : "录音提交失败");
+    recorder.stop(usb.log());
+    releaseLocalCapture();
+    consumeRecorderTerminal(true);
   } else if (tencentWorker.working()) {
     showMessage("当前胶囊正在转写");
   } else if (!board.sdReady()) {
@@ -356,8 +393,10 @@ void toggleRecording() {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
     const bool acquired = captureRouter.acquire(AudioCaptureOwner::localCapsule);
+    const RecordingSpaceSnapshot space = {
+        SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
     const bool ok = acquired && audio.startCapture(usb.log()) &&
-        recorder.start(usb.log(), recordingId(), board.utcNow());
+        recorder.start(usb.log(), recordingId(), board.utcNow(), space);
     if (ok) {
       audio.resetPeakWindow();
       transientMessage = "";
@@ -365,7 +404,7 @@ void toggleRecording() {
     } else {
       captureRouter.release(AudioCaptureOwner::localCapsule);
       audio.stopHardware(usb.log());
-      showMessage("录音启动失败");
+      if (!consumeRecorderTerminal(true)) showMessage("录音启动失败");
     }
   }
   noteUserActivity();
@@ -966,9 +1005,9 @@ void loop() {
         const bool wasRecording = recorder.recording();
         recorder.append(audioBuffer, bytes, usb.log());
         if (wasRecording && !recorder.recording()) {
-          captureRouter.release(AudioCaptureOwner::localCapsule);
-          audio.stopHardware(usb.log());
-          capsuleLibrary.includeInboxCapsule(recorder.capsuleId());
+          releaseLocalCapture();
+          consumeRecorderTerminal(true);
+          drawDashboard();
         }
       }
     }
@@ -1087,8 +1126,8 @@ void loop() {
     } else if (powerKey == PowerKeyEvent::longPress) {
       if (recorder.recording()) {
         recorder.stop(usb.log());
-        captureRouter.release(AudioCaptureOwner::localCapsule);
-        audio.stopHardware(usb.log());
+        releaseLocalCapture();
+        consumeRecorderTerminal(false);
       }
       if (bleVoice.streaming()) stopWirelessHold();
       if (audio.playing()) audio.stopPlayback(usb.log());
