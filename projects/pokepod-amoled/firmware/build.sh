@@ -10,8 +10,10 @@ GFX_MANIFEST="$SCRIPT_DIR/gfx-minimal-files.txt"
 WAVESHARE_COMMIT="ba32b5cbca96f0e04b0736d04959b6e832268d3f"
 FQBN='esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none'
 APP_ONLY_FLASH_OFFSET=0x10000
+APP_SLOT_BYTES=0x300000
 FINGERPRINT_TOOL="$PROJECT_DIR/tools/build-input-fingerprint.py"
 ARTIFACT_TOOL="$PROJECT_DIR/tools/write-artifact-manifest.py"
+FLASH_SIZE_POLICY_TOOL="$PROJECT_DIR/tools/flash-size-policy.py"
 FIRMWARE_VERSION_HEADER="$SKETCH_DIR/FirmwareVersion.h"
 BUILD_ENV_TOOL="$PROJECT_DIR/tools/pokepod_build_env.py"
 PORTABLE_TOOL="$PROJECT_DIR/tools/portable_build_utils.py"
@@ -65,10 +67,17 @@ case "$BUILD_MODE" in
     exit 64
     ;;
 esac
+if [ "$BUILD_MODE" = release ] &&
+   [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all -- . 2>/dev/null)" ]; then
+  echo "Release build requires a clean PokePod tree" >&2
+  git -C "$PROJECT_DIR" status --short --untracked-files=all -- . >&2
+  exit 65
+fi
 
 BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
 BUILD_LOG="$WORK_DIR/build-$BUILD_MODE.log"
 OUTPUT_DIR="$WORK_DIR/output/$BUILD_MODE"
+RESOURCE_REVIEW_FILE="$WORK_DIR/resource-review.json"
 CACHE_DIR="$WORK_DIR/cache"
 SUCCESS_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-success.sha256"
 CURRENT_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-current.sha256"
@@ -82,6 +91,10 @@ if [ ! -f "$FINGERPRINT_TOOL" ]; then
 fi
 if [ ! -f "$ARTIFACT_TOOL" ]; then
   echo "Artifact manifest tool not found: $ARTIFACT_TOOL" >&2
+  exit 1
+fi
+if [ ! -f "$FLASH_SIZE_POLICY_TOOL" ]; then
+  echo "Flash size policy tool not found: $FLASH_SIZE_POLICY_TOOL" >&2
   exit 1
 fi
 if [ ! -f "$FIRMWARE_VERSION_HEADER" ]; then
@@ -258,6 +271,7 @@ BUILD_FINGERPRINT=$(python3 "$FINGERPRINT_TOOL" \
   --file "$GFX_MANIFEST" \
   --file "$GFX_LIBRARY/library.properties" \
   --file "$SCRIPT_DIR/build.sh" \
+  --file "$FLASH_SIZE_POLICY_TOOL" \
   --file "$ESP32_PLATFORM_DIR/platform.txt" \
   --file "$ESP32_PLATFORM_DIR/boards.txt" \
   --file "$SDK_OVERLAY_DIR/sdkconfig" \
@@ -282,6 +296,22 @@ write_artifact_manifest() {
   fi
   firmware_sha=$(python3 "$PORTABLE_TOOL" sha256-value "$firmware_bin")
   firmware_size=$(python3 "$PORTABLE_TOOL" size "$firmware_bin")
+  python3 "$FLASH_SIZE_POLICY_TOOL" \
+    --program-bytes "$firmware_size" \
+    --slot-bytes "$APP_SLOT_BYTES" \
+    --output "$OUTPUT_DIR/flash-resource.json" \
+    --enforce
+  resource_review_approved=false
+  if [ "$BUILD_MODE" = release ]; then
+    python3 "$FLASH_SIZE_POLICY_TOOL" \
+      --program-bytes "$firmware_size" \
+      --slot-bytes "$APP_SLOT_BYTES" \
+      --require-release-review \
+      --review "$RESOURCE_REVIEW_FILE" \
+      --source-revision "$source_revision" \
+      --binary "$firmware_bin"
+    resource_review_approved=true
+  fi
   created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   python3 "$ARTIFACT_TOOL" \
     --output "$OUTPUT_DIR/artifact.json" \
@@ -291,6 +321,8 @@ write_artifact_manifest() {
     --build-input "$BUILD_FINGERPRINT" \
     --binary-sha256 "$firmware_sha" \
     --binary-size "$firmware_size" \
+    --flash-policy "$OUTPUT_DIR/flash-resource.json" \
+    --resource-review-approved "$resource_review_approved" \
     --created-at "$created_at" \
     --fqbn "$FQBN" \
     --core-version "$ESP32_CORE_VERSION" \

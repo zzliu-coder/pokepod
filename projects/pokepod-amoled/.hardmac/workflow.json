@@ -29,6 +29,7 @@
       "cleanBuild": false,
       "artifactPath": "work/pokepod-build/output/fast/PokePodAmoled.ino.bin",
       "manifestPath": "work/pokepod-build/output/fast/artifact.json",
+      "resourceReportPath": "work/pokepod-build/output/fast/flash-resource.json",
       "flashCommand": "./flash.sh --fast",
       "verification": [
         "application CDC returns with the expected Link identity",
@@ -40,6 +41,7 @@
       "cleanBuild": true,
       "artifactPath": "work/pokepod-build/output/release/PokePodAmoled.ino.bin",
       "manifestPath": "work/pokepod-build/output/release/artifact.json",
+      "resourceReportPath": "work/pokepod-build/output/release/flash-resource.json",
       "flashCommand": "./flash.sh --release",
       "verification": [
         "host checks and clean build pass",
@@ -74,6 +76,21 @@
       "maxAttemptsPerChunk": 3,
       "resumable": true,
       "verification": "full-readback"
+    },
+    "capacityPolicy": {
+      "scope": "each-application-slot",
+      "slotSizeBytes": 3145728,
+      "greenBelowPercent": 75,
+      "yellowBelowPercent": 80,
+      "orangeBelowPercent": 85,
+      "hardBlockAtOrAbovePercent": 85,
+      "yellowRequiredEvidence": [
+        "linker map",
+        "largest symbols",
+        "delta from baseline",
+        "duplicate implementation review"
+      ],
+      "orangeRequiredAction": "freeze nonessential features and complete a size reduction review"
     },
     "regions": [
       {

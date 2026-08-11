@@ -116,6 +116,23 @@ with tempfile.TemporaryDirectory() as temporary:
     assert size == str(len(b"portable-pokepod"))
 
     artifact = root / "artifact.json"
+    flash_policy = root / "flash-resource.json"
+    flash_policy.write_text(
+        json.dumps(
+            {
+                "schema": "pokepod.flash-size-policy.v1",
+                "programBytes": 16,
+                "slotBytes": 0x300000,
+                "remainingBytes": 0x300000 - 16,
+                "percent": 0.0005,
+                "tier": "green",
+                "releaseAllowed": True,
+                "requiredAction": "keep implementation simple",
+                "thresholds": {},
+            }
+        ),
+        encoding="utf-8",
+    )
     version_header = ROOT / "firmware/PokePodAmoled/FirmwareVersion.h"
     subprocess.check_call(
         [
@@ -124,6 +141,8 @@ with tempfile.TemporaryDirectory() as temporary:
             "--source-revision", "abc", "--source-dirty", "false",
             "--build-input", "1" * 64, "--binary-sha256", "2" * 64,
             "--binary-size", "16", "--created-at", "2026-08-11T00:00:00Z",
+            "--flash-policy", str(flash_policy),
+            "--resource-review-approved", "false",
             "--fqbn", "esp32:esp32:esp32s3:test", "--core-version", "3.3.8",
             "--core-profile", "production", "--app-offset", "0x10000",
             "--vendor-revision", "def",
@@ -132,6 +151,10 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     manifest = json.loads(artifact.read_text())
     assert manifest["binary"]["flashOffset"] == "0x10000"
+    assert manifest["binary"]["slotSizeBytes"] == 0x300000
+    assert manifest["binary"]["resourceTier"] == "green"
+    assert manifest["resourceReview"]["required"] is False
+    assert manifest["resourceReview"]["approved"] is False
     assert manifest["toolchain"]["coreProfile"] == "production"
     assert manifest["firmwareVersion"] == "2.0.0"
 
@@ -148,6 +171,7 @@ forbidden_home = "/" + "Users/" + "zheliu"
 forbidden_app_root = "/" + "Applications"
 assert forbidden_home not in combined
 assert forbidden_app_root not in combined
+assert "Release build requires a clean PokePod tree" in build
 assert "stat -f" not in build and "shasum" not in build
 assert "shasum" not in verify and "portable_build_utils.py" in verify
 assert "PRODUCTION_CORE_VERSION = \"3.3.8\"" in (

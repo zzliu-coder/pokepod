@@ -10,6 +10,7 @@ profile = json.loads((ROOT / ".hardmac/workflow.json").read_text(encoding="utf-8
 build = (ROOT / "firmware/build.sh").read_text(encoding="utf-8")
 flash = (ROOT / "flash.sh").read_text(encoding="utf-8")
 manifest_writer = (ROOT / "tools/write-artifact-manifest.py").read_text(encoding="utf-8")
+artifact_validator = (ROOT / "tools/validate-flash-artifact.py").read_text(encoding="utf-8")
 
 assert profile["schemaVersion"] == 1
 assert profile["kind"] == "hardmac.workflow"
@@ -24,11 +25,20 @@ assert fast["cleanBuild"] is False
 assert release["cleanBuild"] is True
 assert fast["artifactPath"] != release["artifactPath"]
 assert fast["manifestPath"] != release["manifestPath"]
+assert fast["resourceReportPath"] != release["resourceReportPath"]
 assert "/fast/" in fast["artifactPath"]
 assert "/release/" in release["artifactPath"]
+capacity = profile["flash"]["capacityPolicy"]
+assert capacity["scope"] == "each-application-slot"
+assert capacity["slotSizeBytes"] == 0x300000
+assert capacity["greenBelowPercent"] == 75
+assert capacity["yellowBelowPercent"] == 80
+assert capacity["orangeBelowPercent"] == 85
+assert capacity["hardBlockAtOrAbovePercent"] == 85
 assert 'OUTPUT_DIR="$WORK_DIR/output/$BUILD_MODE"' in build
 assert 'FLASH_MODE=release' in flash
-assert 'artifact_manifest_binary_sha256' in flash
+assert 'validate-flash-artifact.py' in flash
+assert 'artifact_manifest_binary_sha256' in artifact_validator
 transfer = profile["flash"]["transfer"]
 assert transfer == {
     "resetBefore": "usb-reset",
@@ -48,7 +58,11 @@ assert '--stub disabled' in flash
 assert '--max-size 0x300000' in flash
 assert 'work/hardmac-runs' in flash
 assert 'write_artifact_manifest' in build
+assert 'flash-size-policy.py' in build
+assert '--slot-bytes "$APP_SLOT_BYTES"' in build
+assert '--enforce' in build
 assert '"sourceDirty"' in manifest_writer
+assert '"resourcePolicy"' in manifest_writer
 
 serialized = json.dumps(profile, ensure_ascii=False)
 for forbidden in ("/dev/cu.", "secretId", "secretKey", "wifiPassword"):

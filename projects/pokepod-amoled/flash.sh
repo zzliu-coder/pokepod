@@ -54,6 +54,7 @@ ESPTOOL_BIN=${ESPTOOL_BIN:-$(find "$HOME/Library/Arduino15/packages/esp32/tools/
   -type f -name esptool -perm +111 -print 2>/dev/null | sort | tail -1)}
 HARDMAC_SKILL_DIR=${HARDMAC_SKILL_DIR:-"${CODEX_HOME:-$HOME/.codex}/skills/hardmac"}
 TRANSFER_SCRIPT=${HARDMAC_ESP32_TRANSFER:-"$HARDMAC_SKILL_DIR/scripts/esp32_region_transfer.py"}
+ARTIFACT_VALIDATOR="$SCRIPT_DIR/tools/validate-flash-artifact.py"
 
 if [ ! -s "$FIRMWARE_BIN" ]; then
   printf 'FAIL firmware_binary_missing path=%s\n' "$FIRMWARE_BIN" >&2
@@ -77,41 +78,21 @@ if [ ! -s "$MANIFEST_PATH" ]; then
   printf 'FAIL artifact_manifest_missing path=%s\n' "$MANIFEST_PATH" >&2
   exit 75
 fi
+if [ ! -s "$ARTIFACT_VALIDATOR" ]; then
+  printf 'FAIL artifact_validator_missing path=%s\n' "$ARTIFACT_VALIDATOR" >&2
+  exit 75
+fi
 EXPECTED_MODE=
 if [ "$MODE_EXPLICIT" -eq 1 ]; then
   EXPECTED_MODE=$FLASH_MODE
 fi
-python3 - "$MANIFEST_PATH" "$FIRMWARE_BIN" "$EXPECTED_MODE" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-manifest_path = pathlib.Path(sys.argv[1])
-binary_path = pathlib.Path(sys.argv[2])
-expected_lane = sys.argv[3]
-try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"FAIL artifact_manifest_invalid error={exc}")
-if manifest.get("schemaVersion") != 1 or manifest.get("kind") != "hardmac.artifact":
-    raise SystemExit("FAIL artifact_manifest_kind")
-lane = manifest.get("lane")
-if lane not in {"fast", "release"}:
-    raise SystemExit("FAIL artifact_manifest_lane")
-if expected_lane and lane != expected_lane:
-    raise SystemExit(f"FAIL artifact_lane_mismatch expected={expected_lane} actual={lane}")
-binary = manifest.get("binary")
-if not isinstance(binary, dict) or binary.get("file") != binary_path.name:
-    raise SystemExit("FAIL artifact_manifest_binary_name")
-payload = binary_path.read_bytes()
-if binary.get("sizeBytes") != len(payload):
-    raise SystemExit("FAIL artifact_manifest_binary_size")
-actual_sha = hashlib.sha256(payload).hexdigest()
-if binary.get("sha256") != actual_sha:
-    raise SystemExit("FAIL artifact_manifest_binary_sha256")
-print(f"PASS artifact_manifest lane={lane} sha256={actual_sha}")
-PY
+if [ -n "$EXPECTED_MODE" ]; then
+  python3 "$ARTIFACT_VALIDATOR" --manifest "$MANIFEST_PATH" \
+    --binary "$FIRMWARE_BIN" --expected-lane "$EXPECTED_MODE"
+else
+  python3 "$ARTIFACT_VALIDATOR" --manifest "$MANIFEST_PATH" \
+    --binary "$FIRMWARE_BIN"
+fi
 FLASH_STARTED_AT=$(date +%s)
 
 find_ports() {

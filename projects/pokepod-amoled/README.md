@@ -148,8 +148,33 @@ Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊�
 `build.sh` 固定 Waveshare 源码版本，并使用 Arduino-ESP32 3.3.8。快速产物位于
 `work/pokepod-build/output/fast`，正式产物位于
 `work/pokepod-build/output/release`。两者都带有记录源码版本、输入指纹、工具链、
-大小和 SHA-256 的 `artifact.json`，互相不会覆盖。`verify.sh` 运行固件主机测试、干净固件编译、
+大小、单槽剩余空间、资源等级和 SHA-256 的 `artifact.json`，并生成
+`flash-resource.json`。Flash `<75%` 为绿色；`75%–80%` 为黄色，发布前必须检查
+map、最大符号、相对基线增量和重复实现；`80%–85%` 冻结非必要功能并专项瘦身；
+`>=85%` 构建会阻断发布。两个 3 MiB OTA 槽位分别计算，内部 RAM、PSRAM、连续堆
+和任务栈分别验收。快速与正式产物互相不会覆盖。`verify.sh` 运行固件主机测试、干净固件编译、
 Mac 测试和 release build、脚本语法检查及 diff 检查。
+
+黄色或橙色候选先在 fast 产物上生成绑定源码 commit 与二进制 SHA-256 的资源审查：
+
+```sh
+python3 tools/write-resource-review.py \
+  --output work/pokepod-build/resource-review.json \
+  --source-revision "$(git rev-parse HEAD)" \
+  --binary work/pokepod-build/output/fast/PokePodAmoled.ino.bin \
+  --tier yellow \
+  --baseline-commit <baseline-commit> \
+  --baseline-bytes <baseline-bin-bytes> \
+  --nm <xtensa-esp32s3-elf-nm> \
+  --elf work/pokepod-build/build-fast/PokePodAmoled.ino.elf \
+  --map work/pokepod-build/build-fast/PokePodAmoled.ino.map \
+  --duplicate-evidence "legacy duplicate paths removed" \
+  --forbidden-symbol-regex "PokePodLinkService::(handleImmediate|mutateFavoriteOrTags|trashOperation)"
+```
+
+审查文件包含相对基线增量、最大符号和重复实现结论。橙色还必须提供
+`--nonessential-features-frozen` 与 `--size-reduction-evidence`。Release 构建和
+刷写都会重新校验 commit、二进制摘要、体积和审查内容；证据不匹配时拒绝继续。
 
 日常修改固件直接运行默认的快速构建：
 
@@ -200,6 +225,18 @@ overlay、fast/release 独立缓存；宿主文件大小和 SHA-256 由 Python �
 发布构建使用另一套 build path 并强制 `--clean`，不会清掉日常增量缓存。
 `./verify.sh` 始终调用这条发布路径。需要忽略指纹、主动刷新日常缓存时使用
 `./firmware/build.sh --force`。
+
+交给外部 AI 审查前，从 clean HEAD 生成可重复的仅源码压缩包：
+
+```sh
+python3 tools/package-source-audit.py \
+  --repo ../.. \
+  --output work/source-audits/PokePod-source-audit.zip
+```
+
+打包器按 Git commit 读取源码和测试，写入逐文件 SHA-256 清单；固件、构建缓存、
+录音、设备备份、日志和二进制字库不会进入压缩包。PokePod 路径存在任何 tracked
+或 untracked 改动时，命令会拒绝生成，以免审查对象和后续构建候选脱节。
 
 设备正常运行并通过 USB 连接时，刷写只需一个命令：
 
