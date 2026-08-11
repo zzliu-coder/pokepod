@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <stdint.h>
 
 namespace pokepod {
@@ -45,8 +46,7 @@ constexpr bool tencentJobIsTerminal(TencentJobState state) {
 }
 
 constexpr bool tencentDeadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
-  return deadlineMs != 0 &&
-      static_cast<int32_t>(nowMs - deadlineMs) >= 0;
+  return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
 }
 
 constexpr const char *tencentJobStateName(TencentJobState state) {
@@ -68,86 +68,138 @@ constexpr const char *tencentJobStateName(TencentJobState state) {
 class TencentJobModel {
  public:
   bool queue(uint32_t generation, uint32_t deadlineMs) {
-    if (generation == 0 || tencentJobOwnsResources(state_)) return false;
-    generation_ = generation;
-    deadlineMs_ = deadlineMs;
-    cancelReason_ = TencentCancelReason::none;
-    state_ = TencentJobState::queued;
+    if (generation == 0 || tencentJobOwnsResources(state())) return false;
+    generation_.store(generation, std::memory_order_relaxed);
+    deadlineMs_.store(deadlineMs, std::memory_order_relaxed);
+    cancelReason_.store(static_cast<uint8_t>(TencentCancelReason::none),
+                        std::memory_order_relaxed);
+    setState(TencentJobState::queued);
     return true;
   }
 
   bool start(uint32_t generation) {
-    if (!matches(generation) || state_ != TencentJobState::queued) return false;
-    state_ = TencentJobState::working;
-    return true;
+    if (!matches(generation)) return false;
+    uint8_t expected = static_cast<uint8_t>(TencentJobState::queued);
+    return state_.compare_exchange_strong(
+        expected, static_cast<uint8_t>(TencentJobState::working),
+        std::memory_order_acq_rel);
   }
 
   bool cancel(uint32_t generation, TencentCancelReason reason) {
-    if (matches(generation) &&
-        (state_ == TencentJobState::cancelling ||
-         state_ == TencentJobState::watchdog)) {
-      return true;
-    }
-    if (!matches(generation) || !tencentJobOwnsResources(state_) ||
-        state_ == TencentJobState::committing) {
-      return false;
-    }
-    cancelReason_ = reason == TencentCancelReason::none
-        ? TencentCancelReason::user : reason;
-    state_ = reason == TencentCancelReason::watchdog
+    if (!matches(generation)) return false;
+    if (reason == TencentCancelReason::none) reason = TencentCancelReason::user;
+    const TencentJobState target = reason == TencentCancelReason::watchdog
         ? TencentJobState::watchdog : TencentJobState::cancelling;
-    return true;
+    for (;;) {
+      const TencentJobState current = state();
+      if (current == TencentJobState::cancelling ||
+          current == TencentJobState::watchdog) {
+        return true;
+      }
+      if ((current != TencentJobState::queued &&
+           current != TencentJobState::working) ||
+          current == TencentJobState::committing) {
+        return false;
+      }
+      uint8_t expected = static_cast<uint8_t>(current);
+      if (state_.compare_exchange_weak(
+              expected, static_cast<uint8_t>(target),
+              std::memory_order_acq_rel)) {
+        cancelReason_.store(static_cast<uint8_t>(reason),
+                            std::memory_order_release);
+        return true;
+      }
+    }
   }
 
   bool checkWatchdog(uint32_t nowMs) {
-    if ((state_ != TencentJobState::queued &&
-         state_ != TencentJobState::working) ||
-        !tencentDeadlineReached(nowMs, deadlineMs_)) {
+    const TencentJobState current = state();
+    if ((current != TencentJobState::queued &&
+         current != TencentJobState::working) ||
+        !tencentDeadlineReached(nowMs, deadlineMs())) {
       return false;
     }
-    return cancel(generation_, TencentCancelReason::watchdog);
+    return cancel(generation(), TencentCancelReason::watchdog);
   }
 
   bool networkFinished(uint32_t generation, bool ok, bool transient) {
-    if (!matches(generation) || !tencentJobOwnsResources(state_)) return false;
-    if (cancelReason_ == TencentCancelReason::watchdog ||
-        state_ == TencentJobState::watchdog) {
-      state_ = TencentJobState::retryable;
-    } else if (cancelReason_ != TencentCancelReason::none ||
-               state_ == TencentJobState::cancelling) {
-      state_ = TencentJobState::cancelled;
+    const TencentJobState current = state();
+    if (!matches(generation) ||
+        (current != TencentJobState::queued &&
+         current != TencentJobState::working &&
+         current != TencentJobState::cancelling &&
+         current != TencentJobState::watchdog)) {
+      return false;
+    }
+    if (cancelReason() == TencentCancelReason::watchdog ||
+        current == TencentJobState::watchdog) {
+      setState(TencentJobState::retryable);
+    } else if (cancelReason() != TencentCancelReason::none ||
+               current == TencentJobState::cancelling) {
+      setState(TencentJobState::cancelled);
     } else if (ok) {
-      state_ = TencentJobState::committing;
+      setState(TencentJobState::committing);
     } else {
-      state_ = transient ? TencentJobState::retryable
-                         : TencentJobState::failed;
+      setState(transient ? TencentJobState::retryable
+                         : TencentJobState::failed);
     }
     return true;
   }
 
   bool commitFinished(uint32_t generation, bool committed) {
-    if (!matches(generation) || state_ != TencentJobState::committing) {
+    if (!matches(generation) || state() != TencentJobState::committing) {
       return false;
     }
-    state_ = committed ? TencentJobState::succeeded
-                       : TencentJobState::failed;
+    setState(committed ? TencentJobState::succeeded
+                       : TencentJobState::failed);
     return true;
   }
 
-  TencentJobState state() const { return state_; }
-  TencentCancelReason cancelReason() const { return cancelReason_; }
-  uint32_t generation() const { return generation_; }
-  uint32_t deadlineMs() const { return deadlineMs_; }
-
- private:
-  bool matches(uint32_t generation) const {
-    return generation != 0 && generation == generation_;
+  bool failWithoutActiveJob() {
+    if (tencentJobOwnsResources(state())) return false;
+    setState(TencentJobState::failed);
+    return true;
   }
 
-  TencentJobState state_ = TencentJobState::idle;
-  TencentCancelReason cancelReason_ = TencentCancelReason::none;
-  uint32_t generation_ = 0;
-  uint32_t deadlineMs_ = 0;
+  bool resetIdle() {
+    if (tencentJobOwnsResources(state())) return false;
+    setState(TencentJobState::idle);
+    return true;
+  }
+
+  TencentJobState state() const {
+    return static_cast<TencentJobState>(
+        state_.load(std::memory_order_acquire));
+  }
+  TencentCancelReason cancelReason() const {
+    return static_cast<TencentCancelReason>(
+        cancelReason_.load(std::memory_order_acquire));
+  }
+  uint32_t generation() const {
+    return generation_.load(std::memory_order_acquire);
+  }
+  uint32_t deadlineMs() const {
+    return deadlineMs_.load(std::memory_order_acquire);
+  }
+  bool matchesGeneration(uint32_t generation) const {
+    return matches(generation);
+  }
+
+ private:
+  void setState(TencentJobState state) {
+    state_.store(static_cast<uint8_t>(state), std::memory_order_release);
+  }
+
+  bool matches(uint32_t generation) const {
+    return generation != 0 && generation == this->generation();
+  }
+
+  std::atomic<uint8_t> state_{
+      static_cast<uint8_t>(TencentJobState::idle)};
+  std::atomic<uint8_t> cancelReason_{
+      static_cast<uint8_t>(TencentCancelReason::none)};
+  std::atomic<uint32_t> generation_{0};
+  std::atomic<uint32_t> deadlineMs_{0};
 };
 
 }  // namespace pokepod

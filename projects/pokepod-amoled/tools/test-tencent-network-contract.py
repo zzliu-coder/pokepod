@@ -18,6 +18,8 @@ def require(text: str, needle: str, label: str) -> None:
 
 tls = source("TlsExternalMemory.cpp")
 worker = source("TencentWorker.cpp")
+worker_header = source("TencentWorker.h")
+job_runtime = source("TencentJobRuntime.h")
 asr = source("TencentAsr.cpp")
 link = source("PokePodLinkService.cpp")
 dashboard = source("Dashboard.cpp")
@@ -39,6 +41,31 @@ require(worker, "TencentCancelReason::watchdog",
         "ASR worker watchdog cancellation is missing")
 require(worker, "TencentJobState::committing",
         "ASR success is not separated from atomic commit")
+require(worker_header, "TencentJobRuntime runtime_;",
+        "production worker does not own the host-tested lifecycle runtime")
+for lifecycle_call in (
+    "runtime_.workerStartResult(false)",
+    "runtime_.request(",
+    "runtime_.start(",
+    "runtime_.checkWatchdog(",
+    "runtime_.networkFinished(",
+    "runtime_.commitFinished(",
+    "runtime_.beginQuiesce(",
+    "runtime_.pollQuiesce(",
+):
+    require(worker, lifecycle_call,
+            f"production worker bypasses shared runtime: {lifecycle_call}")
+for duplicated_state in (
+    "std::atomic<uint8_t> state_",
+    "std::atomic<uint32_t> activeGeneration_",
+    "std::atomic<uint8_t> cancelReason_",
+):
+    if duplicated_state in worker_header:
+        raise SystemExit(
+            "FAIL tencent_network_contract: production worker duplicates "
+            f"runtime state: {duplicated_state}")
+require(job_runtime, "class TencentJobRuntime",
+        "Arduino-free production lifecycle runtime is missing")
 require(asr, "control->cancelled()",
         "ASR network and file path has no generation cancel token")
 require(asr, "Network.hostByName(kHost, resolvedAddress)",

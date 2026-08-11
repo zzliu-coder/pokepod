@@ -18,11 +18,11 @@ bool TencentWorker::begin(fs::FS &fs, CapsuleLibrary &library,
           taskEntry, "pokepod-asr", 16384, this, 1, &taskHandle_, 0,
           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
     taskHandle_ = nullptr;
-    setState(TencentJobState::failed);
+    runtime_.workerStartResult(false);
     log.println("{\"event\":\"asr_worker_start\",\"ok\":false}");
     return false;
   }
-  setState(TencentJobState::idle);
+  runtime_.workerStartResult(true);
   log.println("{\"event\":\"asr_worker_start\",\"ok\":true,\"persistent\":true}");
   return true;
 }
@@ -38,11 +38,8 @@ void TencentWorker::loop(uint32_t nowMs, bool networkReady, bool timeReady,
 
   if (resultReady_.load(std::memory_order_acquire)) finishAttempt(nowMs);
 
-  const TencentJobState current = state();
-  if ((current == TencentJobState::queued ||
-       current == TencentJobState::working) &&
-      tencentDeadlineReached(nowMs, attemptDeadlineMs_)) {
-    cancel(TencentCancelReason::watchdog);
+  if (runtime_.checkWatchdog(nowMs)) {
+    logState("watchdog", TencentJobState::watchdog, runtime_.generation());
   }
 
   if (fs_ == nullptr || library_ == nullptr || config_ == nullptr ||
@@ -59,7 +56,7 @@ void TencentWorker::loop(uint32_t nowMs, bool networkReady, bool timeReady,
   const String directory = queued->directory;
   if (!safeCapsuleFileName(audioFile.c_str()) || audioFile != "audio.wav") {
     library_->markFailure(id, "audio", "不支持的胶囊音频路径");
-    setState(TencentJobState::failed);
+    runtime_.failBeforeRequest();
     return;
   }
   if (retryingCapsuleId_ != id) {
@@ -77,50 +74,36 @@ void TencentWorker::loop(uint32_t nowMs, bool networkReady, bool timeReady,
   resultGeneration_.store(0, std::memory_order_relaxed);
   stage_.store(static_cast<uint8_t>(TencentAsrStage::idle),
                std::memory_order_relaxed);
-  cancelReason_.store(static_cast<uint8_t>(TencentCancelReason::none),
-                      std::memory_order_relaxed);
-  const uint32_t generation = cancelToken_.begin();
-  activeGeneration_.store(generation, std::memory_order_release);
-  attemptDeadlineMs_ = nowMs + kAttemptWatchdogMs;
-  setState(TencentJobState::queued);
+  const uint32_t generation = runtime_.request(nowMs + kAttemptWatchdogMs);
+  if (generation == 0) {
+    library_->markRetryable(id, "transcription", "转写任务正忙");
+    return;
+  }
   logState("queued", TencentJobState::queued, generation);
   xTaskNotifyGive(taskHandle_);
 }
 
 bool TencentWorker::cancel(TencentCancelReason reason) {
-  const TencentJobState current = state();
-  if (current == TencentJobState::cancelling ||
-      current == TencentJobState::watchdog) {
-    return true;
-  }
-  if (current != TencentJobState::queued &&
-      current != TencentJobState::working) {
-    return false;
-  }
-  const uint32_t generation = activeGeneration_.load(std::memory_order_acquire);
-  if (!cancelToken_.cancel(generation)) return false;
   if (reason == TencentCancelReason::none) reason = TencentCancelReason::user;
-  cancelReason_.store(static_cast<uint8_t>(reason), std::memory_order_release);
+  if (!runtime_.cancel(reason)) return false;
   const TencentJobState next = reason == TencentCancelReason::watchdog
       ? TencentJobState::watchdog : TencentJobState::cancelling;
-  setState(next);
   logState(reason == TencentCancelReason::watchdog ? "watchdog" : "cancel",
-           next, generation);
+           next, runtime_.generation());
   return true;
 }
 
 bool TencentWorker::quiesce(uint32_t nowMs, uint32_t timeoutMs,
                             TencentCancelReason reason) {
-  if (!working()) return true;
-  cancel(reason);
-  const uint32_t deadlineMs = nowMs + timeoutMs;
-  while (working() &&
-         static_cast<int32_t>(millis() - deadlineMs) < 0) {
+  TencentQuiesceStatus status =
+      runtime_.beginQuiesce(nowMs, timeoutMs, reason);
+  while (status == TencentQuiesceStatus::waiting) {
     if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
-    if (working()) delay(5);
+    status = runtime_.pollQuiesce(millis());
+    if (status == TencentQuiesceStatus::waiting) delay(5);
   }
   if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
-  return !working();
+  return runtime_.pollQuiesce(millis()) == TencentQuiesceStatus::complete;
 }
 
 void TencentWorker::taskEntry(void *context) {
@@ -130,8 +113,7 @@ void TencentWorker::taskEntry(void *context) {
 void TencentWorker::taskLoop() {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    const uint32_t generation =
-        activeGeneration_.load(std::memory_order_acquire);
+    const uint32_t generation = runtime_.generation();
     if (generation == 0) continue;
     runAttempt(generation);
   }
@@ -139,12 +121,9 @@ void TencentWorker::taskLoop() {
 
 void TencentWorker::runAttempt(uint32_t generation) {
   TencentAsrControl control = {
-      &cancelToken_, generation, &stage_,
+      runtime_.cancelToken(), generation, &stage_,
   };
-  uint8_t expected = static_cast<uint8_t>(TencentJobState::queued);
-  const bool started = !control.cancelled() && state_.compare_exchange_strong(
-      expected, static_cast<uint8_t>(TencentJobState::working),
-      std::memory_order_acq_rel);
+  const bool started = runtime_.start(generation);
   if (started) {
     logState("started", TencentJobState::working, generation);
   }
@@ -166,7 +145,7 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
   const uint32_t generation =
       resultGeneration_.load(std::memory_order_acquire);
   if (generation == 0 ||
-      generation != activeGeneration_.load(std::memory_order_acquire)) {
+      !runtime_.matchesGeneration(generation)) {
     if (log_ != nullptr) {
       log_->printf(
           "{\"event\":\"asr_stale_result\",\"generation\":%lu}\n",
@@ -177,8 +156,7 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
 
   const String id = taskCapsuleId_;
   const TencentAsrResult result = taskResult_;
-  const TencentCancelReason cancelReason = static_cast<TencentCancelReason>(
-      cancelReason_.load(std::memory_order_acquire));
+  const TencentCancelReason cancelReason = runtime_.cancelReason();
   lastHashElapsedMs_ = result.hashElapsedMs;
   lastConnectElapsedMs_ = result.connectElapsedMs;
   lastUploadElapsedMs_ = result.uploadElapsedMs;
@@ -189,9 +167,14 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
   lastInternalHeapFreeBeforeTls_ = result.internalHeapFreeBeforeTls;
   lastInternalHeapLargestBeforeTls_ = result.internalHeapLargestBeforeTls;
   lastPsramFreeBeforeTls_ = result.psramFreeBeforeTls;
-  attemptDeadlineMs_ = 0;
+  if (!runtime_.networkFinished(generation, result.ok, result.transient)) {
+    logState("stale_result", state(), generation);
+    return;
+  }
 
-  if (cancelReason != TencentCancelReason::none || result.code == "CANCELLED") {
+  if (state() == TencentJobState::cancelled ||
+      (state() == TencentJobState::retryable &&
+       cancelReason == TencentCancelReason::watchdog)) {
     const bool watchdog = cancelReason == TencentCancelReason::watchdog;
     const String detail = watchdog ? "转写超时" : "转写已取消";
     library_->markRetryable(id, "transcription", detail);
@@ -204,22 +187,23 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
       } else {
         nextAttemptMs_ = nowMs + delayMs;
       }
-      setState(TencentJobState::retryable);
     } else {
       waitingForWake_ = true;
       nextAttemptMs_ = 0;
-      setState(TencentJobState::cancelled);
     }
     logState(watchdog ? "watchdog_finished" : "cancelled", state(),
              generation);
     return;
   }
 
-  if (result.ok) {
-    setState(TencentJobState::committing);
+  if (state() == TencentJobState::committing) {
     logState("committing", TencentJobState::committing, generation);
-    if (library_->commitRawText(id, result.text)) {
-      setState(TencentJobState::succeeded);
+    const bool committed = library_->commitRawText(id, result.text);
+    if (!runtime_.commitFinished(generation, committed)) {
+      logState("commit_stale", state(), generation);
+      return;
+    }
+    if (committed) {
       retryingCapsuleId_ = "";
       transientFailures_ = 0;
       nextAttemptMs_ = 0;
@@ -227,27 +211,24 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
     } else {
       library_->markFailure(id, "storage",
                             "转写成功但 raw.txt 提交失败");
-      setState(TencentJobState::failed);
       lastCode_ = "COMMIT_FAILED";
       logState("commit_failed", TencentJobState::failed, generation);
     }
     return;
   }
 
-  if (!result.transient) {
+  if (state() == TencentJobState::failed) {
     library_->markFailure(id, "transcription",
                           result.code + ": " + result.message);
     retryingCapsuleId_ = "";
     transientFailures_ = 0;
     nextAttemptMs_ = 0;
-    setState(TencentJobState::failed);
     logState("failed", TencentJobState::failed, generation);
     return;
   }
 
   library_->markRetryable(id, "transcription",
                           result.code + ": " + result.message);
-  setState(TencentJobState::retryable);
   const uint32_t delayMs = wifiRetryDelayMs(transientFailures_);
   ++transientFailures_;
   if (delayMs == 0) {

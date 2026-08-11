@@ -3,6 +3,7 @@
 
 #include "../PokePodAmoled/TencentAsrControl.h"
 #include "../PokePodAmoled/TencentJobModel.h"
+#include "../PokePodAmoled/TencentJobRuntime.h"
 
 using namespace pokepod;
 
@@ -36,6 +37,80 @@ int main() {
   TencentAsrControl control = {&token, secondGeneration, &asrStage};
   control.setStage(TencentAsrStage::hashing);
   assert(asrStage.load() == static_cast<uint8_t>(TencentAsrStage::hashing));
+
+  // Drive the Arduino-free runtime used directly by TencentWorker.  These are
+  // production lifecycle semantics, not a second test-only state machine.
+  TencentJobRuntime taskCreate;
+  taskCreate.workerStartResult(false);
+  assert(taskCreate.state() == TencentJobState::failed);
+  assert(!taskCreate.working());
+  taskCreate.workerStartResult(true);
+  assert(taskCreate.state() == TencentJobState::idle);
+
+  TencentJobRuntime productionSuccess;
+  productionSuccess.workerStartResult(true);
+  const uint32_t successGeneration = productionSuccess.request(180000);
+  assert(successGeneration != 0);
+  assert(productionSuccess.state() == TencentJobState::queued);
+  assert(productionSuccess.request(180001) == 0);
+  assert(productionSuccess.start(successGeneration));
+  assert(productionSuccess.state() == TencentJobState::working);
+  assert(productionSuccess.networkFinished(successGeneration, true, false));
+  assert(productionSuccess.state() == TencentJobState::committing);
+  assert(!productionSuccess.networkFinished(successGeneration, true, false));
+  assert(productionSuccess.commitFinished(successGeneration, true));
+  assert(productionSuccess.state() == TencentJobState::succeeded);
+
+  TencentJobRuntime productionCommitFailure;
+  const uint32_t commitGeneration = productionCommitFailure.request(180000);
+  assert(productionCommitFailure.start(commitGeneration));
+  assert(productionCommitFailure.networkFinished(
+      commitGeneration, true, false));
+  assert(productionCommitFailure.commitFinished(commitGeneration, false));
+  assert(productionCommitFailure.state() == TencentJobState::failed);
+
+  TencentJobRuntime productionCancel;
+  const uint32_t cancelGeneration = productionCancel.request(180000);
+  assert(productionCancel.start(cancelGeneration));
+  assert(productionCancel.beginQuiesce(
+             100, 20, TencentCancelReason::shutdown) ==
+         TencentQuiesceStatus::waiting);
+  assert(productionCancel.cancelToken()->cancelled(cancelGeneration));
+  assert(productionCancel.pollQuiesce(119) ==
+         TencentQuiesceStatus::waiting);
+  assert(productionCancel.pollQuiesce(120) ==
+         TencentQuiesceStatus::timedOut);
+  assert(productionCancel.networkFinished(cancelGeneration, false, false));
+  assert(productionCancel.state() == TencentJobState::cancelled);
+  assert(productionCancel.pollQuiesce(121) ==
+         TencentQuiesceStatus::complete);
+
+  TencentJobRuntime productionWatchdog;
+  const uint32_t watchdogGeneration =
+      productionWatchdog.request(180000);
+  assert(productionWatchdog.start(watchdogGeneration));
+  assert(!productionWatchdog.checkWatchdog(179999));
+  assert(productionWatchdog.checkWatchdog(180000));
+  assert(productionWatchdog.state() == TencentJobState::watchdog);
+  assert(productionWatchdog.cancelToken()->cancelled(watchdogGeneration));
+  assert(productionWatchdog.networkFinished(
+      watchdogGeneration, false, false));
+  assert(productionWatchdog.state() == TencentJobState::retryable);
+
+  TencentJobRuntime staleGeneration;
+  const uint32_t oldGeneration = staleGeneration.request(10);
+  assert(staleGeneration.start(oldGeneration));
+  assert(staleGeneration.networkFinished(oldGeneration, false, false));
+  const uint32_t newGeneration = staleGeneration.request(20);
+  assert(newGeneration != oldGeneration);
+  assert(staleGeneration.start(newGeneration));
+  assert(!staleGeneration.networkFinished(oldGeneration, true, false));
+  assert(staleGeneration.state() == TencentJobState::working);
+  assert(staleGeneration.networkFinished(newGeneration, true, false));
+  assert(staleGeneration.commitFinished(newGeneration, true));
+  assert(staleGeneration.beginQuiesce(
+             30, 10, TencentCancelReason::maintenance) ==
+         TencentQuiesceStatus::complete);
 
   TencentJobModel success;
   assert(success.queue(1, 180000));
