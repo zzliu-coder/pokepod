@@ -31,6 +31,8 @@ class BleVoiceService {
                     AudioCaptureRouter &router);
   void endSession();
   bool appendAudio(const uint8_t *stereo48, size_t bytes, uint32_t nowMs);
+  bool appendMono16(const int16_t *samples, size_t count, uint32_t nowMs);
+  void abortSession(VoiceSessionError error);
   void enterPairingMode(uint32_t nowMs);
   void cancelPairingMode();
   void forgetMac();

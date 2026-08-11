@@ -130,6 +130,26 @@ size_t AudioPipeline::read(uint8_t *buffer, size_t capacity) {
   return bytes;
 }
 
+size_t AudioPipeline::readCaptureRealtime(uint8_t *buffer, size_t capacity) {
+  if (!hardwareActive_ || hardwareMode_ != HardwareMode::capture ||
+      buffer == nullptr || capacity == 0) {
+    return 0;
+  }
+  return i2s_.readBytes(reinterpret_cast<char *>(buffer), capacity);
+}
+
+void AudioPipeline::observeCapturedMono(const int16_t *samples, size_t count) {
+  if (samples == nullptr || count == 0) return;
+  uint16_t peak = 0;
+  for (size_t index = 0; index < count; ++index) {
+    const int32_t sample = samples[index];
+    const uint16_t magnitude = static_cast<uint16_t>(
+        sample < 0 ? (sample == INT16_MIN ? 32768 : -sample) : sample);
+    if (magnitude > peak) peak = magnitude;
+  }
+  peakWindow_.observe(peak);
+}
+
 bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
   if (!available_ || playing_) return false;
   lastPlaybackError_ = "none";

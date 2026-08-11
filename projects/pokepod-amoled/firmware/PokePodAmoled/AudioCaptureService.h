@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <atomic>
 
 #include "AudioCaptureRing.h"
 #include "AudioFrontEnd.h"
@@ -74,13 +75,14 @@ class AudioCaptureService {
     nextSequence_ = 0;
     rawUsed_ = 0;
     monoUsed_ = 0;
-    readCalls_ = 0;
-    shortReads_ = 0;
-    timeouts_ = 0;
-    sourceOverruns_ = 0;
-    sourceFailures_ = 0;
-    longestReadUs_ = 0;
-    lastReadUs_ = 0;
+    readCalls_.store(0, std::memory_order_relaxed);
+    shortReads_.store(0, std::memory_order_relaxed);
+    timeouts_.store(0, std::memory_order_relaxed);
+    sourceOverruns_.store(0, std::memory_order_relaxed);
+    sourceFailures_.store(0, std::memory_order_relaxed);
+    longestReadUs_.store(0, std::memory_order_relaxed);
+    lastReadUs_.store(0, std::memory_order_relaxed);
+    partialMonoSamples_.store(0, std::memory_order_relaxed);
     frontEnd_.reset();
     ring_.resetSession(sessionId);
     return true;
@@ -92,37 +94,44 @@ class AudioCaptureService {
     running_ = false;
     rawUsed_ = 0;
     monoUsed_ = 0;
+    partialMonoSamples_.store(0, std::memory_order_relaxed);
   }
 
   AudioCaptureCycleResult captureOnce(uint32_t nowMs) {
     if (!running_ || source_ == nullptr) return AudioCaptureCycleResult::idle;
     AudioCaptureReadResult read = source_->readStereo48(
         raw_ + rawUsed_, sizeof(raw_) - rawUsed_, kReadTimeoutMs);
-    ++readCalls_;
-    lastReadUs_ = read.elapsedUs;
-    if (read.elapsedUs > longestReadUs_) longestReadUs_ = read.elapsedUs;
+    readCalls_.fetch_add(1, std::memory_order_relaxed);
+    lastReadUs_.store(read.elapsedUs, std::memory_order_relaxed);
+    uint32_t longest = longestReadUs_.load(std::memory_order_relaxed);
+    while (read.elapsedUs > longest &&
+           !longestReadUs_.compare_exchange_weak(
+               longest, read.elapsedUs, std::memory_order_relaxed,
+               std::memory_order_relaxed)) {}
     if (read.bytes > sizeof(raw_) - rawUsed_ || read.bytes % 4 != 0) {
-      ++sourceFailures_;
+      sourceFailures_.fetch_add(1, std::memory_order_relaxed);
       return AudioCaptureCycleResult::sourceFailure;
     }
     if (read.status == AudioCaptureReadStatus::timeout) {
-      ++timeouts_;
+      timeouts_.fetch_add(1, std::memory_order_relaxed);
       return AudioCaptureCycleResult::sourceTimeout;
     }
     if (read.status == AudioCaptureReadStatus::failure) {
-      ++sourceFailures_;
+      sourceFailures_.fetch_add(1, std::memory_order_relaxed);
       return AudioCaptureCycleResult::sourceFailure;
     }
-    if (read.status == AudioCaptureReadStatus::overrun) ++sourceOverruns_;
+    if (read.status == AudioCaptureReadStatus::overrun) {
+      sourceOverruns_.fetch_add(1, std::memory_order_relaxed);
+    }
     if (read.bytes == 0) {
-      ++shortReads_;
+      shortReads_.fetch_add(1, std::memory_order_relaxed);
       return read.status == AudioCaptureReadStatus::overrun
           ? AudioCaptureCycleResult::sourceOverrun
           : AudioCaptureCycleResult::partialInput;
     }
     rawUsed_ += read.bytes;
     if (rawUsed_ < sizeof(raw_)) {
-      ++shortReads_;
+      shortReads_.fetch_add(1, std::memory_order_relaxed);
       return read.status == AudioCaptureReadStatus::overrun
           ? AudioCaptureCycleResult::sourceOverrun
           : AudioCaptureCycleResult::partialInput;
@@ -149,14 +158,15 @@ class AudioCaptureService {
   AudioCaptureServiceMetrics metrics() const {
     AudioCaptureServiceMetrics value;
     value.ring = ring_.metrics();
-    value.readCalls = readCalls_;
-    value.shortReads = shortReads_;
-    value.timeouts = timeouts_;
-    value.sourceOverruns = sourceOverruns_;
-    value.sourceFailures = sourceFailures_;
-    value.longestReadUs = longestReadUs_;
-    value.lastReadUs = lastReadUs_;
-    value.partialMonoSamples = static_cast<uint32_t>(monoUsed_);
+    value.readCalls = readCalls_.load(std::memory_order_relaxed);
+    value.shortReads = shortReads_.load(std::memory_order_relaxed);
+    value.timeouts = timeouts_.load(std::memory_order_relaxed);
+    value.sourceOverruns = sourceOverruns_.load(std::memory_order_relaxed);
+    value.sourceFailures = sourceFailures_.load(std::memory_order_relaxed);
+    value.longestReadUs = longestReadUs_.load(std::memory_order_relaxed);
+    value.lastReadUs = lastReadUs_.load(std::memory_order_relaxed);
+    value.partialMonoSamples =
+        partialMonoSamples_.load(std::memory_order_relaxed);
     return value;
   }
 
@@ -179,7 +189,10 @@ class AudioCaptureService {
       }
       ++nextSequence_;
       monoUsed_ = 0;
+      partialMonoSamples_.store(0, std::memory_order_relaxed);
     }
+    partialMonoSamples_.store(static_cast<uint32_t>(monoUsed_),
+                              std::memory_order_relaxed);
   }
 
   AudioCaptureSource *source_ = nullptr;
@@ -195,13 +208,14 @@ class AudioCaptureService {
   bool lastFrameDropped_ = false;
   uint32_t sessionId_ = 0;
   uint32_t nextSequence_ = 0;
-  uint32_t readCalls_ = 0;
-  uint32_t shortReads_ = 0;
-  uint32_t timeouts_ = 0;
-  uint32_t sourceOverruns_ = 0;
-  uint32_t sourceFailures_ = 0;
-  uint32_t longestReadUs_ = 0;
-  uint32_t lastReadUs_ = 0;
+  std::atomic<uint32_t> readCalls_{0};
+  std::atomic<uint32_t> shortReads_{0};
+  std::atomic<uint32_t> timeouts_{0};
+  std::atomic<uint32_t> sourceOverruns_{0};
+  std::atomic<uint32_t> sourceFailures_{0};
+  std::atomic<uint32_t> longestReadUs_{0};
+  std::atomic<uint32_t> lastReadUs_{0};
+  std::atomic<uint32_t> partialMonoSamples_{0};
 };
 
 }  // namespace pokepod

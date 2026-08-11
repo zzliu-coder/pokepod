@@ -86,20 +86,24 @@ class VoiceSessionController {
       const size_t converted = audioFrontEnd_.processStereo16(
           data + offset, chunk, monoBytes, sizeof(monoBytes));
       for (size_t monoOffset = 0; monoOffset + 1 < converted; monoOffset += 2) {
-        pcm_[pcmUsed_++] = static_cast<int16_t>(
+        const int16_t sample = static_cast<int16_t>(
             static_cast<uint16_t>(monoBytes[monoOffset]) |
             static_cast<uint16_t>(monoBytes[monoOffset + 1]) << 8);
-        if (pcmUsed_ == kBleVoiceSamplesPerFrame) {
-          BleVoiceAudioFrame frame;
-          if (!encodeBleVoiceAudio(sessionId_, sequence_++, pcm_, frame) ||
-              !queue_.push(frame)) {
-            return fail(VoiceSessionError::queueOverflow);
-          }
-          pcmUsed_ = 0;
-        }
+        if (!appendMonoSamples(&sample, 1)) return false;
       }
       offset += chunk;
     }
+    lastAudioAtMs_ = nowMs;
+    return true;
+  }
+
+  bool appendMono16(const int16_t *samples, size_t count, uint32_t nowMs) {
+    if ((state_ != VoiceSessionState::waitingForReady &&
+         state_ != VoiceSessionState::streaming) || stopRequested_ ||
+        samples == nullptr || count == 0) {
+      return false;
+    }
+    if (!appendMonoSamples(samples, count)) return false;
     lastAudioAtMs_ = nowMs;
     return true;
   }
@@ -202,6 +206,20 @@ class VoiceSessionController {
   }
 
  private:
+  bool appendMonoSamples(const int16_t *samples, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+      pcm_[pcmUsed_++] = samples[index];
+      if (pcmUsed_ != kBleVoiceSamplesPerFrame) continue;
+      BleVoiceAudioFrame frame;
+      if (!encodeBleVoiceAudio(sessionId_, sequence_++, pcm_, frame) ||
+          !queue_.push(frame)) {
+        return fail(VoiceSessionError::queueOverflow);
+      }
+      pcmUsed_ = 0;
+    }
+    return true;
+  }
+
   bool fail(VoiceSessionError error) {
     error_ = error;
     state_ = VoiceSessionState::failed;

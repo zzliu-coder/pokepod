@@ -141,6 +141,22 @@ int main() {
   controller.complete();
   assert(controller.state() == VoiceSessionState::idle);
 
+  VoiceSessionController monoController;
+  assert(monoController.begin(67, 0, true, 185, router));
+  assert(monoController.markReady(67, 1));
+  int16_t monoSamples[kBleVoiceSamplesPerFrame] = {};
+  for (size_t index = 0; index < kBleVoiceSamplesPerFrame; ++index) {
+    monoSamples[index] = static_cast<int16_t>(index * 3 - 400);
+  }
+  assert(monoController.appendMono16(
+      monoSamples, kBleVoiceSamplesPerFrame, 2));
+  assert(monoController.queuedFrames() == 1);
+  BleVoiceAudioFrame monoFrame;
+  assert(monoController.peekFrame(monoFrame));
+  assert(readVoiceU32(monoFrame.bytes + 2) == 67);
+  assert(readVoiceU32(monoFrame.bytes + 6) == 0);
+  monoController.complete();
+
   VoiceSessionController streamTimeout;
   assert(streamTimeout.begin(68, 0, true, 185, router));
   assert(streamTimeout.markReady(68, 1));

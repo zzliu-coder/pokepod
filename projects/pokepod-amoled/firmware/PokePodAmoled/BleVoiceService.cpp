@@ -566,6 +566,21 @@ bool BleVoiceService::appendAudio(const uint8_t *stereo48, size_t bytes,
   return controller_.appendStereo48(stereo48, bytes, nowMs);
 }
 
+bool BleVoiceService::appendMono16(const int16_t *samples, size_t count,
+                                   uint32_t nowMs) {
+  const bool ok = controller_.appendMono16(samples, count, nowMs);
+  if (!ok && controller_.error() == VoiceSessionError::queueOverflow) {
+    portENTER_CRITICAL(&qualityMux_);
+    quality_.noteQueueOverflow();
+    portEXIT_CRITICAL(&qualityMux_);
+  }
+  return ok;
+}
+
+void BleVoiceService::abortSession(VoiceSessionError error) {
+  controller_.abort(error);
+}
+
 void BleVoiceService::handleConnect(uint16_t connectionId,
                                     const uint8_t *peerAddress) {
   const BleConnectDecision decision = connectionPolicy_.connect(connectionId);

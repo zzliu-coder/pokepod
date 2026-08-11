@@ -16,6 +16,10 @@ class AudioPipeline {
   bool startCapture(Print &log);
   void stopHardware(Print &log);
   size_t read(uint8_t *buffer, size_t capacity);
+  // Capture-task entry. It performs one bounded I2S read without touching UI
+  // meters, logging or cross-thread diagnostic counters.
+  size_t readCaptureRealtime(uint8_t *buffer, size_t capacity);
+  void observeCapturedMono(const int16_t *samples, size_t count);
   bool startPlayback(fs::FS &fs, const String &path, Print &log);
   void pumpPlayback(Print &log);
   void stopPlayback(Print &log);
