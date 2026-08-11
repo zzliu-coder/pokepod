@@ -401,7 +401,7 @@ void consumeLocalOperationOutcome() {
   } else if (outcome.rollbackFailed || outcome.authorityPreserved) {
     showMessage("操作中断，已保留恢复记录，请连接 Mac", 5000);
   } else {
-    showMessage("操作失败，原数据已恢复");
+    showMessage("操作失败，已恢复");
   }
   pendingLocalOperationIds.clear();
   dashboard.closeOverlays();
