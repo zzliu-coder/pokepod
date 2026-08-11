@@ -193,7 +193,7 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
 
 bool WavRecorder::append(const uint8_t *data, size_t length, Print &log) {
   if (!recording_ || !file_ || data == nullptr) return false;
-  uint8_t mono[kAudioBytesPerChunk];
+  uint8_t mono[AudioFrontEnd::kSelectionReplayOutputBytes];
   size_t offset = 0;
   while (offset + 4 <= length) {
     size_t inputBytes = length - offset;

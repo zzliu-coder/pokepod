@@ -23,6 +23,7 @@ struct AudioFrontEndMetrics : public VoiceConditionerMetrics {
   AudioDspProfile profile = AudioDspProfile::unavailable;
   AudioInputChannel selectedChannel = AudioInputChannel::undecided;
   uint64_t inputFrames = 0;
+  uint64_t selectedInputFrames = 0;
   uint64_t leftEnergy = 0;
   uint64_t rightEnergy = 0;
   uint32_t clippedInputSamples = 0;
@@ -30,13 +31,20 @@ struct AudioFrontEndMetrics : public VoiceConditionerMetrics {
   uint16_t rightPeak = 0;
 };
 
-// Shared capsule/BLE voice front end. It performs a short deterministic slot
+// Shared capsule/BLE voice front end. It performs a deterministic 10 ms slot
 // probe, a 79-tap anti-alias FIR and 3:1 decimation. The independent
 // VoiceConditioner owns the 16 kHz speech cleanup and dynamics. No heap
 // allocation is used.
 class AudioFrontEnd {
  public:
-  static constexpr size_t kSelectionFrames = 96;
+  static constexpr size_t kSelectionBlockFrames = 96;
+  static constexpr size_t kSelectionBlocks = 5;
+  static constexpr size_t kSelectionFrames =
+      kSelectionBlockFrames * kSelectionBlocks;
+  // At channel lock, all probe samples are replayed through FIR/DSP in one
+  // call. Callers must provide room for that deterministic startup burst.
+  static constexpr size_t kSelectionReplayOutputBytes =
+      ((kSelectionFrames + 2) / 3) * sizeof(int16_t);
   static constexpr size_t kFirTaps = 79;
   static constexpr int32_t kLimiter = VoiceConditioner::kLimiter;
 
@@ -52,8 +60,8 @@ class AudioFrontEnd {
   void reset() {
     selectedChannel_ = AudioInputChannel::undecided;
     selectionUsed_ = 0;
-    leftSelectionEnergy_ = 0;
-    rightSelectionEnergy_ = 0;
+    for (auto &energy : leftBlockEnergy_) energy = 0;
+    for (auto &energy : rightBlockEnergy_) energy = 0;
     ringIndex_ = 0;
     sampleCount_ = 0;
     decimationPhase_ = 0;
@@ -76,8 +84,9 @@ class AudioFrontEnd {
       if (selectedChannel_ == AudioInputChannel::undecided) {
         selection_[selectionUsed_ * 2] = left;
         selection_[selectionUsed_ * 2 + 1] = right;
-        leftSelectionEnergy_ += magnitude(left);
-        rightSelectionEnergy_ += magnitude(right);
+        const size_t block = selectionUsed_ / kSelectionBlockFrames;
+        leftBlockEnergy_[block] += magnitude(left);
+        rightBlockEnergy_[block] += magnitude(right);
         ++selectionUsed_;
         if (selectionUsed_ == kSelectionFrames) {
           lockChannel();
@@ -132,19 +141,37 @@ class AudioFrontEnd {
   }
 
   void lockChannel() {
-    // The board normally mirrors or left-aligns its mono ADC. Select right only
-    // when its short-window energy is decisively larger, keeping left as the
-    // deterministic tie/default channel.
+    // Five fixed 2 ms windows cover the first 10 ms. Discarding each side's
+    // highest and lowest window prevents one startup pop or abnormal block from
+    // deciding the slot. The board normally mirrors or left-aligns its mono
+    // ADC, so left remains the deterministic tie/default channel.
+    const uint64_t leftSelectionEnergy = robustSelectionEnergy(leftBlockEnergy_);
+    const uint64_t rightSelectionEnergy = robustSelectionEnergy(rightBlockEnergy_);
     const uint64_t rightThreshold =
-        leftSelectionEnergy_ * rightChannelEnergyRatioQ8_ / 256U;
-    selectedChannel_ = rightSelectionEnergy_ > rightThreshold &&
+        leftSelectionEnergy * rightChannelEnergyRatioQ8_ / 256U;
+    selectedChannel_ = rightSelectionEnergy > rightThreshold &&
         metrics_.rightPeak >= channelSelectionMinimumPeak_
         ? AudioInputChannel::right : AudioInputChannel::left;
     metrics_.selectedChannel = selectedChannel_;
   }
 
+  static uint64_t robustSelectionEnergy(
+      const uint32_t (&blocks)[kSelectionBlocks]) {
+    uint64_t total = 0;
+    uint32_t minimum = blocks[0];
+    uint32_t maximum = blocks[0];
+    for (size_t index = 0; index < kSelectionBlocks; ++index) {
+      const uint32_t value = blocks[index];
+      total += value;
+      if (value < minimum) minimum = value;
+      if (value > maximum) maximum = value;
+    }
+    return total - minimum - maximum;
+  }
+
   bool filterSample(int16_t sample, uint8_t *mono, size_t monoCapacity,
                     size_t &outputBytes) {
+    ++metrics_.selectedInputFrames;
     ring_[ringIndex_] = sample;
     ringIndex_ = (ringIndex_ + 1) % kFirTaps;
     ++sampleCount_;
@@ -174,8 +201,8 @@ class AudioFrontEnd {
   uint16_t channelSelectionMinimumPeak_ = 32;
   int16_t selection_[kSelectionFrames * 2] = {};
   size_t selectionUsed_ = 0;
-  uint64_t leftSelectionEnergy_ = 0;
-  uint64_t rightSelectionEnergy_ = 0;
+  uint32_t leftBlockEnergy_[kSelectionBlocks] = {};
+  uint32_t rightBlockEnergy_[kSelectionBlocks] = {};
   int16_t ring_[kFirTaps] = {};
   size_t ringIndex_ = 0;
   uint64_t sampleCount_ = 0;

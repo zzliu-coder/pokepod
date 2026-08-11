@@ -12,6 +12,7 @@ FQBN='esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,Up
 APP_ONLY_FLASH_OFFSET=0x10000
 FINGERPRINT_TOOL="$PROJECT_DIR/tools/build-input-fingerprint.py"
 ARTIFACT_TOOL="$PROJECT_DIR/tools/write-artifact-manifest.py"
+FIRMWARE_VERSION_HEADER="$SKETCH_DIR/FirmwareVersion.h"
 BUILD_ENV_TOOL="$PROJECT_DIR/tools/pokepod_build_env.py"
 PORTABLE_TOOL="$PROJECT_DIR/tools/portable_build_utils.py"
 BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
@@ -81,6 +82,10 @@ if [ ! -f "$FINGERPRINT_TOOL" ]; then
 fi
 if [ ! -f "$ARTIFACT_TOOL" ]; then
   echo "Artifact manifest tool not found: $ARTIFACT_TOOL" >&2
+  exit 1
+fi
+if [ ! -f "$FIRMWARE_VERSION_HEADER" ]; then
+  echo "Firmware version source not found: $FIRMWARE_VERSION_HEADER" >&2
   exit 1
 fi
 if [ ! -f "$BUILD_ENV_TOOL" ]; then
@@ -291,7 +296,8 @@ write_artifact_manifest() {
     --core-version "$ESP32_CORE_VERSION" \
     --core-profile "$POKEPOD_CORE_PROFILE" \
     --app-offset "$APP_ONLY_FLASH_OFFSET" \
-    --vendor-revision "$WAVESHARE_COMMIT"
+    --vendor-revision "$WAVESHARE_COMMIT" \
+    --firmware-version-header "$FIRMWARE_VERSION_HEADER"
 }
 
 if [ "$BUILD_MODE" = fast ] && [ "$FORCE_BUILD" -eq 0 ] && [ "$#" -eq 0 ] && \

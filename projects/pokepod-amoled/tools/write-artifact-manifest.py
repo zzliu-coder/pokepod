@@ -6,6 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
+
+
+def read_firmware_version(header: Path) -> str:
+    source = header.read_text(encoding="utf-8")
+    match = re.search(
+        r'constexpr\s+const\s+char\s+kFirmwareVersion\[\]\s*=\s*"([^"]+)"\s*;',
+        source,
+    )
+    if match is None:
+        raise ValueError(f"firmware version constant missing: {header}")
+    return match.group(1)
 
 
 def main() -> int:
@@ -23,7 +35,10 @@ def main() -> int:
     parser.add_argument("--core-profile", choices=("production", "matrix"), required=True)
     parser.add_argument("--app-offset", required=True)
     parser.add_argument("--vendor-revision", required=True)
+    parser.add_argument("--firmware-version-header", required=True)
     args = parser.parse_args()
+
+    firmware_version = read_firmware_version(Path(args.firmware_version_header))
 
     manifest = {
         "schemaVersion": 1,
@@ -31,6 +46,7 @@ def main() -> int:
         "lane": args.lane,
         "sourceRevision": args.source_revision,
         "sourceDirty": args.source_dirty == "true",
+        "firmwareVersion": firmware_version,
         "buildInputSha256": args.build_input,
         "createdAt": args.created_at,
         "binary": {

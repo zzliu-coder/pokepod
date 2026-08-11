@@ -116,6 +116,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert size == str(len(b"portable-pokepod"))
 
     artifact = root / "artifact.json"
+    version_header = ROOT / "firmware/PokePodAmoled/FirmwareVersion.h"
     subprocess.check_call(
         [
             "python3", str(TOOLS / "write-artifact-manifest.py"),
@@ -126,13 +127,18 @@ with tempfile.TemporaryDirectory() as temporary:
             "--fqbn", "esp32:esp32:esp32s3:test", "--core-version", "3.3.8",
             "--core-profile", "production", "--app-offset", "0x10000",
             "--vendor-revision", "def",
+            "--firmware-version-header", str(version_header),
         ]
     )
     manifest = json.loads(artifact.read_text())
     assert manifest["binary"]["flashOffset"] == "0x10000"
     assert manifest["toolchain"]["coreProfile"] == "production"
+    assert manifest["firmwareVersion"] == "2.0.0"
 
 build = (ROOT / "firmware/build.sh").read_text(encoding="utf-8")
+ble_service = (ROOT / "firmware/PokePodAmoled/BleVoiceService.cpp").read_text(
+    encoding="utf-8"
+)
 verify = (ROOT / "verify.sh").read_text(encoding="utf-8")
 usb_contract = (TOOLS / "test-usb-connection-contract.py").read_text(
     encoding="utf-8"
@@ -151,5 +157,9 @@ assert "POKEPOD_CORE_MATRIX" in build
 assert "PartitionScheme=app3M_fat9M_16MB" in build
 assert "CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1" in build
 assert "APP_ONLY_FLASH_OFFSET=0x10000" in build
+assert 'FIRMWARE_VERSION_HEADER="$SKETCH_DIR/FirmwareVersion.h"' in build
+assert "--firmware-version-header" in build
+assert "kFirmwareVersion" in ble_service
+assert '\\"firmwareVersion\\":\\"2.0.0' not in ble_service
 
 print("PASS test_build_portability (fake home, production/matrix, portable metadata)")

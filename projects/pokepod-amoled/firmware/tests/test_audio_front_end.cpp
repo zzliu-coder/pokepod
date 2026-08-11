@@ -31,7 +31,7 @@ static std::vector<int16_t> processTone(double frequency, int16_t amplitude,
       appendFrame(stereo, rightOnly ? 0 : sample,
                   rightOnly ? sample : sample);
     }
-    uint8_t mono[192] = {};
+    uint8_t mono[AudioFrontEnd::kSelectionReplayOutputBytes] = {};
     const size_t bytes = frontEnd.processStereo16(
         stereo.data(), stereo.size(), mono, sizeof(mono));
     for (size_t index = 0; index + 1 < bytes; index += 2) {
@@ -58,6 +58,41 @@ static double rmsTail(const std::vector<int16_t> &samples) {
   return sqrt(energy / static_cast<double>(samples.size() - first));
 }
 
+enum class ProbeScenario : uint8_t {
+  leftLowRightPop,
+  rightLowLeftPop,
+  tied,
+};
+
+static AudioInputChannel runProbe(AudioDspProfile profile,
+                                  ProbeScenario scenario) {
+  AudioFrontEnd frontEnd;
+  frontEnd.configure(profile);
+  frontEnd.reset();
+  std::vector<uint8_t> stereo;
+  stereo.reserve(AudioFrontEnd::kSelectionFrames * 4);
+  for (size_t frame = 0; frame < AudioFrontEnd::kSelectionFrames; ++frame) {
+    const int16_t low = (frame & 1U) == 0 ? 48 : -48;
+    const bool abnormalBlock = frame < AudioFrontEnd::kSelectionBlockFrames;
+    int16_t left = low;
+    int16_t right = low;
+    if (scenario == ProbeScenario::leftLowRightPop) {
+      right = abnormalBlock ? 32767 : 0;
+    } else if (scenario == ProbeScenario::rightLowLeftPop) {
+      left = abnormalBlock ? -32767 : 0;
+    }
+    appendFrame(stereo, left, right);
+  }
+  uint8_t mono[AudioFrontEnd::kSelectionReplayOutputBytes] = {};
+  const size_t outputBytes = frontEnd.processStereo16(
+      stereo.data(), stereo.size(), mono, sizeof(mono));
+  assert(outputBytes > 0);
+  assert(frontEnd.metrics().inputFrames == AudioFrontEnd::kSelectionFrames);
+  assert(frontEnd.metrics().selectedInputFrames ==
+         AudioFrontEnd::kSelectionFrames);
+  return frontEnd.selectedChannel();
+}
+
 int main() {
   AudioFrontEnd v1Profile;
   v1Profile.configure(AudioDspProfile::v1Measured);
@@ -67,6 +102,20 @@ int main() {
   v2Profile.configure(AudioDspProfile::v2Baseline);
   v2Profile.reset();
   assert(v2Profile.metrics().profile == AudioDspProfile::v2Baseline);
+
+  static_assert(AudioFrontEnd::kSelectionFrames == 480,
+                "slot probe must cover 10 ms at 48 kHz");
+  for (AudioDspProfile profile : {AudioDspProfile::v1Measured,
+                                  AudioDspProfile::v2Baseline}) {
+    // A full-scale abnormal 2 ms block on the wrong slot is discarded by the
+    // robust statistic; the continuous low-level slot still wins.
+    assert(runProbe(profile, ProbeScenario::leftLowRightPop) ==
+           AudioInputChannel::left);
+    assert(runProbe(profile, ProbeScenario::rightLowLeftPop) ==
+           AudioInputChannel::right);
+    // Equal slots keep the deterministic board default.
+    assert(runProbe(profile, ProbeScenario::tied) == AudioInputChannel::left);
+  }
 
   const std::vector<int16_t> voice = processTone(1000.0, 500, true);
   assert(voice.size() > 1500);
@@ -97,7 +146,7 @@ int main() {
           ? 32767 : -32767;
       appendFrame(stereo, sample, sample);
     }
-    uint8_t mono[192] = {};
+    uint8_t mono[AudioFrontEnd::kSelectionReplayOutputBytes] = {};
     (void)frontEnd.processStereo16(stereo.data(), stereo.size(),
                                    mono, sizeof(mono));
   }

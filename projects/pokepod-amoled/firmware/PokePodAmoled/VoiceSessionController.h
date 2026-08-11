@@ -77,7 +77,7 @@ class VoiceSessionController {
     if ((state_ != VoiceSessionState::waitingForReady &&
          state_ != VoiceSessionState::streaming) || stopRequested_ ||
         data == nullptr) return false;
-    uint8_t monoBytes[192];
+    uint8_t monoBytes[AudioFrontEnd::kSelectionReplayOutputBytes];
     size_t offset = 0;
     while (offset + 4 <= bytes) {
       size_t chunk = bytes - offset;

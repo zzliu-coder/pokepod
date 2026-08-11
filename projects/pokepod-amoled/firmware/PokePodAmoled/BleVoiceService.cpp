@@ -3,6 +3,8 @@
 #include <BLESecurity.h>
 #include <string.h>
 
+#include "FirmwareVersion.h"
+
 namespace pokepod {
 namespace {
 
@@ -329,7 +331,8 @@ void BleVoiceService::updateDeviceInfo() {
   const BleVoiceQualitySnapshot current = quality();
   const String info = String("{\"batteryPercent\":") + batteryPercent_ +
       ",\"codec\":\"ima-adpcm\",\"deviceId\":\"" + deviceId_ +
-      "\",\"firmwareVersion\":\"2.0.0\",\"lastErrorCode\":" +
+      "\",\"firmwareVersion\":\"" + kFirmwareVersion +
+      "\",\"lastErrorCode\":" +
       current.lastErrorCode + ",\"notifyAccepted\":" +
       current.notifyAccepted + ",\"notifyAttempts\":" +
       current.notifyAttempts + ",\"notifyFailures\":" +
