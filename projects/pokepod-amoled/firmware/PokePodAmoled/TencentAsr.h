@@ -5,6 +5,7 @@
 #include <NetworkClientSecure.h>
 
 #include "DeviceConfig.h"
+#include "TencentAsrControl.h"
 
 namespace pokepod {
 
@@ -31,16 +32,17 @@ class TencentAsr {
  public:
   bool transcribe(fs::FS &fs, const String &audioPath,
                   const DeviceSettings &settings, TencentAsrResult &result,
-                  Print &log);
+                  Print &log, const TencentAsrControl *control = nullptr);
 
  private:
   using StreamSink = bool (*)(void *, const uint8_t *, size_t);
 
-  bool streamBase64(File &file, StreamSink sink, void *context);
+  bool streamBase64(File &file, StreamSink sink, void *context,
+                    const TencentAsrControl *control);
   bool hashPayload(File &file, const String &prefix, const String &suffix,
-                   uint8_t digest[32]);
+                   uint8_t digest[32], const TencentAsrControl *control);
   bool readHttpResponse(NetworkClientSecure &client, int &status,
-                        String &body);
+                        String &body, const TencentAsrControl *control);
   String authorization(const DeviceSettings &settings, time_t timestamp,
                        const uint8_t payloadHash[32]);
   static String hex(const uint8_t *data, size_t length);

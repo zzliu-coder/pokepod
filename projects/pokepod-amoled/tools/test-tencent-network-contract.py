@@ -31,8 +31,16 @@ require(main, "beginTlsExternalMemory(Serial);",
         "TLS allocator is not installed during startup")
 require(worker, "xTaskCreatePinnedToCoreWithCaps(",
         "ASR task stack still consumes internal RAM")
-require(worker, "vTaskDeleteWithCaps(nullptr);",
-        "PSRAM task stack is deleted with the wrong API")
+require(worker, "ulTaskNotifyTake(pdTRUE, portMAX_DELAY);",
+        "ASR worker is not a persistent notified task")
+if "vTaskDeleteWithCaps" in worker or "vTaskDelete(" in worker:
+    raise SystemExit("FAIL tencent_network_contract: persistent ASR worker is deleted")
+require(worker, "TencentCancelReason::watchdog",
+        "ASR worker watchdog cancellation is missing")
+require(worker, "TencentJobState::committing",
+        "ASR success is not separated from atomic commit")
+require(asr, "control->cancelled()",
+        "ASR network and file path has no generation cancel token")
 require(asr, "Network.hostByName(kHost, resolvedAddress)",
         "DNS failures are not separated from TLS failures")
 require(asr, "client.lastError(networkError, sizeof(networkError))",

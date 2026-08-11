@@ -30,11 +30,24 @@ bool deadlineExpired(uint32_t deadlineMs) {
   return static_cast<int32_t>(millis() - deadlineMs) >= 0;
 }
 
+bool cancelled(const TencentAsrControl *control) {
+  return control != nullptr && control->cancelled();
+}
+
+void markCancelled(TencentAsrResult &result,
+                   const TencentAsrControl *control) {
+  result.ok = false;
+  result.transient = false;
+  result.code = "CANCELLED";
+  result.message = "转写已取消";
+  if (control != nullptr) control->setStage(TencentAsrStage::cancelled);
+}
+
 bool writeAll(NetworkClientSecure &client, const uint8_t *data, size_t length,
-              uint32_t deadlineMs) {
+              uint32_t deadlineMs, const TencentAsrControl *control) {
   size_t written = 0;
   while (written < length) {
-    if (deadlineExpired(deadlineMs)) return false;
+    if (cancelled(control) || deadlineExpired(deadlineMs)) return false;
     const size_t chunk = client.write(data + written, length - written);
     if (chunk == 0) return false;
     written += chunk;
@@ -43,8 +56,9 @@ bool writeAll(NetworkClientSecure &client, const uint8_t *data, size_t length,
 }
 
 bool readExact(NetworkClientSecure &client, String &target, size_t length,
-               uint32_t deadlineMs) {
+               uint32_t deadlineMs, const TencentAsrControl *control) {
   while (length > 0 && target.length() < kMaxResponseBytes) {
+    if (cancelled(control)) return false;
     if (client.available()) {
       const int value = client.read();
       if (value < 0) continue;
@@ -60,9 +74,11 @@ bool readExact(NetworkClientSecure &client, String &target, size_t length,
   return length == 0;
 }
 
-String readLine(NetworkClientSecure &client, uint32_t deadlineMs) {
+String readLine(NetworkClientSecure &client, uint32_t deadlineMs,
+                const TencentAsrControl *control) {
   String value;
   while (value.length() < 2048) {
+    if (cancelled(control)) break;
     if (client.available()) {
       const int next = client.read();
       if (next < 0) continue;
@@ -82,9 +98,15 @@ String readLine(NetworkClientSecure &client, uint32_t deadlineMs) {
 
 bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
                             const DeviceSettings &settings,
-                            TencentAsrResult &result, Print &log) {
+                            TencentAsrResult &result, Print &log,
+                            const TencentAsrControl *control) {
   const uint32_t startedAtMs = millis();
   result = TencentAsrResult();
+  if (control != nullptr) control->setStage(TencentAsrStage::validating);
+  if (cancelled(control)) {
+    markCancelled(result, control);
+    return false;
+  }
   if (settings.secretId.isEmpty() || settings.secretKey.isEmpty()) {
     result.code = "CONFIG_MISSING";
     result.message = "腾讯云密钥未配置";
@@ -107,6 +129,11 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   }
   File audio;
   size_t audioBytes = 0;
+  auto closeAudio = [&]() {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (audio && lease) audio.close();
+  };
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         StorageOwner::tencentRead, StorageAccess::read, 1000);
@@ -120,18 +147,14 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     if (audio && !audio.isDirectory()) audioBytes = audio.size();
   }
   if (!audio || audio.isDirectory() || audioBytes <= 44) {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (audio && lease) audio.close();
+    closeAudio();
     result.code = "AUDIO_INVALID";
     result.message = "胶囊音频缺失或为空";
     return false;
   }
   const size_t encodedBytes = base64EncodedLength(audioBytes);
   if (encodedBytes > kMaxEncodedAudioBytes) {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (lease) audio.close();
+    closeAudio();
     result.code = "AUDIO_TOO_LARGE";
     result.message = "音频超过腾讯一句话识别限制";
     return false;
@@ -148,10 +171,13 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   suffix += "}";
 
   uint8_t payloadHash[32];
-  if (!hashPayload(audio, prefix, suffix, payloadHash)) {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (lease) audio.close();
+  if (control != nullptr) control->setStage(TencentAsrStage::hashing);
+  if (!hashPayload(audio, prefix, suffix, payloadHash, control)) {
+    closeAudio();
+    if (cancelled(control)) {
+      markCancelled(result, control);
+      return false;
+    }
     result.transient = true;
     result.code = "AUDIO_READ_FAILED";
     result.message = "读取音频失败";
@@ -169,19 +195,29 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     seekOk = lease && audio.seek(0);
   }
   if (auth.isEmpty() || !seekOk) {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (lease) audio.close();
+    closeAudio();
+    if (cancelled(control)) {
+      markCancelled(result, control);
+      return false;
+    }
     result.code = "SIGNATURE_FAILED";
     result.message = "请求签名失败";
     return false;
   }
 
   IPAddress resolvedAddress;
+  if (control != nullptr) control->setStage(TencentAsrStage::resolving);
+  if (cancelled(control)) {
+    closeAudio();
+    markCancelled(result, control);
+    return false;
+  }
   if (!Network.hostByName(kHost, resolvedAddress)) {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (lease) audio.close();
+    closeAudio();
+    if (cancelled(control)) {
+      markCancelled(result, control);
+      return false;
+    }
     result.transient = true;
     result.code = "DNS_FAILED";
     result.message = "腾讯云域名解析失败";
@@ -205,19 +241,33 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   client.setCACert(kTencentRootCa);
   client.setHandshakeTimeout(15);
   client.setTimeout(kSocketIoTimeoutMs);
+  if (control != nullptr) control->setStage(TencentAsrStage::connecting);
+  if (cancelled(control)) {
+    closeAudio();
+    markCancelled(result, control);
+    return false;
+  }
   if (!client.connect(kHost, 443, 15000)) {
     char networkError[160] = {};
     result.networkError = client.lastError(networkError, sizeof(networkError));
     result.networkErrorDetail = networkError;
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (lease) audio.close();
+    closeAudio();
+    if (cancelled(control)) {
+      markCancelled(result, control);
+      return false;
+    }
     result.transient = true;
     result.code = "NETWORK_CONNECT_FAILED";
     result.message = "腾讯云 TLS 连接失败";
     log.printf(
         "{\"event\":\"tencent_asr_network\",\"stage\":\"tls\",\"ok\":false,\"error\":%ld}\n",
         static_cast<long>(result.networkError));
+    return false;
+  }
+  if (cancelled(control)) {
+    client.stop();
+    closeAudio();
+    markCancelled(result, control);
     return false;
   }
   result.connectElapsedMs = millis() - startedAtMs;
@@ -244,30 +294,33 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
 
   const uint32_t uploadDeadlineMs = millis() +
       tencentUploadDeadlineMs(encodedBytes);
+  if (control != nullptr) control->setStage(TencentAsrStage::uploading);
   bool sent = writeAll(client,
       reinterpret_cast<const uint8_t *>(headers.c_str()), headers.length(),
-      uploadDeadlineMs) &&
+      uploadDeadlineMs, control) &&
       writeAll(client, reinterpret_cast<const uint8_t *>(prefix.c_str()),
-               prefix.length(), uploadDeadlineMs);
+               prefix.length(), uploadDeadlineMs, control);
   struct ClientSinkContext {
     NetworkClientSecure *client;
     uint32_t deadlineMs;
-  } sinkContext = {&client, uploadDeadlineMs};
+    const TencentAsrControl *control;
+  } sinkContext = {&client, uploadDeadlineMs, control};
   auto clientSink = [](void *context, const uint8_t *data, size_t length) {
     ClientSinkContext *sink = static_cast<ClientSinkContext *>(context);
-    return writeAll(*sink->client, data, length, sink->deadlineMs);
+    return writeAll(*sink->client, data, length, sink->deadlineMs,
+                    sink->control);
   };
-  if (sent) sent = streamBase64(audio, clientSink, &sinkContext);
+  if (sent) sent = streamBase64(audio, clientSink, &sinkContext, control);
   if (sent) sent = writeAll(client,
       reinterpret_cast<const uint8_t *>(suffix.c_str()), suffix.length(),
-      uploadDeadlineMs);
-  {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (lease) audio.close();
-  }
+      uploadDeadlineMs, control);
+  closeAudio();
   if (!sent) {
     client.stop();
+    if (cancelled(control)) {
+      markCancelled(result, control);
+      return false;
+    }
     result.transient = true;
     result.code = deadlineExpired(uploadDeadlineMs)
         ? "NETWORK_WRITE_TIMEOUT" : "NETWORK_WRITE_FAILED";
@@ -282,8 +335,13 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
 
   int httpStatus = 0;
   String body;
-  if (!readHttpResponse(client, httpStatus, body)) {
+  if (control != nullptr) control->setStage(TencentAsrStage::waitingResponse);
+  if (!readHttpResponse(client, httpStatus, body, control)) {
     client.stop();
+    if (cancelled(control)) {
+      markCancelled(result, control);
+      return false;
+    }
     result.transient = true;
     result.code = "NETWORK_READ_FAILED";
     result.message = "腾讯云响应不完整";
@@ -294,6 +352,11 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   log.printf("{\"event\":\"tencent_asr_stage\",\"stage\":\"responded\",\"elapsed_ms\":%lu,\"http_status\":%d}\n",
              static_cast<unsigned long>(millis() - startedAtMs), httpStatus);
 
+  if (control != nullptr) control->setStage(TencentAsrStage::parsing);
+  if (cancelled(control)) {
+    markCancelled(result, control);
+    return false;
+  }
   cJSON *root = cJSON_ParseWithLength(body.c_str(), body.length());
   cJSON *response = root == nullptr ? nullptr :
       cJSON_GetObjectItemCaseSensitive(root, "Response");
@@ -332,11 +395,14 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   log.printf("{\"event\":\"tencent_asr\",\"ok\":%s,\"code\":\"%s\",\"request_id\":\"%s\"}\n",
              result.ok ? "true" : "false", result.code.c_str(),
              result.requestId.c_str());
+  if (control != nullptr) control->setStage(TencentAsrStage::completed);
   return result.ok;
 }
 
-bool TencentAsr::streamBase64(File &file, StreamSink sink, void *context) {
+bool TencentAsr::streamBase64(File &file, StreamSink sink, void *context,
+                              const TencentAsrControl *control) {
   if (!file || sink == nullptr) return false;
+  if (cancelled(control)) return false;
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         StorageOwner::tencentRead, StorageAccess::read, 1000);
@@ -345,6 +411,7 @@ bool TencentAsr::streamBase64(File &file, StreamSink sink, void *context) {
   Base64StreamEncoder encoder;
   uint8_t input[768];
   while (true) {
+    if (cancelled(control)) return false;
     int bytes = 0;
     {
       StorageIoLease lease = StorageCoordinator::instance().acquireIo(
@@ -366,7 +433,8 @@ bool TencentAsr::streamBase64(File &file, StreamSink sink, void *context) {
 }
 
 bool TencentAsr::hashPayload(File &file, const String &prefix,
-                             const String &suffix, uint8_t digest[32]) {
+                             const String &suffix, uint8_t digest[32],
+                             const TencentAsrControl *control) {
   mbedtls_sha256_context context;
   mbedtls_sha256_init(&context);
   bool ok = mbedtls_sha256_starts(&context, 0) == 0 &&
@@ -376,7 +444,9 @@ bool TencentAsr::hashPayload(File &file, const String &prefix,
     return mbedtls_sha256_update(
         static_cast<mbedtls_sha256_context *>(opaque), data, length) == 0;
   };
-  if (ok) ok = streamBase64(file, hashSink, &context);
+  if (ok && !cancelled(control)) {
+    ok = streamBase64(file, hashSink, &context, control);
+  }
   if (ok) ok = mbedtls_sha256_update(&context,
       reinterpret_cast<const uint8_t *>(suffix.c_str()), suffix.length()) == 0;
   if (ok) ok = mbedtls_sha256_finish(&context, digest) == 0;
@@ -427,15 +497,18 @@ String TencentAsr::authorization(const DeviceSettings &settings,
 }
 
 bool TencentAsr::readHttpResponse(NetworkClientSecure &client, int &status,
-                                  String &body) {
+                                  String &body,
+                                  const TencentAsrControl *control) {
   const uint32_t deadline = millis() + 30000;
-  const String statusLine = readLine(client, deadline);
+  const String statusLine = readLine(client, deadline, control);
+  if (cancelled(control)) return false;
   const int firstSpace = statusLine.indexOf(' ');
   status = firstSpace < 0 ? 0 : statusLine.substring(firstSpace + 1).toInt();
   size_t contentLength = 0;
   bool chunked = false;
   while (true) {
-    const String line = readLine(client, deadline);
+    const String line = readLine(client, deadline, control);
+    if (cancelled(control)) return false;
     if (line.isEmpty()) break;
     String lower = line;
     lower.toLowerCase();
@@ -450,23 +523,27 @@ bool TencentAsr::readHttpResponse(NetworkClientSecure &client, int &status,
       ? contentLength + 1 : 2048);
   if (chunked) {
     while (body.length() < kMaxResponseBytes) {
-      const String sizeLine = readLine(client, deadline);
+      const String sizeLine = readLine(client, deadline, control);
+      if (cancelled(control)) return false;
       const size_t chunkSize = strtoul(sizeLine.c_str(), nullptr, 16);
       if (chunkSize == 0) {
-        readLine(client, deadline);
+        readLine(client, deadline, control);
         break;
       }
       if (body.length() + chunkSize > kMaxResponseBytes ||
-          !readExact(client, body, chunkSize, deadline)) return false;
-      readLine(client, deadline);
+          !readExact(client, body, chunkSize, deadline, control)) return false;
+      readLine(client, deadline, control);
     }
     return !body.isEmpty();
   }
   if (contentLength > kMaxResponseBytes) return false;
-  if (contentLength > 0) return readExact(client, body, contentLength, deadline);
+  if (contentLength > 0) {
+    return readExact(client, body, contentLength, deadline, control);
+  }
   while ((client.connected() || client.available()) &&
          body.length() < kMaxResponseBytes &&
          static_cast<int32_t>(millis() - deadline) < 0) {
+    if (cancelled(control)) return false;
     if (client.available()) body += static_cast<char>(client.read());
     else delay(1);
   }

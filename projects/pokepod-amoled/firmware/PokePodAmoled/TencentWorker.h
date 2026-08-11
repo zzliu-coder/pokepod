@@ -7,6 +7,7 @@
 #include "CapsuleLibrary.h"
 #include "DeviceConfig.h"
 #include "TencentAsr.h"
+#include "TencentJobModel.h"
 
 namespace pokepod {
 
@@ -21,7 +22,24 @@ class TencentWorker {
   }
   void loop(uint32_t nowMs, bool networkReady, bool timeReady,
             bool foregroundBusy, bool charging);
-  bool working() const { return working_.load(); }
+  bool working() const {
+    return tencentJobOwnsResources(state());
+  }
+  TencentJobState state() const {
+    return static_cast<TencentJobState>(
+        state_.load(std::memory_order_acquire));
+  }
+  TencentAsrStage stage() const {
+    return static_cast<TencentAsrStage>(
+        stage_.load(std::memory_order_acquire));
+  }
+  const char *stateName() const { return tencentJobStateName(state()); }
+  uint32_t generation() const {
+    return activeGeneration_.load(std::memory_order_acquire);
+  }
+  bool cancel(TencentCancelReason reason);
+  bool quiesce(uint32_t nowMs, uint32_t timeoutMs,
+               TencentCancelReason reason);
   bool waitingForWake() const { return waitingForWake_; }
   uint32_t lastHashElapsedMs() const { return lastHashElapsedMs_; }
   uint32_t lastConnectElapsedMs() const { return lastConnectElapsedMs_; }
@@ -39,18 +57,34 @@ class TencentWorker {
   uint32_t lastPsramFreeBeforeTls() const { return lastPsramFreeBeforeTls_; }
 
  private:
+  static constexpr uint32_t kAttemptWatchdogMs = 180000;
   static void taskEntry(void *context);
-  void runAttempt();
+  void taskLoop();
+  void runAttempt(uint32_t generation);
   void finishAttempt(uint32_t nowMs);
+  void setState(TencentJobState state) {
+    state_.store(static_cast<uint8_t>(state), std::memory_order_release);
+  }
+  void logState(const char *event, TencentJobState state,
+                uint32_t generation) const;
 
   fs::FS *fs_ = nullptr;
   CapsuleLibrary *library_ = nullptr;
   DeviceConfig *config_ = nullptr;
   Print *log_ = nullptr;
   TencentAsr asr_;
+  TaskHandle_t taskHandle_ = nullptr;
   String retryingCapsuleId_;
-  std::atomic<bool> working_{false};
+  std::atomic<uint8_t> state_{
+      static_cast<uint8_t>(TencentJobState::idle)};
+  std::atomic<uint8_t> stage_{
+      static_cast<uint8_t>(TencentAsrStage::idle)};
   std::atomic<bool> resultReady_{false};
+  std::atomic<uint32_t> activeGeneration_{0};
+  std::atomic<uint32_t> resultGeneration_{0};
+  std::atomic<uint8_t> cancelReason_{
+      static_cast<uint8_t>(TencentCancelReason::none)};
+  TencentCancelToken cancelToken_;
   TencentAsrResult taskResult_;
   DeviceSettings taskSettings_;
   String taskCapsuleId_;
@@ -59,6 +93,7 @@ class TencentWorker {
   bool previousCharging_ = false;
   uint8_t transientFailures_ = 0;
   uint32_t nextAttemptMs_ = 0;
+  uint32_t attemptDeadlineMs_ = 0;
   uint32_t lastHashElapsedMs_ = 0;
   uint32_t lastConnectElapsedMs_ = 0;
   uint32_t lastUploadElapsedMs_ = 0;
