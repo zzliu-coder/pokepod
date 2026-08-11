@@ -30,7 +30,10 @@ assemble_app() {
 }
 
 assemble_app "PokeCapsule" "PokeCapsule" "Info.plist" "PokeCapsule.icns"
-assemble_app "PokePod Voice" "PokePodVoice" "PokePodVoice-Info.plist" "PokePodVoice.icns"
+# Keep the two local apps buildable from a clean checkout.  Voice does not
+# need a second binary icon asset; using the tracked capsule icon avoids a
+# hidden/untracked resource being required for every release build.
+assemble_app "PokePod Voice" "PokePodVoice" "PokePodVoice-Info.plist" "PokeCapsule.icns"
 
 mkdir -p "$DIST/backups"
 BACKUP_ROOT=$(mktemp -d "$DIST/backups/build-app.XXXXXX")

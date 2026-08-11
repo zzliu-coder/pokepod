@@ -113,12 +113,29 @@ final class VoiceRuntimeModel: ObservableObject {
 
     func requestAccessibility() {
         platform.shortcut.requestAuthorization()
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
         refreshPrerequisites()
     }
 
     func openBlackHoleInstaller() {
-        guard let url = URL(string: "https://github.com/ExistentialAudio/BlackHole") else { return }
-        NSWorkspace.shared.open(url)
+        if let package = localBlackHolePackage() {
+            let installer = URL(fileURLWithPath: "/System/Library/CoreServices/Installer.app")
+            NSWorkspace.shared.open(
+                [package],
+                withApplicationAt: installer,
+                configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                    guard let error else { return }
+                    Task { @MainActor in
+                        self?.showRecoverable("无法打开本机安装包：\(error.localizedDescription)")
+                    }
+                }
+            detail = "已打开本机 BlackHole 安装包；在安装器中确认后会自动刷新状态"
+            return
+        }
+        NSWorkspace.shared.open(BlackHoleInstallPolicy.officialReleasesURL)
+        detail = "未找到本机 BlackHole .pkg，已打开官方 Releases；下载后再次点击“安装”"
     }
 
     func forgetPokePod() {
@@ -440,9 +457,33 @@ final class VoiceRuntimeModel: ObservableObject {
 
     private var prerequisiteMessage: String {
         if !bluetoothReady { return "请打开蓝牙并允许 PokePod Voice 使用蓝牙" }
-        if !blackHoleReady { return "请先安装 BlackHole 2ch" }
-        if !accessibilityReady { return "请允许辅助功能，以便按住和释放 Option-Z" }
+        if !blackHoleReady {
+            return localBlackHolePackage() == nil
+                ? "请安装 BlackHole 2ch；下载的文件尚未进入系统音频设备"
+                : "已找到 BlackHole 安装包，点击“安装”完成系统安装"
+        }
+        if !accessibilityReady { return "请在辅助功能中打开 PokePod Voice，返回后会自动刷新" }
         return "准备完成"
+    }
+
+    private func localBlackHolePackage() -> URL? {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let roots = ["Downloads", "Desktop", "Documents"].map {
+            home.appendingPathComponent($0, isDirectory: true)
+        }
+        var candidates = [URL]()
+        for root in roots where FileManager.default.fileExists(atPath: root.path) {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+            for case let url as URL in enumerator {
+                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+                      values.isRegularFile == true else { continue }
+                candidates.append(url)
+            }
+        }
+        return BlackHoleInstallPolicy.selectPackage(from: candidates)
     }
 
     private var monotonicNow: TimeInterval { ProcessInfo.processInfo.systemUptime }

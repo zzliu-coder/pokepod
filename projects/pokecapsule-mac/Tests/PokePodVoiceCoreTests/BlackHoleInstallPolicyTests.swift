@@ -1,0 +1,32 @@
+import XCTest
+@testable import PokePodVoiceCore
+
+final class BlackHoleInstallPolicyTests: XCTestCase {
+    func testSelectsNewestBlackHolePackageAndIgnoresOtherPackages() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let older = directory.appendingPathComponent("BlackHole2ch-0.6.0.pkg")
+        let newer = directory.appendingPathComponent("BlackHole2ch-0.6.1.pkg")
+        let unrelated = directory.appendingPathComponent("OtherAudio.pkg")
+        for url in [older, newer, unrelated] { try Data().write(to: url) }
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 10)],
+            ofItemAtPath: older.path)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 20)],
+            ofItemAtPath: newer.path)
+
+        XCTAssertEqual(
+            BlackHoleInstallPolicy.selectPackage(from: [older, newer, unrelated]),
+            newer)
+    }
+
+    func testOfficialFallbackUsesReleasesPage() {
+        XCTAssertEqual(
+            BlackHoleInstallPolicy.officialReleasesURL.absoluteString,
+            "https://github.com/ExistentialAudio/BlackHole/releases/latest")
+    }
+}
