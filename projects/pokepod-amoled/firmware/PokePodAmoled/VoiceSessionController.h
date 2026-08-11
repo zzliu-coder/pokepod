@@ -27,6 +27,8 @@ enum class VoiceSessionError : uint8_t {
   readyTimeout,
   stopAckTimeout,
   streamTimeout,
+  notifyFailed,
+  disconnected,
 };
 
 class VoiceSessionController {
@@ -106,6 +108,23 @@ class VoiceSessionController {
     if (state_ != VoiceSessionState::streaming &&
         state_ != VoiceSessionState::ending) return false;
     return queue_.pop(frame);
+  }
+
+  bool peekFrame(BleVoiceAudioFrame &frame) const {
+    if (state_ != VoiceSessionState::streaming &&
+        state_ != VoiceSessionState::ending) return false;
+    return queue_.peek(frame);
+  }
+
+  bool commitFrame(uint32_t expectedSequence) {
+    BleVoiceAudioFrame frame;
+    if (!peekFrame(frame) ||
+        readVoiceU32(frame.bytes + 6) != expectedSequence) return false;
+    return queue_.commit();
+  }
+
+  void abort(VoiceSessionError error) {
+    if (error != VoiceSessionError::none) fail(error);
   }
 
   void end() {

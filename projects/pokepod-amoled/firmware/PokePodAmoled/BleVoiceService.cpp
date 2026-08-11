@@ -333,7 +333,13 @@ void BleVoiceService::updateDeviceInfo() {
       current.lastErrorCode + ",\"notifyAccepted\":" +
       current.notifyAccepted + ",\"notifyAttempts\":" +
       current.notifyAttempts + ",\"notifyFailures\":" +
-      current.notifyFailures + ",\"protocolVersion\":1," +
+      current.notifyFailures + ",\"notifyRetries\":" +
+      current.notifyRetries + ",\"notifyAborts\":" +
+      current.notifyAborts + ",\"disconnectedSessions\":" +
+      current.disconnectedSessions + ",\"controlNotifyAttempts\":" +
+      current.controlNotifyAttempts + ",\"controlNotifyAccepted\":" +
+      current.controlNotifyAccepted + ",\"controlNotifyFailures\":" +
+      current.controlNotifyFailures + ",\"protocolVersion\":1," +
       "\"queueOverflows\":" + current.queueOverflows +
       ",\"readyTimeouts\":" + current.readyTimeouts +
       ",\"sampleRateHz\":16000,\"sessionFailures\":" +
@@ -354,10 +360,18 @@ void BleVoiceService::handleNotifyStatus(bool acceptedByHost) {
   portENTER_CRITICAL(&qualityMux_);
   quality_.recordNotifyStatus(acceptedByHost);
   portEXIT_CRITICAL(&qualityMux_);
+  portENTER_CRITICAL(&notifyMux_);
+  if (audioNotifyPending_) {
+    audioNotifyAccepted_ = acceptedByHost;
+    audioNotifyResolved_ = true;
+  }
+  portEXIT_CRITICAL(&notifyMux_);
 }
 
 void BleVoiceService::handleControlNotifyStatus(bool acceptedByHost) {
-  handleNotifyStatus(acceptedByHost);
+  portENTER_CRITICAL(&qualityMux_);
+  quality_.recordControlNotifyStatus(acceptedByHost);
+  portEXIT_CRITICAL(&qualityMux_);
   controlNotifyAccepted_ = acceptedByHost;
   controlNotifyResolved_ = true;
 }
@@ -371,6 +385,7 @@ void BleVoiceService::poll(uint32_t nowMs) {
   if (!controller_.poll(nowMs) &&
       controller_.error() != reportedError_) {
     reportedError_ = controller_.error();
+    resetAudioNotify();
     portENTER_CRITICAL(&qualityMux_);
     quality_.recordSessionError(reportedError_);
     portEXIT_CRITICAL(&qualityMux_);
@@ -386,17 +401,65 @@ void BleVoiceService::poll(uint32_t nowMs) {
   if (!connected_ || !authenticated_ || audio_ == nullptr ||
       (state != VoiceSessionState::streaming &&
        state != VoiceSessionState::ending)) return;
-  BleVoiceAudioFrame frame;
-  uint8_t budget = 4;
-  while (budget-- > 0 && controller_.takeFrame(frame)) {
-    audio_->setValue(frame.bytes, sizeof(frame.bytes));
+  bool resolved = false;
+  bool accepted = false;
+  bool pending = false;
+  portENTER_CRITICAL(&notifyMux_);
+  resolved = audioNotifyResolved_;
+  accepted = audioNotifyAccepted_;
+  pending = audioNotifyPending_;
+  if (resolved) {
+    audioNotifyResolved_ = false;
+    audioNotifyPending_ = false;
+  }
+  portEXIT_CRITICAL(&notifyMux_);
+
+  if (resolved) audioNotify_.resolve(accepted, nowMs);
+  audioNotify_.poll(nowMs);
+  if (pending && !resolved &&
+      audioNotify_.snapshot().state != BleNotifyInFlightState::awaitingHost) {
+    portENTER_CRITICAL(&notifyMux_);
+    audioNotifyPending_ = false;
+    portEXIT_CRITICAL(&notifyMux_);
+  }
+
+  if (audioNotify_.accepted()) {
+    if (!controller_.commitFrame(audioNotify_.sequence())) {
+      failAudioNotify(VoiceSessionError::notifyFailed);
+      return;
+    }
+    resetAudioNotify();
+  } else if (audioNotify_.failed()) {
+    failAudioNotify(VoiceSessionError::notifyFailed);
+    return;
+  }
+
+  if (audioNotify_.snapshot().state == BleNotifyInFlightState::idle &&
+      controller_.peekFrame(audioInFlightFrame_)) {
+    audioNotify_.start(readVoiceU32(audioInFlightFrame_.bytes + 6), nowMs);
+  }
+
+  if (audioNotify_.canAttempt(nowMs) && audioNotify_.beginAttempt(nowMs)) {
+    if (audioNotify_.attempts() > 1) {
+      portENTER_CRITICAL(&qualityMux_);
+      quality_.recordNotifyRetry();
+      portEXIT_CRITICAL(&qualityMux_);
+    }
+    audio_->setValue(audioInFlightFrame_.bytes,
+                     sizeof(audioInFlightFrame_.bytes));
+    portENTER_CRITICAL(&notifyMux_);
+    audioNotifyPending_ = true;
+    audioNotifyResolved_ = false;
+    audioNotifyAccepted_ = false;
+    portEXIT_CRITICAL(&notifyMux_);
     portENTER_CRITICAL(&qualityMux_);
     quality_.recordNotifyAttempt();
     portEXIT_CRITICAL(&qualityMux_);
     audio_->notify();
   }
   if (controller_.state() == VoiceSessionState::ending &&
-      controller_.queuedFrames() == 0) {
+      controller_.queuedFrames() == 0 &&
+      audioNotify_.snapshot().state == BleNotifyInFlightState::idle) {
     const uint32_t sessionId = controller_.sessionId();
     if (notifyControl(BleVoiceEventType::sessionEnd, sessionId)) {
       controller_.markSessionEndSent(nowMs);
@@ -433,6 +496,7 @@ void BleVoiceService::cancelPairingMode() {
 
 void BleVoiceService::forgetMac() {
   controller_.complete();
+  resetAudioNotify();
   forgetAllBonds();
   bonded_ = false;
   peerPolicy_.forgotBonds();
@@ -465,6 +529,7 @@ void BleVoiceService::resumeAfterIdleSleep() {
 void BleVoiceService::prepareForDeepSleep() {
   idlePaused_ = true;
   controller_.complete();
+  resetAudioNotify();
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   if (advertising != nullptr) advertising->stop();
   if (connected_ && server_ != nullptr) {
@@ -481,11 +546,13 @@ bool BleVoiceService::startSession(uint32_t sessionId, uint32_t nowMs,
     return false;
   }
   requestConnectionPowerMode(BleConnectionPowerMode::voice);
+  resetAudioNotify();
   reportedError_ = VoiceSessionError::none;
   if (notifyControl(BleVoiceEventType::sessionStart, sessionId, mtu_)) {
     return true;
   }
   controller_.complete();
+  resetAudioNotify();
   return false;
 }
 
@@ -535,8 +602,17 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
     return;
   }
   const bool startPairing = connectionPolicy_.consumePairingAfterDisconnect();
-  controller_.complete();
-  reportedError_ = VoiceSessionError::none;
+  if (controller_.active()) {
+    controller_.abort(VoiceSessionError::disconnected);
+    reportedError_ = VoiceSessionError::disconnected;
+    portENTER_CRITICAL(&qualityMux_);
+    quality_.recordSessionError(reportedError_);
+    portEXIT_CRITICAL(&qualityMux_);
+  } else {
+    controller_.complete();
+    reportedError_ = VoiceSessionError::none;
+  }
+  resetAudioNotify();
   connected_ = authenticated_ = appReady_ = false;
   peerPolicy_.disconnected();
   mtu_ = 23;
@@ -612,10 +688,12 @@ void BleVoiceService::handleCommand(uint16_t connectionId,
     if (bleVoiceCommandTargetsSession(command.sessionId,
                                       controller_.sessionId())) {
       controller_.complete();
+      resetAudioNotify();
     }
   } else if (type == BleVoiceCommandType::stopAck) {
     if (controller_.acceptsStopAck(command.sessionId)) {
       controller_.complete();
+      resetAudioNotify();
     }
   } else if (type == BleVoiceCommandType::ping) {
     notifyControl(BleVoiceEventType::status, command.sessionId,
@@ -679,12 +757,34 @@ bool BleVoiceService::notifyControl(BleVoiceEventType type, uint32_t sessionId,
   controlNotifyResolved_ = false;
   controlNotifyAccepted_ = false;
   portENTER_CRITICAL(&qualityMux_);
-  quality_.recordNotifyAttempt();
+  quality_.recordControlNotifyAttempt();
   portEXIT_CRITICAL(&qualityMux_);
   event_->notify();
   // Arduino-ESP32 reports the NimBLE host queue result synchronously through
   // onStatus. This is host acceptance only; it is not an air-delivery ACK.
   return controlNotifyResolved_ && controlNotifyAccepted_;
+}
+
+void BleVoiceService::resetAudioNotify() {
+  audioNotify_.reset();
+  memset(&audioInFlightFrame_, 0, sizeof(audioInFlightFrame_));
+  portENTER_CRITICAL(&notifyMux_);
+  audioNotifyPending_ = false;
+  audioNotifyResolved_ = false;
+  audioNotifyAccepted_ = false;
+  portEXIT_CRITICAL(&notifyMux_);
+}
+
+void BleVoiceService::failAudioNotify(VoiceSessionError error) {
+  resetAudioNotify();
+  controller_.abort(error);
+  reportedError_ = error;
+  portENTER_CRITICAL(&qualityMux_);
+  quality_.recordSessionError(error);
+  portEXIT_CRITICAL(&qualityMux_);
+  updateDeviceInfo();
+  notifyControl(BleVoiceEventType::error, controller_.sessionId(),
+                static_cast<uint16_t>(error));
 }
 
 void BleVoiceService::restartAdvertising() {

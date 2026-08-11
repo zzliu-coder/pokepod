@@ -17,6 +17,7 @@
 #include "BleSingleConnectionPolicy.h"
 #include "BleVoiceProtocol.h"
 #include "BleVoiceQuality.h"
+#include "BleNotifyReliability.h"
 #include "VoiceSessionController.h"
 
 namespace pokepod {
@@ -86,6 +87,8 @@ class BleVoiceService {
   void activatePairingMode(uint32_t nowMs);
   void updateDeviceInfo();
   void requestConnectionPowerMode(BleConnectionPowerMode mode);
+  void resetAudioNotify();
+  void failAudioNotify(VoiceSessionError error);
 
   BLEServer *server_ = nullptr;
   BLECharacteristic *info_ = nullptr;
@@ -96,6 +99,7 @@ class BleVoiceService {
   BleSingleConnectionPolicy connectionPolicy_;
   VoiceSessionController controller_;
   mutable portMUX_TYPE qualityMux_ = portMUX_INITIALIZER_UNLOCKED;
+  mutable portMUX_TYPE notifyMux_ = portMUX_INITIALIZER_UNLOCKED;
   BleVoiceQualityCounters quality_;
   Print *log_ = nullptr;
   String deviceId_;
@@ -111,6 +115,11 @@ class BleVoiceService {
   uint32_t pairingUntilMs_ = 0;
   volatile bool controlNotifyResolved_ = false;
   volatile bool controlNotifyAccepted_ = false;
+  volatile bool audioNotifyResolved_ = false;
+  volatile bool audioNotifyAccepted_ = false;
+  volatile bool audioNotifyPending_ = false;
+  BleNotifyInFlight audioNotify_;
+  BleVoiceAudioFrame audioInFlightFrame_;
   VoiceSessionError reportedError_ = VoiceSessionError::none;
   int batteryPercent_ = -1;
   BleConnectionPowerMode connectionPowerMode_ =

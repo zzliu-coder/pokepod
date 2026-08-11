@@ -156,8 +156,18 @@ class BleVoiceFrameQueue {
   }
 
   bool pop(BleVoiceAudioFrame &frame) {
+    if (!peek(frame)) return false;
+    return commit();
+  }
+
+  bool peek(BleVoiceAudioFrame &frame) const {
     if (count_ == 0) return false;
     frame = frames_[head_];
+    return true;
+  }
+
+  bool commit() {
+    if (count_ == 0) return false;
     head_ = (head_ + 1) % Capacity;
     --count_;
     return true;
