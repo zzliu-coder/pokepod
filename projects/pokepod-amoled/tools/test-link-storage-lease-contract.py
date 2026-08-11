@@ -44,6 +44,11 @@ assert "StorageAccess::read, 1000" not in CPP
 assert "StorageAccess::mutation, 1000" not in CPP
 assert "return transferGate_ == nullptr ? 1000U : 0U" in CPP
 
+exists = dict(methods(CPP))["storageExists"]
+assert "storageIoTimeout()" in exists
+assert "1000" not in exists
+assert exists.count("transferPermitted()") >= 2
+
 for name in ("handleImmediate", "folderOperation", "executeCommand"):
     text = dict(methods(CPP))[name]
     assert "fs_->" not in text, f"command path bypasses storage helper: {name}"

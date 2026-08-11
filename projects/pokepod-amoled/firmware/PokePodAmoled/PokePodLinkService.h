@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "LinkFrame.h"
+#include "LinkRecordingStop.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
@@ -147,7 +148,9 @@ class PokePodLinkService {
   void onFrameSent(TxCompletion completion);
   void releaseRequestLeaseNow();
   bool drainLinkCapture();
-  bool stopLinkRecording(bool commit);
+  bool requestLinkRecordingStop(uint32_t requestId, bool commit,
+                                bool respond);
+  void advanceLinkRecordingStop();
   void rememberCompleted(uint32_t requestId);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
@@ -244,6 +247,7 @@ class PokePodLinkService {
   bool commandCleanupPending_ = false;
   uint32_t commandCleanupRequestId_ = 0;
   bool linkOwnedRecording_ = false;
+  LinkRecordingStop linkRecordingStop_;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};

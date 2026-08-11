@@ -224,7 +224,11 @@ void PokePodLinkService::disconnect() {
   manifestResponseJson_ = "";
   manifestFailureRequestId_ = 0;
   manifestFailureMessage_ = "";
-  if (linkOwnedRecording_) stopLinkRecording(false);
+  if (linkRecordingStop_.active()) {
+    linkRecordingStop_.suppressResponseAndAbort();
+  } else if (linkOwnedRecording_) {
+    (void)requestLinkRecordingStop(0, false, false);
+  }
   abortManifest();
   abortOutgoing();
   sessionActive_ = false;
@@ -240,6 +244,7 @@ void PokePodLinkService::disconnect() {
 }
 
 void PokePodLinkService::pollDeferredCleanup() {
+  advanceLinkRecordingStop();
   if (incomingCleanupPending_) cleanupIncomingStorage();
   if (outgoingCleanupPending_) cleanupOutgoingStorage();
   if (manifestCleanupPending_) cleanupManifestStorage();
@@ -262,8 +267,9 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     finishPendingManifestFailure();
     return;
   }
-  if (linkOwnedRecording_ && !drainLinkCapture()) {
-    stopLinkRecording(false);
+  if (linkOwnedRecording_ && !linkRecordingStop_.active() &&
+      !drainLinkCapture()) {
+    (void)requestLinkRecordingStop(0, false, false);
   }
   if (!transferPermitted()) {
     disconnect();
@@ -501,6 +507,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   if (acquireRequestLease(requestId)) handleImmediate(requestId, root);
   cJSON_Delete(root);
   if (manifestRequestId_ == requestId && manifestStepper_.active()) return;
+  if (linkRecordingStop_.ownsRequest(requestId)) return;
   rememberCompleted(requestId);
   if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
@@ -1014,19 +1021,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendError(requestId, "recording is not active");
     }
     else {
-      const bool committed = stopLinkRecording(true);
-      if (committed) {
-        const bool refreshQueued = library_->requestScan();
-        if (refreshQueued) {
-          sendOk(requestId,
-                 "\"recording\":false,\"queued\":true,"
-                 "\"indexRefresh\":\"queued\"");
-        } else {
-          sendError(requestId, "recording committed but index refresh failed");
-        }
-      } else {
-        sendError(requestId, "recording commit failed");
-      }
+      (void)requestLinkRecordingStop(requestId, true, true);
     }
   } else if (strcmp(operation, "reboot") == 0) {
     sendOk(requestId);
@@ -3058,24 +3053,73 @@ bool PokePodLinkService::drainLinkCapture() {
   return ok;
 }
 
-bool PokePodLinkService::stopLinkRecording(bool commit) {
-  if (!linkOwnedRecording_) return false;
-  const bool stopped = captureRuntime_ != nullptr &&
-      captureRuntime_->stop(*log_);
-  const bool drained = drainLinkCapture();
-  const bool complete = commit && stopped && drained &&
-      captureRuntime_ != nullptr && !captureRuntime_->incomplete();
-  bool recorderFinished = false;
-  if (recorder_ != nullptr && recorder_->recording()) {
-    recorderFinished = complete
-        ? recorder_->stop(*log_, RecorderStopReason::user)
-        : recorder_->abortCapture(*log_);
+bool PokePodLinkService::requestLinkRecordingStop(uint32_t requestId,
+                                                   bool commit,
+                                                   bool respond) {
+  if (!linkOwnedRecording_ || captureRuntime_ == nullptr ||
+      recorder_ == nullptr || captureRouter_ == nullptr) return false;
+  if (linkRecordingStop_.active()) {
+    if (!respond) linkRecordingStop_.suppressResponseAndAbort();
+    return false;
   }
-  if (captureRouter_ != nullptr) {
-    captureRouter_->release(AudioCaptureOwner::localCapsule);
+  if (!linkRecordingStop_.begin(requestId, commit, respond)) return false;
+  // stop() may time out while the task is still completing its bounded I2S
+  // read.  Ownership remains here; pollDeferredCleanup observes the eventual
+  // stopped fact even if PokePodApp consumed the semaphore first.
+  (void)captureRuntime_->stop(*log_);
+  return true;
+}
+
+void PokePodLinkService::advanceLinkRecordingStop() {
+  if (!linkRecordingStop_.active() || !linkOwnedRecording_ ||
+      captureRuntime_ == nullptr || recorder_ == nullptr ||
+      captureRouter_ == nullptr) return;
+
+  if (linkRecordingStop_.awaitsCapture()) {
+    if (captureRuntime_->running()) {
+      if (captureRuntime_->finalizePending()) {
+        (void)captureRuntime_->pollFinalize(*log_);
+      }
+      if (captureRuntime_->running()) return;
+    }
+    const bool drained = drainLinkCapture();
+    const bool complete = linkRecordingStop_.commitRequested() && drained &&
+        !captureRuntime_->incomplete();
+    bool recorderSucceeded = false;
+    if (recorder_->recording()) {
+      recorderSucceeded = complete
+          ? recorder_->stop(*log_, RecorderStopReason::user)
+          : recorder_->abortCapture(*log_);
+    }
+    linkRecordingStop_.captureFinalized(complete && recorderSucceeded);
   }
+
+  if (linkRecordingStop_.awaitsRecorder() && recorder_->cleanupPending()) {
+    (void)recorder_->pollCleanup(*log_);
+    if (recorder_->cleanupPending()) return;
+  }
+  if (!linkRecordingStop_.awaitsRecorder()) return;
+
+  const uint32_t requestId = linkRecordingStop_.requestId();
+  const bool respond = linkRecordingStop_.shouldRespond() && sessionActive_ &&
+      transferPermitted();
+  const bool committed = linkRecordingStop_.recorderSucceeded();
+  captureRouter_->release(AudioCaptureOwner::localCapsule);
   linkOwnedRecording_ = false;
-  return complete && recorderFinished;
+  linkRecordingStop_.finish();
+
+  if (!respond || requestId == 0) return;
+  if (committed && library_->requestScan()) {
+    sendOk(requestId,
+           "\"recording\":false,\"queued\":true,"
+           "\"indexRefresh\":\"queued\"");
+  } else if (committed) {
+    sendError(requestId, "recording committed but index refresh failed");
+  } else {
+    sendError(requestId, "recording commit failed");
+  }
+  rememberCompleted(requestId);
+  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 bool PokePodLinkService::transferPermitted() const {
@@ -3114,10 +3158,12 @@ bool PokePodLinkService::ensureDirectoryTree(const String &path) {
 
 bool PokePodLinkService::storageExists(const String &path,
                                        StorageAccess access) const {
-  if (fs_ == nullptr) return false;
+  if (fs_ == nullptr || !transferPermitted()) return false;
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      storageOwner(), access, 1000);
-  return lease && fs_->exists(path);
+      storageOwner(), access, storageIoTimeout());
+  if (!lease) return false;
+  const bool exists = fs_->exists(path);
+  return transferPermitted() && exists;
 }
 
 bool PokePodLinkService::storageRename(const String &source,
