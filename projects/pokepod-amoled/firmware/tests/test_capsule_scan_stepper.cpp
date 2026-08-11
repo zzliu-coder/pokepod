@@ -232,11 +232,65 @@ void runProductionCancelAndCapacityFailure() {
   // rebuild and the previously published 64-entry index remains intact.
   seedFixture(360, 153, 512, state);
   assert(library.startScan({1, 1024}));
+  // A request arriving during the doomed generation remains sticky. The old
+  // index remains visible, and pollScan() starts the requested follow-up only
+  // on a later turn.
+  assert(library.requestScan({1, 512}));
   finishScan(library);
   assert(library.scanState() == CapsuleScanState::failed);
+  assert(library.scanRequested());
   assert(library.indexOverflow());
   assert(library.indexedCount() == original.size());
   assert(library.find(original.front().id.c_str()) != nullptr);
+  assert(library.pollScan() == CapsuleScanState::running);
+  assert(!library.scanRequested());
+  assert(library.scanSlices() == 0);
+  library.cancelScan();
+  assert(library.pollScan() == CapsuleScanState::cancelled);
+  assert(library.indexedCount() == original.size());
+}
+
+void runProductionQueuedRescanGate() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  const uint32_t bootScans = library.fullScanCount();
+  seedFixture(0, 12, 11, state);
+
+  // Link command completion requests the scan while still owning its mutation
+  // reservation. Acceptance is independent of immediate start availability.
+  StorageReservation mutation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 0);
+  assert(mutation);
+  assert(library.requestScan({1, 1024}));
+  assert(library.pollScan() != CapsuleScanState::running);
+  assert(library.scanRequested());
+  mutation.release();
+
+  // Starting consumes this turn without consuming a filesystem slice.
+  assert(library.pollScan() == CapsuleScanState::running);
+  assert(library.scanSlices() == 0);
+  assert(!library.scanRequested());
+
+  // Recorder and Link may both request while the first generation is active.
+  // They coalesce into exactly one additional full rebuild and are not lost.
+  assert(library.requestScan({1, 1024}));
+  assert(library.requestScan({1, 512}));
+  assert(library.scanRequested());
+  while (library.scanActive()) library.pollScan();
+  assert(library.scanState() == CapsuleScanState::completed);
+  assert(library.fullScanCount() == bootScans + 1);
+  assert(library.scanRequested());
+
+  // The completed turn did not also start the pending generation.
+  assert(library.pollScan() == CapsuleScanState::running);
+  assert(library.scanSlices() == 0);
+  assert(!library.scanRequested());
+  while (library.scanActive()) library.pollScan();
+  assert(library.fullScanCount() == bootScans + 2);
+  assert(library.indexedCount() == 12);
 }
 
 void runProductionHeapSoak() {
@@ -269,6 +323,7 @@ void runProductionHeapSoak() {
 int main() {
   runProductionLargeFixture();
   runProductionCancelAndCapacityFailure();
+  runProductionQueuedRescanGate();
   runProductionHeapSoak();
   assert(fake_heap_caps::liveBytes() == 0);
   return 0;

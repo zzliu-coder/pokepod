@@ -6,10 +6,14 @@ library = (root / "firmware/PokePodAmoled/CapsuleLibrary.cpp").read_text()
 header = (root / "firmware/PokePodAmoled/CapsuleLibrary.h").read_text()
 coordinator = (root / "firmware/PokePodAmoled/StorageCoordinator.h").read_text()
 host_test = (root / "firmware/tests/test_capsule_scan_stepper.cpp").read_text()
+app = (root / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
+link = (root / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 
 required = {
     "public start": "bool startScan(",
     "public step": "CapsuleScanState stepScan()",
+    "sticky request": "bool requestScan(",
+    "loop poll": "CapsuleScanState pollScan()",
     "public cancel": "void cancelScan()",
     "public hydrate": "bool hydrate(",
     "dedicated owner": "capsuleScan",
@@ -39,8 +43,23 @@ for forbidden in ("AtomicFixtureScanner", "struct FixtureScanner"):
 for required_test_path in (
     "CapsuleLibrary library", "library.startScan", "library.stepScan",
     "library.hydrate", "seedFixture(0, 360", "cycle < 10000",
+    "library.requestScan", "library.pollScan", "library.scanRequested",
+    "StorageOwner::capsuleTransaction, StorageAccess::mutation",
 ):
     if required_test_path not in host_test:
         raise SystemExit("FAIL host test misses production path: " + required_test_path)
+
+if app.count("capsuleLibrary.pollScan()") != 1:
+    raise SystemExit("FAIL app must poll the capsule scan exactly once per loop")
+if "capsuleLibrary.scan()" in app:
+    raise SystemExit("FAIL app runtime still invokes synchronous capsule scan")
+if "capsuleLibrary.requestScan()" not in app:
+    raise SystemExit("FAIL recorder fallback does not queue an async refresh")
+if "library_->scan()" in link:
+    raise SystemExit("FAIL Link runtime still invokes synchronous capsule scan")
+if link.count("library_->requestScan()") < 3:
+    raise SystemExit("FAIL Link stop/rescan/command completion refresh is incomplete")
+if 'message = success ? "queued" : "rescan request failed"' not in link:
+    raise SystemExit("FAIL Link rescan response claims synchronous completion")
 
 print("PASS production capsule scan service contract")

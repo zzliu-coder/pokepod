@@ -111,11 +111,46 @@ bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
 }
 
 bool CapsuleLibrary::scan() {
-  // Compatibility path for boot and mutation recovery. Product UI/Link code
-  // uses startScan()+stepScan() so each loop turn performs one bounded slice.
+  // The only product caller is begin(): boot must publish an initial index
+  // before any consumer can safely query it. Runtime paths use requestScan()
+  // and pollScan().
   if (!startScanWithOwner({}, StorageOwner::capsuleTransaction)) return false;
   while (scanStepper_.active()) stepScan();
   return scanStepper_.state() == CapsuleScanState::completed;
+}
+
+bool CapsuleLibrary::requestScan(const CapsuleScanBudget &budget) {
+  if (fs_ == nullptr || locators_ == nullptr || scanLocators_ == nullptr) {
+    return false;
+  }
+  CapsuleScanBudget normalized = budget;
+  if (normalized.directoryEntries == 0) normalized.directoryEntries = 1;
+  if (normalized.readBytes == 0) normalized.readBytes = 512;
+  if (!scanRequested_) {
+    requestedScanBudget_ = normalized;
+  } else {
+    // Multiple requesters share one sticky generation. Use the tighter
+    // budget so merging requests can never make a loop turn more expensive.
+    if (normalized.directoryEntries < requestedScanBudget_.directoryEntries) {
+      requestedScanBudget_.directoryEntries = normalized.directoryEntries;
+    }
+    if (normalized.readBytes < requestedScanBudget_.readBytes) {
+      requestedScanBudget_.readBytes = normalized.readBytes;
+    }
+  }
+  scanRequested_ = true;
+  return true;
+}
+
+CapsuleScanState CapsuleLibrary::pollScan() {
+  // One poll performs one action: either advance one bounded slice or attempt
+  // to start one requested generation. A generation completed in this call is
+  // never followed immediately by another start.
+  if (scanStepper_.active()) return stepScan();
+  if (!scanRequested_) return scanStepper_.state();
+  if (!startScan(requestedScanBudget_)) return scanStepper_.state();
+  scanRequested_ = false;
+  return scanStepper_.state();
 }
 
 bool CapsuleLibrary::startScan(const CapsuleScanBudget &budget) {
@@ -764,7 +799,7 @@ CapsuleBatchResult CapsuleLibrary::purge(const std::vector<String> &ids) {
       result.rolledBackFully = rollback.fullyRolledBack();
       result.changed = rollback.failed;
       if (result.rolledBackFully) fs_->rmdir(transaction);
-      scan();
+      (void)requestScan();
       return result;
     }
     staged.push_back(id);
@@ -904,14 +939,14 @@ bool CapsuleLibrary::refreshRecord(const String &id, const String &directory,
   if (!readRecord(directory, folder, refreshed) ||
       !refreshed.id.equalsIgnoreCase(id)) {
     ++refreshFallbackCount_;
-    return scan() && find(id) != nullptr;
+    return requestScan();
   }
   const size_t index = recordIndex(id);
   if (index < locatorCount_) {
     replaceIndexedRecord(index, refreshed);
   } else if (!appendIndexedRecord(refreshed)) {
     ++refreshFallbackCount_;
-    return scan();
+    return requestScan();
   }
   ++incrementalRefreshCount_;
   requestPublish();
@@ -922,13 +957,13 @@ bool CapsuleLibrary::refreshExisting(const String &id) {
   const size_t index = recordIndex(id);
   if (index >= locatorCount_) {
     ++refreshFallbackCount_;
-    return scan();
+    return requestScan();
   }
   String directory;
   String folder;
   if (!resolveLocator(locators_[index], directory, folder)) {
     ++refreshFallbackCount_;
-    return scan() && find(id) != nullptr;
+    return requestScan();
   }
   return refreshRecord(id, directory, folder);
 }

@@ -77,9 +77,16 @@ class CapsuleLibrary {
 
   bool begin(fs::FS &fs, Print &log);
   bool scan();
+  // Queue a full rebuild without doing filesystem work in the caller. The
+  // request is sticky: if a scan is running, or a mutation currently prevents
+  // a new read reservation, pollScan() will retry it on a later loop turn.
+  bool requestScan(const CapsuleScanBudget &budget = {});
+  CapsuleScanState pollScan();
   bool startScan(const CapsuleScanBudget &budget = {});
   CapsuleScanState stepScan();
   void cancelScan();
+  bool scanRequested() const { return scanRequested_; }
+  bool scanActive() const { return scanStepper_.active(); }
   CapsuleScanState scanState() const { return scanStepper_.state(); }
   uint32_t scanSlices() const { return scanStepper_.slices(); }
   size_t maximumScanEntriesPerSlice() const {
@@ -245,6 +252,8 @@ class CapsuleLibrary {
   bool scanCancelRequested_ = false;
   bool scanFailureRequested_ = false;
   bool scanIndexOverflow_ = false;
+  bool scanRequested_ = false;
+  CapsuleScanBudget requestedScanBudget_{};
   int64_t scanStartedUs_ = 0;
   StorageOwner scanOwner_ = StorageOwner::capsuleScan;
   uint32_t maximumScanStepUs_ = 0;

@@ -87,6 +87,7 @@ uint32_t lastScrollFrameMs = 0;
 uint32_t lastSensorMs = 0;
 uint32_t bootPressedAtMs = 0;
 uint32_t lastNetworkTimeSyncRevision = 0;
+uint32_t lastCapsuleLibraryRevision = 0;
 bool ignoreTouchUntilRelease = false;
 bool lastUsbHostConnected = false;
 bool lastVbusPresent = false;
@@ -140,7 +141,8 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
   input.audioActive = audio.active() || recorder.recording() || audio.playing();
   const bool linkLeaseActive = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy() ||
-      wirelessSync.openWindow();
+      wirelessSync.openWindow() || capsuleLibrary.scanActive() ||
+      capsuleLibrary.scanRequested();
   const PowerFacts facts = {
       usb.tinyUsbMounted(),
       usb.cdcSessionActive(),
@@ -446,14 +448,21 @@ bool consumeRecorderTerminal(bool notifyUser) {
   if (!recorder.takeTerminalResult(outcome)) return false;
   const bool completed = outcome.success();
   bool indexed = completed;
+  bool refreshQueued = false;
   if (completed) {
-    indexed = capsuleLibrary.includeInboxCapsule(recorder.capsuleId()) ||
-        capsuleLibrary.scan();
+    if (!capsuleLibrary.scanActive() && !capsuleLibrary.scanRequested()) {
+      indexed = capsuleLibrary.includeInboxCapsule(recorder.capsuleId());
+    } else {
+      indexed = false;
+    }
+    if (!indexed) refreshQueued = capsuleLibrary.requestScan();
   }
   if (notifyUser) {
     const char *message = "录音失败，内容未提交";
     if (completed) {
-      message = indexed ? "胶囊已进入转写队列" : "胶囊已保存，列表刷新失败";
+      message = indexed ? "胶囊已进入转写队列"
+                        : (refreshQueued ? "胶囊已保存，列表刷新中"
+                                         : "胶囊已保存，列表刷新失败");
     } else if (outcome.failureStage ==
                RecorderFailureStage::insufficientSpace) {
       message = "存储空间不足";
@@ -1040,6 +1049,7 @@ void setup() {
   }
   capabilities.record(DeviceCapability::capsuleLibrary,
                       capsuleLibraryStarted);
+  lastCapsuleLibraryRevision = capsuleLibrary.revision();
   capabilities.record(DeviceCapability::recording,
                       recorderStarted && captureTaskStarted);
   capabilities.record(DeviceCapability::transcription,
@@ -1223,10 +1233,20 @@ void loop() {
         static_cast<unsigned long>(wifi.connectionGeneration()),
         rtcUpdated ? "true" : "false");
   }
+  // One application turn performs at most one scan action. Starting is also
+  // an action, so the first filesystem slice happens on the next turn. An ASR
+  // job retains priority until its result has committed.
+  if (!tencentWorker.working()) capsuleLibrary.pollScan();
+  const uint32_t capsuleRevision = capsuleLibrary.revision();
+  if (capsuleRevision != lastCapsuleLibraryRevision) {
+    lastCapsuleLibraryRevision = capsuleRevision;
+    dashboard.invalidate();
+  }
   tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                      transcriptionDispatchBusy(recorder.recording(),
                                                linkService.maintenanceActive() ||
-                                                   wirelessSync.linkBusy()) ||
+                                                   wirelessSync.linkBusy() ||
+                                                   capsuleLibrary.scanActive()) ||
                          lowBatteryShutdown.critical(),
                      board.status().charging);
   PowerInputs finalPowerInputs = currentPowerInputs(now);

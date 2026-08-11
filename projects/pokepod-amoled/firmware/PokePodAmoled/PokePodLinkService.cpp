@@ -996,8 +996,14 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     else {
       const bool committed = stopLinkRecording(true);
       if (committed) {
-        library_->scan();
-        sendOk(requestId, "\"recording\":false,\"queued\":true");
+        const bool refreshQueued = library_->requestScan();
+        if (refreshQueued) {
+          sendOk(requestId,
+                 "\"recording\":false,\"queued\":true,"
+                 "\"indexRefresh\":\"queued\"");
+        } else {
+          sendError(requestId, "recording committed but index refresh failed");
+        }
       } else {
         sendError(requestId, "recording commit failed");
       }
@@ -2075,8 +2081,8 @@ bool PokePodLinkService::executeCommand(const String &path,
     if (operation == nullptr) {
       message = "command operation is missing";
     } else if (strcmp(operation, "rescan") == 0) {
-      success = library_->scan();
-      message = success ? "committed" : "rescan failed";
+      success = library_->requestScan();
+      message = success ? "queued" : "rescan request failed";
     } else {
       // The maintenance lifecycle is persisted in the command result directory.
       // Mutating commands are implemented by the shared capsule library below;
@@ -2291,7 +2297,10 @@ bool PokePodLinkService::executeCommand(const String &path,
   const bool persisted = writeTextAtomic(resultPath, printed(result) + "\n");
   cJSON_Delete(result);
   cJSON_Delete(root);
-  library_->scan();
+  // executeCommand() runs under the Link mutation reservation. Queueing is
+  // intentionally accepted here; pollScan() starts only after that owner has
+  // released the reservation.
+  (void)library_->requestScan();
   if (persisted && completedMaintenance) {
     maintenanceCompletion_.endResultPersisted(transactionId.c_str());
   }
