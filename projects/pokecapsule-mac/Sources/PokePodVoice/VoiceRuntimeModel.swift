@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import Foundation
 import PokePodVoiceCore
 import ServiceManagement
@@ -39,6 +40,7 @@ final class VoiceRuntimeModel: ObservableObject {
     @Published private(set) var detail = "正在检查运行环境"
     @Published private(set) var bluetoothReady = false
     @Published private(set) var blackHoleReady = false
+    @Published private(set) var blackHoleInstallInProgress = false
     @Published private(set) var accessibilityReady = false
     @Published private(set) var connectionQuality = VoiceLinkQualityFormatter.summary(
         nil, context: .disconnected)
@@ -120,22 +122,19 @@ final class VoiceRuntimeModel: ObservableObject {
     }
 
     func openBlackHoleInstaller() {
-        if let package = localBlackHolePackage() {
-            let installer = URL(fileURLWithPath: "/System/Library/CoreServices/Installer.app")
-            NSWorkspace.shared.open(
-                [package],
-                withApplicationAt: installer,
-                configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
-                    guard let error else { return }
-                    Task { @MainActor in
-                        self?.showRecoverable("无法打开本机安装包：\(error.localizedDescription)")
-                    }
-                }
-            detail = "已打开本机 BlackHole 安装包；在安装器中确认后会自动刷新状态"
-            return
+        guard !blackHoleInstallInProgress else { return }
+        blackHoleInstallInProgress = true
+        detail = "正在准备 BlackHole 2ch 安装包"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { blackHoleInstallInProgress = false }
+            do {
+                let package = try await self.obtainBlackHolePackage()
+                self.openSystemInstaller(package)
+            } catch {
+                self.showRecoverable("BlackHole 自动下载失败：\(error.localizedDescription)")
+            }
         }
-        NSWorkspace.shared.open(BlackHoleInstallPolicy.officialReleasesURL)
-        detail = "未找到本机 BlackHole .pkg，已打开官方 Releases；下载后再次点击“安装”"
     }
 
     func forgetPokePod() {
@@ -484,6 +483,98 @@ final class VoiceRuntimeModel: ObservableObject {
             }
         }
         return BlackHoleInstallPolicy.selectPackage(from: candidates)
+    }
+
+    private func obtainBlackHolePackage() async throws -> URL {
+        if let local = localBlackHolePackage() { return local }
+
+        var request = URLRequest(url: BlackHoleInstallPolicy.latestReleaseAPIURL)
+        request.setValue("PokePodVoice/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw BlackHoleDownloadError.releaseLookupFailed
+        }
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        let candidates = release.assets.compactMap { asset -> BlackHoleInstallPolicy.ReleaseAsset? in
+            guard let url = URL(string: asset.browserDownloadURL) else { return nil }
+            return .init(name: asset.name, downloadURL: url, digest: asset.digest)
+        }
+        guard let asset = BlackHoleInstallPolicy.selectReleaseAsset(from: candidates) else {
+            throw BlackHoleDownloadError.twoChannelAssetMissing
+        }
+
+        var downloadRequest = URLRequest(url: asset.downloadURL)
+        downloadRequest.setValue("PokePodVoice/1.0", forHTTPHeaderField: "User-Agent")
+        let (temporaryURL, downloadResponse) = try await URLSession.shared.download(for: downloadRequest)
+        guard let http = downloadResponse as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw BlackHoleDownloadError.downloadFailed
+        }
+        let directory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask)[0]
+            .appendingPathComponent("PokePod Voice/Installers", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(asset.name)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+
+        if let digest = asset.digest?.lowercased(), digest.hasPrefix("sha256:") {
+            let expected = String(digest.dropFirst("sha256:".count))
+            let actual = SHA256.hash(data: try Data(contentsOf: destination))
+                .map { String(format: "%02x", $0) }.joined()
+            guard actual == expected else {
+                try? FileManager.default.removeItem(at: destination)
+                throw BlackHoleDownloadError.digestMismatch
+            }
+        }
+        return destination
+    }
+
+    private func openSystemInstaller(_ package: URL) {
+        let installer = URL(fileURLWithPath: "/System/Library/CoreServices/Installer.app")
+        NSWorkspace.shared.open(
+            [package],
+            withApplicationAt: installer,
+            configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                guard let error else { return }
+                Task { @MainActor in
+                    self?.showRecoverable("无法打开系统安装器：\(error.localizedDescription)")
+                }
+            }
+        detail = "已打开系统安装器；确认管理员授权后会自动刷新 BlackHole 状态"
+    }
+
+    private struct GitHubRelease: Decodable {
+        let assets: [GitHubAsset]
+    }
+
+    private struct GitHubAsset: Decodable {
+        let name: String
+        let browserDownloadURL: String
+        let digest: String?
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case browserDownloadURL = "browser_download_url"
+            case digest
+        }
+    }
+
+    private enum BlackHoleDownloadError: LocalizedError {
+        case releaseLookupFailed
+        case twoChannelAssetMissing
+        case downloadFailed
+        case digestMismatch
+
+        var errorDescription: String? {
+            switch self {
+            case .releaseLookupFailed: return "无法读取官方最新版本信息"
+            case .twoChannelAssetMissing: return "官方版本没有找到 BlackHole 2ch 安装包"
+            case .downloadFailed: return "官方安装包下载失败"
+            case .digestMismatch: return "安装包校验失败，已删除不完整文件"
+            }
+        }
     }
 
     private var monotonicNow: TimeInterval { ProcessInfo.processInfo.systemUptime }

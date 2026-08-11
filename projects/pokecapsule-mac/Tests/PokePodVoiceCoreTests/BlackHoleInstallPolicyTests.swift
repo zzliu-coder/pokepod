@@ -28,5 +28,26 @@ final class BlackHoleInstallPolicyTests: XCTestCase {
         XCTAssertEqual(
             BlackHoleInstallPolicy.officialReleasesURL.absoluteString,
             "https://github.com/ExistentialAudio/BlackHole/releases/latest")
+        XCTAssertEqual(
+            BlackHoleInstallPolicy.latestReleaseAPIURL.absoluteString,
+            "https://api.github.com/repos/ExistentialAudio/BlackHole/releases/latest")
+    }
+
+    func testSelectsOnlyBlackHoleTwoChannelReleaseAsset() throws {
+        let assets = [
+            BlackHoleInstallPolicy.ReleaseAsset(
+                name: "BlackHole16ch-0.6.0.pkg",
+                downloadURL: try XCTUnwrap(URL(string: "https://example.invalid/16.pkg"))),
+            BlackHoleInstallPolicy.ReleaseAsset(
+                name: "BlackHole2ch-0.6.0.zip",
+                downloadURL: try XCTUnwrap(URL(string: "https://example.invalid/zip"))),
+            BlackHoleInstallPolicy.ReleaseAsset(
+                name: "BlackHole2ch-0.6.0.pkg",
+                downloadURL: try XCTUnwrap(URL(string: "https://example.invalid/2.pkg")),
+                digest: "sha256:abc")
+        ]
+        XCTAssertEqual(
+            BlackHoleInstallPolicy.selectReleaseAsset(from: assets)?.name,
+            "BlackHole2ch-0.6.0.pkg")
     }
 }

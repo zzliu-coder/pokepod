@@ -42,7 +42,11 @@ private struct VoiceMenuView: View {
             readinessRow("蓝牙", ready: model.bluetoothReady, actionTitle: "重连") {
                 model.reconnect()
             }
-            readinessRow("BlackHole 2ch", ready: model.blackHoleReady, actionTitle: "安装") {
+            readinessRow(
+                "BlackHole 2ch",
+                ready: model.blackHoleReady,
+                actionTitle: model.blackHoleInstallInProgress ? "安装中…" : "安装",
+                actionEnabled: !model.blackHoleInstallInProgress) {
                 model.openBlackHoleInstaller()
             }
             readinessRow("辅助功能", ready: model.accessibilityReady, actionTitle: "授权") {
@@ -97,6 +101,7 @@ private struct VoiceMenuView: View {
         _ title: String,
         ready: Bool,
         actionTitle: String,
+        actionEnabled: Bool = true,
         action: @escaping () -> Void
     ) -> some View {
         HStack {
@@ -107,7 +112,11 @@ private struct VoiceMenuView: View {
             Text(ready ? "已就绪" : "未就绪")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if !ready { Button(actionTitle, action: action).controlSize(.small) }
+            if !ready {
+                Button(actionTitle, action: action)
+                    .controlSize(.small)
+                    .disabled(!actionEnabled)
+            }
         }
     }
 
