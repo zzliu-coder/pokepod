@@ -103,20 +103,6 @@ bool hiddenReadDenied(const String &relative) {
          relative == ".commands" || relative.startsWith(".commands/");
 }
 
-uint64_t fnvUpdate(uint64_t hash, const uint8_t *bytes, size_t count) {
-  for (size_t index = 0; index < count; ++index) {
-    hash ^= bytes[index];
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
-bool metadataName(const String &name) {
-  return name.endsWith("/capsule.json") || name.endsWith("/processing.json") ||
-         name.endsWith("/raw.txt") || name.endsWith("/polished.md") ||
-         name.endsWith("/final.md") || name.endsWith("/trash.json");
-}
-
 String parentPath(const String &path) {
   const int slash = path.lastIndexOf('/');
   return slash <= 0 ? String("/") : path.substring(0, slash);
@@ -233,7 +219,12 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
 }
 
 void PokePodLinkService::disconnect() {
+  manifestResponseRequestId_ = 0;
+  manifestResponseJson_ = "";
+  manifestFailureRequestId_ = 0;
+  manifestFailureMessage_ = "";
   if (linkOwnedRecording_) stopLinkRecording(false);
+  abortManifest();
   abortOutgoing();
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
@@ -260,8 +251,23 @@ void PokePodLinkService::disconnect() {
   releaseRequestLeaseNow();
 }
 
+void PokePodLinkService::pollDeferredCleanup() {
+  if (manifestCleanupPending_) cleanupManifestStorage();
+}
+
 void PokePodLinkService::poll(uint32_t nowMs) {
   if (stream_ == nullptr) return;
+  if (manifestCleanupPending_) {
+    if (!cleanupManifestStorage()) return;
+    if (manifestResponseRequestId_ != 0) {
+      finishPendingManifestResponse();
+      return;
+    }
+    if (manifestFailureRequestId_ != 0) {
+      finishPendingManifestFailure();
+      return;
+    }
+  }
   if (linkOwnedRecording_ && !drainLinkCapture()) {
     stopLinkRecording(false);
   }
@@ -275,6 +281,11 @@ void PokePodLinkService::poll(uint32_t nowMs) {
   }
   if (outgoingPhase_ == OutgoingPhase::data) {
     queueNextFileChunk();
+    return;
+  }
+  if (manifestStepper_.active() || manifestStepper_.complete() ||
+      manifestStepper_.failed()) {
+    advanceManifest(nowMs);
     return;
   }
   frameProcessedThisPoll_ = false;
@@ -495,6 +506,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
 
   if (acquireRequestLease(requestId)) handleImmediate(requestId, root);
   cJSON_Delete(root);
+  if (manifestRequestId_ == requestId && manifestStepper_.active()) return;
   rememberCompleted(requestId);
   if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
@@ -905,10 +917,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     }
   } else if (strcmp(operation, "fingerprint") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
-    else {
-      const String extra = "\"fingerprint\":\"" + metadataFingerprint() + "\"";
-      sendOk(requestId, extra.c_str());
-    }
+    else beginManifest(requestId, LinkManifestMode::fingerprint);
   } else if (strcmp(operation, "read") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
     else handleRead(requestId, root);
@@ -1002,12 +1011,6 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
 }
 
 void PokePodLinkService::handleRead(uint32_t requestId, void *jsonRoot) {
-  StorageReservation readReservation = StorageCoordinator::instance().reserve(
-      storageOwner(), StorageAccess::read, 250);
-  if (!readReservation) {
-    sendBusy(requestId);
-    return;
-  }
   cJSON *root = asJson(jsonRoot);
   const char *requested = jsonString(root, "path");
   if (requested == nullptr) {
@@ -1015,49 +1018,9 @@ void PokePodLinkService::handleRead(uint32_t requestId, void *jsonRoot) {
     return;
   }
   if (strcmp(requested, ".") == 0 && jsonBool(root, "recursive")) {
-    std::vector<String> files;
-    if (!collectFiles(kCapsuleRoot, "", 0, files) ||
-        !transferPermitted()) {
-      return;
-    }
-    std::sort(files.begin(), files.end());
     const char *cursorText = jsonString(root, "cursor");
     size_t cursor = cursorText == nullptr ? 0 : strtoul(cursorText, nullptr, 10);
-    if (cursor > files.size()) {
-      sendError(requestId, "invalid read cursor");
-      return;
-    }
-    cJSON *response = cJSON_CreateObject();
-    cJSON_AddStringToObject(response, "status", "ok");
-    cJSON_AddNumberToObject(response, "version", kLinkVersion);
-    cJSON *items = cJSON_AddArrayToObject(response, "files");
-    const size_t end = std::min(files.size(), cursor + kReadPageFiles);
-    for (size_t index = cursor; index < end; ++index) {
-      File file = fs_->open(String(kCapsuleRoot) + "/" + files[index], FILE_READ);
-      if (!file || file.isDirectory()) {
-        if (file) file.close();
-        continue;
-      }
-      char digest[65] = {};
-      if (linkAudioFileNeedsDigest(files[index].c_str()) &&
-          !sha256File(file, digest)) {
-        file.close();
-        cJSON_Delete(response);
-        sendError(requestId, "audio digest failed");
-        return;
-      }
-      cJSON *item = cJSON_CreateObject();
-      cJSON_AddStringToObject(item, "path", files[index].c_str());
-      cJSON_AddNumberToObject(item, "length", file.size());
-      if (digest[0] != '\0') {
-        cJSON_AddStringToObject(item, "sha256", digest);
-      }
-      cJSON_AddItemToArray(items, item);
-      file.close();
-    }
-    if (end < files.size()) cJSON_AddStringToObject(response, "nextCursor", String(end).c_str());
-    sendJson(requestId, printed(response));
-    cJSON_Delete(response);
+    beginManifest(requestId, LinkManifestMode::recursiveRead, cursor);
     return;
   }
   const String relative(requested);
@@ -1068,38 +1031,385 @@ void PokePodLinkService::handleRead(uint32_t requestId, void *jsonRoot) {
   sendFile(requestId, String(kCapsuleRoot) + "/" + relative);
 }
 
-bool PokePodLinkService::sha256File(File &file, char output[65]) const {
-  if (!file || file.isDirectory() || output == nullptr || !file.seek(0)) {
+bool PokePodLinkService::beginManifest(uint32_t requestId,
+                                       LinkManifestMode mode,
+                                       size_t cursor) {
+  if (manifestStepper_.active() || outgoingPhase_ != OutgoingPhase::none ||
+      txStepper_.active() || pendingControlBytes_ != 0) {
+    sendBusy(requestId);
     return false;
   }
-  mbedtls_sha256_context context;
-  mbedtls_sha256_init(&context);
-  bool ok = mbedtls_sha256_starts(&context, 0) == 0;
-  uint8_t buffer[1024];
-  size_t remaining = file.size();
-  while (ok && remaining > 0 && transferPermitted()) {
-    const size_t wanted = std::min(remaining, sizeof(buffer));
-    const int received = file.read(buffer, wanted);
-    if (received <= 0) {
-      ok = false;
-      break;
-    }
-    ok = mbedtls_sha256_update(
-        &context, buffer, static_cast<size_t>(received)) == 0;
-    remaining -= static_cast<size_t>(received);
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      storageOwner(), StorageAccess::read, 0);
+  if (!reservation) {
+    sendBusy(requestId);
+    return false;
   }
-  if (remaining > 0) ok = false;
-  uint8_t digest[32] = {};
-  if (ok) ok = mbedtls_sha256_finish(&context, digest) == 0;
-  mbedtls_sha256_free(&context);
-  if (!ok) return false;
-  static constexpr char kHex[] = "0123456789abcdef";
-  for (size_t index = 0; index < sizeof(digest); ++index) {
-    output[index * 2] = kHex[digest[index] >> 4];
-    output[index * 2 + 1] = kHex[digest[index] & 0x0f];
+  if (!manifestStepper_.begin(mode, cursor, kReadPageFiles)) {
+    sendError(requestId, "manifest computation is busy");
+    return false;
   }
-  output[64] = '\0';
+  manifestStorageReservation_ = std::move(reservation);
+  manifestDirectories_.clear();
+  manifestDirectories_.reserve(6);
+  manifestRequestId_ = requestId;
+  manifestRootOpened_ = false;
+  manifestError_ = "manifest computation failed";
   return true;
+}
+
+void PokePodLinkService::advanceManifest(uint32_t nowMs) {
+  if (!linkTransferPermitted(transferGate_, nowMs) || !transferPermitted()) {
+    disconnect();
+    return;
+  }
+  switch (manifestStepper_.phase()) {
+    case LinkManifestPhase::scanning:
+      advanceManifestScan();
+      break;
+    case LinkManifestPhase::sorting:
+      manifestStepper_.stepSort(48);
+      break;
+    case LinkManifestPhase::processing:
+      advanceManifestFile();
+      break;
+    case LinkManifestPhase::hashing:
+      advanceManifestHash();
+      break;
+    case LinkManifestPhase::complete:
+      finishManifestResponse();
+      break;
+    case LinkManifestPhase::failed:
+      failManifest(manifestError_.c_str());
+      break;
+    case LinkManifestPhase::cancelled:
+      disconnect();
+      break;
+    case LinkManifestPhase::idle:
+      break;
+  }
+  if (!transferPermitted()) disconnect();
+}
+
+void PokePodLinkService::advanceManifestScan() {
+  if (fs_ == nullptr || !transferPermitted()) return;
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, 0);
+  if (!lease) return;
+
+  if (!manifestRootOpened_) {
+    File root = fs_->open(kCapsuleRoot);
+    if (!root || !root.isDirectory()) {
+      if (root) root.close();
+      manifestError_ = "capsule root is missing";
+      manifestStepper_.fail();
+      return;
+    }
+    ManifestDirectoryCursor cursor;
+    cursor.directory = root;
+    cursor.absolute = kCapsuleRoot;
+    cursor.relative = "";
+    cursor.depth = 0;
+    manifestDirectories_.push_back(cursor);
+    manifestRootOpened_ = true;
+    return;
+  }
+
+  if (manifestDirectories_.empty()) {
+    if (!manifestStepper_.finishScan()) {
+      manifestError_ = manifestStepper_.mode() ==
+              LinkManifestMode::recursiveRead
+          ? "invalid read cursor"
+          : "manifest scan failed";
+    }
+    return;
+  }
+
+  ManifestDirectoryCursor &cursor = manifestDirectories_.back();
+  File entry = cursor.directory.openNextFile();
+  if (!entry) {
+    cursor.directory.close();
+    manifestDirectories_.pop_back();
+    return;
+  }
+  const String full = entry.name();
+  const bool directory = entry.isDirectory();
+  const int slash = full.lastIndexOf('/');
+  const String name = slash >= 0 ? full.substring(slash + 1) : full;
+  const String relative = cursor.relative.isEmpty()
+      ? name : cursor.relative + "/" + name;
+  const String absolute = cursor.absolute + "/" + name;
+  if (hiddenReadDenied(relative)) {
+    entry.close();
+    return;
+  }
+  if (directory) {
+    if (cursor.depth >= 5) {
+      entry.close();
+      manifestError_ = "manifest directory depth exceeded";
+      manifestStepper_.fail();
+      return;
+    }
+    ManifestDirectoryCursor child;
+    child.directory = entry;
+    child.absolute = absolute;
+    child.relative = relative;
+    child.depth = cursor.depth + 1;
+    manifestDirectories_.push_back(child);
+    return;
+  }
+  entry.close();
+  if (!manifestStepper_.addPath(relative)) {
+    manifestError_ = "manifest file limit exceeded";
+  }
+}
+
+void PokePodLinkService::advanceManifestFile() {
+  if (fs_ == nullptr || !transferPermitted()) return;
+  String relative;
+  if (!manifestStepper_.currentPath(relative)) {
+    manifestError_ = "manifest path state failed";
+    manifestStepper_.fail();
+    return;
+  }
+  if (manifestStepper_.mode() == LinkManifestMode::fingerprint &&
+      !manifestStepper_.currentIsMetadata()) {
+    manifestStepper_.skipCurrent();
+    return;
+  }
+
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, 0);
+  if (!lease) return;
+  File file = fs_->open(String(kCapsuleRoot) + "/" + relative, FILE_READ);
+  if (!file || file.isDirectory()) {
+    if (file) file.close();
+    manifestError_ = "manifest file is missing";
+    manifestStepper_.fail();
+    return;
+  }
+  const size_t length = file.size();
+  if (manifestStepper_.mode() == LinkManifestMode::recursiveRead &&
+      !linkAudioFileNeedsDigest(relative.c_str())) {
+    file.close();
+    if (!manifestStepper_.finishCurrentWithoutHash(length)) {
+      manifestError_ = "manifest item failed";
+      manifestStepper_.fail();
+    }
+    return;
+  }
+
+  if (!manifestStepper_.beginCurrentFile(length)) {
+    file.close();
+    manifestError_ = "manifest hash state failed";
+    manifestStepper_.fail();
+    return;
+  }
+  manifestFile_ = file;
+  if (manifestStepper_.mode() == LinkManifestMode::recursiveRead) {
+    mbedtls_sha256_init(&manifestSha_);
+    manifestShaActive_ = true;
+    if (mbedtls_sha256_starts(&manifestSha_, 0) != 0) {
+      manifestError_ = "audio digest failed";
+      manifestStepper_.fail();
+    }
+  }
+}
+
+void PokePodLinkService::advanceManifestHash() {
+  if (!manifestFile_ || manifestFile_.isDirectory() ||
+      !transferPermitted()) {
+    manifestError_ = "manifest hash file failed";
+    manifestStepper_.fail();
+    return;
+  }
+  const size_t length = manifestFile_.size();
+  const size_t hashed = manifestStepper_.currentHashedBytes();
+  if (hashed > length) {
+    manifestError_ = "manifest hash length failed";
+    manifestStepper_.fail();
+    return;
+  }
+  const size_t remaining = length - hashed;
+  if (remaining > 0) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 0);
+    if (!lease) return;
+    const size_t wanted = std::min(
+        remaining, std::min(kLinkManifestMaximumReadBytes,
+                            static_cast<size_t>(kLinkMaxDataBytes)));
+    const int received = manifestFile_.read(payload_, wanted);
+    if (received <= 0 || static_cast<size_t>(received) > wanted) {
+      manifestError_ = manifestStepper_.mode() ==
+              LinkManifestMode::recursiveRead
+          ? "audio digest failed"
+          : "fingerprint read failed";
+      manifestStepper_.fail();
+      return;
+    }
+    if (manifestShaActive_ &&
+        mbedtls_sha256_update(&manifestSha_, payload_, received) != 0) {
+      manifestError_ = "audio digest failed";
+      manifestStepper_.fail();
+      return;
+    }
+    if (!manifestStepper_.acceptHashBytes(payload_, received)) {
+      manifestError_ = "manifest hash budget failed";
+      return;
+    }
+    if (!transferPermitted()) return;
+  }
+  if (manifestStepper_.currentHashedBytes() != length) return;
+
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, 0);
+  if (!lease) return;
+  manifestFile_.close();
+  if (manifestStepper_.mode() == LinkManifestMode::recursiveRead) {
+    uint8_t digest[32] = {};
+    const bool digestOk = manifestShaActive_ &&
+        mbedtls_sha256_finish(&manifestSha_, digest) == 0;
+    if (manifestShaActive_) mbedtls_sha256_free(&manifestSha_);
+    manifestShaActive_ = false;
+    if (!digestOk) {
+      manifestError_ = "audio digest failed";
+      manifestStepper_.fail();
+      return;
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    char hex[65] = {};
+    for (size_t index = 0; index < sizeof(digest); ++index) {
+      hex[index * 2] = kHex[digest[index] >> 4];
+      hex[index * 2 + 1] = kHex[digest[index] & 0x0f];
+    }
+    if (!manifestStepper_.finishCurrentFile(hex)) {
+      manifestError_ = "audio digest commit failed";
+    }
+  } else if (!manifestStepper_.finishCurrentFile()) {
+    manifestError_ = "fingerprint commit failed";
+  }
+}
+
+void PokePodLinkService::finishManifestResponse() {
+  const uint32_t requestId = manifestRequestId_;
+  String response;
+  if (manifestStepper_.mode() == LinkManifestMode::recursiveRead) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status", "ok");
+    cJSON_AddNumberToObject(root, "version", kLinkVersion);
+    cJSON *items = cJSON_AddArrayToObject(root, "files");
+    for (const LinkManifestItem &manifestItem : manifestStepper_.items()) {
+      cJSON *item = cJSON_CreateObject();
+      cJSON_AddStringToObject(item, "path", manifestItem.path.c_str());
+      cJSON_AddNumberToObject(item, "length", manifestItem.length);
+      if (!manifestItem.sha256.isEmpty()) {
+        cJSON_AddStringToObject(item, "sha256",
+                                manifestItem.sha256.c_str());
+      }
+      cJSON_AddItemToArray(items, item);
+    }
+    if (manifestStepper_.hasNextPage()) {
+      cJSON_AddStringToObject(root, "nextCursor",
+                              String(manifestStepper_.nextCursor()).c_str());
+    }
+    response = printed(root);
+    cJSON_Delete(root);
+  } else {
+    char fingerprint[24] = {};
+    snprintf(fingerprint, sizeof(fingerprint), "%016llx",
+             static_cast<unsigned long long>(
+                 manifestStepper_.fingerprint()));
+    response = "{\"status\":\"ok\",\"version\":2,\"fingerprint\":\"" +
+        String(fingerprint) + "\"}";
+  }
+
+  manifestResponseRequestId_ = requestId;
+  manifestResponseJson_ = response;
+  abortManifest();
+  if (!manifestCleanupPending_) finishPendingManifestResponse();
+}
+
+void PokePodLinkService::failManifest(const char *message) {
+  const bool permitted = transferPermitted();
+  manifestFailureRequestId_ = permitted ? manifestRequestId_ : 0;
+  manifestFailureMessage_ = message == nullptr
+      ? "manifest computation failed" : message;
+  abortManifest();
+  if (!permitted) {
+    disconnect();
+    return;
+  }
+  if (!manifestCleanupPending_) finishPendingManifestFailure();
+}
+
+void PokePodLinkService::abortManifest() {
+  if (manifestShaActive_) {
+    mbedtls_sha256_free(&manifestSha_);
+    manifestShaActive_ = false;
+  }
+  manifestStepper_.cancel();
+  manifestRequestId_ = 0;
+  manifestRootOpened_ = false;
+  manifestError_ = "";
+  manifestCleanupPending_ = !cleanupManifestStorage();
+}
+
+bool PokePodLinkService::cleanupManifestStorage() {
+  bool hasOpenHandle = static_cast<bool>(manifestFile_);
+  if (!hasOpenHandle) {
+    for (const ManifestDirectoryCursor &cursor : manifestDirectories_) {
+      if (cursor.directory) {
+        hasOpenHandle = true;
+        break;
+      }
+    }
+  }
+  StorageIoLease lease;
+  if (hasOpenHandle || manifestStorageReservation_) {
+    lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 0);
+    if (!lease) {
+      manifestCleanupPending_ = true;
+      return false;
+    }
+  }
+  if (manifestFile_) manifestFile_.close();
+  for (ManifestDirectoryCursor &cursor : manifestDirectories_) {
+    if (cursor.directory) cursor.directory.close();
+  }
+  manifestDirectories_.clear();
+  manifestStorageReservation_.release();
+  manifestStepper_.reset();
+  manifestCleanupPending_ = false;
+  return true;
+}
+
+void PokePodLinkService::finishPendingManifestResponse() {
+  const uint32_t requestId = manifestResponseRequestId_;
+  const String response = manifestResponseJson_;
+  manifestResponseRequestId_ = 0;
+  manifestResponseJson_ = "";
+  if (requestId == 0 || !transferPermitted() ||
+      !sendJson(requestId, response)) {
+    disconnect();
+    return;
+  }
+  rememberCompleted(requestId);
+  if (activeMaintenance_.isEmpty()) releaseRequestLease();
+}
+
+void PokePodLinkService::finishPendingManifestFailure() {
+  const uint32_t requestId = manifestFailureRequestId_;
+  const String message = manifestFailureMessage_;
+  manifestFailureRequestId_ = 0;
+  manifestFailureMessage_ = "";
+  if (requestId == 0 || !transferPermitted()) {
+    disconnect();
+    return;
+  }
+  sendError(requestId, message.c_str());
+  rememberCompleted(requestId);
+  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 void PokePodLinkService::handleConfigure(uint32_t requestId, void *jsonRoot) {
@@ -2406,32 +2716,6 @@ bool PokePodLinkService::collectFiles(const String &directory,
   }
   root.close();
   return transferPermitted();
-}
-
-String PokePodLinkService::metadataFingerprint() const {
-  StorageReservation reservation = StorageCoordinator::instance().reserve(
-      storageOwner(), StorageAccess::read, 250);
-  if (!reservation) return String();
-  std::vector<String> files;
-  if (!collectFiles(kCapsuleRoot, "", 0, files)) return String();
-  std::sort(files.begin(), files.end());
-  uint64_t hash = 1469598103934665603ULL;
-  uint8_t buffer[512];
-  for (const String &relative : files) {
-    if (!transferPermitted()) return String();
-    if (!metadataName(relative)) continue;
-    hash = fnvUpdate(hash, reinterpret_cast<const uint8_t *>(relative.c_str()), relative.length());
-    File file = fs_->open(String(kCapsuleRoot) + "/" + relative, FILE_READ);
-    while (file && file.available() && transferPermitted()) {
-      const size_t count = file.read(buffer, sizeof(buffer));
-      hash = fnvUpdate(hash, buffer, count);
-    }
-    if (file) file.close();
-    if (!transferPermitted()) return String();
-  }
-  char value[24];
-  snprintf(value, sizeof(value), "%016llx", static_cast<unsigned long long>(hash));
-  return String(value);
 }
 
 String PokePodLinkService::deviceId() const {

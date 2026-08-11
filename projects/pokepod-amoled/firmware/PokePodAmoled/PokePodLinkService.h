@@ -2,11 +2,13 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <mbedtls/sha256.h>
 #include <vector>
 
 #include "LinkFrame.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
+#include "LinkManifestStepper.h"
 #include "LinkTransferGate.h"
 #include "LinkTransferStepper.h"
 #include "MaintenanceCompletionTracker.h"
@@ -56,6 +58,10 @@ class PokePodLinkService {
              AudioCaptureRuntime *captureRuntime = nullptr,
              const CapabilityRegistry *capabilities = nullptr);
   void poll(uint32_t nowMs);
+  // Finishes read-only handle cleanup after an immediate transport cancel.
+  // This never reads frames or writes responses, so a Wi-Fi service can call
+  // it before authentication and while its five-minute window is closed.
+  void pollDeferredCleanup();
   void disconnect();
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
@@ -81,6 +87,13 @@ class PokePodLinkService {
     fileFinal,
   };
 
+  struct ManifestDirectoryCursor {
+    File directory;
+    String absolute;
+    String relative;
+    uint8_t depth = 0;
+  };
+
   void consumeByte(uint8_t value);
   void resetFrame();
   void processFrame();
@@ -92,6 +105,18 @@ class PokePodLinkService {
 
   void handleImmediate(uint32_t requestId, void *jsonRoot);
   void handleRead(uint32_t requestId, void *jsonRoot);
+  bool beginManifest(uint32_t requestId, LinkManifestMode mode,
+                     size_t cursor = 0);
+  void advanceManifest(uint32_t nowMs);
+  void advanceManifestScan();
+  void advanceManifestFile();
+  void advanceManifestHash();
+  void finishManifestResponse();
+  void failManifest(const char *message);
+  void abortManifest();
+  bool cleanupManifestStorage();
+  void finishPendingManifestResponse();
+  void finishPendingManifestFailure();
   void handleConfigure(uint32_t requestId, void *jsonRoot);
   void handleCommandFile(uint32_t requestId, const String &path,
                          const String &transactionId);
@@ -130,8 +155,6 @@ class PokePodLinkService {
   String readText(const String &path, size_t limit) const;
   bool collectFiles(const String &directory, const String &relative,
                     uint8_t depth, std::vector<String> &files) const;
-  bool sha256File(File &file, char output[65]) const;
-  String metadataFingerprint() const;
   String deviceId() const;
   bool foregroundBusy() const;
   bool acquireRequestLease(uint32_t requestId);
@@ -238,6 +261,21 @@ class PokePodLinkService {
   File outgoingFile_;
   String outgoingResultTransactionId_;
   StorageReservation outgoingStorageReservation_;
+
+  LinkManifestStepper manifestStepper_;
+  std::vector<ManifestDirectoryCursor> manifestDirectories_;
+  File manifestFile_;
+  StorageReservation manifestStorageReservation_;
+  uint32_t manifestRequestId_ = 0;
+  bool manifestRootOpened_ = false;
+  bool manifestShaActive_ = false;
+  mbedtls_sha256_context manifestSha_;
+  String manifestError_;
+  bool manifestCleanupPending_ = false;
+  uint32_t manifestResponseRequestId_ = 0;
+  String manifestResponseJson_;
+  uint32_t manifestFailureRequestId_ = 0;
+  String manifestFailureMessage_;
 };
 
 }  // namespace pokepod

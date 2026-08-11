@@ -88,12 +88,13 @@ assert '\\"bundle\\"' in link
 assert "wireless-pairing-bundle" not in link
 assert 'strcmp(basename, "audio.m4a") == 0' in read("LinkPolicy.h")
 assert 'strcmp(basename, "audio.wav") == 0' in read("LinkPolicy.h")
-assert 'cJSON_AddStringToObject(item, "sha256", digest)' in link
+assert 'cJSON_AddStringToObject(item, "sha256",' in link
+assert "manifestItem.sha256.c_str()" in link
 assert "mbedtls_sha256_starts" in link
 assert "mbedtls_sha256_update" in link
 assert "mbedtls_sha256_finish" in link
 assert 'static constexpr char kHex[] = "0123456789abcdef"' in link
-assert "output[64] = '\\0'" in link
+assert "char hex[65] = {}" in link
 assert link.count("transferPermitted()") >= 12
 assert "AudioCaptureRuntime *captureRuntime" in read("PokePodLinkService.h")
 assert "recorder_->start(*log_, id, board_->utcNow(), space)" in link

@@ -102,6 +102,10 @@ void WirelessSyncService::enforceDeadline(uint32_t nowMs) {
 
 void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
   if (!begun_) return;
+  // A hard-deadline or peer disconnect closes TLS immediately. Read-only SD
+  // handles may still need the physical I/O lease before they can be closed;
+  // service that cleanup without admitting any unauthenticated Link frames.
+  link_.pollDeferredCleanup();
   networkConnected_ = networkConnected;
   enforceDeadline(nowMs);
   if (!window_.opened()) return;
