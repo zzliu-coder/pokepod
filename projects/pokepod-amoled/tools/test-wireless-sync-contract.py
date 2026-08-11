@@ -97,8 +97,11 @@ assert 'static constexpr char kHex[] = "0123456789abcdef"' in link
 assert "char hex[65] = {}" in link
 assert link.count("transferPermitted()") >= 12
 assert "AudioCaptureRuntime *captureRuntime" in read("PokePodLinkService.h")
-assert "recorder_->start(*log_, id, board_->utcNow(), space)" in link
-assert "captureRuntime_->start(*audio_, sessionId, *log_)" in link
+assert "recorder_->requestStart(*log_, id, board_->utcNow(), space," in link
+assert "RecorderOperationOwner::linkWifi" in link
+assert "RecorderOperationOwner::linkUsb" in link
+assert "recorder_->pollStart" in link
+assert "captureRuntime_->start(*audio_, captureSessionId, *log_)" in link
 assert "recorder_->start(*log_, id, board_->utcNow())" not in link
 assert "audio_->startCapture(*log_)" not in link
 assert "captureRuntime_->stop(*log_)" in link

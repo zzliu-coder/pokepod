@@ -33,6 +33,8 @@ assert '"录音和文字将无法恢复"' in dashboard
 assert "capsuleLibrary.purge(pendingPurgeIds)" in app
 assert '"版本过新，请在 Mac 处理"' in app
 assert 'strcmp(operation, "purgeCapsules") == 0' in link
-assert "library_->purge(ids)" in link
+assert "library_->purge(ids)" not in link
+assert 'strcmp(batchJournalState_.operation, "purgeCapsules") == 0' in link
+assert "batchTreeStepper_.beginRemove" in link
 
 print("capsule local management contract: PASS")

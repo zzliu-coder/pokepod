@@ -255,6 +255,7 @@ class PokePodLinkService {
   bool drainLinkCapture();
   bool requestLinkRecordingStop(uint32_t requestId, bool commit,
                                 bool respond);
+  void advanceLinkRecordingStart();
   void advanceLinkRecordingStop();
   void rememberCompleted(uint32_t requestId);
 
@@ -398,6 +399,10 @@ class PokePodLinkService {
   StringByteSource batchByteSource_;
   StringByteSource batchSecondByteSource_;
   bool linkOwnedRecording_ = false;
+  bool linkRecordingStartPending_ = false;
+  uint32_t linkRecordingStartRequestId_ = 0;
+  uint32_t linkRecordingCaptureSessionId_ = 0;
+  String linkRecordingCapsuleId_;
   LinkRecordingStop linkRecordingStop_;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;

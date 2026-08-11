@@ -7,7 +7,7 @@ namespace pokepod {
 enum class LinkRecordingStopPhase : uint8_t {
   idle = 0,
   awaitCaptureFinalize,
-  awaitRecorderCleanup,
+  awaitRecorderTerminal,
 };
 
 // Records ownership while the realtime capture task and recorder settle.  A
@@ -21,7 +21,6 @@ class LinkRecordingStop {
     requestId_ = requestId;
     commit_ = commit;
     respond_ = respond;
-    recorderSucceeded_ = false;
     return true;
   }
 
@@ -30,7 +29,7 @@ class LinkRecordingStop {
     return phase_ == LinkRecordingStopPhase::awaitCaptureFinalize;
   }
   bool awaitsRecorder() const {
-    return phase_ == LinkRecordingStopPhase::awaitRecorderCleanup;
+    return phase_ == LinkRecordingStopPhase::awaitRecorderTerminal;
   }
   bool ownsRequest(uint32_t requestId) const {
     return active() && requestId_ != 0 && requestId_ == requestId;
@@ -38,17 +37,15 @@ class LinkRecordingStop {
   uint32_t requestId() const { return requestId_; }
   bool commitRequested() const { return commit_; }
   bool shouldRespond() const { return respond_; }
-  bool recorderSucceeded() const { return recorderSucceeded_; }
 
   void suppressResponseAndAbort() {
     commit_ = false;
     respond_ = false;
   }
 
-  void captureFinalized(bool recorderSucceeded) {
+  void captureFinalized() {
     if (!awaitsCapture()) return;
-    recorderSucceeded_ = recorderSucceeded;
-    phase_ = LinkRecordingStopPhase::awaitRecorderCleanup;
+    phase_ = LinkRecordingStopPhase::awaitRecorderTerminal;
   }
 
   void finish() {
@@ -56,7 +53,6 @@ class LinkRecordingStop {
     requestId_ = 0;
     commit_ = false;
     respond_ = false;
-    recorderSucceeded_ = false;
   }
 
  private:
@@ -64,7 +60,6 @@ class LinkRecordingStop {
   uint32_t requestId_ = 0;
   bool commit_ = false;
   bool respond_ = false;
-  bool recorderSucceeded_ = false;
 };
 
 }  // namespace pokepod

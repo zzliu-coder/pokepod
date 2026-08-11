@@ -289,6 +289,7 @@ void PokePodLinkService::disconnect() {
   } else if (linkOwnedRecording_) {
     (void)requestLinkRecordingStop(0, false, false);
   }
+  if (linkOwnedRecording_) transactionGate_.cancel();
   if (transactionPurpose_ == TransactionPurpose::incoming ||
       transactionPurpose_ == TransactionPurpose::commandText) {
     if (transactionRunner_.active()) transactionGate_.cancel();
@@ -342,6 +343,7 @@ void PokePodLinkService::pollDeferredCleanup() {
   advanceBatchStartupRecovery();
   advanceStartupPartCleanup();
   cleanupPurgeStaging();
+  advanceLinkRecordingStart();
   advanceLinkRecordingStop();
   if (incomingCleanupPending_) cleanupIncomingStorage();
   if (outgoingCleanupPending_) cleanupOutgoingStorage();
@@ -377,9 +379,13 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     finishPendingManifestFailure();
     return;
   }
-  if (linkOwnedRecording_ && !linkRecordingStop_.active() &&
-      !drainLinkCapture()) {
-    (void)requestLinkRecordingStop(0, false, false);
+  if (linkOwnedRecording_ && !linkRecordingStop_.active()) {
+    const bool captureOk = drainLinkCapture();
+    if (!captureOk) {
+      (void)requestLinkRecordingStop(0, false, false);
+    } else if (recorder_ != nullptr && recorder_->stopRequested()) {
+      (void)requestLinkRecordingStop(0, true, false);
+    }
   }
   if (!transferPermitted()) {
     disconnect();
@@ -1343,21 +1349,32 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
           SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
       uint32_t sessionId = esp_random();
       if (sessionId == 0) sessionId = 1;
-      const bool recorderStarted = acquired &&
-          recorder_->start(*log_, id, board_->utcNow(), space);
-      const bool captureStarted = recorderStarted &&
-          captureRuntime_->start(*audio_, sessionId, *log_);
-      if (!captureStarted) {
-        if (recorder_->recording()) recorder_->abortCapture(*log_);
-        if (acquired) {
+      const RecorderOperationOwner recorderOwner =
+          transport_ == LinkTransport::wifi
+              ? RecorderOperationOwner::linkWifi
+              : RecorderOperationOwner::linkUsb;
+      if (acquired) transactionGate_.beginOperation(transferGate_);
+      const bool recorderStartAccepted = acquired &&
+          recorder_->requestStart(*log_, id, board_->utcNow(), space,
+                                  recorderOwner);
+      if (!recorderStartAccepted) {
+        if (recorder_->ownedBy(recorderOwner) ||
+            recorder_->operationActive() ||
+            recorder_->terminalResult().pending()) {
+          linkOwnedRecording_ = true;
+          (void)requestLinkRecordingStop(requestId, false, true);
+        } else if (acquired) {
           captureRouter_->release(AudioCaptureOwner::localCapsule);
+          transactionGate_.reset();
+          sendError(requestId, "recording start failed");
         }
-        if (acquired) sendError(requestId, "recording start failed");
-        else sendBusy(requestId);
+        if (!acquired) sendBusy(requestId);
       } else {
         linkOwnedRecording_ = true;
-        const String extra = "\"recording\":true,\"capsuleId\":\"" + id + "\"";
-        sendOk(requestId, extra.c_str());
+        linkRecordingStartPending_ = true;
+        linkRecordingStartRequestId_ = requestId;
+        linkRecordingCaptureSessionId_ = sessionId;
+        linkRecordingCapsuleId_ = id;
       }
     }
   } else if (strcmp(operation, "stop") == 0) {
@@ -3428,8 +3445,11 @@ bool PokePodLinkService::startBatchResultPersistence() {
                          batchTransactionId_.c_str());
   cJSON_AddBoolToObject(result, "ok", batchExecutor_.success());
   cJSON_AddBoolToObject(result, "success", batchExecutor_.success());
+  const bool queued = batchExecutor_.success() &&
+      (strcmp(batchJournalState_.operation, "rescan") == 0 ||
+       strcmp(batchJournalState_.operation, "requeueTranscription") == 0);
   cJSON_AddStringToObject(result, "message",
-      batchExecutor_.success() ? "committed" :
+      batchExecutor_.success() ? (queued ? "queued" : "committed") :
       (batchMessage_.isEmpty() ? "batch command failed" :
                                  batchMessage_.c_str()));
   cJSON_AddStringToObject(result, "completedAt", board_->utcNow().c_str());
@@ -4121,10 +4141,66 @@ bool PokePodLinkService::requestLinkRecordingStop(uint32_t requestId,
   return true;
 }
 
+void PokePodLinkService::advanceLinkRecordingStart() {
+  if (!linkRecordingStartPending_ || !linkOwnedRecording_ ||
+      recorder_ == nullptr || captureRuntime_ == nullptr ||
+      captureRouter_ == nullptr || audio_ == nullptr) return;
+  CapsuleTransactionGate *gate =
+      transport_ == LinkTransport::wifi || !sessionActive_ || quiesceRequested_
+          ? &transactionGate_
+          : nullptr;
+  const RecorderStartPollResult result = recorder_->pollStart(
+      *log_, millis(), gate);
+  if (result == RecorderStartPollResult::pending) return;
+
+  const uint32_t requestId = linkRecordingStartRequestId_;
+  const uint32_t captureSessionId = linkRecordingCaptureSessionId_;
+  const String capsuleId = linkRecordingCapsuleId_;
+  linkRecordingStartPending_ = false;
+  linkRecordingStartRequestId_ = 0;
+  linkRecordingCaptureSessionId_ = 0;
+  linkRecordingCapsuleId_ = "";
+
+  const bool transportAlive = sessionActive_ && !quiesceRequested_ &&
+      transferPermitted();
+  if (result == RecorderStartPollResult::started && transportAlive &&
+      captureRuntime_->start(*audio_, captureSessionId, *log_)) {
+    const String extra = "\"recording\":true,\"capsuleId\":\"" +
+        capsuleId + "\"";
+    sendOk(requestId, extra.c_str());
+    return;
+  }
+
+  if (linkRecordingStop_.active()) {
+    linkRecordingStop_.suppressResponseAndAbort();
+  } else {
+    (void)requestLinkRecordingStop(requestId, false, transportAlive);
+  }
+}
+
 void PokePodLinkService::advanceLinkRecordingStop() {
-  if (!linkRecordingStop_.active() || !linkOwnedRecording_ ||
+  if (!linkOwnedRecording_ ||
       captureRuntime_ == nullptr || recorder_ == nullptr ||
       captureRouter_ == nullptr) return;
+
+  // USB has no time-window gate while its CDC session is alive. Once either
+  // transport disconnects/quiesces, publish the latched cancellation gate so
+  // an in-flight recorder transaction rolls back instead of committing after
+  // its owner disappeared.
+  CapsuleTransactionGate *recordingGate =
+      transport_ == LinkTransport::wifi || !sessionActive_ || quiesceRequested_
+          ? &transactionGate_
+          : nullptr;
+  // Link is the sole owner of Link recordings. Publishing the same gate on
+  // every turn also lets the storage task advance periodic checkpoints while
+  // capture is still active; the App only polls localApp-owned sessions.
+  (void)recorder_->pollFinalize(*log_, millis(), recordingGate);
+  if (linkRecordingStartPending_) return;
+  if (!linkRecordingStop_.active() && !recorder_->operationActive() &&
+      recorder_->terminalResult().pending()) {
+    (void)requestLinkRecordingStop(0, false, false);
+  }
+  if (!linkRecordingStop_.active()) return;
 
   if (linkRecordingStop_.awaitsCapture()) {
     if (captureRuntime_->running()) {
@@ -4136,28 +4212,33 @@ void PokePodLinkService::advanceLinkRecordingStop() {
     const bool drained = drainLinkCapture();
     const bool complete = linkRecordingStop_.commitRequested() && drained &&
         !captureRuntime_->incomplete();
-    bool recorderSucceeded = false;
     if (recorder_->recording()) {
-      recorderSucceeded = complete
-          ? recorder_->stop(*log_, RecorderStopReason::user)
-          : recorder_->abortCapture(*log_);
+      if (complete) {
+        (void)recorder_->stop(*log_, recorder_->stopRequested()
+            ? recorder_->requestedStopReason()
+            : RecorderStopReason::user);
+      } else {
+        (void)recorder_->abortCapture(*log_);
+      }
     }
-    linkRecordingStop_.captureFinalized(complete && recorderSucceeded);
+    linkRecordingStop_.captureFinalized();
   }
 
-  if (linkRecordingStop_.awaitsRecorder() && recorder_->cleanupPending()) {
-    (void)recorder_->pollCleanup(*log_);
-    if (recorder_->cleanupPending()) return;
-  }
   if (!linkRecordingStop_.awaitsRecorder()) return;
+  (void)recorder_->pollFinalize(*log_, millis(), recordingGate);
+  if (recorder_->operationActive()) return;
+
+  RecorderOutcome outcome;
+  if (!recorder_->takeTerminalResult(outcome)) return;
 
   const uint32_t requestId = linkRecordingStop_.requestId();
   const bool respond = linkRecordingStop_.shouldRespond() && sessionActive_ &&
       transferPermitted();
-  const bool committed = linkRecordingStop_.recorderSucceeded();
+  const bool committed = outcome.success();
   captureRouter_->release(AudioCaptureOwner::localCapsule);
   linkOwnedRecording_ = false;
   linkRecordingStop_.finish();
+  transactionGate_.reset();
 
   if (!respond || requestId == 0) return;
   if (committed && library_->requestScan()) {

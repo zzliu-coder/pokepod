@@ -116,6 +116,36 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
                                 const String &createdAt,
                                 const RecordingSpaceSnapshot *space,
                                 RecorderOperationOwner owner) {
+  if (!requestStartInternal(log, recordingId, createdAt, space, owner)) {
+    return false;
+  }
+#if defined(ARDUINO_ARCH_ESP32)
+  while (true) {
+    const RecorderStartPollResult result = pollStart(log, millis(), nullptr);
+    if (result == RecorderStartPollResult::pending) {
+      delay(1);
+      continue;
+    }
+    return result == RecorderStartPollResult::started;
+  }
+#else
+  return pollStart(log, 0, nullptr) ==
+      RecorderStartPollResult::started;
+#endif
+}
+
+bool WavRecorder::requestStart(Print &log, const String &recordingId,
+                               const String &createdAt,
+                               const RecordingSpaceSnapshot &space,
+                               RecorderOperationOwner owner) {
+  return requestStartInternal(log, recordingId, createdAt, &space, owner);
+}
+
+bool WavRecorder::requestStartInternal(Print &log,
+                                       const String &recordingId,
+                                       const String &createdAt,
+                                       const RecordingSpaceSnapshot *space,
+                                       RecorderOperationOwner owner) {
   if (operationActive() || bootRecoveryFailed_ || file_ ||
       terminalState_.peek().pending()) {
     log.println("{\"event\":\"recording_error\",\"stage\":\"invalid_start\"}");
@@ -167,25 +197,48 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
   storageStartSucceeded_.store(false, std::memory_order_release);
   while (xSemaphoreTake(storageStartAck_, 0) == pdTRUE) {}
   const uint32_t startWaitBeganMs = millis();
+  if (!startState_.begin(startWaitBeganMs)) return false;
   storageSessionActive_.store(true, std::memory_order_release);
   storageStartRequested_.store(true, std::memory_order_release);
   xTaskNotifyGive(storageTask_);
-  if (xSemaphoreTake(storageStartAck_, pdMS_TO_TICKS(5000)) != pdTRUE) {
+  return true;
+#else
+  if (!startState_.begin(0)) return false;
+  synchronousStartSucceeded_ = startStorageSession(log);
+  return true;
+#endif
+}
+
+RecorderStartPollResult WavRecorder::pollStart(
+    Print &log, uint32_t nowMs, CapsuleTransactionGate *gate) {
+  if (!startState_.active()) return RecorderStartPollResult::idle;
+#if defined(ARDUINO_ARCH_ESP32)
+  const bool permitted = capsuleTransactionPermitted(gate, nowMs);
+  const bool acknowledged =
+      xSemaphoreTake(storageStartAck_, 0) == pdTRUE;
+  const bool succeeded =
+      storageStartSucceeded_.load(std::memory_order_acquire);
+#else
+  const bool permitted = capsuleTransactionPermitted(gate, nowMs);
+  const bool acknowledged = true;
+  const bool succeeded = synchronousStartSucceeded_;
+#endif
+  const RecorderStartPollResult result = startState_.poll(
+      nowMs, permitted, acknowledged, succeeded);
+  if (result == RecorderStartPollResult::cancelled) {
+#if defined(ARDUINO_ARCH_ESP32)
     storageStartCancelled_.store(true, std::memory_order_release);
     xTaskNotifyGive(storageTask_);
+#endif
     log.println(
         "{\"event\":\"recording_error\",\"stage\":\"storage_start_timeout\"}");
-    return false;
+  } else if (result == RecorderStartPollResult::started ||
+             result == RecorderStartPollResult::failed) {
+    log.printf(
+        "{\"event\":\"recording_storage_start_ack\",\"ok\":%s}\n",
+        result == RecorderStartPollResult::started ? "true" : "false");
   }
-  const bool started = storageStartSucceeded_.load(std::memory_order_acquire);
-  log.printf(
-      "{\"event\":\"recording_storage_start_ack\",\"ok\":%s,\"latency_ms\":%lu}\n",
-      started ? "true" : "false",
-      static_cast<unsigned long>(millis() - startWaitBeganMs));
-  return started;
-#else
-  return startStorageSession(log);
-#endif
+  return result;
 }
 
 bool WavRecorder::startStorageSession(Print &log) {

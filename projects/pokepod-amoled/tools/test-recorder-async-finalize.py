@@ -14,9 +14,13 @@ storage_queue = (firmware / "RecorderStorageQueue.h").read_text(encoding="utf-8"
 
 assert "CapsuleTransactionRunner transactionRunner_" in wav_h
 assert "RecorderOperationOwner operationOwner() const" in wav_h
+assert "bool requestStart(Print &log" in wav_h
+assert "RecorderStartPollResult pollStart" in wav_h
 assert "bool pollFinalize(Print &log" in wav_h
 assert "commitPreparedFile" not in wav
 assert "recording_finalize_pending" in wav
+assert "startState_.poll(" in wav
+assert "capsuleTransactionPermitted(gate, nowMs)" in wav
 assert "startAudioAndProcessing" in wav
 assert 'directory_ + "/recording.failed.chk"' in wav
 assert "transactionRunner_.poll(nowMs, gate)" in wav

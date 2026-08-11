@@ -24,13 +24,50 @@ assert "captureRuntime_->pollFinalize" in advance
 assert "captureRuntime_->running()" in advance
 assert advance.index("captureRuntime_->running()") < advance.index(
     "captureRouter_->release")
-assert "recorder_->cleanupPending()" in advance
-assert advance.index("recorder_->cleanupPending()") < advance.index(
+assert "recorder_->pollFinalize(*log_, millis(), recordingGate)" in advance
+assert "recorder_->operationActive()" in advance
+assert "recorder_->takeTerminalResult(outcome)" in advance
+assert "outcome.success()" in advance
+assert "transport_ == LinkTransport::wifi || !sessionActive_ || quiesceRequested_" in advance
+assert advance.index("recorder_->takeTerminalResult(outcome)") < advance.index(
     "captureRouter_->release")
+assert "recorder_->pollCleanup" not in advance
 assert "rememberCompleted(requestId)" in advance
 
 assert "awaitCaptureFinalize" in STATE
-assert "awaitRecorderCleanup" in STATE
+assert "awaitRecorderTerminal" in STATE
 assert "suppressResponseAndAbort" in STATE
+
+start = CPP[CPP.index('} else if (strcmp(operation, "record") == 0)'):
+            CPP.index('} else if (strcmp(operation, "stop") == 0)')]
+assert "RecorderOperationOwner::linkWifi" in start
+assert "RecorderOperationOwner::linkUsb" in start
+assert "transactionGate_.beginOperation(transferGate_)" in start
+assert "recorder_->requestStart" in start
+assert "recorder_->start(" not in start
+
+start_advance = CPP[CPP.index("void PokePodLinkService::advanceLinkRecordingStart()"):
+                    CPP.index("void PokePodLinkService::advanceLinkRecordingStop()")]
+assert "recorder_->pollStart" in start_advance
+assert "RecorderStartPollResult::pending" in start_advance
+assert "RecorderStartPollResult::started" in start_advance
+assert "transferPermitted()" in start_advance
+assert start_advance.index("RecorderStartPollResult::started") < start_advance.index(
+    "captureRuntime_->start")
+assert start_advance.index("captureRuntime_->start") < start_advance.index(
+    "sendOk(requestId")
+
+poll = CPP[CPP.index("void PokePodLinkService::pollDeferredCleanup()"):
+           CPP.index("void PokePodLinkService::poll(uint32_t nowMs)")]
+assert "advanceLinkRecordingStop()" in poll
+assert "advanceLinkRecordingStart()" in poll
+assert poll.index("advanceLinkRecordingStart()") < poll.index(
+    "advanceLinkRecordingStop()")
+
+disconnect = CPP[CPP.index("void PokePodLinkService::disconnect()"):
+                 CPP.index("void PokePodLinkService::requestQuiesce()")]
+assert "transactionGate_.cancel()" in disconnect
+assert disconnect.index("transactionGate_.cancel()") < CPP.index(
+    "recorder_->takeTerminalResult(outcome)")
 
 print("PASS link_recording_stop_contract")

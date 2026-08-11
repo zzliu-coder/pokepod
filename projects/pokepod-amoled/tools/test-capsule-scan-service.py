@@ -59,7 +59,8 @@ if "library_->scan()" in link:
     raise SystemExit("FAIL Link runtime still invokes synchronous capsule scan")
 if link.count("library_->requestScan()") < 3:
     raise SystemExit("FAIL Link stop/rescan/command completion refresh is incomplete")
-if 'message = success ? "queued" : "rescan request failed"' not in link:
+if 'strcmp(batchJournalState_.operation, "rescan") == 0' not in link or \
+        '(queued ? "queued" : "committed")' not in link:
     raise SystemExit("FAIL Link rescan response claims synchronous completion")
 
 print("PASS production capsule scan service contract")

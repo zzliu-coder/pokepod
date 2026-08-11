@@ -13,6 +13,7 @@
 #include "CapsuleTransaction.h"
 #include "RecorderCheckpoint.h"
 #include "RecorderOutcome.h"
+#include "RecorderStartState.h"
 #include "RecorderStorageQueue.h"
 #include "RecordingAdmissionPolicy.h"
 #include "StorageCoordinator.h"
@@ -28,6 +29,13 @@ class WavRecorder {
   bool start(Print &log, const String &recordingId, const String &createdAt,
              const RecordingSpaceSnapshot &space,
              RecorderOperationOwner owner);
+  bool requestStart(Print &log, const String &recordingId,
+                    const String &createdAt,
+                    const RecordingSpaceSnapshot &space,
+                    RecorderOperationOwner owner);
+  RecorderStartPollResult pollStart(
+      Print &log, uint32_t nowMs,
+      CapsuleTransactionGate *gate = nullptr);
   bool append(const uint8_t *data, size_t length, Print &log);
   bool appendMono16(const int16_t *samples, size_t sampleCount, Print &log);
   bool stop(Print &log,
@@ -93,6 +101,10 @@ class WavRecorder {
                      const String &createdAt,
                      const RecordingSpaceSnapshot *space,
                      RecorderOperationOwner owner);
+  bool requestStartInternal(Print &log, const String &recordingId,
+                            const String &createdAt,
+                            const RecordingSpaceSnapshot *space,
+                            RecorderOperationOwner owner);
   void resetSessionState();
   bool finishFailure(Print &log, RecorderTerminal terminal,
                      RecorderFailureStage stage);
@@ -301,6 +313,8 @@ class WavRecorder {
   bool bootRecoveryReady_ = false;
   bool bootRecoveryFailed_ = false;
   bool recoveryFinalizeActive_ = false;
+  RecorderStartState startState_;
+  bool synchronousStartSucceeded_ = false;
   bool recoveryCandidate_ = false;
   bool recoveryAudioCommitted_ = false;
   RecoveryPhase recoveryPhase_ = RecoveryPhase::transaction;
