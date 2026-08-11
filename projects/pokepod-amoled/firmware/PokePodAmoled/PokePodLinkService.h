@@ -182,13 +182,27 @@ class PokePodLinkService {
   bool folderOperation(void *jsonRoot, const char *operation,
                        String &message);
   bool cleanupPurgeStaging();
+  void queueDeferredTreeCleanup(const String &path);
+  bool stepDeferredTreeCleanup();
   bool removeTree(const String &path);
   bool copyTree(const String &source, const String &target, uint8_t depth = 0);
+  bool storageExists(const String &path, StorageAccess access) const;
+  bool storageRename(const String &source, const String &target);
+  bool storageRemove(const String &path);
+  bool storageMkdir(const String &path);
+  bool storageRmdir(const String &path);
+  void closeStorageFile(File &file, StorageAccess access) const;
+  bool finishCopiedFiles(File &input, File &output) const;
+  void deferStorageFile(File &file, StorageAccess access,
+                        bool flushBeforeClose = false) const;
+  bool stepDeferredFileCleanup();
+  void finishCommandStorageCleanup();
   bool rewriteCopiedMetadata(const String &directory, const String &id);
   String newUuid() const;
   String provisioningDiagnosticsJson() const;
   String powerDiagnosticsJson() const;
   bool transferPermitted() const;
+  uint32_t storageIoTimeout() const;
   StorageOwner storageOwner() const;
 
   Stream *stream_ = nullptr;
@@ -226,6 +240,9 @@ class PokePodLinkService {
   uint32_t incomingCleanupRequestId_ = 0;
   String incomingCleanupMessage_;
   bool commandStorageActive_ = false;
+  StorageReservation commandStorageReservation_;
+  bool commandCleanupPending_ = false;
+  uint32_t commandCleanupRequestId_ = 0;
   bool linkOwnedRecording_ = false;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
@@ -289,6 +306,15 @@ class PokePodLinkService {
   String manifestResponseJson_;
   uint32_t manifestFailureRequestId_ = 0;
   String manifestFailureMessage_;
+  struct DeferredCommandFile {
+    File file;
+    StorageOwner owner = StorageOwner::none;
+    StorageAccess access = StorageAccess::read;
+    bool flushBeforeClose = false;
+  };
+  mutable std::vector<DeferredCommandFile> deferredCommandFiles_;
+  bool deferredCommandFileFailed_ = false;
+  std::vector<String> deferredTreeCleanupStack_;
 };
 
 }  // namespace pokepod
