@@ -2,10 +2,12 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <array>
 #include <vector>
 
 #include "CapsuleBrowserState.h"
 #include "CapsuleTransaction.h"
+#include "CapsuleIndexPolicy.h"
 #include "DeferredPublish.h"
 #include "StorageCoordinator.h"
 
@@ -67,6 +69,11 @@ struct CapsuleBatchResult {
 
 class CapsuleLibrary {
  public:
+  ~CapsuleLibrary();
+  CapsuleLibrary() = default;
+  CapsuleLibrary(const CapsuleLibrary &) = delete;
+  CapsuleLibrary &operator=(const CapsuleLibrary &) = delete;
+
   bool begin(fs::FS &fs, Print &log);
   bool scan();
   bool includeInboxCapsule(const String &id);
@@ -77,8 +84,10 @@ class CapsuleLibrary {
   uint32_t refreshFallbackCount() const { return refreshFallbackCount_; }
   uint32_t lastScanUs() const { return lastScanUs_; }
   uint32_t maxScanUs() const { return maxScanUs_; }
+  bool indexOverflow() const { return indexOverflow_; }
+  size_t indexedCount() const { return locatorCount_; }
   size_t pendingCount() const;
-  const CapsuleSummary *at(size_t index) const;
+  const CapsuleSummary *at(size_t index, bool loadPreview = false) const;
   const CapsuleSummary *nextQueued() const;
   const CapsuleSummary *find(const String &id) const;
 
@@ -122,6 +131,18 @@ class CapsuleLibrary {
                      const String &folder);
   bool refreshExisting(const String &id);
   void removeIndexedRecord(const String &id);
+  bool appendIndexedRecord(const CapsuleSummary &record);
+  bool replaceIndexedRecord(size_t index, const CapsuleSummary &record);
+  void populateDamagedRecord(const String &directory, const String &folder,
+                             const String &directoryId,
+                             CapsuleSummary &record) const;
+  void copyToLocator(const CapsuleSummary &record, CapsuleLocator &locator) const;
+  void copyFromLocator(const CapsuleLocator &locator,
+                       CapsuleSummary &record) const;
+  const CapsuleSummary *cachedRecord(size_t locatorIndex,
+                                     bool loadPreview) const;
+  void invalidateRecordCache(const String &id = String());
+  bool allocateIndex();
   void requestPublish();
   void publishRecords();
   void finishDeferredPublish();
@@ -131,9 +152,21 @@ class CapsuleLibrary {
   fs::FS *fs_ = nullptr;
   Print *log_ = nullptr;
   CapsuleTransaction transaction_;
-  std::vector<CapsuleSummary> records_;
+  CapsuleLocator *locators_ = nullptr;
+  size_t locatorCount_ = 0;
+  std::vector<size_t> order_;
   std::vector<size_t> visible_;
+  struct DetailCacheEntry {
+    CapsuleSummary summary;
+    size_t locatorIndex = 0;
+    uint32_t age = 0;
+    bool valid = false;
+    bool previewLoaded = false;
+  };
+  mutable std::array<DetailCacheEntry, kCapsuleDetailCacheCapacity> detailCache_;
+  mutable uint32_t detailCacheAge_ = 0;
   CapsuleScope scope_ = CapsuleScope::inbox;
+  bool indexOverflow_ = false;
   uint32_t revision_ = 0;
   DeferredPublish deferredPublish_;
   uint32_t fullScanCount_ = 0;

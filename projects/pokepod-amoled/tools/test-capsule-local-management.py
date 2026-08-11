@@ -14,7 +14,8 @@ link = (FIRMWARE / "PokePodLinkService.cpp").read_text()
 assert "bool readOnly = false" in library_h
 assert "CapsuleBatchResult purge(const std::vector<String> &ids)" in library_h
 assert "record.readOnly = !capsuleRecordWritable(metadata)" in library_cpp
-assert "!record.readOnly && !record.archived" in library_cpp
+assert "!capsuleLocatorHasFlag(locator, locatorReadOnly)" in library_cpp
+assert "!capsuleLocatorHasFlag(locator, locatorArchived)" in library_cpp
 assert "record == nullptr || record->readOnly" in library_cpp
 
 purge_start = library_cpp.index("CapsuleBatchResult CapsuleLibrary::purge")

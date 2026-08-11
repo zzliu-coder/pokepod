@@ -49,7 +49,7 @@ struct CapsuleRollbackCounts {
 
 class CapsuleBrowserState {
  public:
-  static constexpr size_t kMaximumItems = 96;
+  static constexpr size_t kMaximumItems = 512;
   static constexpr uint32_t kLongPressMs = 500;
   static constexpr uint32_t kUndoMs = 5000;
 
@@ -59,8 +59,8 @@ class CapsuleBrowserState {
     offset_ = 0;
   }
   CapsuleScope scope() const { return scope_; }
-  void setOffset(uint8_t offset) { offset_ = offset; }
-  uint8_t offset() const { return offset_; }
+  void setOffset(size_t offset) { offset_ = offset; }
+  size_t offset() const { return offset_; }
   bool longPressReady(uint32_t elapsedMs, int16_t maxX, int16_t maxY) const {
     const int16_t ax = maxX < 0 ? -maxX : maxX;
     const int16_t ay = maxY < 0 ? -maxY : maxY;
@@ -124,7 +124,7 @@ class CapsuleBrowserState {
 
  private:
   CapsuleScope scope_ = CapsuleScope::inbox;
-  uint8_t offset_ = 0;
+  size_t offset_ = 0;
   std::vector<std::string> selectedIds_;
   std::string focusedId_;
   bool selectionMode_ = false;

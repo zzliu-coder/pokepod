@@ -475,7 +475,7 @@ void Dashboard::drawCapsuleRows(const DashboardView &view,
         (index - firstIndex) * ui::kCapsuleRowStride);
     if (y >= listBottom) break;
     if (y + ui::kCapsuleRowStride <= clipTop || y >= clipBottom) continue;
-    const CapsuleSummary *record = view.library->at(index);
+    const CapsuleSummary *record = view.library->at(index, true);
     if (record == nullptr) break;
     const uint16_t stateColor = record->readOnly
         ? ui::kWaiting : capsuleStatusColor(record->status);

@@ -12,6 +12,8 @@ def require(source: str, needle: str, label: str) -> None:
 
 
 library = (FIRMWARE / "CapsuleLibrary.cpp").read_text(encoding="utf-8")
+library_header = (FIRMWARE / "CapsuleLibrary.h").read_text(encoding="utf-8")
+index_policy = (FIRMWARE / "CapsuleIndexPolicy.h").read_text(encoding="utf-8")
 app = (FIRMWARE / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard = (FIRMWARE / "Dashboard.cpp").read_text(encoding="utf-8")
 audio = (FIRMWARE / "AudioPipeline.cpp").read_text(encoding="utf-8")
@@ -33,6 +35,26 @@ require(app, "capsuleLibrary.includeInboxCapsule(recorder.capsuleId())",
         "recording completion still scans every capsule")
 require(library, "deferredPublish_.begin();",
         "batch mutations do not coalesce visible-index publication")
+if "kMaxCapsulesOnDevice = 96" in library:
+    raise SystemExit("FAIL performance_architecture: filesystem scan still truncates at 96")
+scan_start = library.index("void CapsuleLibrary::scanFolder")
+scan_end = library.index("bool CapsuleLibrary::readRecord", scan_start)
+if "readBestText" in library[scan_start:scan_end]:
+    raise SystemExit("FAIL performance_architecture: scan eagerly reads preview text")
+read_start = library.index("bool CapsuleLibrary::readRecord")
+read_end = library.index("void CapsuleLibrary::populateDamagedRecord", read_start)
+if "readBestText" in library[read_start:read_end]:
+    raise SystemExit("FAIL performance_architecture: metadata hydration reads body text")
+require(library, "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT",
+        "capsule locator index is not allocated in PSRAM")
+require(library_header, "std::array<DetailCacheEntry, kCapsuleDetailCacheCapacity>",
+        "capsule details do not use a bounded cache")
+require(index_policy, "kCapsuleLocatorCapacity = 512",
+        "capsule locator capacity does not cover 320 fixtures")
+require(index_policy, "locatorDamaged",
+        "damaged capsule locators are not represented")
+require(dashboard, "view.library->at(index, true)",
+        "visible rows do not request lazy preview hydration")
 require(library, "file.read(chunk, request)",
         "small text files are still read one byte at a time")
 require(dashboard, "UiSignatureBuilder value;",
