@@ -21,7 +21,7 @@ class AudioCaptureRuntime {
   static constexpr UBaseType_t kTaskPriority = 5;
   static constexpr uint32_t kStopTimeoutMs = 500;
 
-  bool begin(Print &log);
+  bool begin(BoardVariant variant, Print &log);
   bool start(AudioPipeline &audio, uint32_t sessionId, Print &log);
   bool stop(Print &log);
   bool pop(AudioCaptureFrame &frame) { return service_.pop(frame); }
@@ -61,6 +61,7 @@ class AudioCaptureRuntime {
   std::atomic<bool> stopRequested_{false};
   std::atomic<bool> incomplete_{false};
   bool ready_ = false;
+  AudioDspProfile profile_ = AudioDspProfile::unavailable;
 };
 
 }  // namespace pokepod

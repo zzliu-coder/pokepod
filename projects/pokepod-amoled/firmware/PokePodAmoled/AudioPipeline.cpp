@@ -13,7 +13,12 @@
 
 namespace pokepod {
 
-bool AudioPipeline::begin(Print &log) {
+bool AudioPipeline::begin(BoardVariant variant, Print &log) {
+  boardProfile_ = audioBoardProfile(variant);
+  if (!boardProfile_.valid()) {
+    log.println("{\"event\":\"audio_ready\",\"ok\":false,\"stage\":\"profile\"}");
+    return false;
+  }
   pinMode(kSpeakerAmpPin, OUTPUT);
   // Waveshare's ES8311 example enables the board audio power path before
   // starting I2S. BLE and local WAV both consume the physical microphone, so no
@@ -71,10 +76,19 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
     error = es8311_sample_frequency_config(codec, clock.mclk_frequency,
                                            clock.sample_frequency);
   }
-  if (error == ESP_OK) error = es8311_microphone_config(codec, false);
-  if (error == ESP_OK) error = es8311_voice_volume_set(codec, 85, nullptr);
-  if (error == ESP_OK) error = es8311_voice_mute(codec, false);
-  if (error == ESP_OK) error = es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_30DB);
+  const AudioCodecPolicy codecPolicy = audioCodecPolicy(
+      mode == HardwareMode::capture ? AudioCodecPath::capture
+                                    : AudioCodecPath::playback);
+  if (error == ESP_OK && codecPolicy.configureMicrophone) {
+    error = es8311_microphone_config(codec, false);
+  }
+  if (error == ESP_OK && codecPolicy.configureMicrophone) {
+    error = es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_30DB);
+  }
+  if (error == ESP_OK && codecPolicy.configureOutput) {
+    error = es8311_voice_volume_set(codec, 85, nullptr);
+  }
+  if (error == ESP_OK) error = es8311_voice_mute(codec, codecPolicy.muteOutput);
   if (error != ESP_OK) {
     es8311_delete(codec);
     i2s_.end();
@@ -86,10 +100,13 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   hardwareActive_ = true;
   hardwareMode_ = mode;
   hardwareSampleRate_ = sampleRate;
-  log.printf("{\"event\":\"audio\",\"ok\":true,\"mode\":\"%s\",\"sample_rate\":%lu,\"channels\":%u,\"dma_direction\":\"%s\",\"microphone_gain_db\":30,\"frontend\":\"voice_v1\"}\n",
+  log.printf("{\"event\":\"audio\",\"ok\":true,\"mode\":\"%s\",\"sample_rate\":%lu,\"channels\":%u,\"dma_direction\":\"%s\",\"microphone_configured\":%s,\"microphone_gain_db\":%u,\"dsp_profile\":\"%s\"}\n",
              mode == HardwareMode::playback ? "playback" : "capture",
              static_cast<unsigned long>(sampleRate), kAudioChannels,
-             mode == HardwareMode::playback ? "tx" : "rx");
+             mode == HardwareMode::playback ? "tx" : "rx",
+             codecPolicy.configureMicrophone ? "true" : "false",
+             codecPolicy.configureMicrophone ? boardProfile_.microphoneGainDb : 0,
+             audioDspProfileName(boardProfile_.dsp));
   return true;
 }
 

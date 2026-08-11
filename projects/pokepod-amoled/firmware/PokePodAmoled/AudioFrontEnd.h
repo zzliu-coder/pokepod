@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "AudioBoardProfile.h"
 #include "VoiceConditioner.h"
 
 namespace pokepod {
@@ -19,6 +20,7 @@ inline const char *audioInputChannelName(AudioInputChannel channel) {
 }
 
 struct AudioFrontEndMetrics : public VoiceConditionerMetrics {
+  AudioDspProfile profile = AudioDspProfile::unavailable;
   AudioInputChannel selectedChannel = AudioInputChannel::undecided;
   uint64_t inputFrames = 0;
   uint64_t leftEnergy = 0;
@@ -38,6 +40,15 @@ class AudioFrontEnd {
   static constexpr size_t kFirTaps = 79;
   static constexpr int32_t kLimiter = VoiceConditioner::kLimiter;
 
+  void configure(AudioDspProfile profile) {
+    profile_ = profile;
+    const AudioBoardProfile boardProfile = profile == AudioDspProfile::v2Baseline
+        ? audioBoardProfile(BoardVariant::v2Co5300Cst820)
+        : audioBoardProfile(BoardVariant::v1Sh8601Ft3168);
+    rightChannelEnergyRatioQ8_ = boardProfile.rightChannelEnergyRatioQ8;
+    channelSelectionMinimumPeak_ = boardProfile.channelSelectionMinimumPeak;
+  }
+
   void reset() {
     selectedChannel_ = AudioInputChannel::undecided;
     selectionUsed_ = 0;
@@ -48,6 +59,7 @@ class AudioFrontEnd {
     decimationPhase_ = 0;
     metrics_ = {};
     conditioner_.reset(&metrics_);
+    metrics_.profile = profile_;
     for (auto &sample : selection_) sample = 0;
     for (auto &sample : ring_) sample = 0;
   }
@@ -123,9 +135,11 @@ class AudioFrontEnd {
     // The board normally mirrors or left-aligns its mono ADC. Select right only
     // when its short-window energy is decisively larger, keeping left as the
     // deterministic tie/default channel.
-    selectedChannel_ = rightSelectionEnergy_ > leftSelectionEnergy_ * 2 &&
-        metrics_.rightPeak >= 32 ? AudioInputChannel::right
-                                 : AudioInputChannel::left;
+    const uint64_t rightThreshold =
+        leftSelectionEnergy_ * rightChannelEnergyRatioQ8_ / 256U;
+    selectedChannel_ = rightSelectionEnergy_ > rightThreshold &&
+        metrics_.rightPeak >= channelSelectionMinimumPeak_
+        ? AudioInputChannel::right : AudioInputChannel::left;
     metrics_.selectedChannel = selectedChannel_;
   }
 
@@ -155,6 +169,9 @@ class AudioFrontEnd {
   }
 
   AudioInputChannel selectedChannel_ = AudioInputChannel::undecided;
+  AudioDspProfile profile_ = AudioDspProfile::v1Measured;
+  uint16_t rightChannelEnergyRatioQ8_ = 512;
+  uint16_t channelSelectionMinimumPeak_ = 32;
   int16_t selection_[kSelectionFrames * 2] = {};
   size_t selectionUsed_ = 0;
   uint64_t leftSelectionEnergy_ = 0;

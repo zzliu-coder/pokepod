@@ -67,6 +67,12 @@ class AudioCaptureService {
       48000 * kAudioCaptureFrameDurationMs / 1000 * 2 * sizeof(int16_t);
   static constexpr uint32_t kReadTimeoutMs = kAudioCaptureFrameDurationMs + 5;
 
+  bool configureDspProfile(AudioDspProfile profile) {
+    if (running_ || profile == AudioDspProfile::unavailable) return false;
+    frontEnd_.configure(profile);
+    return true;
+  }
+
   bool startSession(uint32_t sessionId, AudioCaptureSource &source) {
     if (running_ || sessionId == 0 || !source.start()) return false;
     source_ = &source;

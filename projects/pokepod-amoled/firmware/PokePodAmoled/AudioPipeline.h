@@ -5,6 +5,7 @@
 #include <FS.h>
 
 #include "BoardConfig.h"
+#include "AudioBoardProfile.h"
 #include "PeakWindow.h"
 #include "PlaybackBufferPolicy.h"
 #include "StorageCoordinator.h"
@@ -13,7 +14,7 @@ namespace pokepod {
 
 class AudioPipeline {
  public:
-  bool begin(Print &log);
+  bool begin(BoardVariant variant, Print &log);
   bool startCapture(Print &log);
   void stopHardware(Print &log);
   size_t read(uint8_t *buffer, size_t capacity);
@@ -54,6 +55,7 @@ class AudioPipeline {
   bool available_ = false;
   bool hardwareActive_ = false;
   HardwareMode hardwareMode_ = HardwareMode::none;
+  AudioBoardProfile boardProfile_;
   uint32_t hardwareSampleRate_ = 0;
   const char *lastHardwareError_ = "none";
   uint64_t bytesRead_ = 0;

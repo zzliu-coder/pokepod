@@ -954,9 +954,10 @@ void setup() {
   beginTlsExternalMemory(Serial);
   provisioningDiagnostics.begin(
       Serial, static_cast<uint16_t>(esp_reset_reason()));
-  const bool audioStarted = audio.begin(Serial);
+  const bool audioStarted = audio.begin(board.status().variant, Serial);
   capabilities.record(DeviceCapability::audio, audioStarted);
-  const bool captureTaskStarted = audioStarted && captureRuntime.begin(Serial);
+  const bool captureTaskStarted = audioStarted &&
+      captureRuntime.begin(board.status().variant, Serial);
   const bool usbStarted = usb.begin(board.status().variant);
   runtimePower.begin(usb.log());
   const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();

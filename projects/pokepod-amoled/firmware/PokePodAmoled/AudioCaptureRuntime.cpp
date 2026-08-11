@@ -17,8 +17,14 @@ AudioCaptureReadResult AudioCaptureRuntime::PipelineSource::readStereo48(
   return result;
 }
 
-bool AudioCaptureRuntime::begin(Print &log) {
+bool AudioCaptureRuntime::begin(BoardVariant variant, Print &log) {
   if (ready_) return true;
+  const AudioBoardProfile profile = audioBoardProfile(variant);
+  if (!profile.valid() || !service_.configureDspProfile(profile.dsp)) {
+    log.println("{\"event\":\"capture_task\",\"ok\":false,\"stage\":\"profile\"}");
+    return false;
+  }
+  profile_ = profile.dsp;
   stopped_ = xSemaphoreCreateBinary();
   if (stopped_ == nullptr) {
     log.println("{\"event\":\"capture_task\",\"ok\":false,\"stage\":\"semaphore\"}");
@@ -35,10 +41,10 @@ bool AudioCaptureRuntime::begin(Print &log) {
   }
   ready_ = true;
   log.printf(
-      "{\"event\":\"capture_task\",\"ok\":true,\"priority\":%u,\"stack_bytes\":%u,\"ring_frames\":%u}\n",
+      "{\"event\":\"capture_task\",\"ok\":true,\"priority\":%u,\"stack_bytes\":%u,\"ring_frames\":%u,\"dsp_profile\":\"%s\"}\n",
       static_cast<unsigned>(kTaskPriority),
       static_cast<unsigned>(kTaskStackBytes),
-      static_cast<unsigned>(kRingFrames));
+      static_cast<unsigned>(kRingFrames), audioDspProfileName(profile_));
   return true;
 }
 

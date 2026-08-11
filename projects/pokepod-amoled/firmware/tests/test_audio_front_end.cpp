@@ -59,6 +59,15 @@ static double rmsTail(const std::vector<int16_t> &samples) {
 }
 
 int main() {
+  AudioFrontEnd v1Profile;
+  v1Profile.configure(AudioDspProfile::v1Measured);
+  v1Profile.reset();
+  assert(v1Profile.metrics().profile == AudioDspProfile::v1Measured);
+  AudioFrontEnd v2Profile;
+  v2Profile.configure(AudioDspProfile::v2Baseline);
+  v2Profile.reset();
+  assert(v2Profile.metrics().profile == AudioDspProfile::v2Baseline);
+
   const std::vector<int16_t> voice = processTone(1000.0, 500, true);
   assert(voice.size() > 1500);
   assert(rmsTail(voice) > 1500.0);
