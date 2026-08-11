@@ -3,16 +3,17 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-WORK_DIR="$PROJECT_DIR/work/pokepod-build"
-VENDOR_DIR="$PROJECT_DIR/work/pokepod-vendor/waveshare"
+WORK_DIR=${POKEPOD_BUILD_ROOT:-"$PROJECT_DIR/work/pokepod-build"}
+VENDOR_DIR=${POKEPOD_VENDOR_DIR:-"$PROJECT_DIR/work/pokepod-vendor/waveshare"}
 SKETCH_DIR="$SCRIPT_DIR/PokePodAmoled"
-ARDUINO_CLI=${ARDUINO_CLI:-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"}
-GFX_LIBRARY=${GFX_LIBRARY:-"/Users/zheliu/Documents/Arduino/libraries/GFX_Library_for_Arduino"}
 GFX_MANIFEST="$SCRIPT_DIR/gfx-minimal-files.txt"
 WAVESHARE_COMMIT="ba32b5cbca96f0e04b0736d04959b6e832268d3f"
 FQBN='esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,DFUOnBoot=default,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,DebugLevel=info,EraseFlash=none'
+APP_ONLY_FLASH_OFFSET=0x10000
 FINGERPRINT_TOOL="$PROJECT_DIR/tools/build-input-fingerprint.py"
 ARTIFACT_TOOL="$PROJECT_DIR/tools/write-artifact-manifest.py"
+BUILD_ENV_TOOL="$PROJECT_DIR/tools/pokepod_build_env.py"
+PORTABLE_TOOL="$PROJECT_DIR/tools/portable_build_utils.py"
 BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
 FORCE_BUILD=0
 
@@ -37,6 +38,13 @@ Usage: ./firmware/build.sh [--fast|--release|--force] [arduino-cli options]
   --fast      Reuse the persistent daily cache (default).
   --release   Use a separate build directory and force a clean build.
   --force     Run the fast compiler even when the input fingerprint matches.
+
+Environment discovery:
+  ARDUINO_CLI, ARDUINO_DATA_DIR, ARDUINO_USER_DIR, GFX_LIBRARY
+  POKEPOD_BUILD_ROOT, POKEPOD_VENDOR_DIR
+
+Production uses Arduino-ESP32 3.3.8. A non-production core requires both
+POKEPOD_CORE_MATRIX=1 and an explicit POKEPOD_ESP32_CORE_VERSION.
 EOF
       exit 0
       ;;
@@ -64,25 +72,29 @@ CACHE_DIR="$WORK_DIR/cache"
 SUCCESS_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-success.sha256"
 CURRENT_FINGERPRINT="$CACHE_DIR/$BUILD_MODE-current.sha256"
 STARTED_AT=$(date +%s)
-ESP32_CORE_VERSION=$(
-  "$ARDUINO_CLI" core list 2>/dev/null |
-    awk '$1 == "esp32:esp32" { print $2; exit }'
-)
-ESP32_S3_SDK_DIR="/Users/zheliu/Library/Arduino15/packages/esp32/tools/esp32s3-libs/$ESP32_CORE_VERSION"
-ESP32_PLATFORM_DIR="/Users/zheliu/Library/Arduino15/packages/esp32/hardware/esp32/$ESP32_CORE_VERSION"
 SDK_OVERLAY_DIR="$WORK_DIR/sdk-single-connection"
 SDK_VARIANT=qio_opi
 
-if [ ! -x "$ARDUINO_CLI" ]; then
-  echo "Arduino CLI not found: $ARDUINO_CLI" >&2
-  exit 1
-fi
 if [ ! -f "$FINGERPRINT_TOOL" ]; then
   echo "Build fingerprint tool not found: $FINGERPRINT_TOOL" >&2
   exit 1
 fi
 if [ ! -f "$ARTIFACT_TOOL" ]; then
   echo "Artifact manifest tool not found: $ARTIFACT_TOOL" >&2
+  exit 1
+fi
+if [ ! -f "$BUILD_ENV_TOOL" ]; then
+  echo "Build environment resolver not found: $BUILD_ENV_TOOL" >&2
+  exit 1
+fi
+if [ ! -f "$PORTABLE_TOOL" ]; then
+  echo "Portable build utility not found: $PORTABLE_TOOL" >&2
+  exit 1
+fi
+BUILD_ENV_ASSIGNMENTS=$(python3 "$BUILD_ENV_TOOL" --format shell)
+eval "$BUILD_ENV_ASSIGNMENTS"
+if [ ! -x "$ARDUINO_CLI" ]; then
+  echo "Arduino CLI not found: $ARDUINO_CLI" >&2
   exit 1
 fi
 if [ ! -f "$GFX_LIBRARY/library.properties" ]; then
@@ -97,8 +109,9 @@ if ! grep -q '^version=1\.6\.5$' "$GFX_LIBRARY/library.properties"; then
   echo "Expected Arduino GFX 1.6.5 at: $GFX_LIBRARY" >&2
   exit 1
 fi
-if [ -z "$ESP32_CORE_VERSION" ]; then
-  echo "ESP32 Arduino core is not installed" >&2
+if [ ! -f "$ESP32_PLATFORM_DIR/platform.txt" ] ||
+   [ ! -f "$ESP32_PLATFORM_DIR/boards.txt" ]; then
+  echo "ESP32 Arduino platform not found: $ESP32_PLATFORM_DIR" >&2
   exit 1
 fi
 if [ ! -f "$ESP32_S3_SDK_DIR/sdkconfig" ] ||
@@ -106,14 +119,6 @@ if [ ! -f "$ESP32_S3_SDK_DIR/sdkconfig" ] ||
   echo "ESP32-S3 SDK configuration not found: $ESP32_S3_SDK_DIR" >&2
   exit 1
 fi
-
-case "$ESP32_CORE_VERSION" in
-  3.3.8|3.3.9|3.3.10|3.3.11) ;;
-  *)
-    echo "Unsupported ESP32 Arduino core: $ESP32_CORE_VERSION" >&2
-    exit 1
-    ;;
-esac
 
 mkdir -p "$(dirname -- "$VENDOR_DIR")" "$OUTPUT_DIR" "$CACHE_DIR" \
   "$SDK_OVERLAY_DIR/$SDK_VARIANT/include"
@@ -123,9 +128,10 @@ mkdir -p "$(dirname -- "$VENDOR_DIR")" "$OUTPUT_DIR" "$CACHE_DIR" \
 # upstream files PokePod uses. The manifest hash gives changed views a new path
 # while stable views keep stable mtimes and remain cacheable.
 GFX_VIEW_ID=$(
-  { shasum -a 256 "$GFX_MANIFEST" "$GFX_LIBRARY/library.properties"; \
-    printf '%s\n' "$GFX_LIBRARY"; } |
-    shasum -a 256 | awk '{print substr($1, 1, 16)}'
+  python3 "$FINGERPRINT_TOOL" \
+    --file "$GFX_MANIFEST" \
+    --file "$GFX_LIBRARY/library.properties" \
+    --literal "gfx-source=$GFX_LIBRARY" | cut -c1-16
 )
 GFX_MINIMAL_LIBRARY="$WORK_DIR/gfx-minimal/$GFX_VIEW_ID"
 mkdir -p "$GFX_MINIMAL_LIBRARY/src"
@@ -239,7 +245,7 @@ if [ -n "$(git -C "$VENDOR_DIR" status --porcelain --untracked-files=no)" ]; the
   exit 1
 fi
 
-EXTRA_ARGUMENTS_HASH=$(printf '%s\0' "$@" | shasum -a 256 | awk '{print $1}')
+EXTRA_ARGUMENTS_HASH=$(python3 "$PORTABLE_TOOL" argv-sha256 -- "$@")
 CLI_VERSION=$("$ARDUINO_CLI" version | tr '\n' ' ')
 BUILD_FINGERPRINT=$(python3 "$FINGERPRINT_TOOL" \
   --tree "$SKETCH_DIR" \
@@ -269,8 +275,8 @@ write_artifact_manifest() {
   else
     source_dirty=false
   fi
-  firmware_sha=$(shasum -a 256 "$firmware_bin" | awk '{print $1}')
-  firmware_size=$(stat -f %z "$firmware_bin")
+  firmware_sha=$(python3 "$PORTABLE_TOOL" sha256-value "$firmware_bin")
+  firmware_size=$(python3 "$PORTABLE_TOOL" size "$firmware_bin")
   created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   python3 "$ARTIFACT_TOOL" \
     --output "$OUTPUT_DIR/artifact.json" \
@@ -283,6 +289,8 @@ write_artifact_manifest() {
     --created-at "$created_at" \
     --fqbn "$FQBN" \
     --core-version "$ESP32_CORE_VERSION" \
+    --core-profile "$POKEPOD_CORE_PROFILE" \
+    --app-offset "$APP_ONLY_FLASH_OFFSET" \
     --vendor-revision "$WAVESHARE_COMMIT"
 }
 
@@ -295,7 +303,7 @@ if [ "$BUILD_MODE" = fast ] && [ "$FORCE_BUILD" -eq 0 ] && [ "$#" -eq 0 ] && \
   printf 'CACHE HIT pokepod fast build (%s)\n' "$BUILD_FINGERPRINT"
   rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$BUILD_DIR/sdkconfig"
   write_artifact_manifest
-  shasum -a 256 "$OUTPUT_DIR"/*
+  python3 "$PORTABLE_TOOL" sha256 "$OUTPUT_DIR"/*
   printf 'Build mode: fast; elapsed: %ss\n' "$(($(date +%s) - STARTED_AT))"
   exit 0
 fi
@@ -343,6 +351,6 @@ if [ "$BUILD_MODE" = release ]; then
   cp "$BUILD_LOG" "$WORK_DIR/build.log"
 fi
 write_artifact_manifest
-shasum -a 256 "$OUTPUT_DIR"/*
+python3 "$PORTABLE_TOOL" sha256 "$OUTPUT_DIR"/*
 printf 'Build mode: %s; elapsed: %ss\n' "$BUILD_MODE" \
   "$(($(date +%s) - STARTED_AT))"

@@ -3,9 +3,14 @@
 
 from pathlib import Path
 import re
+import sys
 
 
 project = Path(__file__).parents[1]
+sys.path.insert(0, str(project / "tools"))
+from pokepod_build_env import resolve_build_environment  # noqa: E402
+
+build_environment = resolve_build_environment()
 bridge = (project / "firmware/PokePodAmoled/UsbLinkBridge.cpp").read_text()
 bridge_header = (project / "firmware/PokePodAmoled/UsbLinkBridge.h").read_text()
 app = (project / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
@@ -34,9 +39,7 @@ assert "return usbPhysicalConnected(usb.hostConnected(), status.pmu," in app
 assert "view.usbConnected = usbCableConnected();" in app
 assert "lastVbusPresent" in app
 
-sdk_usb = Path(
-    "/Users/zheliu/Library/Arduino15/packages/esp32/hardware/esp32/3.3.8/cores/esp32/USB.cpp"
-)
+sdk_usb = Path(build_environment.esp32_platform_dir) / "cores/esp32/USB.cpp"
 assert sdk_usb.is_file(), f"Arduino-ESP32 USB source missing: {sdk_usb}"
 sdk_source = sdk_usb.read_text()
 operator = re.search(
@@ -56,9 +59,9 @@ assert "bool rts;" in cdc_header
 assert "l.line_state.dtr = dtr;" in cdc_source
 assert "ARDUINO_USB_CDC_LINE_STATE_EVENT" in cdc_source
 
-sdk_cdc_device = Path(
-    "/Users/zheliu/Library/Arduino15/packages/esp32/tools/esp32s3-libs/3.3.8/"
-    "include/arduino_tinyusb/tinyusb/src/class/cdc/cdc_device.h"
+sdk_cdc_device = (
+    Path(build_environment.esp32_s3_sdk_dir)
+    / "include/arduino_tinyusb/tinyusb/src/class/cdc/cdc_device.h"
 )
 assert sdk_cdc_device.is_file(), f"TinyUSB CDC source missing: {sdk_cdc_device}"
 cdc_device = sdk_cdc_device.read_text()

@@ -164,6 +164,33 @@ Mac 测试和 release build、脚本语法检查及 diff 检查。
 的符号链接视图；上游源码仍是唯一来源，构建器不会再扫描和编译两百多个无关
 屏幕及总线驱动。
 
+构建机路径由 `arduino-cli` 自己的配置解析，不依赖某个开发者的 home：脚本先读
+显式的 `ARDUINO_CLI`，再查找 PATH；macOS 还会通过应用 bundle 标识发现 Arduino
+IDE 内置的 CLI。Arduino data/user 目录默认来自 `arduino-cli config get`，GFX
+默认位于所解析 user 目录的 `libraries/GFX_Library_for_Arduino`。CI 或非标准安装可
+明确覆盖：
+
+```sh
+ARDUINO_CLI=/opt/arduino/bin/arduino-cli \
+ARDUINO_DATA_DIR=/srv/arduino-data \
+ARDUINO_USER_DIR=/srv/arduino-user \
+GFX_LIBRARY=/srv/arduino-user/libraries/GFX_Library_for_Arduino \
+./firmware/build.sh --fast
+```
+
+产品构建只接受已经验证的 Arduino-ESP32 `3.3.8`。其他版本仅用于显式矩阵验证，
+必须同时给出开关和版本，产物清单会标记为 `matrix`，不能作为产品发布件：
+
+```sh
+POKEPOD_CORE_MATRIX=1 POKEPOD_ESP32_CORE_VERSION=3.3.11 \
+./firmware/build.sh --fast
+```
+
+产物清单继续记录 FQBN、core、vendor、输入指纹和二进制 SHA-256，并明确记录
+`0x10000` app-only 写入偏移。构建保持 `app3M_fat9M_16MB` 分区、single-NimBLE
+overlay、fast/release 独立缓存；宿主文件大小和 SHA-256 由 Python 标准库生成，
+因此 macOS 与 Linux 使用同一条路径。
+
 正式交付运行：
 
 ```sh

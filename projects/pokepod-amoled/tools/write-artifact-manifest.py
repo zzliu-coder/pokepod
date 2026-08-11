@@ -20,6 +20,8 @@ def main() -> int:
     parser.add_argument("--created-at", required=True)
     parser.add_argument("--fqbn", required=True)
     parser.add_argument("--core-version", required=True)
+    parser.add_argument("--core-profile", choices=("production", "matrix"), required=True)
+    parser.add_argument("--app-offset", required=True)
     parser.add_argument("--vendor-revision", required=True)
     args = parser.parse_args()
 
@@ -35,10 +37,12 @@ def main() -> int:
             "file": "PokePodAmoled.ino.bin",
             "sizeBytes": args.binary_size,
             "sha256": args.binary_sha256,
+            "flashOffset": args.app_offset,
         },
         "toolchain": {
             "fqbn": args.fqbn,
             "esp32ArduinoCore": args.core_version,
+            "coreProfile": args.core_profile,
             "waveshareRevision": args.vendor_revision,
         },
     }
