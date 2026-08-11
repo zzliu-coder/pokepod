@@ -16,7 +16,20 @@ assert "maintenanceCompletionRevision() const" in link_header
 assert 'strcmp(operation, "endMaintenance") == 0' in link_source
 assert "completedMaintenance = true;" in link_source
 assert "maintenanceCompletion_.endResultPersisted" in link_source
-assert "maintenanceCompletion_.resultFetched(transactionId, fullySent)" in link_source
+assert "maintenanceCompletion_.resultFetched(transactionId, fullySent)" not in link_source
+assert (
+    "maintenanceCompletion_.resultFetched(resultTransaction.c_str(), true)"
+    in link_source
+)
+file_final = link_source.index("completion == TxCompletion::fileFinal")
+finish_after_final = link_source.index("finishOutgoingFile(true);", file_final)
+result_fetched = link_source.index(
+    "maintenanceCompletion_.resultFetched(resultTransaction.c_str(), true)"
+)
+finish_function = link_source.index("void PokePodLinkService::finishOutgoingFile")
+abort_function = link_source.index("void PokePodLinkService::abortOutgoing")
+assert file_final < finish_after_final
+assert finish_function < result_fetched < abort_function
 assert "maintenanceCompletion_.beginAccepted();" in link_source
 assert "beginResultPersisted" not in link_source
 begin_assignment = link_source.index("activeMaintenance_ = maintenanceId;")

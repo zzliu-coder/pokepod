@@ -5,6 +5,7 @@
 #include <esp_tls.h>
 
 #include "LinkTransferGate.h"
+#include "LinkTransferStepper.h"
 
 namespace pokepod {
 
@@ -19,7 +20,8 @@ enum class WirelessTlsPhase : uint8_t {
 };
 
 class WirelessSyncTlsStream : public Stream,
-                              public LinkTransferCancellationSink {
+                              public LinkTransferCancellationSink,
+                              public LinkWriteChannel {
  public:
   bool begin(NetworkClient client, const WirelessSyncIdentity &identity,
              LinkTransferGate &transferGate, uint32_t nowMs, Print &log);
@@ -32,6 +34,7 @@ class WirelessSyncTlsStream : public Stream,
   void flush() override;
   size_t write(uint8_t value) override;
   size_t write(const uint8_t *buffer, size_t size) override;
+  LinkWriteAttempt writeSome(const uint8_t *buffer, size_t size) override;
   void cancelForTransferDeadline() override;
 
   WirelessTlsPhase phase() const { return phase_; }

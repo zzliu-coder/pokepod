@@ -171,6 +171,39 @@ size_t WirelessSyncTlsStream::write(const uint8_t *buffer, size_t size) {
   return offset;
 }
 
+LinkWriteAttempt WirelessSyncTlsStream::writeSome(const uint8_t *buffer,
+                                                   size_t size) {
+  LinkWriteAttempt attempt;
+  if (!ensureTransferPermitted()) {
+    attempt.disposition = LinkWriteDisposition::disconnected;
+    return attempt;
+  }
+  if (!ready() || tls_ == nullptr || buffer == nullptr || size == 0) {
+    attempt.disposition = closed() || failed()
+        ? LinkWriteDisposition::disconnected
+        : LinkWriteDisposition::failed;
+    return attempt;
+  }
+  const ssize_t written = esp_tls_conn_write(tls_, buffer, size);
+  if (!ensureTransferPermitted()) {
+    attempt.disposition = LinkWriteDisposition::disconnected;
+    return attempt;
+  }
+  if (written > 0) {
+    attempt.disposition = LinkWriteDisposition::progress;
+    attempt.bytes = static_cast<size_t>(written);
+    return attempt;
+  }
+  if (written == ESP_TLS_ERR_SSL_WANT_READ ||
+      written == ESP_TLS_ERR_SSL_WANT_WRITE) {
+    attempt.disposition = LinkWriteDisposition::wouldBlock;
+    return attempt;
+  }
+  markFailed(static_cast<int>(written));
+  attempt.disposition = LinkWriteDisposition::failed;
+  return attempt;
+}
+
 bool WirelessSyncTlsStream::ensureTransferPermitted() {
   if (linkTransferPermitted(transferGate_, millis())) return true;
   return false;

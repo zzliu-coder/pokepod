@@ -8,6 +8,7 @@
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkTransferGate.h"
+#include "LinkTransferStepper.h"
 #include "MaintenanceCompletionTracker.h"
 #include "CapsuleTransaction.h"
 #include "StorageCoordinator.h"
@@ -16,6 +17,7 @@ namespace pokepod {
 
 class BoardServices;
 class AudioPipeline;
+class AudioCaptureRuntime;
 class AudioCaptureRouter;
 class CapsuleLibrary;
 class DeviceConfig;
@@ -48,7 +50,9 @@ class PokePodLinkService {
              LinkTransport transport = LinkTransport::none,
              WirelessSyncPairingProvider *pairingProvider = nullptr,
              LinkTransferGate *transferGate = nullptr,
-             ProvisioningCoordinator *provisioningCoordinator = nullptr);
+             ProvisioningCoordinator *provisioningCoordinator = nullptr,
+             LinkWriteChannel *writeChannel = nullptr,
+             AudioCaptureRuntime *captureRuntime = nullptr);
   void poll(uint32_t nowMs);
   void disconnect();
   bool active() const { return sessionActive_; }
@@ -67,6 +71,13 @@ class PokePodLinkService {
  private:
   enum class ReceivePhase : uint8_t { magic, header, payload };
   enum class IncomingKind : uint8_t { none, stagedFile, command, systemFont };
+  enum class OutgoingPhase : uint8_t { none, response, data };
+  enum class TxCompletion : uint8_t {
+    none,
+    fileResponse,
+    fileData,
+    fileFinal,
+  };
 
   void consumeByte(uint8_t value);
   void resetFrame();
@@ -90,9 +101,21 @@ class PokePodLinkService {
   void sendError(uint32_t requestId, const char *message);
   bool sendJson(uint32_t requestId, const String &json);
   bool sendEvent(uint32_t requestId, const String &json);
-  bool sendFile(uint32_t requestId, const String &path);
+  bool sendFile(uint32_t requestId, const String &path,
+                const char *resultTransactionId = nullptr);
   bool sendFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                  const uint8_t *payload, size_t size);
+  bool queueFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
+                  const uint8_t *payload, size_t size,
+                  TxCompletion completion);
+  void advanceTransmit(uint32_t nowMs);
+  void queueNextFileChunk();
+  void finishOutgoingFile(bool success);
+  void abortOutgoing();
+  void onFrameSent(TxCompletion completion);
+  void releaseRequestLeaseNow();
+  bool drainLinkCapture();
+  bool stopLinkRecording(bool commit);
   void rememberCompleted(uint32_t requestId);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
@@ -142,6 +165,7 @@ class PokePodLinkService {
   fs::FS *fs_ = nullptr;
   BoardServices *board_ = nullptr;
   AudioPipeline *audio_ = nullptr;
+  AudioCaptureRuntime *captureRuntime_ = nullptr;
   AudioCaptureRouter *captureRouter_ = nullptr;
   UsbLinkBridge *usb_ = nullptr;
   BleVoiceService *bleVoice_ = nullptr;
@@ -160,10 +184,13 @@ class PokePodLinkService {
   LinkTransport transport_ = LinkTransport::none;
   WirelessSyncPairingProvider *pairingProvider_ = nullptr;
   LinkTransferGate *transferGate_ = nullptr;
+  LinkWriteChannel *writeChannel_ = nullptr;
   bool requestLeaseHeld_ = false;
+  bool releaseRequestLeaseWhenTxDrained_ = false;
   CapsuleTransaction transaction_;
   StorageReservation incomingStorageReservation_;
   bool commandStorageActive_ = false;
+  bool linkOwnedRecording_ = false;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};
@@ -174,8 +201,11 @@ class PokePodLinkService {
   // Wi-Fi driver of large contiguous blocks when the provisioning AP starts.
   // The board has mandatory PSRAM, so allocate these long-lived buffers there.
   uint8_t *payload_ = nullptr;
+  uint8_t *txFrame_ = nullptr;
+  uint8_t *pendingControlFrame_ = nullptr;
   size_t payloadUsed_ = 0;
   uint8_t magicMatched_ = 0;
+  bool frameProcessedThisPoll_ = false;
   bool sessionActive_ = false;
   LinkRequestHistory completed_;
 
@@ -192,6 +222,19 @@ class PokePodLinkService {
   uint32_t rebootAtMs_ = 0;
   String activeMaintenance_;
   MaintenanceCompletionTracker maintenanceCompletion_;
+
+  LinkTransferStepper txStepper_;
+  size_t txFrameBytes_ = 0;
+  TxCompletion txCompletion_ = TxCompletion::none;
+  size_t pendingControlBytes_ = 0;
+  TxCompletion pendingControlCompletion_ = TxCompletion::none;
+  OutgoingPhase outgoingPhase_ = OutgoingPhase::none;
+  uint32_t outgoingRequestId_ = 0;
+  size_t outgoingLength_ = 0;
+  size_t outgoingRead_ = 0;
+  File outgoingFile_;
+  String outgoingResultTransactionId_;
+  StorageReservation outgoingStorageReservation_;
 };
 
 }  // namespace pokepod

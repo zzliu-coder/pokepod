@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "AudioPipeline.h"
+#include "AudioCaptureRuntime.h"
 #include "AudioCaptureRouter.h"
 #include "BoardServices.h"
 #include "CapsuleLibrary.h"
@@ -37,6 +38,10 @@ namespace {
 constexpr uint32_t kMaxIncomingCommandBytes = 1024 * 1024;
 constexpr size_t kMaxCommandJsonBytes = kMaxIncomingCommandBytes;
 constexpr size_t kReadPageFiles = 12;
+constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
+constexpr size_t kLinkPendingControlBytes =
+    kLinkHeaderBytes + kLinkMaxControlBytes;
+constexpr size_t kLinkWriteSliceBytes = 512;
 
 cJSON *asJson(void *value) { return static_cast<cJSON *>(value); }
 
@@ -139,11 +144,14 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                LinkTransport transport,
                                WirelessSyncPairingProvider *pairingProvider,
                                LinkTransferGate *transferGate,
-                               ProvisioningCoordinator *provisioningCoordinator) {
+                               ProvisioningCoordinator *provisioningCoordinator,
+                               LinkWriteChannel *writeChannel,
+                               AudioCaptureRuntime *captureRuntime) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
   audio_ = &audio;
+  captureRuntime_ = captureRuntime;
   captureRouter_ = &captureRouter;
   usb_ = &usb;
   bleVoice_ = &bleVoice;
@@ -162,6 +170,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   transport_ = transport;
   pairingProvider_ = pairingProvider;
   transferGate_ = transferGate;
+  writeChannel_ = writeChannel;
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
   if (!transaction_.begin(fs, log)) return false;
@@ -170,7 +179,18 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
         kLinkMaxDataBytes, sizeof(uint8_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   }
-  if (payload_ == nullptr) {
+  if (txFrame_ == nullptr) {
+    txFrame_ = static_cast<uint8_t *>(heap_caps_calloc(
+        kLinkTxFrameBytes, sizeof(uint8_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (pendingControlFrame_ == nullptr) {
+    pendingControlFrame_ = static_cast<uint8_t *>(heap_caps_calloc(
+        kLinkPendingControlBytes, sizeof(uint8_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (payload_ == nullptr || txFrame_ == nullptr ||
+      pendingControlFrame_ == nullptr) {
     stream_ = nullptr;
     log_->println(
         "{\"event\":\"link_buffer\",\"ok\":false,\"memory\":\"psram\"}");
@@ -178,7 +198,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   }
   log_->printf(
       "{\"event\":\"link_buffer\",\"ok\":true,\"memory\":\"psram\",\"bytes\":%u}\n",
-      static_cast<unsigned>(kLinkMaxDataBytes));
+      static_cast<unsigned>(kLinkMaxDataBytes + kLinkTxFrameBytes +
+                            kLinkPendingControlBytes));
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
     return false;
@@ -190,6 +211,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
 }
 
 void PokePodLinkService::disconnect() {
+  if (linkOwnedRecording_) stopLinkRecording(false);
+  abortOutgoing();
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         storageOwner(), StorageAccess::mutation, 1000);
@@ -212,17 +235,30 @@ void PokePodLinkService::disconnect() {
   completed_.clear();
   resetFrame();
   incomingStorageReservation_.release();
-  releaseRequestLease();
+  releaseRequestLeaseNow();
 }
 
 void PokePodLinkService::poll(uint32_t nowMs) {
   if (stream_ == nullptr) return;
+  if (linkOwnedRecording_ && !drainLinkCapture()) {
+    stopLinkRecording(false);
+  }
   if (!transferPermitted()) {
     disconnect();
     return;
   }
+  if (txStepper_.active()) {
+    advanceTransmit(nowMs);
+    return;
+  }
+  if (outgoingPhase_ == OutgoingPhase::data) {
+    queueNextFileChunk();
+    return;
+  }
+  frameProcessedThisPoll_ = false;
   size_t budget = 32768;
-  while (transferPermitted() && stream_->available() > 0 && budget-- > 0) {
+  while (!frameProcessedThisPoll_ && !txStepper_.active() && transferPermitted() &&
+         stream_->available() > 0 && budget-- > 0) {
     const int value = stream_->read();
     if (value >= 0) consumeByte(static_cast<uint8_t>(value));
   }
@@ -284,6 +320,7 @@ void PokePodLinkService::resetFrame() {
 }
 
 void PokePodLinkService::processFrame() {
+  frameProcessedThisPoll_ = true;
   const LinkFrameHeader header = currentHeader_;
   const size_t size = payloadUsed_;
   if (!transferPermitted()) {
@@ -845,8 +882,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     if (!fs_->exists(path)) {
       sendOk(requestId, "\"available\":false");
     } else {
-      const bool fullySent = sendFile(requestId, path);
-      maintenanceCompletion_.resultFetched(transactionId, fullySent);
+      sendFile(requestId, path, transactionId);
     }
   } else if (strcmp(operation, "configure") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
@@ -858,31 +894,45 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     } else sendOk(requestId);
   } else if (strcmp(operation, "record") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
-    else if (audio_ == nullptr || !audio_->ready() || !board_->sdReady()) {
+    else if (audio_ == nullptr || !audio_->ready() || !board_->sdReady() ||
+             captureRuntime_ == nullptr || !captureRuntime_->ready()) {
       sendError(requestId, "audio or SD is not ready");
     } else {
       const String id = newUuid();
       tencent_->wake();
-      const bool acquired = captureRouter_->acquire(
-          AudioCaptureOwner::localCapsule);
-      if (!acquired) {
-        sendBusy(requestId);
-      } else if (audio_->startCapture(*log_) &&
-                 recorder_->start(*log_, id, board_->utcNow())) {
+      // AudioCaptureRouter deliberately allows the same logical owner to
+      // re-enter. A Link request is a distinct session, so require the router
+      // to be genuinely idle before acquiring it. This prevents a failed Link
+      // start from releasing a UI-owned local recording.
+      const bool acquired = captureRouter_->available() &&
+          captureRouter_->acquire(AudioCaptureOwner::localCapsule);
+      const RecordingSpaceSnapshot space = {
+          SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
+      uint32_t sessionId = esp_random();
+      if (sessionId == 0) sessionId = 1;
+      const bool recorderStarted = acquired &&
+          recorder_->start(*log_, id, board_->utcNow(), space);
+      const bool captureStarted = recorderStarted &&
+          captureRuntime_->start(*audio_, sessionId, *log_);
+      if (!captureStarted) {
+        if (recorder_->recording()) recorder_->abortCapture(*log_);
+        if (acquired) {
+          captureRouter_->release(AudioCaptureOwner::localCapsule);
+        }
+        if (acquired) sendError(requestId, "recording start failed");
+        else sendBusy(requestId);
+      } else {
+        linkOwnedRecording_ = true;
         const String extra = "\"recording\":true,\"capsuleId\":\"" + id + "\"";
         sendOk(requestId, extra.c_str());
-      } else {
-        captureRouter_->release(AudioCaptureOwner::localCapsule);
-        audio_->stopHardware(*log_);
-        sendError(requestId, "recording start failed");
       }
     }
   } else if (strcmp(operation, "stop") == 0) {
-    if (!recorder_->recording()) sendError(requestId, "recording is not active");
+    if (!recorder_->recording() || !linkOwnedRecording_) {
+      sendError(requestId, "recording is not active");
+    }
     else {
-      const bool committed = recorder_->stop(*log_);
-      captureRouter_->release(AudioCaptureOwner::localCapsule);
-      audio_->stopHardware(*log_);
+      const bool committed = stopLinkRecording(true);
       if (committed) {
         library_->scan();
         sendOk(requestId, "\"recording\":false,\"queued\":true");
@@ -1921,11 +1971,20 @@ bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
                    reinterpret_cast<const uint8_t *>(json.c_str()), json.length());
 }
 
-bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
+bool PokePodLinkService::sendFile(uint32_t requestId, const String &path,
+                                  const char *resultTransactionId) {
   if (!transferPermitted()) return false;
+  if (outgoingPhase_ != OutgoingPhase::none || txStepper_.active() ||
+      pendingControlBytes_ != 0) {
+    sendBusy(requestId);
+    return false;
+  }
   StorageReservation reservation = StorageCoordinator::instance().reserve(
       storageOwner(), StorageAccess::read, 250);
-  if (!reservation) return false;
+  if (!reservation) {
+    sendBusy(requestId);
+    return false;
+  }
   File file;
   size_t length = 0;
   {
@@ -1942,49 +2001,31 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
     sendError(requestId, "file is missing");
     return false;
   }
-  if (!sendOk(requestId,
-              ("\"available\":true,\"binaryLength\":" +
-               String(length)).c_str())) {
+  const String response =
+      "{\"status\":\"ok\",\"version\":2,\"available\":true,"
+      "\"binaryLength\":" + String(length) + "}";
+  outgoingPhase_ = OutgoingPhase::response;
+  outgoingRequestId_ = requestId;
+  outgoingLength_ = length;
+  outgoingRead_ = 0;
+  outgoingFile_ = file;
+  outgoingResultTransactionId_ = resultTransactionId == nullptr
+      ? String() : String(resultTransactionId);
+  outgoingStorageReservation_ = std::move(reservation);
+  if (!queueFrame(LinkFrameType::responseJson, 0, requestId,
+                  reinterpret_cast<const uint8_t *>(response.c_str()),
+                  response.length(), TxCompletion::fileResponse)) {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         storageOwner(), StorageAccess::read, 1000);
-    if (lease) file.close();
+    if (lease && outgoingFile_) outgoingFile_.close();
+    // A read-only File close only releases the VFS handle. Do not retain the
+    // handle indefinitely if another owner held the coordinator longer than
+    // the bounded wait.
+    if (!lease && outgoingFile_) outgoingFile_.close();
+    outgoingPhase_ = OutgoingPhase::none;
+    outgoingStorageReservation_.release();
+    outgoingResultTransactionId_ = "";
     return false;
-  }
-  size_t sent = 0;
-  while (sent < length) {
-    if (!transferPermitted()) {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::read, 1000);
-      if (lease) file.close();
-      return false;
-    }
-    size_t count = 0;
-    {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::read, 1000);
-      if (!lease) return false;
-      count = file.read(
-          payload_, std::min<size_t>(kLinkMaxDataBytes, length - sent));
-    }
-    if (count == 0) {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::read, 1000);
-      if (lease) file.close();
-      return false;
-    }
-    sent += count;
-    if (!sendFrame(LinkFrameType::data, sent == length ? 1 : 0,
-                   requestId, payload_, count)) {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::read, 1000);
-      if (lease) file.close();
-      return false;
-    }
-  }
-  {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        storageOwner(), StorageAccess::read, 1000);
-    if (lease) file.close();
   }
   return true;
 }
@@ -1992,6 +2033,14 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
 bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
                                    uint32_t requestId,
                                    const uint8_t *payload, size_t size) {
+  return queueFrame(type, flags, requestId, payload, size,
+                    TxCompletion::none);
+}
+
+bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
+                                    uint32_t requestId,
+                                    const uint8_t *payload, size_t size,
+                                    TxCompletion completion) {
   if (stream_ == nullptr || !transferPermitted() || size >
       (type == LinkFrameType::data ? kLinkMaxDataBytes : kLinkMaxControlBytes)) {
     return false;
@@ -2002,22 +2051,208 @@ bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
   header.requestId = requestId;
   header.payloadLength = size;
   header.payloadCrc32 = linkCrc32(payload, size);
-  uint8_t encoded[kLinkHeaderBytes];
-  if (!encodeLinkHeader(header, encoded, sizeof(encoded))) return false;
-  const auto writeAll = [this](const uint8_t *data, size_t length) {
-    size_t offset = 0;
-    while (offset < length) {
-      if (!transferPermitted()) return false;
-      const size_t written = stream_->write(
-          data + offset, std::min<size_t>(512, length - offset));
-      if (written == 0 || !transferPermitted()) return false;
-      offset += written;
-      yield();
+  uint8_t *target = nullptr;
+  size_t *targetBytes = nullptr;
+  TxCompletion *targetCompletion = nullptr;
+  if (!txStepper_.active() && txFrameBytes_ == 0) {
+    target = txFrame_;
+    targetBytes = &txFrameBytes_;
+    targetCompletion = &txCompletion_;
+  } else if (type != LinkFrameType::data && pendingControlBytes_ == 0) {
+    target = pendingControlFrame_;
+    targetBytes = &pendingControlBytes_;
+    targetCompletion = &pendingControlCompletion_;
+  } else {
+    return false;
+  }
+  if (target == nullptr ||
+      !encodeLinkHeader(header, target, kLinkHeaderBytes)) return false;
+  if (size > 0) memcpy(target + kLinkHeaderBytes, payload, size);
+  *targetBytes = kLinkHeaderBytes + size;
+  *targetCompletion = completion;
+  if (target == txFrame_ && !txStepper_.beginFrame(*targetBytes)) {
+    *targetBytes = 0;
+    *targetCompletion = TxCompletion::none;
+    return false;
+  }
+  if (requestLeaseHeld_ && activeMaintenance_.isEmpty()) {
+    releaseRequestLeaseWhenTxDrained_ = true;
+  }
+  return true;
+}
+
+void PokePodLinkService::advanceTransmit(uint32_t nowMs) {
+  if (!txStepper_.active() || txFrame_ == nullptr) return;
+  const bool permitted = linkTransferPermitted(transferGate_, nowMs);
+  const size_t wanted = txStepper_.nextWriteBytes(
+      permitted, kLinkWriteSliceBytes);
+  if (wanted == 0) {
+    if (!permitted) disconnect();
+    return;
+  }
+  const uint8_t *source = txFrame_ + txStepper_.offset();
+  LinkWriteAttempt attempt;
+  if (writeChannel_ != nullptr) {
+    attempt = writeChannel_->writeSome(source, wanted);
+  } else {
+    const int available = stream_ == nullptr ? 0 :
+        stream_->availableForWrite();
+    const size_t writable = available <= 0 ? 0 :
+        std::min<size_t>(wanted, static_cast<size_t>(available));
+    const size_t written = writable == 0 ? 0 :
+        stream_->write(source, writable);
+    attempt.disposition = written == 0 ? LinkWriteDisposition::wouldBlock :
+                                         LinkWriteDisposition::progress;
+    attempt.bytes = written;
+  }
+  const bool permittedAfter = transferPermitted();
+  const LinkTransferStepResult result =
+      txStepper_.accept(permittedAfter, attempt);
+  if (result == LinkTransferStepResult::cancelled ||
+      result == LinkTransferStepResult::disconnected ||
+      result == LinkTransferStepResult::failed) {
+    disconnect();
+    return;
+  }
+  if (result != LinkTransferStepResult::frameComplete) return;
+
+  const TxCompletion completion = txCompletion_;
+  txFrameBytes_ = 0;
+  txCompletion_ = TxCompletion::none;
+  onFrameSent(completion);
+
+  if (!txStepper_.active() && pendingControlBytes_ > 0) {
+    memcpy(txFrame_, pendingControlFrame_, pendingControlBytes_);
+    txFrameBytes_ = pendingControlBytes_;
+    txCompletion_ = pendingControlCompletion_;
+    pendingControlBytes_ = 0;
+    pendingControlCompletion_ = TxCompletion::none;
+    txStepper_.beginFrame(txFrameBytes_);
+  }
+  if (!txStepper_.active() && pendingControlBytes_ == 0 &&
+      outgoingPhase_ == OutgoingPhase::none &&
+      releaseRequestLeaseWhenTxDrained_) {
+    releaseRequestLeaseNow();
+  }
+}
+
+void PokePodLinkService::queueNextFileChunk() {
+  if (outgoingPhase_ != OutgoingPhase::data || txStepper_.active() ||
+      !outgoingFile_) return;
+  if (!transferPermitted()) {
+    disconnect();
+    return;
+  }
+  if (outgoingRead_ >= outgoingLength_) {
+    finishOutgoingFile(true);
+    return;
+  }
+  size_t count = 0;
+  {
+    // Do not wait behind another SD user while the Link state owns no physical
+    // IO lease. A later poll retries without holding the network path hostage.
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 0);
+    if (!lease) return;
+    count = outgoingFile_.read(
+        payload_, std::min<size_t>(kLinkMaxDataBytes,
+                                   outgoingLength_ - outgoingRead_));
+  }
+  if (count == 0) {
+    finishOutgoingFile(false);
+    disconnect();
+    return;
+  }
+  outgoingRead_ += count;
+  const bool final = outgoingRead_ == outgoingLength_;
+  if (!queueFrame(LinkFrameType::data, final ? 1 : 0,
+                  outgoingRequestId_, payload_, count,
+                  final ? TxCompletion::fileFinal :
+                          TxCompletion::fileData)) {
+    finishOutgoingFile(false);
+    disconnect();
+  }
+}
+
+void PokePodLinkService::finishOutgoingFile(bool success) {
+  const String resultTransaction = outgoingResultTransactionId_;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 1000);
+    if (lease && outgoingFile_) outgoingFile_.close();
+    if (!lease && outgoingFile_) outgoingFile_.close();
+  }
+  outgoingStorageReservation_.release();
+  outgoingPhase_ = OutgoingPhase::none;
+  outgoingRequestId_ = 0;
+  outgoingLength_ = 0;
+  outgoingRead_ = 0;
+  outgoingResultTransactionId_ = "";
+  if (success && !resultTransaction.isEmpty()) {
+    maintenanceCompletion_.resultFetched(resultTransaction.c_str(), true);
+  }
+}
+
+void PokePodLinkService::abortOutgoing() {
+  txStepper_.cancel();
+  txFrameBytes_ = 0;
+  txCompletion_ = TxCompletion::none;
+  pendingControlBytes_ = 0;
+  pendingControlCompletion_ = TxCompletion::none;
+  if (outgoingPhase_ != OutgoingPhase::none || outgoingFile_) {
+    finishOutgoingFile(false);
+  } else {
+    outgoingStorageReservation_.release();
+    outgoingResultTransactionId_ = "";
+  }
+  releaseRequestLeaseWhenTxDrained_ = false;
+}
+
+void PokePodLinkService::onFrameSent(TxCompletion completion) {
+  if (completion == TxCompletion::fileResponse) {
+    if (outgoingLength_ == 0) finishOutgoingFile(true);
+    else outgoingPhase_ = OutgoingPhase::data;
+  } else if (completion == TxCompletion::fileFinal) {
+    finishOutgoingFile(true);
+  }
+}
+
+bool PokePodLinkService::drainLinkCapture() {
+  if (captureRuntime_ == nullptr) return false;
+  bool ok = true;
+  AudioCaptureFrame frame;
+  while (captureRuntime_->pop(frame)) {
+    if (audio_ != nullptr) {
+      audio_->observeCapturedMono(frame.samples,
+                                  kAudioCaptureSamplesPerFrame);
     }
-    return true;
-  };
-  return writeAll(encoded, sizeof(encoded)) &&
-      (size == 0 || writeAll(payload, size));
+    if (recorder_ != nullptr && recorder_->recording() &&
+        !recorder_->appendMono16(frame.samples,
+                                 kAudioCaptureSamplesPerFrame, *log_)) {
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+bool PokePodLinkService::stopLinkRecording(bool commit) {
+  if (!linkOwnedRecording_) return false;
+  const bool stopped = captureRuntime_ != nullptr &&
+      captureRuntime_->stop(*log_);
+  const bool drained = drainLinkCapture();
+  const bool complete = commit && stopped && drained &&
+      captureRuntime_ != nullptr && !captureRuntime_->incomplete();
+  bool recorderFinished = false;
+  if (recorder_ != nullptr && recorder_->recording()) {
+    recorderFinished = complete
+        ? recorder_->stop(*log_, RecorderStopReason::user)
+        : recorder_->abortCapture(*log_);
+  }
+  if (captureRouter_ != nullptr) {
+    captureRouter_->release(AudioCaptureOwner::localCapsule);
+  }
+  linkOwnedRecording_ = false;
+  return complete && recorderFinished;
 }
 
 bool PokePodLinkService::transferPermitted() const {
@@ -2168,10 +2403,24 @@ bool PokePodLinkService::acquireRequestLease(uint32_t requestId) {
 
 void PokePodLinkService::releaseRequestLease() {
   if (!requestLeaseHeld_) return;
+  if (txStepper_.active() || pendingControlBytes_ != 0 ||
+      outgoingPhase_ != OutgoingPhase::none) {
+    releaseRequestLeaseWhenTxDrained_ = true;
+    return;
+  }
+  releaseRequestLeaseNow();
+}
+
+void PokePodLinkService::releaseRequestLeaseNow() {
+  if (!requestLeaseHeld_) {
+    releaseRequestLeaseWhenTxDrained_ = false;
+    return;
+  }
   if (coordinator_ != nullptr && transport_ != LinkTransport::none) {
     coordinator_->release(transport_);
   }
   requestLeaseHeld_ = false;
+  releaseRequestLeaseWhenTxDrained_ = false;
 }
 
 bool PokePodLinkService::foregroundBusy() const {

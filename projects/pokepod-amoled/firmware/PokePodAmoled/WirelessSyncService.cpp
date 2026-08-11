@@ -1,6 +1,7 @@
 #include "WirelessSyncService.h"
 
 #include "AudioCaptureRouter.h"
+#include "AudioCaptureRuntime.h"
 #include "AudioPipeline.h"
 #include "BleVoiceService.h"
 #include "BoardServices.h"
@@ -27,7 +28,8 @@ bool WirelessSyncService::begin(
     ProvisioningDiagnostics &provisioningDiagnostics,
     PowerDiagnostics &powerDiagnostics,
     RuntimePowerManager &power, WirelessSyncIdentity &identity,
-    LinkServiceCoordinator &coordinator, Print &log) {
+    LinkServiceCoordinator &coordinator, Print &log,
+    AudioCaptureRuntime *captureRuntime) {
   identity_ = &identity;
   log_ = &log;
   authenticator_.begin(identity, replay_, log);
@@ -36,7 +38,8 @@ bool WirelessSyncService::begin(
                        provisioningDiagnostics, powerDiagnostics, power, log,
                        &coordinator,
                        LinkTransport::wifi, nullptr,
-                       &window_.transferGate(), nullptr);
+                       &window_.transferGate(), nullptr, &tls_,
+                       captureRuntime);
   observedMaintenanceStartRevision_ = link_.maintenanceStartRevision();
   observedMaintenanceCompletionRevision_ =
       link_.maintenanceCompletionRevision();
