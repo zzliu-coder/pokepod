@@ -3,13 +3,15 @@
 namespace pokepod {
 
 String CapsuleBatchJournalStore::path(const String &transactionId) const {
-  return String(kDirectory) + "/" + transactionId + ".cbj";
+  return capsuleBatchUuid(transactionId.c_str())
+      ? String(kDirectory) + "/" + transactionId + ".cbj" : String();
 }
 
 bool CapsuleBatchJournalStore::create(
     const String &transactionId, const char *operation, uint16_t total,
     StorageOwner owner, StoredCapsuleBatchState &state) {
-  if (fs_ == nullptr || transactionId.length() != 36 || operation == nullptr ||
+  if (fs_ == nullptr || !capsuleBatchUuid(transactionId.c_str()) ||
+      !capsuleBatchOperation(operation) ||
       strlen(operation) >= sizeof(state.operation) || total > 500) return false;
   memset(&state, 0, sizeof(state));
   state.magic = kCapsuleBatchJournalMagic;
@@ -36,10 +38,10 @@ bool CapsuleBatchJournalStore::create(
   const size_t second = file.write(
       reinterpret_cast<const uint8_t *>(&empty), sizeof(empty));
   file.flush();
-  const bool ok = first == sizeof(state) && second == sizeof(empty) &&
+  const bool wrote = first == sizeof(state) && second == sizeof(empty) &&
       file.getWriteError() == 0;
   file.close();
-  if (!ok) return false;
+  if (!wrote || file.getWriteError() != 0) return false;
   lease.release();
   StoredCapsuleBatchState verified;
   return readStateSlot(path(transactionId), 0, verified, owner) &&
@@ -49,7 +51,7 @@ bool CapsuleBatchJournalStore::create(
 bool CapsuleBatchJournalStore::load(
     const String &transactionId, StorageOwner owner,
     StoredCapsuleBatchState &state) const {
-  if (fs_ == nullptr) return false;
+  if (fs_ == nullptr || !capsuleBatchUuid(transactionId.c_str())) return false;
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       owner, StorageAccess::read, 0);
   if (!lease) return false;
@@ -98,9 +100,9 @@ bool CapsuleBatchJournalStore::writeStateSlot(
       reinterpret_cast<const uint8_t *>(&state), sizeof(state)) ==
       sizeof(state);
   file.flush();
-  const bool ok = wrote && file.getWriteError() == 0;
+  const bool flushed = wrote && file.getWriteError() == 0;
   file.close();
-  return ok;
+  return flushed && file.getWriteError() == 0;
 }
 
 bool CapsuleBatchJournalStore::readStateSlot(
@@ -125,6 +127,8 @@ bool CapsuleBatchJournalStore::writePlan(
     StoredCapsuleBatchPlan &plan, StorageOwner owner) {
   if (fs_ == nullptr || index >= state.total) return false;
   sealCapsuleBatchPlan(plan);
+  if (!validCapsuleBatchState(state) ||
+      !validCapsuleBatchPlan(plan, state.operation)) return false;
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       owner, StorageAccess::mutation, 0);
   if (!lease) return false;
@@ -136,9 +140,9 @@ bool CapsuleBatchJournalStore::writePlan(
   const bool wrote = file.write(
       reinterpret_cast<const uint8_t *>(&plan), sizeof(plan)) == sizeof(plan);
   file.flush();
-  const bool ok = wrote && file.getWriteError() == 0;
+  const bool flushed = wrote && file.getWriteError() == 0;
   file.close();
-  if (!ok) return false;
+  if (!flushed || file.getWriteError() != 0) return false;
   lease.release();
   StoredCapsuleBatchPlan verified;
   return readPlan(state, index, verified, owner) &&
@@ -160,12 +164,12 @@ bool CapsuleBatchJournalStore::readPlan(
   const bool read = file.read(reinterpret_cast<uint8_t *>(&plan),
                               sizeof(plan)) == sizeof(plan);
   file.close();
-  return read && validCapsuleBatchPlan(plan);
+  return read && validCapsuleBatchPlan(plan, state.operation);
 }
 
 bool CapsuleBatchJournalStore::erase(const String &transactionId,
                                      StorageOwner owner) {
-  if (fs_ == nullptr) return false;
+  if (fs_ == nullptr || !capsuleBatchUuid(transactionId.c_str())) return false;
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       owner, StorageAccess::mutation, 0);
   return lease && (!fs_->exists(path(transactionId)) ||

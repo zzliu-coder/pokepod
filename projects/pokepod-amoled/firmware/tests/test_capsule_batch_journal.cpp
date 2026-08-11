@@ -11,7 +11,7 @@ int main() {
   strcpy(first.operation, "moveCapsules");
   first.total = 500;
   first.cursor = 37;
-  first.applied = 12;
+  first.applied = 37;
   first.phase = CapsuleBatchPhase::rollback;
   first.generation = 9;
   sealCapsuleBatchState(first);
@@ -57,8 +57,71 @@ int main() {
   plan.expectedRevision = 4;
   sealCapsuleBatchPlan(plan);
   assert(validCapsuleBatchPlan(plan));
+  assert(validCapsuleBatchPlan(plan, "moveCapsules"));
   plan.target[3] ^= 1;
   assert(!validCapsuleBatchPlan(plan));
+
+  StoredCapsuleBatchState malicious = first;
+  memset(malicious.transactionId, 'a', sizeof(malicious.transactionId));
+  sealCapsuleBatchState(malicious);
+  assert(!validCapsuleBatchState(malicious));
+  malicious = first;
+  strcpy(malicious.operation, "unknownOperation");
+  sealCapsuleBatchState(malicious);
+  assert(!validCapsuleBatchState(malicious));
+  malicious = first;
+  malicious.flags = 0x80;
+  sealCapsuleBatchState(malicious);
+  assert(!validCapsuleBatchState(malicious));
+  malicious = first;
+  malicious.phase = CapsuleBatchPhase::rollback;
+  malicious.cursor = 4;
+  malicious.applied = 3;
+  sealCapsuleBatchState(malicious);
+  assert(!validCapsuleBatchState(malicious));
+
+  StoredCapsuleBatchPlan escaped;
+  strcpy(escaped.id, "22222222-2222-4222-8222-222222222222");
+  strcpy(escaped.source, "/PokeCapsule/Inbox/../../secret");
+  strcpy(escaped.target, "/PokeCapsule/Archive/x");
+  sealCapsuleBatchPlan(escaped);
+  assert(!validCapsuleBatchPlan(escaped, "moveCapsules"));
+  memset(escaped.source, 'x', sizeof(escaped.source));
+  sealCapsuleBatchPlan(escaped);
+  assert(!validCapsuleBatchPlan(escaped, "moveCapsules"));
+
+  StoredCapsuleBatchPlan protectedPath;
+  strcpy(protectedPath.id, "22222222-2222-4222-8222-222222222222");
+  strcpy(protectedPath.source,
+         "/PokeCapsule/.system/22222222-2222-4222-8222-222222222222");
+  strcpy(protectedPath.target,
+         "/PokeCapsule/Inbox/22222222-2222-4222-8222-222222222222");
+  sealCapsuleBatchPlan(protectedPath);
+  assert(!validCapsuleBatchPlan(protectedPath, "moveCapsules"));
+  strcpy(protectedPath.source,
+         "/PokeCapsule/.staging/22222222-2222-4222-8222-222222222222");
+  sealCapsuleBatchPlan(protectedPath);
+  assert(!validCapsuleBatchPlan(protectedPath, "moveCapsules"));
+  strcpy(protectedPath.source, "/PokeCapsule/Inbox");
+  sealCapsuleBatchPlan(protectedPath);
+  assert(!validCapsuleBatchPlan(protectedPath, "moveCapsules"));
+
+  StoredCapsuleBatchPlan trashPlan;
+  strcpy(trashPlan.id, "22222222-2222-4222-8222-222222222222");
+  strcpy(trashPlan.source,
+         "/PokeCapsule/Inbox/22222222-2222-4222-8222-222222222222");
+  strcpy(trashPlan.target,
+         "/PokeCapsule/.trash/22222222-2222-4222-8222-222222222222");
+  sealCapsuleBatchPlan(trashPlan);
+  assert(validCapsuleBatchPlan(trashPlan, "deleteCapsules"));
+  assert(!validCapsuleBatchPlan(trashPlan, "restoreCapsules"));
+  strcpy(trashPlan.source,
+         "/PokeCapsule/.trash/22222222-2222-4222-8222-222222222222");
+  strcpy(trashPlan.target,
+         "/PokeCapsule/Inbox/22222222-2222-4222-8222-222222222222");
+  sealCapsuleBatchPlan(trashPlan);
+  assert(validCapsuleBatchPlan(trashPlan, "restoreCapsules"));
+  assert(!validCapsuleBatchPlan(trashPlan, "deleteCapsules"));
 
   // A cut after an apply mutation but before its post-checkpoint includes the
   // uncertain item in reverse recovery. Repeating recovery is idempotent.
