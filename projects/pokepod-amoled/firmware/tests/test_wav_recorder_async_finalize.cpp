@@ -485,24 +485,28 @@ void runFailureFactMustBecomeDurable() {
                     fakefs::FaultAction::returnFailure);
   state->failAlsoAlways(fakefs::Operation::rename,
                         fakefs::FaultAction::returnFailure);
-  for (uint32_t poll = 0; poll < 2000U; ++poll) {
+  for (uint32_t poll = 0; recorder.operationActive() && poll < 2000U; ++poll) {
     const uint32_t before = state->operations;
     (void)recorder.pollFinalize(log, poll, nullptr);
     assert(state->operations - before <= 1U);
   }
-  assert(recorder.operationActive());
-  assert(recorder.cleanupPending());
-  assert(!recorder.terminalResult().pending());
-  assert(recorder.ownedBy(RecorderOperationOwner::localApp));
-  assert(!StorageCoordinator::instance().idle());
-  assert(!recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
-                         RecorderOperationOwner::localApp));
-
-  state->clearFault();
-  drive(recorder, state, log, 3000U, nullptr);
+  assert(!recorder.operationActive());
+  assert(!recorder.cleanupPending());
   assert(recorder.terminalResult().terminal ==
          RecorderTerminal::cleanupBlocked);
-  assert(failedCheckpoint(state, kFirstId).failureStage != 0);
+  assert(recorder.recoveryFailed());
+  assert(recorder.operationOwner() == RecorderOperationOwner::none);
+  assert(StorageCoordinator::instance().idle());
+  assert(state->openHandles == 0U);
+  const std::string staging = std::string(kCapsuleStaging) + "/" + kFirstId;
+  assert(state->directories.count(staging) == 1U);
+  assert(state->files.count(staging + "/audio.wav.part") == 1U);
+  assert(!recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+                         RecorderOperationOwner::localApp));
+  RecorderOutcome acknowledged;
+  assert(recorder.takeTerminalResult(acknowledged));
+  assert(!recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+                         RecorderOperationOwner::localApp));
 }
 
 void runRecoveryFinalizeFailureDoesNotWedge() {

@@ -1266,7 +1266,7 @@ bool WavRecorder::pollCleanup(Print &log, uint32_t nowMs,
     if (!fs_->rename(checkpointPath, failedPath)) {
       if (++cleanupPrimitiveFailures_ < 3) return false;
       log.println(
-          "{\"event\":\"recording_cleanup_blocked\",\"artifact\":\"failure_marker\"}");
+          "{\"event\":\"recording_storage_degraded\",\"artifact\":\"failure_marker\",\"staging_preserved\":true}");
       cleanupTerminal_ = RecorderTerminal::cleanupBlocked;
       cleanupPrimitiveFailures_ = 0;
       if (recoveryFinalizeActive_) {
@@ -1276,7 +1276,16 @@ bool WavRecorder::pollCleanup(Print &log, uint32_t nowMs,
         finalizePhase_ = FinalizePhase::idle;
         recoveryPhase_ = recoveryRoot_ ? RecoveryPhase::failureCloseRoot
                                        : RecoveryPhase::failureDone;
+        return false;
       }
+      // No durable failure fact can be created while both writes and the
+      // atomic checkpoint rename are unavailable.  Preserve the staging
+      // evidence, publish a bounded terminal result, and fail this recorder
+      // instance closed so a new session cannot reinterpret the old
+      // recording checkpoint as reusable truth.  A reboot will run the
+      // normal recovery/quarantine path before recording is enabled.
+      bootRecoveryFailed_ = true;
+      cleanupPhase_ = CleanupPhase::publishTerminal;
       return false;
     }
     cleanupPrimitiveFailures_ = 0;
