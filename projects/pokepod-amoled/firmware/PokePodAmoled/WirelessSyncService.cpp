@@ -17,9 +17,6 @@
 #include "WirelessSyncIdentity.h"
 
 namespace pokepod {
-namespace {
-constexpr uint32_t kAuthenticationTimeoutMs = 6000;
-}
 
 bool WirelessSyncService::begin(
     fs::FS &fs, BoardServices &board, AudioPipeline &audio,
@@ -152,17 +149,16 @@ void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
     return;
   }
   if (!tls_.ready()) return;
+  authenticationDeadline_.observeTlsReady(nowMs);
 
   if (!authenticator_.authenticated()) {
+    if (authenticationDeadline_.expired(nowMs)) {
+      closeClient("authentication-timeout");
+      return;
+    }
     authenticator_.poll(tls_);
     if (authenticator_.rejected()) {
       closeClient("authentication-failed");
-      return;
-    }
-    if (!authenticator_.authenticated() &&
-        static_cast<uint32_t>(nowMs - clientStartedAtMs_) >=
-            kAuthenticationTimeoutMs) {
-      closeClient("authentication-timeout");
       return;
     }
   }
@@ -229,7 +225,7 @@ void WirelessSyncService::acceptClient(uint32_t nowMs) {
   }
   clientPresent_ = true;
   authenticationObserved_ = false;
-  clientStartedAtMs_ = nowMs == 0 ? 1 : nowMs;
+  authenticationDeadline_.reset();
   lastCompletedAtMs_ = 0;
   lastError_ = "";
 }
@@ -244,7 +240,7 @@ void WirelessSyncService::closeClient(const char *reason) {
   authenticator_.reset();
   clientPresent_ = false;
   authenticationObserved_ = false;
-  clientStartedAtMs_ = 0;
+  authenticationDeadline_.reset();
   const bool expectedAfterCompletion = completed() && reason != nullptr &&
       (strcmp(reason, "peer-closed") == 0 ||
        strcmp(reason, "link-disconnected") == 0);

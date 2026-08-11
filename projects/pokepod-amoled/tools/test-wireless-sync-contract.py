@@ -59,6 +59,14 @@ assert "link_.begin(tls_" in service
 assert "link_.begin(incoming" not in service
 assert "&window_.transferGate()" in service
 assert "window_.transferGate(), nowMs" in service
+assert "authenticationDeadline_.observeTlsReady(nowMs);" in service
+assert service.index("if (!tls_.ready()) return;") < service.index(
+    "authenticationDeadline_.observeTlsReady(nowMs);"
+)
+assert service.index("authenticationDeadline_.expired(nowMs)") < service.index(
+    "authenticator_.poll(tls_)"
+)
+assert "clientStartedAtMs_" not in service
 
 window = read("WirelessSyncWindow.h")
 assert "kWirelessSyncWindowMs = 5UL * 60UL * 1000UL" in window
@@ -92,6 +100,7 @@ main = read("PokePodApp.cpp")
 assert "LinkTransport::usb, &wirelessSync,\n                    nullptr" in main
 
 identity = read("WirelessSyncIdentity.cpp")
+assert "rotationPolicy_.shouldRotate(rotate" in identity
 assert 'cJSON_AddStringToObject(root, "deviceId", deviceId_)' in identity
 assert 'cJSON_AddStringToObject(root, "platform", "pokepod")' in identity
 for field in (

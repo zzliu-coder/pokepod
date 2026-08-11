@@ -5,6 +5,7 @@
 
 #include "WirelessSyncIdentityBlob.h"
 #include "WirelessSyncPairing.h"
+#include "WirelessSecurityPolicy.h"
 
 namespace pokepod {
 
@@ -37,6 +38,7 @@ class WirelessSyncIdentity : public WirelessSyncPairingProvider {
   bool preferencesOpen_ = false;
   bool ready_ = false;
   Print *log_ = nullptr;
+  PairingExportRotationPolicy rotationPolicy_;
 };
 
 }  // namespace pokepod

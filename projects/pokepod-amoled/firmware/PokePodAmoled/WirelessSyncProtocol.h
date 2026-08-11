@@ -10,7 +10,8 @@ namespace pokepod {
 constexpr uint8_t kWirelessSyncSchemaVersion = 1;
 constexpr uint8_t kWirelessSyncLinkVersion = 2;
 constexpr size_t kWirelessSyncSecretBytes = 32;
-constexpr size_t kWirelessSyncNonceMinimumBytes = 16;
+constexpr size_t kWirelessSyncNonceShortBytes = 16;
+constexpr size_t kWirelessSyncNonceLongBytes = 32;
 constexpr size_t kWirelessSyncReplayLimit = 64;
 constexpr char kWirelessSyncProtocolLabel[] = "pokecapsule-v1";
 constexpr char kWirelessSyncServiceType[] = "_pokecapsule._tcp";
@@ -67,7 +68,8 @@ inline std::string base64UrlEncode(const uint8_t *bytes, size_t size) {
 inline bool validWirelessNonce(const std::string &value) {
   std::vector<uint8_t> decoded;
   return base64UrlDecode(value, decoded) &&
-      decoded.size() >= kWirelessSyncNonceMinimumBytes;
+      (decoded.size() == kWirelessSyncNonceShortBytes ||
+       decoded.size() == kWirelessSyncNonceLongBytes);
 }
 
 inline std::string wirelessProofMessage(const char *role,

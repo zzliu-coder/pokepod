@@ -8,6 +8,7 @@
 #include "DeviceConfig.h"
 #include "ProvisioningDiagnostics.h"
 #include "ProvisioningPolicy.h"
+#include "WirelessSecurityPolicy.h"
 
 namespace pokepod {
 
@@ -45,6 +46,7 @@ class ProvisioningPortal {
   void showPortal();
   void saveRequest();
   void forgetRequest();
+  bool authorizeMutation();
   void sendSaveJson(int statusCode, bool accepted);
   void beginStationValidation();
   void restorePortalForRetry();
@@ -81,6 +83,7 @@ class ProvisioningPortal {
   uint32_t closeAtMs_ = 0;
   int16_t candidateRssi_ = -127;
   uint8_t validationAttempt_ = 0;
+  ProvisioningCsrfPolicy csrf_;
 };
 
 }  // namespace pokepod

@@ -48,6 +48,7 @@ assert "高级设置" in source
 assert "form.addEventListener('submit',submitForm)" in source
 assert "fetch('/save'" in source
 assert "fetch('/forget-network'" in source
+assert "'X-PokePod-CSRF':csrf" in source
 assert 'server_.on("/forget-network", HTTP_POST' in source
 assert "config_->wifiNetwork(next.wifiSsid)" in source
 assert r'\"remembered\"' in source
@@ -166,6 +167,15 @@ assert 'strcmp(operation, "provisioning-start") == 0' in link_source
 assert 'strcmp(operation, "provisioning-stop") == 0' in link_source
 assert "only available over USB" in link_source
 assert source.index("id='wifi-step'") < source.index("id='tencent-step'")
+for handler_name, next_declaration in (
+    ("scanRequest", "void ProvisioningPortal::showPortal()"),
+    ("saveRequest", "void ProvisioningPortal::beginStationValidation()"),
+    ("forgetRequest", "bool ProvisioningPortal::authorizeMutation()"),
+):
+    handler_start = source.index(f"void ProvisioningPortal::{handler_name}()")
+    handler = source[handler_start:source.index(next_declaration, handler_start)]
+    assert "if (!authorizeMutation()) return;" in handler
+assert "server_.collectHeaders(headers, 1);" in source
 change_gate = source[source.index("bool ProvisioningPortal::takeConfigurationChanged()"):
                      source.index("void ProvisioningPortal::installRoutes()")]
 assert "if (active_) return false;" in change_gate

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <esp_wifi.h>
 
 #include "ProvisioningPolicy.h"
@@ -17,6 +18,20 @@ constexpr uint32_t kPortalLifetimeMs = 5UL * 60UL * 1000UL;
 constexpr uint32_t kValidationTimeoutMs = 15000;
 constexpr uint32_t kScanTimeoutMs = 8000;
 constexpr size_t kMaximumNetworks = 20;
+constexpr size_t kProvisioningCsrfBytes = 32;
+constexpr char kProvisioningCsrfHeader[] = "X-PokePod-CSRF";
+
+std::string newProvisioningCsrfToken() {
+  static constexpr char hex[] = "0123456789abcdef";
+  uint8_t bytes[kProvisioningCsrfBytes];
+  esp_fill_random(bytes, sizeof(bytes));
+  std::string token(sizeof(bytes) * 2, '0');
+  for (size_t index = 0; index < sizeof(bytes); ++index) {
+    token[index * 2] = hex[bytes[index] >> 4];
+    token[index * 2 + 1] = hex[bytes[index] & 0x0f];
+  }
+  return token;
+}
 
 void logProvisioningMemory(Print &log, const char *phase) {
   log.printf(
@@ -78,6 +93,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   closeAtMs_ = 0;
   candidateRssi_ = -127;
   validationAttempt_ = 0;
+  csrf_.begin(newProvisioningCsrfToken(), millis(), kPortalLifetimeMs);
   prepared_ = true;
   starting_ = true;
   diagnostics_->record(ProvisioningLogStage::portalRequested,
@@ -155,6 +171,7 @@ bool ProvisioningPortal::startServices() {
   dns_.start(53, "*", WiFi.softAPIP());
   server_.begin();
   startedMs_ = millis();
+  csrf_.begin(csrf_.token(), startedMs_, kPortalLifetimeMs);
   active_ = true;
   starting_ = false;
   statusMessage_ = "请选择附近的 2.4 GHz 网络或手工输入";
@@ -266,6 +283,7 @@ void ProvisioningPortal::stop() {
   transitionPending_ = false;
   networks_.clear();
   closeAtMs_ = 0;
+  csrf_.close();
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
     diagnostics_->record(ProvisioningLogStage::portalStopped,
                          ProvisioningLogOutcome::info, ssid_, 0, 0,
@@ -286,6 +304,8 @@ bool ProvisioningPortal::takeConfigurationChanged() {
 
 void ProvisioningPortal::installRoutes() {
   if (routesInstalled_) return;
+  const char *headers[] = {kProvisioningCsrfHeader};
+  server_.collectHeaders(headers, 1);
   server_.on("/", HTTP_GET, [this]() { showPortal(); });
   server_.on("/networks", HTTP_GET, [this]() { showNetworks(); });
   server_.on("/scan", HTTP_POST, [this]() { scanRequest(); });
@@ -412,6 +432,7 @@ void ProvisioningPortal::showNetworks() {
 }
 
 void ProvisioningPortal::scanRequest() {
+  if (!authorizeMutation()) return;
   if (validating_) {
     server_.send(409, "application/json; charset=utf-8",
                  "{\"error\":\"正在验证 Wi-Fi\"}");
@@ -427,6 +448,7 @@ void ProvisioningPortal::showPortal() {
 }
 
 void ProvisioningPortal::saveRequest() {
+  if (!authorizeMutation()) return;
   if (validating_) {
     statusMessage_ = "正在验证 Wi-Fi，请稍候";
     sendSaveJson(409, false);
@@ -530,6 +552,7 @@ void ProvisioningPortal::restorePortalForRetry() {
 }
 
 void ProvisioningPortal::forgetRequest() {
+  if (!authorizeMutation()) return;
   if (validating_) {
     server_.send(409, "application/json; charset=utf-8",
                  "{\"error\":\"正在验证 Wi-Fi\"}");
@@ -550,6 +573,15 @@ void ProvisioningPortal::forgetRequest() {
   changed_ = true;
   statusMessage_ = "已忘记所选网络";
   showNetworks();
+}
+
+bool ProvisioningPortal::authorizeMutation() {
+  const String candidate = server_.header(kProvisioningCsrfHeader);
+  if (csrf_.accepts(std::string(candidate.c_str()), millis())) return true;
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(403, "application/json; charset=utf-8",
+               "{\"error\":\"配网页无法使用，请重新进入手机配网\"}");
+  return false;
 }
 
 void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
@@ -736,6 +768,9 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
 <p class='footer'>热点 5 分钟后自动关闭</p>
 </main>
 <script>
+const csrf=')HTML");
+  html += csrf_.token().c_str();
+  html += F(R"HTML(';
 const s=document.getElementById('ssid'),b=document.getElementById('rescan'),form=document.getElementById('form'),save=document.getElementById('save'),status=document.getElementById('status'),connection=document.getElementById('connection'),connectionDetail=document.getElementById('connection-detail'),connectionState=document.getElementById('connection-state'),wifi=document.getElementById('wifi-step'),tencent=document.getElementById('tencent-step'),success=document.getElementById('success-step'),title=document.getElementById('title'),subtitle=document.getElementById('subtitle'),p1=document.getElementById('p1'),p2=document.getElementById('p2'),rememberedWrap=document.getElementById('remembered-wrap'),rememberedList=document.getElementById('remembered-list');
 let preferred=s.dataset.current;
 let validationTimer=0;
@@ -745,14 +780,14 @@ function syncViewport(){const viewport=window.visualViewport;const height=viewpo
 function resetScroll(){requestAnimationFrame(()=>{const root=document.scrollingElement||document.documentElement;root.scrollTop=0;document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>{root.scrollTop=0})})}
 function renderRemembered(items){rememberedList.textContent='';rememberedWrap.hidden=!items.length;for(const item of items){const row=document.createElement('div');row.className='remembered-item';const name=document.createElement('span');name.textContent=item.ssid;const forget=document.createElement('button');forget.type='button';forget.className='forget';forget.textContent='忘记';forget.addEventListener('click',()=>forgetNetwork(item.ssid));row.append(name,forget);rememberedList.appendChild(row)}}
 function render(d){const remembered=d.remembered||[];const rememberedNames=new Set(remembered.map(n=>n.ssid));renderRemembered(remembered);const chosen=s.value||preferred;s.textContent='';for(const n of d.networks){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' · '+strength(n.rssi)+(rememberedNames.has(n.ssid)?' · 已保存':n.secured?' · 加密':' · 开放');s.appendChild(o)}if(chosen&&![...s.options].some(o=>o.value===chosen)){const o=document.createElement('option');o.value=chosen;o.textContent=chosen+' · 已保存';s.prepend(o)}if(!s.options.length){const o=document.createElement('option');o.value='';o.textContent=d.scanning?'正在扫描…':'没有发现网络';s.appendChild(o)}if([...s.options].some(o=>o.value===chosen))s.value=chosen;renderStatus(d);b.textContent=d.scanning?'扫描中…':'重新扫描';b.disabled=d.scanning;if(d.scanning)setTimeout(()=>load(false),800)}
-async function load(rescan){try{const r=await fetch(rescan?'/scan':'/networks',{method:rescan?'POST':'GET',cache:'no-store'});render(await r.json())}catch(e){b.textContent='重新扫描';b.disabled=false}}
-async function forgetNetwork(ssid){if(!confirm('忘记“'+ssid+'”？'))return;const body=new FormData();body.append('ssid',ssid);try{const r=await fetch('/forget-network',{method:'POST',body,cache:'no-store'});const d=await r.json();if(!r.ok){status.textContent=d.error||'无法忘记网络';return}if(preferred===ssid)preferred='';render(d)}catch(e){status.textContent='操作失败，请保持连接 PokePod 热点'}}
+async function load(rescan){try{const r=await fetch(rescan?'/scan':'/networks',{method:rescan?'POST':'GET',headers:rescan?{'X-PokePod-CSRF':csrf}:{},cache:'no-store'});render(await r.json())}catch(e){b.textContent='重新扫描';b.disabled=false}}
+async function forgetNetwork(ssid){if(!confirm('忘记“'+ssid+'”？'))return;const body=new FormData();body.append('ssid',ssid);try{const r=await fetch('/forget-network',{method:'POST',headers:{'X-PokePod-CSRF':csrf},body,cache:'no-store'});const d=await r.json();if(!r.ok){status.textContent=d.error||'无法忘记网络';return}if(preferred===ssid)preferred='';render(d)}catch(e){status.textContent='操作失败，请保持连接 PokePod 热点'}}
 function blurKeyboard(){const active=document.activeElement;if(active&&active.blur)active.blur()}
 function showTencent(){const manual=document.getElementById('manual').value;if(!s.value&&!manual){status.textContent='请选择网络或手工输入名称';try{s.focus({preventScroll:true})}catch(e){s.focus()}return}blurKeyboard();setTimeout(()=>{wifi.hidden=true;tencent.hidden=false;title.textContent='腾讯云转写';subtitle.textContent='保存语音转写凭证';p1.classList.remove('on');p2.classList.add('on');syncViewport();resetScroll()},180)}
 function showWifi(){blurKeyboard();tencent.hidden=true;wifi.hidden=false;title.textContent='连接网络';subtitle.textContent='选择附近的 2.4 GHz Wi-Fi';p2.classList.remove('on');p1.classList.add('on');syncViewport();resetScroll()}
 function showSuccess(){clearTimeout(validationTimer);wifi.hidden=true;tencent.hidden=true;success.hidden=false;renderStatus({wifiState:'connected',saved:true,wifiSsid:s.value||preferred,message:'保存成功；热点即将关闭'});title.textContent='设置完成';subtitle.textContent='PokePod 已连接到网络';save.disabled=true;syncViewport();resetScroll()}
 async function pollValidation(){try{const r=await fetch('/networks',{cache:'no-store'});const d=await r.json();renderStatus(d);if(d.saved){showSuccess();return}if(d.validating){validationTimer=setTimeout(pollValidation,500);return}save.disabled=false;save.textContent='重新保存';document.getElementById('back').disabled=false}catch(e){renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'});validationTimer=setTimeout(pollValidation,700)}}
-async function submitForm(event){event.preventDefault();blurKeyboard();save.disabled=true;document.getElementById('back').disabled=true;save.textContent='正在连接…';renderStatus({wifiState:'connecting',message:'正在连接并验证 Wi-Fi',wifiSsid:s.value||document.getElementById('manual').value});try{const r=await fetch('/save',{method:'POST',body:new FormData(form),cache:'no-store'});const d=await r.json();renderStatus(d);if(!r.ok){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='保存并连接';return}pollValidation()}catch(e){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='重新保存';renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'})}}
+async function submitForm(event){event.preventDefault();blurKeyboard();save.disabled=true;document.getElementById('back').disabled=true;save.textContent='正在连接…';renderStatus({wifiState:'connecting',message:'正在连接并验证 Wi-Fi',wifiSsid:s.value||document.getElementById('manual').value});try{const r=await fetch('/save',{method:'POST',headers:{'X-PokePod-CSRF':csrf},body:new FormData(form),cache:'no-store'});const d=await r.json();renderStatus(d);if(!r.ok){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='保存并连接';return}pollValidation()}catch(e){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='重新保存';renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'})}}
 b.addEventListener('click',()=>load(true));
 document.getElementById('next').addEventListener('click',showTencent);
 document.getElementById('back').addEventListener('click',showWifi);

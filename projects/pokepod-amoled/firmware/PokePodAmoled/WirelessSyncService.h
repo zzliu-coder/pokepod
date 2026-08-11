@@ -8,6 +8,7 @@
 #include "WirelessSyncAuthenticator.h"
 #include "WirelessSyncBonjour.h"
 #include "WirelessSyncPairing.h"
+#include "WirelessSecurityPolicy.h"
 #include "WirelessSyncTlsStream.h"
 #include "WirelessSyncWindow.h"
 
@@ -81,6 +82,7 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
   WirelessSyncWindow window_;
   WirelessSyncWindowDecision decision_;
   WirelessReplayGuard replay_;
+  WirelessAuthDeadline authenticationDeadline_;
   PokePodLinkService link_;
   WirelessSyncIdentity *identity_ = nullptr;
   Print *log_ = nullptr;
@@ -89,7 +91,6 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
   bool clientPresent_ = false;
   bool authenticationObserved_ = false;
   bool networkConnected_ = false;
-  uint32_t clientStartedAtMs_ = 0;
   uint32_t observedMaintenanceStartRevision_ = 0;
   uint32_t observedMaintenanceCompletionRevision_ = 0;
   uint32_t lastCompletedAtMs_ = 0;

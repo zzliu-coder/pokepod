@@ -38,6 +38,7 @@ void formatIsoUtc(time_t value, char output[25]) {
 
 bool WirelessSyncIdentity::begin(uint64_t hardwareId, Print &log) {
   log_ = &log;
+  rotationPolicy_.reset();
   formatPokePodDeviceId(hardwareId, deviceId_);
   preferencesOpen_ = preferences_.begin("pokepod-sync", false);
   if (!preferencesOpen_) {
@@ -170,10 +171,11 @@ bool WirelessSyncIdentity::pairingBundle(bool rotate, String &json,
     error = "set device time before wireless pairing";
     return false;
   }
-  if (rotate) {
+  if (rotationPolicy_.shouldRotate(rotate, static_cast<uint32_t>(now))) {
     const StoredWirelessSyncIdentity previous = stored_;
     if (!rotatePairing() || !persist()) {
       stored_ = previous;
+      rotationPolicy_.rotationFailed();
       error = "pairing rotation failed";
       return false;
     }
