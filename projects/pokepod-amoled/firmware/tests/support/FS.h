@@ -27,6 +27,7 @@ enum class Operation : uint8_t {
   seek,
   rename,
   remove,
+  rmdir,
   close,
 };
 
@@ -466,6 +467,12 @@ class FS {
   bool rmdir(const String &path) { return rmdir(path.c_str()); }
   bool rmdir(const char *path) {
     if (path == nullptr || std::strcmp(path, "/") == 0) return false;
+    const fakefs::FaultAction action =
+        state_->before(fakefs::Operation::rmdir);
+    if (action == fakefs::FaultAction::returnFailure ||
+        action == fakefs::FaultAction::shortWrite) {
+      return false;
+    }
     const std::string key(path);
     const std::string prefix = key + "/";
     for (const auto &entry : state_->files) {
@@ -476,7 +483,9 @@ class FS {
         return false;
       }
     }
-    return state_->directories.erase(key) != 0;
+    const bool removed = state_->directories.erase(key) != 0;
+    state_->after(fakefs::Operation::rmdir, action);
+    return removed;
   }
 
  private:

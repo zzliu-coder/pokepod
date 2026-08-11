@@ -124,6 +124,7 @@ class CapsuleOperationService {
     applyPath,
     rollbackPath,
     cleanup,
+    closeHandles,
   };
 
   class StringByteSource final : public CapsuleTransactionByteSource {
@@ -152,6 +153,7 @@ class CapsuleOperationService {
   void beginWork(const CapsuleBatchExecutor::Work &work);
   void advancePending(uint32_t nowMs);
   void finishWork(bool ok);
+  bool closeOneReadHandle();
   bool buildPreflightPlan(size_t index);
   bool continueMetadataRead();
   bool preparePlanAfterMetadata();
@@ -222,6 +224,7 @@ class CapsuleOperationService {
   bool purgeEntryUnknown_ = false;
   bool observedSourceExists_ = false;
   bool observedTargetExists_ = false;
+  bool pendingCompletionOk_ = false;
   size_t maximumMetadataReadBytes_ = 0;
   size_t maximumPollBytes_ = 0;
 };

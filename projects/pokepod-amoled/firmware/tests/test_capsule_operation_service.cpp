@@ -24,6 +24,7 @@ struct QuietPrint final : public Print {};
 struct FakeCatalog final : public CapsuleOperationCatalog {
   std::map<std::string, CapsuleOperationSnapshot> records;
   size_t finished = 0;
+  size_t committedCalls = 0;
   bool lastCommitted = false;
   bool lastRemoved = false;
 
@@ -35,7 +36,9 @@ struct FakeCatalog final : public CapsuleOperationCatalog {
     return true;
   }
 
-  bool operationCommitted(const char *, const char *, bool) override {
+  bool operationCommitted(const char *, const char *, bool removed) override {
+    ++committedCalls;
+    lastRemoved = removed;
     return true;
   }
 
@@ -180,6 +183,13 @@ void runPurgePolicyAndLargeDirectory() {
   outcome = run(service, CapsuleOperationAction::purge, {String(kFirst)});
   assert(outcome.committed && outcome.changed == 1);
   assert(state->directories.count(trash) == 0);
+  assert(catalog.committedCalls == 1);
+  assert(catalog.lastRemoved);
+  const std::string stagedPrefix =
+      std::string(kCapsuleStaging) + "/purge-local-";
+  for (const std::string &directory : state->directories) {
+    assert(directory.rfind(stagedPrefix, 0) != 0);
+  }
   assert(service.maximumPollBytes() <= 4096);
 }
 
@@ -377,6 +387,44 @@ void runPermanentCheckpointFailureTerminal() {
   assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
 }
 
+void runPermanentPurgeCleanupFailure(fakefs::Operation operation) {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  FakeCatalog catalog;
+  const std::string trash = std::string(kCapsuleTrash) + "/" + kFirst;
+  seedCapsule(state, trash);
+  state->seed(trash + "/trash.json", "{\"originalFolder\":\"Inbox\"}\n");
+  catalog.records[kFirst] = snapshot(kFirst, trash.c_str(), ".trash", false,
+                                     true);
+  CapsuleOperationService service;
+  bootToReady(service, storage, log, &catalog);
+  state->failAlways(operation, fakefs::FaultAction::returnFailure);
+  const CapsuleOperationOutcome outcome = run(
+      service, CapsuleOperationAction::purge, {String(kFirst)});
+  state->clearFault();
+
+  assert(!outcome.committed);
+  assert(outcome.changed == 0);
+  assert(outcome.authorityPreserved);
+  assert(service.mutationCapabilityBlocked());
+  assert(!service.sleepBlocker());
+  assert(catalog.committedCalls == 0);
+  assert(!catalog.lastCommitted);
+  assert(state->directories.count(trash) == 0);
+  const std::string stagedPrefix =
+      std::string(kCapsuleStaging) + "/purge-local-";
+  bool stagedAuthorityPresent = false;
+  for (const std::string &directory : state->directories) {
+    if (directory.compare(0, stagedPrefix.size(), stagedPrefix) == 0) {
+      stagedAuthorityPresent = true;
+      break;
+    }
+  }
+  assert(stagedAuthorityPresent);
+  assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
+}
+
 void runInvalidBootAuthorityTerminal() {
   QuietPrint log;
   auto state = std::make_shared<fakefs::State>();
@@ -414,6 +462,8 @@ int main() {
   runSubmissionLimit();
   runEveryLocalCutpoint();
   runPermanentCheckpointFailureTerminal();
+  runPermanentPurgeCleanupFailure(fakefs::Operation::remove);
+  runPermanentPurgeCleanupFailure(fakefs::Operation::rmdir);
   runInvalidBootAuthorityTerminal();
   return 0;
 }

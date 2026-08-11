@@ -203,6 +203,7 @@ void CapsuleOperationService::resetRequest() {
   purgeEntryUnknown_ = false;
   observedSourceExists_ = false;
   observedTargetExists_ = false;
+  pendingCompletionOk_ = false;
   metadataText_ = "";
   metadataValue_ = "";
   metadataPath_ = "";
@@ -455,9 +456,13 @@ bool CapsuleOperationService::startRecovery(const String &transactionId) {
 }
 
 void CapsuleOperationService::enterBlocked(const char *diagnostic) {
-  if (metadataFile_) metadataFile_.close();
-  if (purgeDirectory_) purgeDirectory_.close();
-  if (startupDirectory_) startupDirectory_.close();
+  // Terminal transitions normally hold no File. If a read-side failure left
+  // one handle open, close it while the storage lease is still attributable
+  // to this service before releasing the logical reservation.
+  if (!closeOneReadHandle()) {
+    diagnostic_ = "local operation terminal close pending";
+    return;
+  }
   reservation_.release();
   lifecycle_ = Lifecycle::blocked;
   diagnostic_ = diagnostic == nullptr ? "local operation blocked" : diagnostic;
@@ -695,6 +700,9 @@ void CapsuleOperationService::advancePending(uint32_t nowMs) {
     case Pending::cleanup:
       if (advanceCleanup()) finishWork(true);
       return;
+    case Pending::closeHandles:
+      finishWork(pendingCompletionOk_);
+      return;
     case Pending::none:
       return;
   }
@@ -704,11 +712,26 @@ void CapsuleOperationService::finishWork(bool ok) {
   if (!ok && failedId_.isEmpty() && work_.index < itemCount_) {
     failedId_ = idAt(work_.index);
   }
+  if (!closeOneReadHandle()) {
+    pendingCompletionOk_ = ok;
+    pending_ = Pending::closeHandles;
+    return;
+  }
   pending_ = Pending::none;
   pendingStep_ = 0;
-  if (metadataFile_) metadataFile_.close();
-  if (purgeDirectory_) purgeDirectory_.close();
   executor_.completeStep(ok);
+}
+
+bool CapsuleOperationService::closeOneReadHandle() {
+  File *open = metadataFile_ ? &metadataFile_ :
+      (purgeDirectory_ ? &purgeDirectory_ :
+       (startupDirectory_ ? &startupDirectory_ : nullptr));
+  if (open == nullptr) return true;
+  StorageIoLease lease = coordinator_->acquireIo(
+      StorageOwner::capsuleTransaction, StorageAccess::read, 0);
+  if (!lease) return false;
+  open->close();
+  return !metadataFile_ && !purgeDirectory_ && !startupDirectory_;
 }
 
 bool CapsuleOperationService::buildPreflightPlan(size_t index) {
@@ -938,12 +961,17 @@ bool CapsuleOperationService::advancePathMutation(bool rollback) {
 
 bool CapsuleOperationService::advanceCleanup() {
   if (executor_.preserveJournal()) return true;
-  if (executor_.success() && catalog_ != nullptr &&
+  const bool purge =
+      strcmp(journalState_.operation, "purgeCapsules") == 0;
+  if (executor_.success() && !purge && catalog_ != nullptr &&
       notificationIndex_ < executor_.total()) {
     StoredCapsuleBatchPlan committedPlan;
     if (!journalStore_.readPlan(
             journalState_, static_cast<uint16_t>(notificationIndex_),
-            committedPlan, StorageOwner::capsuleTransaction)) return false;
+            committedPlan, StorageOwner::capsuleTransaction)) {
+      finishWork(false);
+      return false;
+    }
     const bool removed =
         strcmp(journalState_.operation, "purgeCapsules") == 0;
     if (!catalog_->operationCommitted(
@@ -960,7 +988,10 @@ bool CapsuleOperationService::advanceCleanup() {
       if (cleanupStep_ == 0) {
         if (!journalStore_.readPlan(
                 journalState_, static_cast<uint16_t>(cleanupIndex_), plan_,
-                StorageOwner::capsuleTransaction)) return false;
+                StorageOwner::capsuleTransaction)) {
+          finishWork(false);
+          return false;
+        }
         cleanupStep_ = 1;
         return false;
       }
@@ -971,15 +1002,17 @@ bool CapsuleOperationService::advanceCleanup() {
       if (unarchive || restore) {
         const String metadata = String(plan_.target) +
             (restore ? "/trash.json" : String("/") + kCapsuleArchiveMetadata);
-        if (!removePathIfPresent(metadata)) return false;
+        if (!removePathIfPresent(metadata)) {
+          finishWork(false);
+          return false;
+        }
       }
       ++cleanupIndex_;
       cleanupStep_ = 0;
       return false;
     }
   }
-  if (executor_.success() &&
-      strcmp(journalState_.operation, "purgeCapsules") == 0) {
+  if (executor_.success() && purge) {
     if (cleanupIndex_ < executor_.total()) {
       if (!treeStepper_.active() && cleanupStep_ == 0) {
         if (!journalStore_.readPlan(
@@ -987,6 +1020,7 @@ bool CapsuleOperationService::advanceCleanup() {
                 StorageOwner::capsuleTransaction) ||
             !treeStepper_.beginRemove(*fs_, purgeItemPath(plan_),
                                       StorageOwner::capsuleTransaction)) {
+          finishWork(false);
           return false;
         }
         cleanupStep_ = 1;
@@ -995,7 +1029,10 @@ bool CapsuleOperationService::advanceCleanup() {
       const LinkTreeStepper::Result result = treeStepper_.poll();
       if (result == LinkTreeStepper::Result::progress ||
           result == LinkTreeStepper::Result::wouldBlock) return false;
-      if (result != LinkTreeStepper::Result::complete) return false;
+      if (result != LinkTreeStepper::Result::complete) {
+        finishWork(false);
+        return false;
+      }
       ++cleanupIndex_;
       cleanupStep_ = 0;
       return false;
@@ -1005,10 +1042,34 @@ bool CapsuleOperationService::advanceCleanup() {
           StorageOwner::capsuleTransaction, StorageAccess::mutation, 0);
       if (!lease) return false;
       const String staging = purgeTransactionDirectory();
-      if (fs_->exists(staging) && !fs_->rmdir(staging)) return false;
+      if (fs_->exists(staging) && !fs_->rmdir(staging)) {
+        finishWork(false);
+        return false;
+      }
       cleanupStep_ = 3;
       return false;
     }
+  }
+  // A purge becomes visible as removed only after every staged capsule tree
+  // and the transaction staging directory are physically absent. If remove
+  // or rmdir reaches the executor's bounded permanent-failure terminal, this
+  // block is never reached: the catalog remains intact and the journal stays
+  // as recovery authority.
+  if (executor_.success() && purge && cleanupStep_ >= 3 &&
+      catalog_ != nullptr && notificationIndex_ < executor_.total()) {
+    StoredCapsuleBatchPlan committedPlan;
+    if (!journalStore_.readPlan(
+            journalState_, static_cast<uint16_t>(notificationIndex_),
+            committedPlan, StorageOwner::capsuleTransaction)) {
+      finishWork(false);
+      return false;
+    }
+    if (!catalog_->operationCommitted(
+            committedPlan.id, committedPlan.target, true)) {
+      diagnostic_ = "durable purge committed; index refresh queued";
+    }
+    ++notificationIndex_;
+    return false;
   }
   const uint8_t journalPart = static_cast<uint8_t>(cleanupStep_ >= 10
       ? cleanupStep_ - 10 : 0);
@@ -1019,6 +1080,7 @@ bool CapsuleOperationService::advanceCleanup() {
   if (journalPart < 3) {
     if (!journalStore_.erasePart(transactionId_, journalPart,
                                  StorageOwner::capsuleTransaction)) {
+      finishWork(false);
       return false;
     }
     ++cleanupStep_;
@@ -1125,8 +1187,11 @@ void CapsuleOperationService::publishOutcome() {
   outcome_ = {};
   outcome_.action = action_;
   outcome_.requested = itemCount_;
-  outcome_.committed = executor_.success();
-  outcome_.changed = executor_.success() ? itemCount_ : executor_.applied();
+  // preserveJournal means cleanup did not reach a durable terminal. Even when
+  // every apply rename succeeded, UI must not acknowledge a purge (or any
+  // local mutation) whose retained authority still requires recovery.
+  outcome_.committed = executor_.success() && !executor_.preserveJournal();
+  outcome_.changed = outcome_.committed ? itemCount_ : 0;
   outcome_.rollbackFailed = executor_.rollbackFailed();
   outcome_.authorityPreserved = executor_.preserveJournal();
   outcome_.failedId = failedId_;
