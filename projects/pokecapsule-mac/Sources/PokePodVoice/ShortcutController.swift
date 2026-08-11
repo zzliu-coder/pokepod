@@ -4,6 +4,7 @@ import PokePodVoiceCore
 
 final class ShortcutController {
     private(set) var isHeld = false
+    private let eventSource = CGEventSource(stateID: .hidSystemState)
 
     var isAuthorized: Bool { AXIsProcessTrusted() }
 
@@ -15,20 +16,35 @@ final class ShortcutController {
     func pressOptionZ() throws {
         guard isAuthorized else { throw VoicePlatformError.accessibilityMissing }
         guard !isHeld else { return }
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 6, keyDown: true) else {
+
+        guard post(OptionZHoldSequence.press[0]) else {
             throw VoicePlatformError.audioSinkUnavailable
         }
-        event.flags = .maskAlternate
-        event.post(tap: .cghidEventTap)
+        guard post(OptionZHoldSequence.press[1]) else {
+            _ = post(OptionZHoldSequence.release[1])
+            throw VoicePlatformError.audioSinkUnavailable
+        }
         isHeld = true
     }
 
     func releaseOptionZ() {
         guard isHeld else { return }
-        let event = CGEvent(keyboardEventSource: nil, virtualKey: 6, keyDown: false)
-        event?.flags = .maskAlternate
-        event?.post(tap: .cghidEventTap)
+        for transition in OptionZHoldSequence.release {
+            _ = post(transition)
+        }
         isHeld = false
+    }
+
+    private func post(_ transition: KeyboardShortcutTransition) -> Bool {
+        guard let event = CGEvent(
+            keyboardEventSource: eventSource,
+            virtualKey: CGKeyCode(transition.virtualKey),
+            keyDown: transition.keyDown
+        ) else { return false }
+        event.flags = transition.alternateDown ? .maskAlternate : []
+        event.setIntegerValueField(.keyboardEventAutorepeat, value: 0)
+        event.post(tap: .cghidEventTap)
+        return true
     }
 }
 
