@@ -270,6 +270,11 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     failIncoming("binary transfer timed out");
   }
   if (rebootAtMs_ != 0 && static_cast<int32_t>(nowMs - rebootAtMs_) >= 0) {
+    if (tencent_ != nullptr &&
+        !tencent_->quiesce(nowMs, 250, TencentCancelReason::shutdown)) {
+      rebootAtMs_ = millis() + 100;
+      return;
+    }
     if (stream_ != nullptr) stream_->flush();
     ESP.restart();
   }

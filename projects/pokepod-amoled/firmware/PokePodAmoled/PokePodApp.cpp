@@ -170,6 +170,13 @@ bool pauseIdleRadios() {
 }
 
 void enterDeepSleep(const PowerInputs &inputs) {
+  if (!tencentWorker.quiesce(millis(), 2000,
+                             TencentCancelReason::shutdown)) {
+    usb.log().println(
+        "{\"event\":\"deep_sleep_deferred\",\"reason\":\"asr_busy\"}");
+    noteUserActivity();
+    return;
+  }
   (void)board.takeTouchInterrupt();
   if (!runtimePower.armDeepSleepWakeSources(automaticWakeEnabled(),
                                              board.lowPowerWakeSourcesReady(),
@@ -196,6 +203,11 @@ void enterDeepSleep(const PowerInputs &inputs) {
   const PowerInputs inputs = currentPowerInputs();
   powerDiagnostics.recordSafeShutdown(
       millis(), inputs, board.status().batteryPercent, usb.log());
+  const bool asrQuiesced = tencentWorker.quiesce(
+      millis(), 2000, TencentCancelReason::shutdown);
+  usb.log().printf(
+      "{\"event\":\"shutdown_asr_quiesce\",\"ok\":%s}\n",
+      asrQuiesced ? "true" : "false");
   wifi.prepareForSleep();
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
@@ -993,13 +1005,14 @@ void setup() {
                     provisioningDiagnostics, powerDiagnostics,
                     runtimePower, usb.log(),
                     &linkCoordinator, LinkTransport::usb, &wirelessSync,
-                    nullptr, &provisioningCoordinator);
+                    nullptr, &provisioningCoordinator,
+                    nullptr, &captureRuntime);
   const bool wifiSyncStarted = wirelessSync.begin(
       SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
       capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
       provisioningDiagnostics, powerDiagnostics, runtimePower,
       wirelessSyncIdentity,
-      linkCoordinator, usb.log());
+      linkCoordinator, usb.log(), &captureRuntime);
   capabilities.record(DeviceCapability::link,
                       usbLinkStarted && syncIdentityStarted &&
                           wifiSyncStarted);

@@ -65,5 +65,9 @@ require(dashboard, "等待网络重试",
         "retryable queued capsules have no visible status")
 require(main, "selected->status == CapsuleStatus::queued",
         "queued transient failures cannot be manually retried")
+require(main, "tencentWorker.quiesce(",
+        "deep sleep and shutdown do not quiesce ASR storage/network work")
+require(link, "tencent_->quiesce(",
+        "Link reboot can restart while ASR still owns resources")
 
 print("PASS tencent_network_contract")
