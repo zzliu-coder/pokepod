@@ -9,6 +9,8 @@
 #include "LinkServiceCoordinator.h"
 #include "LinkTransferGate.h"
 #include "MaintenanceCompletionTracker.h"
+#include "CapsuleTransaction.h"
+#include "StorageCoordinator.h"
 
 namespace pokepod {
 
@@ -134,6 +136,7 @@ class PokePodLinkService {
   String provisioningDiagnosticsJson() const;
   String powerDiagnosticsJson() const;
   bool transferPermitted() const;
+  StorageOwner storageOwner() const;
 
   Stream *stream_ = nullptr;
   fs::FS *fs_ = nullptr;
@@ -158,6 +161,9 @@ class PokePodLinkService {
   WirelessSyncPairingProvider *pairingProvider_ = nullptr;
   LinkTransferGate *transferGate_ = nullptr;
   bool requestLeaseHeld_ = false;
+  CapsuleTransaction transaction_;
+  StorageReservation incomingStorageReservation_;
+  bool commandStorageActive_ = false;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};

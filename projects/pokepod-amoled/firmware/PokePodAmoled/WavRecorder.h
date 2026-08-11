@@ -5,8 +5,11 @@
 
 #include "AudioFrontEnd.h"
 #include "BoardConfig.h"
+#include "CapsuleTransaction.h"
+#include "RecorderCheckpoint.h"
 #include "RecorderOutcome.h"
 #include "RecordingAdmissionPolicy.h"
+#include "StorageCoordinator.h"
 
 namespace pokepod {
 
@@ -17,6 +20,7 @@ class WavRecorder {
   bool start(Print &log, const String &recordingId, const String &createdAt,
              const RecordingSpaceSnapshot &space);
   bool append(const uint8_t *data, size_t length, Print &log);
+  bool appendMono16(const int16_t *samples, size_t sampleCount, Print &log);
   bool stop(Print &log,
             RecorderStopReason reason = RecorderStopReason::user);
   bool recoverInterrupted(Print &log, const String &recoveredAt);
@@ -53,6 +57,11 @@ class WavRecorder {
   bool recoverStagingDirectory(const String &stagingDirectory,
                                const String &recordingId,
                                const String &recoveredAt, Print &log);
+  bool persistCheckpoint(bool failed, RecorderFailureStage stage,
+                         Print &log);
+  bool removeCheckpoint();
+  bool appendMonoBytes(const uint8_t *data, size_t length, Print &log);
+  StorageOwner activeStorageOwner() const;
 
   fs::FS *fs_ = nullptr;
   File file_;
@@ -63,6 +72,12 @@ class WavRecorder {
   String finalPath_;
   uint32_t dataBytes_ = 0;
   bool recording_ = false;
+  bool checkpointInitialized_ = false;
+  uint32_t checkpointCrcState_ = recorderAudioCrc32Begin();
+  uint32_t checkpointedBytes_ = 0;
+  StoredRecorderCheckpoint checkpoint_{};
+  StorageReservation storageReservation_;
+  CapsuleTransaction transaction_;
   RecorderOutcomeState terminalState_;
   AudioFrontEnd audioFrontEnd_;
 };

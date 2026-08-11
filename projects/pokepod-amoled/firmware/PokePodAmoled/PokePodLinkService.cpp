@@ -164,6 +164,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   transferGate_ = transferGate;
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
+  if (!transaction_.begin(fs, log)) return false;
   if (payload_ == nullptr) {
     payload_ = static_cast<uint8_t *>(heap_caps_calloc(
         kLinkMaxDataBytes, sizeof(uint8_t),
@@ -189,9 +190,15 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
 }
 
 void PokePodLinkService::disconnect() {
-  if (incomingFile_) incomingFile_.close();
-  if (fs_ != nullptr && !incomingTemporaryPath_.isEmpty()) {
-    fs_->remove(incomingTemporaryPath_);
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::mutation, 1000);
+    if (lease) {
+      if (incomingFile_) incomingFile_.close();
+      if (fs_ != nullptr && !incomingTemporaryPath_.isEmpty()) {
+        fs_->remove(incomingTemporaryPath_);
+      }
+    }
   }
   incomingKind_ = IncomingKind::none;
   incomingRequestId_ = 0;
@@ -204,6 +211,7 @@ void PokePodLinkService::disconnect() {
   sessionActive_ = false;
   completed_.clear();
   resetFrame();
+  incomingStorageReservation_.release();
   releaseRequestLease();
 }
 
@@ -424,9 +432,21 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
                                        const String &finalPath,
                                        const String &transactionId,
                                        bool chunkAcks) {
+  incomingStorageReservation_ = StorageCoordinator::instance().reserve(
+      storageOwner(), StorageAccess::mutation, 1000);
+  if (!incomingStorageReservation_) return false;
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::mutation, 1000);
+  if (!lease) {
+    incomingStorageReservation_.release();
+    return false;
+  }
   if (fs_->exists(temporaryPath)) fs_->remove(temporaryPath);
   File output = fs_->open(temporaryPath, FILE_WRITE);
-  if (!output) return false;
+  if (!output) {
+    incomingStorageReservation_.release();
+    return false;
+  }
   incomingKind_ = kind;
   incomingRequestId_ = requestId;
   incomingExpected_ = expectedBytes;
@@ -446,7 +466,9 @@ void PokePodLinkService::processData(uint32_t requestId, uint16_t flags,
     sendError(requestId, "unexpected data frame");
     return;
   }
-  if (incomingReceived_ + size > incomingExpected_ ||
+  StorageIoLease writeIo = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::mutation, 1000);
+  if (!writeIo || incomingReceived_ + size > incomingExpected_ ||
       (size > 0 && incomingFile_.write(payload, size) != size)) {
     failIncoming("staged write failed");
     return;
@@ -471,6 +493,12 @@ void PokePodLinkService::finishIncoming() {
   const String temporary = incomingTemporaryPath_;
   const String finalPath = incomingFinalPath_;
   const String transaction = incomingTransactionId_;
+  StorageIoLease finishIo = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::mutation, 1000);
+  if (!finishIo) {
+    failIncoming("storage busy");
+    return;
+  }
   incomingFile_.flush();
   const bool writeOk = incomingFile_.getWriteError() == 0;
   incomingFile_.close();
@@ -480,10 +508,14 @@ void PokePodLinkService::finishIncoming() {
   incomingChunkAcks_ = false;
   incomingTemporaryPath_ = incomingFinalPath_ = incomingTransactionId_ = "";
   incomingLastByteMs_ = 0;
-  if (!writeOk || (kind == IncomingKind::systemFont && !validFontFile(temporary)) ||
-      (fs_->exists(finalPath) && !fs_->remove(finalPath)) ||
-      !fs_->rename(temporary, finalPath)) {
-    fs_->remove(temporary);
+  const bool valid = writeOk &&
+      (kind != IncomingKind::systemFont || validFontFile(temporary));
+  finishIo.release();
+  const bool committed = valid && transaction_.commitPreparedFile(
+      transaction.isEmpty() ? finalPath.c_str() : transaction.c_str(),
+      temporary, finalPath, storageOwner());
+  incomingStorageReservation_.release();
+  if (!committed) {
     sendError(requestId, "atomic file commit failed");
     rememberCompleted(requestId);
     releaseRequestLease();
@@ -502,9 +534,15 @@ void PokePodLinkService::finishIncoming() {
 
 void PokePodLinkService::failIncoming(const char *message) {
   const uint32_t requestId = incomingRequestId_;
-  incomingFile_.close();
-  if (fs_ != nullptr && !incomingTemporaryPath_.isEmpty()) {
-    fs_->remove(incomingTemporaryPath_);
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::mutation, 1000);
+    if (lease) {
+      incomingFile_.close();
+      if (fs_ != nullptr && !incomingTemporaryPath_.isEmpty()) {
+        fs_->remove(incomingTemporaryPath_);
+      }
+    }
   }
   incomingKind_ = IncomingKind::none;
   incomingRequestId_ = 0;
@@ -512,6 +550,7 @@ void PokePodLinkService::failIncoming(const char *message) {
   incomingChunkAcks_ = false;
   incomingTemporaryPath_ = incomingFinalPath_ = incomingTransactionId_ = "";
   incomingLastByteMs_ = 0;
+  incomingStorageReservation_.release();
   sendError(requestId, message);
   rememberCompleted(requestId);
   if (activeMaintenance_.isEmpty()) releaseRequestLease();
@@ -860,6 +899,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
 }
 
 void PokePodLinkService::handleRead(uint32_t requestId, void *jsonRoot) {
+  StorageReservation readReservation = StorageCoordinator::instance().reserve(
+      storageOwner(), StorageAccess::read, 250);
+  if (!readReservation) {
+    sendBusy(requestId);
+    return;
+  }
   cJSON *root = asJson(jsonRoot);
   const char *requested = jsonString(root, "path");
   if (requested == nullptr) {
@@ -999,6 +1044,13 @@ void PokePodLinkService::handleConfigure(uint32_t requestId, void *jsonRoot) {
 void PokePodLinkService::handleCommandFile(uint32_t requestId,
                                            const String &path,
                                            const String &transactionId) {
+  StorageReservation commandStorage = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!commandStorage) {
+    sendError(requestId, "storage busy");
+    return;
+  }
+  commandStorageActive_ = true;
   String message;
   const String resultPath = String(kCapsuleSystem) + "/commands/results/" +
       transactionId + ".json";
@@ -1009,6 +1061,8 @@ void PokePodLinkService::handleCommandFile(uint32_t requestId,
     log_->printf("{\"event\":\"link_command_failed\",\"transaction\":\"%s\",\"message\":\"%s\"}\n",
                  transactionId.c_str(), message.c_str());
   }
+  commandStorageActive_ = false;
+  commandStorage.release();
   sendOk(requestId, "\"accepted\":true");
 }
 
@@ -1493,8 +1547,11 @@ bool PokePodLinkService::rewriteCopiedMetadata(const String &directory,
     return false;
   }
   cJSON_SetNumberValue(processingRevision, processingRevision->valueint + 1);
-  const bool ok = writeTextAtomic(capsulePath, printed(capsule) + "\n") &&
-      writeTextAtomic(processingPath, printed(processing) + "\n");
+  const String capsuleValue = printed(capsule) + "\n";
+  const String processingValue = printed(processing) + "\n";
+  const bool ok = transaction_.commitTextPair(
+      id.c_str(), capsulePath, capsuleValue, processingPath, processingValue,
+      storageOwner());
   cJSON_Delete(capsule);
   cJSON_Delete(processing);
   return ok;
@@ -1699,9 +1756,6 @@ bool PokePodLinkService::executeCommand(const String &path,
           } else {
             const String processingPath = record->directory + "/processing.json";
             const String polishedPath = record->directory + "/polished.md";
-            const bool hadPolished = fs_->exists(polishedPath);
-            const String previousPolished = hadPolished
-                ? readText(polishedPath, 1024 * 1024) : String();
             const String processingText = readText(processingPath, 8192);
             cJSON *processing = cJSON_Parse(processingText.c_str());
             if (processing == nullptr) message = "processing metadata is malformed";
@@ -1710,24 +1764,21 @@ bool PokePodLinkService::executeCommand(const String &path,
               const int expected = static_cast<int>(jsonInt64(root, "expectedRevision"));
               if (!cJSON_IsNumber(revision) || revision->valueint != expected) {
                 message = "processing revision conflict";
-              } else if (!writeTextAtomic(polishedPath, text)) {
-                message = "polished text commit failed";
               } else {
                 cJSON_SetNumberValue(revision, expected + 1);
                 cJSON_ReplaceItemInObjectCaseSensitive(processing, "status", cJSON_CreateString("ready"));
                 replaceStringOrNull(processing, "polishedTextFile", "polished.md");
                 replaceStringOrNull(processing, "errorStage", nullptr);
                 replaceStringOrNull(processing, "error", nullptr);
-                success = writeTextAtomic(processingPath, printed(processing) + "\n");
-                message = success ? "committed" : "processing metadata commit failed";
+                const String processingValue = printed(processing) + "\n";
+                success = transaction_.commitTextPair(
+                    transactionId.c_str(), polishedPath, text,
+                    processingPath, processingValue, storageOwner());
+                message = success ? "committed" : "correction commit failed";
                 if (success) {
                   const String stagedDirectory = String(kCapsuleRoot) + "/" + expectedStaged;
                   removeTree(stagedDirectory);
                   fs_->rmdir(parentPath(stagedDirectory));
-                } else if (hadPolished) {
-                  writeTextAtomic(polishedPath, previousPolished);
-                } else {
-                  fs_->remove(polishedPath);
                 }
               }
               cJSON_Delete(processing);
@@ -1751,30 +1802,24 @@ bool PokePodLinkService::executeCommand(const String &path,
           } else {
             const String capsulePath = record->directory + "/capsule.json";
             const String finalPath = record->directory + "/final.md";
-            const bool hadFinal = fs_->exists(finalPath);
-            const String previousFinal = hadFinal
-                ? readText(finalPath, 1024 * 1024) : String();
             cJSON *capsule = cJSON_Parse(readText(capsulePath, 8192).c_str());
             cJSON *revision = capsule == nullptr ? nullptr :
                 cJSON_GetObjectItemCaseSensitive(capsule, "revision");
             const int expected = static_cast<int>(jsonInt64(root, "expectedRevision"));
             if (!cJSON_IsNumber(revision) || revision->valueint != expected) {
               message = "capsule revision conflict";
-            } else if (!writeTextAtomic(finalPath, text)) {
-              message = "final text commit failed";
             } else {
               cJSON_SetNumberValue(revision, expected + 1);
               replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
-              success = writeTextAtomic(capsulePath, printed(capsule) + "\n");
-              message = success ? "committed" : "capsule metadata commit failed";
+              const String capsuleValue = printed(capsule) + "\n";
+              success = transaction_.commitTextPair(
+                  transactionId.c_str(), finalPath, text,
+                  capsulePath, capsuleValue, storageOwner());
+              message = success ? "committed" : "final text commit failed";
               if (success && stagedPath != nullptr) {
                 const String stagedDirectory = String(kCapsuleRoot) + "/" + expectedStaged;
                 removeTree(stagedDirectory);
                 fs_->rmdir(parentPath(stagedDirectory));
-              } else if (!success && hadFinal) {
-                writeTextAtomic(finalPath, previousFinal);
-              } else if (!success) {
-                fs_->remove(finalPath);
               }
             }
             cJSON_Delete(capsule);
@@ -1878,39 +1923,69 @@ bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
 
 bool PokePodLinkService::sendFile(uint32_t requestId, const String &path) {
   if (!transferPermitted()) return false;
-  File file = fs_->open(path, FILE_READ);
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      storageOwner(), StorageAccess::read, 250);
+  if (!reservation) return false;
+  File file;
+  size_t length = 0;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 1000);
+    if (!lease) return false;
+    file = fs_->open(path, FILE_READ);
+    if (file && !file.isDirectory()) length = file.size();
+  }
   if (!file || file.isDirectory()) {
-    if (file) file.close();
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 1000);
+    if (file && lease) file.close();
     sendError(requestId, "file is missing");
     return false;
   }
-  const size_t length = file.size();
   if (!sendOk(requestId,
               ("\"available\":true,\"binaryLength\":" +
                String(length)).c_str())) {
-    file.close();
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 1000);
+    if (lease) file.close();
     return false;
   }
   size_t sent = 0;
   while (sent < length) {
     if (!transferPermitted()) {
-      file.close();
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          storageOwner(), StorageAccess::read, 1000);
+      if (lease) file.close();
       return false;
     }
-    const size_t count = file.read(
-        payload_, std::min<size_t>(kLinkMaxDataBytes, length - sent));
+    size_t count = 0;
+    {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          storageOwner(), StorageAccess::read, 1000);
+      if (!lease) return false;
+      count = file.read(
+          payload_, std::min<size_t>(kLinkMaxDataBytes, length - sent));
+    }
     if (count == 0) {
-      file.close();
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          storageOwner(), StorageAccess::read, 1000);
+      if (lease) file.close();
       return false;
     }
     sent += count;
     if (!sendFrame(LinkFrameType::data, sent == length ? 1 : 0,
                    requestId, payload_, count)) {
-      file.close();
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          storageOwner(), StorageAccess::read, 1000);
+      if (lease) file.close();
       return false;
     }
   }
-  file.close();
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 1000);
+    if (lease) file.close();
+  }
   return true;
 }
 
@@ -1949,6 +2024,12 @@ bool PokePodLinkService::transferPermitted() const {
   return linkTransferPermitted(transferGate_, millis());
 }
 
+StorageOwner PokePodLinkService::storageOwner() const {
+  if (commandStorageActive_) return StorageOwner::capsuleTransaction;
+  return transport_ == LinkTransport::wifi ? StorageOwner::wifiLink
+                                            : StorageOwner::usbLink;
+}
+
 void PokePodLinkService::rememberCompleted(uint32_t requestId) {
   if (requestId != 0) completed_.complete(requestId);
 }
@@ -1967,19 +2048,8 @@ bool PokePodLinkService::ensureDirectoryTree(const String &path) {
 
 bool PokePodLinkService::writeTextAtomic(const String &path,
                                          const String &text) {
-  const String temporary = path + ".tmp";
-  if (fs_->exists(temporary)) fs_->remove(temporary);
-  File file = fs_->open(temporary, FILE_WRITE);
-  if (!file) return false;
-  const bool wrote = file.print(text) == text.length() && file.getWriteError() == 0;
-  file.flush();
-  file.close();
-  if (!wrote) {
-    fs_->remove(temporary);
-    return false;
-  }
-  if (fs_->exists(path) && !fs_->remove(path)) return false;
-  return fs_->rename(temporary, path);
+  return transaction_.writeTextAtomic(
+      path, text, storageOwner(), "link-metadata");
 }
 
 bool PokePodLinkService::validFontFile(const String &path) const {
@@ -2001,6 +2071,9 @@ bool PokePodLinkService::validFontFile(const String &path) const {
 
 String PokePodLinkService::readText(const String &path, size_t limit) const {
   if (fs_ == nullptr) return String();
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, 1000);
+  if (!lease) return String();
   File file = fs_->open(path, FILE_READ);
   if (!file || file.isDirectory() || file.size() > limit) {
     if (file) file.close();
@@ -2048,6 +2121,9 @@ bool PokePodLinkService::collectFiles(const String &directory,
 }
 
 String PokePodLinkService::metadataFingerprint() const {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      storageOwner(), StorageAccess::read, 250);
+  if (!reservation) return String();
   std::vector<String> files;
   if (!collectFiles(kCapsuleRoot, "", 0, files)) return String();
   std::sort(files.begin(), files.end());

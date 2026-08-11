@@ -51,6 +51,23 @@ inline uint32_t recorderCheckpointCrc32(const uint8_t *data, size_t length) {
   return ~crc;
 }
 
+inline uint32_t recorderAudioCrc32Update(uint32_t state,
+                                         const uint8_t *data,
+                                         size_t length) {
+  if (data == nullptr && length != 0) return state;
+  for (size_t index = 0; index < length; ++index) {
+    state ^= data[index];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      state = (state >> 1U) ^ (0xedb88320U &
+          static_cast<uint32_t>(-static_cast<int32_t>(state & 1U)));
+    }
+  }
+  return state;
+}
+
+constexpr uint32_t recorderAudioCrc32Begin() { return 0xffffffffU; }
+constexpr uint32_t recorderAudioCrc32Finish(uint32_t state) { return ~state; }
+
 inline bool recorderCheckpointCopy(char *target, size_t capacity,
                                    const char *source) {
   if (target == nullptr || capacity == 0 || source == nullptr) return false;
@@ -137,7 +154,7 @@ inline bool validateRecorderCheckpoint(
   const bool failedState =
       state == static_cast<uint8_t>(RecorderCheckpointState::failed);
   const uint8_t maximumStage =
-      static_cast<uint8_t>(RecorderFailureStage::recoveryCheckpoint);
+      static_cast<uint8_t>(RecorderFailureStage::storageBusy);
   return checkpoint.magic == kRecorderCheckpointMagic &&
       checkpoint.version == kRecorderCheckpointVersion &&
       (recordingState || failedState) &&

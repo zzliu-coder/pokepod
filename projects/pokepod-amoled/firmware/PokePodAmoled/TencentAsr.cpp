@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "Base64Stream.h"
+#include "StorageCoordinator.h"
 #include "Tc3Policy.h"
 #include "TencentRootCa.h"
 
@@ -96,17 +97,41 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     result.message = "设备时间尚未同步";
     return false;
   }
-  File audio = fs.open(audioPath, FILE_READ);
-  if (!audio || audio.isDirectory() || audio.size() <= 44) {
-    if (audio) audio.close();
+  StorageReservation storageRead = StorageCoordinator::instance().reserve(
+      StorageOwner::tencentRead, StorageAccess::read, 100);
+  if (!storageRead) {
+    result.transient = true;
+    result.code = "STORAGE_BUSY";
+    result.message = "SD 卡正在使用";
+    return false;
+  }
+  File audio;
+  size_t audioBytes = 0;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (!lease) {
+      result.transient = true;
+      result.code = "STORAGE_BUSY";
+      result.message = "SD 卡正在使用";
+      return false;
+    }
+    audio = fs.open(audioPath, FILE_READ);
+    if (audio && !audio.isDirectory()) audioBytes = audio.size();
+  }
+  if (!audio || audio.isDirectory() || audioBytes <= 44) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (audio && lease) audio.close();
     result.code = "AUDIO_INVALID";
     result.message = "胶囊音频缺失或为空";
     return false;
   }
-  const size_t audioBytes = audio.size();
   const size_t encodedBytes = base64EncodedLength(audioBytes);
   if (encodedBytes > kMaxEncodedAudioBytes) {
-    audio.close();
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (lease) audio.close();
     result.code = "AUDIO_TOO_LARGE";
     result.message = "音频超过腾讯一句话识别限制";
     return false;
@@ -124,7 +149,9 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
 
   uint8_t payloadHash[32];
   if (!hashPayload(audio, prefix, suffix, payloadHash)) {
-    audio.close();
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (lease) audio.close();
     result.transient = true;
     result.code = "AUDIO_READ_FAILED";
     result.message = "读取音频失败";
@@ -135,8 +162,16 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
              static_cast<unsigned long>(millis() - startedAtMs),
              static_cast<unsigned long>(audioBytes));
   const String auth = authorization(settings, timestamp, payloadHash);
-  if (auth.isEmpty() || !audio.seek(0)) {
-    audio.close();
+  bool seekOk = false;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    seekOk = lease && audio.seek(0);
+  }
+  if (auth.isEmpty() || !seekOk) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (lease) audio.close();
     result.code = "SIGNATURE_FAILED";
     result.message = "请求签名失败";
     return false;
@@ -144,7 +179,9 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
 
   IPAddress resolvedAddress;
   if (!Network.hostByName(kHost, resolvedAddress)) {
-    audio.close();
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (lease) audio.close();
     result.transient = true;
     result.code = "DNS_FAILED";
     result.message = "腾讯云域名解析失败";
@@ -172,7 +209,9 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
     char networkError[160] = {};
     result.networkError = client.lastError(networkError, sizeof(networkError));
     result.networkErrorDetail = networkError;
-    audio.close();
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (lease) audio.close();
     result.transient = true;
     result.code = "NETWORK_CONNECT_FAILED";
     result.message = "腾讯云 TLS 连接失败";
@@ -222,7 +261,11 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   if (sent) sent = writeAll(client,
       reinterpret_cast<const uint8_t *>(suffix.c_str()), suffix.length(),
       uploadDeadlineMs);
-  audio.close();
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (lease) audio.close();
+  }
   if (!sent) {
     client.stop();
     result.transient = true;
@@ -293,11 +336,23 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
 }
 
 bool TencentAsr::streamBase64(File &file, StreamSink sink, void *context) {
-  if (!file || sink == nullptr || !file.seek(0)) return false;
+  if (!file || sink == nullptr) return false;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::tencentRead, StorageAccess::read, 1000);
+    if (!lease || !file.seek(0)) return false;
+  }
   Base64StreamEncoder encoder;
   uint8_t input[768];
-  while (file.available()) {
-    const int bytes = file.read(input, sizeof(input));
+  while (true) {
+    int bytes = 0;
+    {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::tencentRead, StorageAccess::read, 1000);
+      if (!lease) return false;
+      if (!file.available()) break;
+      bytes = file.read(input, sizeof(input));
+    }
     if (bytes <= 0) return false;
     auto adapter = [sink, context](const uint8_t *data, size_t length) {
       return sink(context, data, length);

@@ -56,6 +56,7 @@ void replaceStringOrNull(cJSON *root, const char *name, const String &value) {
 bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
   fs_ = &fs;
   log_ = &log;
+  if (!transaction_.begin(fs, log) || !transaction_.recoverAll()) return false;
   records_.reserve(kMaxCapsulesOnDevice);
   visible_.reserve(kMaxCapsulesOnDevice);
   if (!scan()) return false;
@@ -79,6 +80,9 @@ bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
 
 bool CapsuleLibrary::scan() {
   if (fs_ == nullptr) return false;
+  StorageIoLease scanIo = StorageCoordinator::instance().acquireIo(
+      StorageOwner::capsuleTransaction, StorageAccess::read, 1000);
+  if (!scanIo) return false;
   const int64_t startedUs = esp_timer_get_time();
   records_.clear();
   scanFolder(kCapsuleInbox, "Inbox", 0);
@@ -254,11 +258,20 @@ bool CapsuleLibrary::markTranscribing(const String &id) {
 }
 
 bool CapsuleLibrary::commitRawText(const String &id, const String &text) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
   const CapsuleSummary *record = find(id);
-  if (record == nullptr || record->readOnly || text.isEmpty() ||
-      !writeTextAtomic(record->directory + "/raw.txt", text + "\n")) return false;
-  return updateProcessing(id, CapsuleStatus::rawReady, "raw.txt", "", "", false) &&
-      refreshExisting(id);
+  if (record == nullptr || record->readOnly || text.isEmpty()) return false;
+  const String directory = record->directory;
+  String processing;
+  if (!prepareProcessing(id, CapsuleStatus::rawReady, "raw.txt", "", "",
+                         false, processing)) return false;
+  const bool committed = transaction_.commitTextPair(
+      id.c_str(), directory + "/raw.txt", text + "\n",
+      directory + "/processing.json", processing,
+      StorageOwner::capsuleTransaction);
+  return committed && refreshExisting(id);
 }
 
 bool CapsuleLibrary::markFailure(const String &id, const String &stage,
@@ -285,6 +298,9 @@ bool CapsuleLibrary::toggleFavorite(const String &id) {
 }
 
 bool CapsuleLibrary::archive(const String &id) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly || record->archived ||
       record->trashed ||
@@ -312,6 +328,9 @@ bool CapsuleLibrary::archive(const String &id) {
 }
 
 bool CapsuleLibrary::unarchive(const String &id) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly || !record->archived ||
       record->trashed ||
@@ -341,6 +360,9 @@ bool CapsuleLibrary::unarchive(const String &id) {
 }
 
 bool CapsuleLibrary::trash(const String &id, const String &trashedAt) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly || record->trashed ||
       trashedAt.isEmpty() ||
@@ -367,6 +389,9 @@ bool CapsuleLibrary::trash(const String &id, const String &trashedAt) {
 }
 
 bool CapsuleLibrary::restore(const String &id) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly || !record->trashed) return false;
   const String metadataText = readText(record->directory + "/trash.json",
@@ -396,6 +421,9 @@ bool CapsuleLibrary::restore(const String &id) {
 CapsuleBatchResult CapsuleLibrary::purge(const std::vector<String> &ids) {
   CapsuleBatchResult result;
   if (ids.empty() || fs_ == nullptr) return result;
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return result;
   for (const String &id : ids) {
     const CapsuleSummary *record = find(id);
     if (record == nullptr || record->readOnly || !record->trashed ||
@@ -480,6 +508,9 @@ CapsuleBatchResult CapsuleLibrary::batch(
     const String &changedAt) {
   CapsuleBatchResult result;
   if (ids.empty()) return result;
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return result;
   bool favoriteTarget = true;
   if (action == CapsuleBatchAction::favorite) {
     favoriteTarget = false;
@@ -660,6 +691,9 @@ String CapsuleLibrary::safeRestoreDirectory(const String &folder) const {
     return String(kCapsuleInbox);
   }
   const String candidate = String(kCapsuleRoot) + "/" + folder;
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      StorageOwner::capsuleTransaction, StorageAccess::read, 1000);
+  if (!lease) return String(kCapsuleInbox);
   File directory = fs_->open(candidate);
   const bool valid = directory && directory.isDirectory();
   if (directory) directory.close();
@@ -677,6 +711,9 @@ String CapsuleLibrary::readBestText(const CapsuleSummary &record,
 
 String CapsuleLibrary::readText(const String &path, size_t maxBytes) const {
   if (fs_ == nullptr || maxBytes == 0) return String();
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      StorageOwner::capsuleTransaction, StorageAccess::read, 1000);
+  if (!lease) return String();
   File file = fs_->open(path, FILE_READ);
   if (!file || file.isDirectory()) {
     if (file) file.close();
@@ -702,23 +739,14 @@ String CapsuleLibrary::readText(const String &path, size_t maxBytes) const {
 }
 
 bool CapsuleLibrary::writeTextAtomic(const String &path, const String &value) {
-  const String temporary = path + ".tmp";
-  if (fs_->exists(temporary)) fs_->remove(temporary);
-  File file = fs_->open(temporary, FILE_WRITE);
-  if (!file) return false;
-  const size_t written = file.print(value);
-  const bool ok = written == value.length() && file.getWriteError() == 0;
-  file.flush();
-  file.close();
-  if (!ok) {
-    fs_->remove(temporary);
-    return false;
-  }
-  if (fs_->exists(path) && !fs_->remove(path)) return false;
-  return fs_->rename(temporary, path);
+  return transaction_.writeTextAtomic(
+      path, value, StorageOwner::capsuleTransaction, "capsule-metadata");
 }
 
 bool CapsuleLibrary::removeTree(const String &path) {
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!lease) return false;
   File root = fs_->open(path);
   if (!root) return true;
   if (!root.isDirectory()) {
@@ -747,10 +775,27 @@ bool CapsuleLibrary::updateProcessing(const String &id, CapsuleStatus status,
                                       const String &errorStage,
                                       const String &error,
                                       bool incrementAttempts) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
+  String encoded;
+  if (!prepareProcessing(id, status, rawTextFile, errorStage, error,
+                         incrementAttempts, encoded)) return false;
+  const CapsuleSummary *record = find(id);
+  return record != nullptr && writeTextAtomic(
+      record->directory + "/processing.json", encoded);
+}
+
+bool CapsuleLibrary::prepareProcessing(const String &id, CapsuleStatus status,
+                                       const String &rawTextFile,
+                                       const String &errorStage,
+                                       const String &error,
+                                       bool incrementAttempts,
+                                       String &encodedValue) {
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly) return false;
-  const String path = record->directory + "/processing.json";
-  const String source = readText(path, kMaxMetadataBytes);
+  const String source = readText(record->directory + "/processing.json",
+                                 kMaxMetadataBytes);
   cJSON *root = cJSON_ParseWithLength(source.c_str(), source.length());
   if (root == nullptr) return false;
   cJSON *revision = cJSON_GetObjectItemCaseSensitive(root, "revision");
@@ -767,13 +812,17 @@ bool CapsuleLibrary::updateProcessing(const String &id, CapsuleStatus status,
     cJSON_ReplaceItemInObjectCaseSensitive(root, "attempts", cJSON_CreateNumber(count));
   }
   char *encoded = cJSON_Print(root);
-  const bool ok = encoded != nullptr && writeTextAtomic(path, String(encoded) + "\n");
+  const bool ok = encoded != nullptr;
+  encodedValue = ok ? String(encoded) + "\n" : String();
   cJSON_free(encoded);
   cJSON_Delete(root);
   return ok;
 }
 
 bool CapsuleLibrary::updateFavorite(const String &id, bool favorite) {
+  StorageReservation reservation = StorageCoordinator::instance().reserve(
+      StorageOwner::capsuleTransaction, StorageAccess::mutation, 1000);
+  if (!reservation) return false;
   const CapsuleSummary *record = find(id);
   if (record == nullptr || record->readOnly) return false;
   const String path = record->directory + "/capsule.json";

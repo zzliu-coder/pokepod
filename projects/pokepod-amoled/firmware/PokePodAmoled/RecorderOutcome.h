@@ -41,6 +41,7 @@ enum class RecorderFailureStage : uint8_t {
   processingMetadata,
   commitDirectory,
   recoveryCheckpoint,
+  storageBusy,
 };
 
 struct RecorderOutcome {
@@ -109,6 +110,7 @@ inline const char *recorderFailureStageName(RecorderFailureStage stage) {
     case RecorderFailureStage::processingMetadata: return "processing_metadata";
     case RecorderFailureStage::commitDirectory: return "directory_commit";
     case RecorderFailureStage::recoveryCheckpoint: return "recovery_checkpoint";
+    case RecorderFailureStage::storageBusy: return "storage_busy";
     default: return "none";
   }
 }

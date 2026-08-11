@@ -5,7 +5,9 @@
 #include <vector>
 
 #include "CapsuleBrowserState.h"
+#include "CapsuleTransaction.h"
 #include "DeferredPublish.h"
+#include "StorageCoordinator.h"
 
 namespace pokepod {
 
@@ -109,6 +111,10 @@ class CapsuleLibrary {
   bool updateProcessing(const String &id, CapsuleStatus status,
                         const String &rawTextFile, const String &errorStage,
                         const String &error, bool incrementAttempts);
+  bool prepareProcessing(const String &id, CapsuleStatus status,
+                         const String &rawTextFile, const String &errorStage,
+                         const String &error, bool incrementAttempts,
+                         String &encoded);
   bool updateFavorite(const String &id, bool favorite);
   bool removeTree(const String &path);
   size_t recordIndex(const String &id) const;
@@ -124,6 +130,7 @@ class CapsuleLibrary {
 
   fs::FS *fs_ = nullptr;
   Print *log_ = nullptr;
+  CapsuleTransaction transaction_;
   std::vector<CapsuleSummary> records_;
   std::vector<size_t> visible_;
   CapsuleScope scope_ = CapsuleScope::inbox;
