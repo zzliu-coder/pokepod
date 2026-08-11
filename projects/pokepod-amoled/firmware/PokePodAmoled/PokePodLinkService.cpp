@@ -43,6 +43,12 @@ constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
 constexpr size_t kLinkPendingControlBytes =
     kLinkHeaderBytes + kLinkMaxControlBytes;
 constexpr size_t kLinkWriteSliceBytes = 512;
+constexpr const char *kLinkCommandUploadPart =
+    "/PokeCapsule/.system/commands/incoming/upload.part";
+constexpr const char *kLinkStagedUploadPart =
+    "/PokeCapsule/.staging/link-upload.part";
+constexpr const char *kLinkFontUploadPart =
+    "/PokeCapsule/.system/fonts/cjk20.a4.part";
 
 cJSON *asJson(void *value) { return static_cast<cJSON *>(value); }
 
@@ -183,6 +189,12 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
   if (!transaction_.begin(fs, log)) return false;
+  if (!transactionRunner_.begin(fs, log)) return false;
+  startupPartCleanupIndex_ = 0;
+  startupPartCleanupFailures_ = 0;
+  startupPartCleanupPending_ = false;
+  startupReady_ = false;
+  startupRecoveryFailed_ = false;
   if (payload_ == nullptr) {
     payload_ = static_cast<uint8_t *>(heap_caps_calloc(
         kLinkMaxDataBytes, sizeof(uint8_t),
@@ -213,6 +225,12 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
     return false;
   }
+  // Recover durable transactions before sweeping the three fixed Link upload
+  // parts. A cut after journal publication but before publishPrepared must let
+  // the durable journal choose old/new state before the borrowed part is
+  // removed. No transport frames are accepted until both phases finish.
+  if (!transactionRunner_.startRecovery(storageOwner())) return false;
+  transactionPurpose_ = TransactionPurpose::startupRecovery;
   if (!cleanupPurgeStaging()) {
     log_->println("{\"event\":\"purge_cleanup_deferred\"}");
   }
@@ -229,6 +247,10 @@ void PokePodLinkService::disconnect() {
   } else if (linkOwnedRecording_) {
     (void)requestLinkRecordingStop(0, false, false);
   }
+  if (transactionPurpose_ == TransactionPurpose::incoming) {
+    if (transactionRunner_.active()) transactionGate_.cancel();
+    transactionRespond_ = false;
+  }
   abortManifest();
   abortOutgoing();
   sessionActive_ = false;
@@ -244,6 +266,8 @@ void PokePodLinkService::disconnect() {
 }
 
 void PokePodLinkService::pollDeferredCleanup() {
+  advanceTransactionRunner();
+  advanceStartupPartCleanup();
   advanceLinkRecordingStop();
   if (incomingCleanupPending_) cleanupIncomingStorage();
   if (outgoingCleanupPending_) cleanupOutgoingStorage();
@@ -255,6 +279,9 @@ void PokePodLinkService::pollDeferredCleanup() {
 
 void PokePodLinkService::poll(uint32_t nowMs) {
   pollDeferredCleanup();
+  if (!startupReady_) return;
+  if (transactionRunner_.active() ||
+      transactionPurpose_ != TransactionPurpose::none) return;
   if (incomingCleanupPending_ || outgoingCleanupPending_ ||
       manifestCleanupPending_ || !deferredCommandFiles_.empty() ||
       !deferredTreeCleanupStack_.empty()) return;
@@ -419,7 +446,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
     }
     cJSON_Delete(root);
     const String finalPath = String(kCapsuleSystem) + "/fonts/cjk20.a4";
-    const String temporaryPath = finalPath + ".part";
+    const String temporaryPath = kLinkFontUploadPart;
     if (foregroundBusy()) {
       sendBusy(requestId);
       rememberCompleted(requestId);
@@ -471,7 +498,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       const String directory = String(kCapsuleStaging) + "/" + transactionId +
           "/" + capsuleId;
       const String finalPath = directory + "/" + path;
-      const String temporaryPath = finalPath + ".part";
+      const String temporaryPath = kLinkStagedUploadPart;
       cJSON_Delete(root);
       if (!ensureDirectoryTree(parentPath(finalPath)) ||
           !beginIncoming(IncomingKind::stagedFile, requestId,
@@ -492,7 +519,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
     }
     const String finalPath = String(kCapsuleSystem) + "/commands/incoming/" +
         transactionId + ".json";
-    const String temporaryPath = finalPath + ".part";
+    const String temporaryPath = kLinkCommandUploadPart;
     cJSON_Delete(root);
     if (!beginIncoming(IncomingKind::command, requestId,
                        static_cast<uint32_t>(binaryLength), temporaryPath,
@@ -597,10 +624,10 @@ void PokePodLinkService::finishIncoming() {
   const bool valid = writeOk &&
       (kind != IncomingKind::systemFont || validFontFile(temporary));
   finishIo.release();
-  const bool committed = valid && transaction_.commitPreparedFile(
-      transaction.isEmpty() ? finalPath.c_str() : transaction.c_str(),
-      temporary, finalPath, storageOwner());
-  if (!committed) {
+  const char *key = transaction.isEmpty() ? finalPath.c_str() :
+                                            transaction.c_str();
+  if (!valid || !transactionRunner_.startPreparedFile(
+                    key, temporary, finalPath, storageOwner())) {
     incomingCleanupRespond_ = true;
     incomingCleanupRequestId_ = requestId;
     incomingCleanupMessage_ = "atomic file commit failed";
@@ -611,17 +638,119 @@ void PokePodLinkService::finishIncoming() {
     cleanupIncomingStorage();
     return;
   }
+  transactionGate_.beginOperation(transferGate_);
+  transactionPurpose_ = TransactionPurpose::incoming;
+  transactionIncomingKind_ = kind;
+  transactionRequestId_ = requestId;
+  transactionPreparedPath_ = temporary;
+  transactionFinalPath_ = finalPath;
+  transactionId_ = transaction;
+  transactionRespond_ = sessionActive_ && transferPermitted();
+}
+
+void PokePodLinkService::advanceTransactionRunner() {
+  if (!transactionRunner_.active()) return;
+  CapsuleTransactionGate *gate = transactionPurpose_ ==
+      TransactionPurpose::incoming ? &transactionGate_ : nullptr;
+  const CapsuleTransactionPollResult result = transactionRunner_.poll(
+      millis(), gate);
+  if (result == CapsuleTransactionPollResult::progress ||
+      result == CapsuleTransactionPollResult::wouldBlock) return;
+  if (transactionPurpose_ == TransactionPurpose::startupRecovery) {
+    finishStartupRecovery(result ==
+                          CapsuleTransactionPollResult::recovered);
+  } else if (transactionPurpose_ == TransactionPurpose::incoming) {
+    finishIncomingTransaction(result ==
+                              CapsuleTransactionPollResult::committed);
+  }
+}
+
+void PokePodLinkService::finishStartupRecovery(bool recovered) {
+  if (!recovered) {
+    startupRecoveryFailed_ = true;
+    if (log_ != nullptr) {
+      log_->println("{\"event\":\"link_startup_recovery_failed\"}");
+    }
+    return;
+  }
+  transactionPurpose_ = TransactionPurpose::none;
+  startupPartCleanupPending_ = true;
+}
+
+void PokePodLinkService::advanceStartupPartCleanup() {
+  if (!startupPartCleanupPending_ || startupReady_ ||
+      startupRecoveryFailed_) return;
+  if (!startupPartCleanupReservation_) {
+    startupPartCleanupReservation_ = StorageCoordinator::instance().reserve(
+        storageOwner(), StorageAccess::mutation, 0);
+    if (!startupPartCleanupReservation_) return;
+  }
+  static constexpr const char *parts[] = {
+      kLinkCommandUploadPart, kLinkStagedUploadPart, kLinkFontUploadPart};
+  if (startupPartCleanupIndex_ >= sizeof(parts) / sizeof(parts[0])) {
+    startupPartCleanupReservation_.release();
+    startupPartCleanupPending_ = false;
+    startupReady_ = true;
+    return;
+  }
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::mutation, 0);
+  if (!lease) return;
+  const char *path = parts[startupPartCleanupIndex_];
+  if (fs_->exists(path) && !fs_->remove(path)) {
+    if (++startupPartCleanupFailures_ >= 3) {
+      startupRecoveryFailed_ = true;
+      startupPartCleanupPending_ = false;
+      startupPartCleanupReservation_.release();
+      if (log_ != nullptr) {
+        log_->println("{\"event\":\"link_startup_part_cleanup_failed\"}");
+      }
+    }
+    return;
+  }
+  startupPartCleanupFailures_ = 0;
+  ++startupPartCleanupIndex_;
+}
+
+void PokePodLinkService::finishIncomingTransaction(bool committed) {
+  const IncomingKind kind = transactionIncomingKind_;
+  const uint32_t requestId = transactionRequestId_;
+  const String preparedPath = transactionPreparedPath_;
+  const String finalPath = transactionFinalPath_;
+  const String transaction = transactionId_;
+  const bool respond = transactionRespond_ && sessionActive_ &&
+      transferPermitted();
+  transactionPurpose_ = TransactionPurpose::none;
+  transactionIncomingKind_ = IncomingKind::none;
+  transactionRequestId_ = 0;
+  transactionPreparedPath_ = "";
+  transactionFinalPath_ = "";
+  transactionId_ = "";
+  transactionRespond_ = false;
+  transactionGate_.reset();
+  if (!committed) {
+    incomingCleanupRespond_ = respond;
+    incomingCleanupRequestId_ = requestId;
+    incomingCleanupMessage_ = "atomic file commit failed";
+    incomingCleanupPending_ = incomingCleanup_.begin(
+        incomingFile_, fs_, preparedPath, incomingStorageReservation_,
+        storageOwner(), StorageAccess::mutation);
+    if (incomingCleanupPending_) cleanupIncomingStorage();
+    return;
+  }
   incomingStorageReservation_.release();
   if (kind == IncomingKind::command) {
     handleCommandFile(requestId, finalPath, transaction);
     if (commandCleanupPending_) return;
-  } else if (kind == IncomingKind::systemFont) {
+  } else if (respond && kind == IncomingKind::systemFont) {
     sendOk(requestId, "\"installed\":true,\"rebootRequired\":true");
-  } else {
+  } else if (respond) {
     sendOk(requestId);
   }
-  rememberCompleted(requestId);
-  if (activeMaintenance_.isEmpty()) releaseRequestLease();
+  if (respond) {
+    rememberCompleted(requestId);
+    if (activeMaintenance_.isEmpty()) releaseRequestLease();
+  }
 }
 
 void PokePodLinkService::failIncoming(const char *message) {

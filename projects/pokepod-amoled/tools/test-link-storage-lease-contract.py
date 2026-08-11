@@ -18,6 +18,7 @@ def methods(source: str):
 
 direct_fs_allowed = {
     "beginIncoming",
+    "advanceStartupPartCleanup",
     "advanceManifestScan",
     "advanceManifestFile",
     "cleanupPurgeStaging",

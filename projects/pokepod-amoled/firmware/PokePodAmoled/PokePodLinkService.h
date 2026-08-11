@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "LinkFrame.h"
+#include "LinkCapsuleTransactionGate.h"
 #include "LinkRecordingStop.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
@@ -88,6 +89,7 @@ class PokePodLinkService {
     fileData,
     fileFinal,
   };
+  enum class TransactionPurpose : uint8_t { none, startupRecovery, incoming };
 
   struct ManifestDirectoryCursor {
     File directory;
@@ -103,6 +105,10 @@ class PokePodLinkService {
   void processData(uint32_t requestId, uint16_t flags,
                    const uint8_t *payload, size_t size);
   void finishIncoming();
+  void advanceTransactionRunner();
+  void advanceStartupPartCleanup();
+  void finishStartupRecovery(bool recovered);
+  void finishIncomingTransaction(bool committed);
   void failIncoming(const char *message);
   bool cleanupIncomingStorage();
   void finishIncomingCleanup();
@@ -236,6 +242,21 @@ class PokePodLinkService {
   bool requestLeaseHeld_ = false;
   bool releaseRequestLeaseWhenTxDrained_ = false;
   CapsuleTransaction transaction_;
+  CapsuleTransactionRunner transactionRunner_;
+  LinkCapsuleTransactionGate transactionGate_;
+  TransactionPurpose transactionPurpose_ = TransactionPurpose::none;
+  IncomingKind transactionIncomingKind_ = IncomingKind::none;
+  uint32_t transactionRequestId_ = 0;
+  String transactionPreparedPath_;
+  String transactionFinalPath_;
+  String transactionId_;
+  bool transactionRespond_ = false;
+  StorageReservation startupPartCleanupReservation_;
+  uint8_t startupPartCleanupIndex_ = 0;
+  uint8_t startupPartCleanupFailures_ = 0;
+  bool startupPartCleanupPending_ = false;
+  bool startupReady_ = false;
+  bool startupRecoveryFailed_ = false;
   StorageReservation incomingStorageReservation_;
   DeferredFileCleanup incomingCleanup_;
   bool incomingCleanupPending_ = false;
