@@ -24,13 +24,21 @@ final class BlackHoleInstallPolicyTests: XCTestCase {
             newer)
     }
 
-    func testOfficialFallbackUsesReleasesPage() {
-        XCTAssertEqual(
-            BlackHoleInstallPolicy.officialReleasesURL.absoluteString,
-            "https://github.com/ExistentialAudio/BlackHole/releases/latest")
+    func testOfficialReleaseAPIEndpoint() {
         XCTAssertEqual(
             BlackHoleInstallPolicy.latestReleaseAPIURL.absoluteString,
             "https://api.github.com/repos/ExistentialAudio/BlackHole/releases/latest")
+    }
+
+    func testOfficialPackageURLUsesOnlyNumericReleaseTag() {
+        XCTAssertEqual(
+            BlackHoleInstallPolicy.officialPackageURL(forTag: "v0.7.1")?.absoluteString,
+            "https://existential.audio/downloads/BlackHole2ch-0.7.1.pkg")
+        XCTAssertEqual(
+            BlackHoleInstallPolicy.officialPackageURL(forTag: "0.6.0")?.absoluteString,
+            "https://existential.audio/downloads/BlackHole2ch-0.6.0.pkg")
+        XCTAssertNil(BlackHoleInstallPolicy.officialPackageURL(forTag: "latest"))
+        XCTAssertNil(BlackHoleInstallPolicy.officialPackageURL(forTag: "v0.7.1-rc1"))
     }
 
     func testSelectsOnlyBlackHoleTwoChannelReleaseAsset() throws {

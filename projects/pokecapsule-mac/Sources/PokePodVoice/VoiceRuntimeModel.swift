@@ -458,7 +458,7 @@ final class VoiceRuntimeModel: ObservableObject {
         if !bluetoothReady { return "请打开蓝牙并允许 PokePod Voice 使用蓝牙" }
         if !blackHoleReady {
             return localBlackHolePackage() == nil
-                ? "请安装 BlackHole 2ch；下载的文件尚未进入系统音频设备"
+                ? "未找到安装包；点击“安装”会后台下载并打开系统安装器"
                 : "已找到 BlackHole 安装包，点击“安装”完成系统安装"
         }
         if !accessibilityReady { return "请在辅助功能中打开 PokePod Voice，返回后会自动刷新" }
@@ -467,9 +467,13 @@ final class VoiceRuntimeModel: ObservableObject {
 
     private func localBlackHolePackage() -> URL? {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask)[0]
+            .appendingPathComponent("PokePod Voice/Installers", isDirectory: true)
         let roots = ["Downloads", "Desktop", "Documents"].map {
             home.appendingPathComponent($0, isDirectory: true)
-        }
+        } + [appSupport]
         var candidates = [URL]()
         for root in roots where FileManager.default.fileExists(atPath: root.path) {
             guard let enumerator = FileManager.default.enumerator(
@@ -500,7 +504,15 @@ final class VoiceRuntimeModel: ObservableObject {
             guard let url = URL(string: asset.browserDownloadURL) else { return nil }
             return .init(name: asset.name, downloadURL: url, digest: asset.digest)
         }
-        guard let asset = BlackHoleInstallPolicy.selectReleaseAsset(from: candidates) else {
+        let asset: BlackHoleInstallPolicy.ReleaseAsset
+        if let githubAsset = BlackHoleInstallPolicy.selectReleaseAsset(from: candidates) {
+            asset = githubAsset
+        } else if let officialURL = BlackHoleInstallPolicy.officialPackageURL(forTag: release.tagName) {
+            asset = .init(
+                name: officialURL.lastPathComponent,
+                downloadURL: officialURL,
+                digest: nil)
+        } else {
             throw BlackHoleDownloadError.twoChannelAssetMissing
         }
 
@@ -546,7 +558,13 @@ final class VoiceRuntimeModel: ObservableObject {
     }
 
     private struct GitHubRelease: Decodable {
+        let tagName: String
         let assets: [GitHubAsset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case assets
+        }
     }
 
     private struct GitHubAsset: Decodable {

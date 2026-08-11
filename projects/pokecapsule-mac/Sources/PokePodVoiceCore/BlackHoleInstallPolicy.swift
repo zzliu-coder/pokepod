@@ -16,10 +16,23 @@ public enum BlackHoleInstallPolicy {
         }
     }
 
-    public static let officialReleasesURL = URL(
-        string: "https://github.com/ExistentialAudio/BlackHole/releases/latest")!
     public static let latestReleaseAPIURL = URL(
         string: "https://api.github.com/repos/ExistentialAudio/BlackHole/releases/latest")!
+
+    /// The project publishes the signed 2ch package from its own download
+    /// host even when the corresponding GitHub release has no binary assets.
+    /// Keep the version restricted to numeric release components so a remote
+    /// tag can never turn into an arbitrary download path.
+    public static func officialPackageURL(forTag tag: String) -> URL? {
+        let version = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let components = version.split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...4).contains(components.count),
+              components.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else {
+            return nil
+        }
+        return URL(string: "https://existential.audio/downloads/BlackHole2ch-\(version).pkg")
+    }
 
     public static func selectPackage(from urls: [URL]) -> URL? {
         urls
