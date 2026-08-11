@@ -42,6 +42,7 @@ struct PowerInputs {
   bool linkLeaseActive = false;
   bool storageBusy = false;
   bool storageMutationActive = false;
+  bool storageReadActive = false;
   bool networkBusy = false;
   bool provisioning = false;
   bool uiAnimating = false;
@@ -115,7 +116,8 @@ inline bool inputLinkLeaseActive(const PowerInputs &input) {
 }
 
 inline bool inputStorageMutationActive(const PowerInputs &input) {
-  return input.storageMutationActive || input.storageBusy;
+  return input.storageMutationActive || input.storageReadActive ||
+      input.storageBusy;
 }
 
 inline bool automaticWakeUnavailable(const PowerInputs &input) {
@@ -136,6 +138,7 @@ inline PowerInputs powerInputsWithFacts(PowerInputs input,
   input.wifiRadioOn = facts.wifiRadioActive;
   input.wakeSourcesReady = facts.wakeSourcesReady;
   input.storageMutationActive = facts.storageMutationActive;
+  input.storageReadActive = facts.storageReadActive;
   input.storageBusy = false;
   return input;
 }
@@ -333,7 +336,7 @@ class LowBatteryShutdownPolicy {
 
 enum class SafeShutdownProgress : uint8_t {
   idle,
-  waitingForAsr,
+  waitingForServices,
   ready,
 };
 
@@ -342,9 +345,9 @@ class SafeShutdownQuiescePolicy {
   void request() { pending_ = true; }
   bool pending() const { return pending_; }
 
-  SafeShutdownProgress update(bool asrQuiesced) {
+  SafeShutdownProgress update(bool servicesQuiesced) {
     if (!pending_) return SafeShutdownProgress::idle;
-    if (!asrQuiesced) return SafeShutdownProgress::waitingForAsr;
+    if (!servicesQuiesced) return SafeShutdownProgress::waitingForServices;
     pending_ = false;
     return SafeShutdownProgress::ready;
   }

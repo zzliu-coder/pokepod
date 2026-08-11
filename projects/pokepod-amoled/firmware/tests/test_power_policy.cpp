@@ -94,7 +94,7 @@ int main() {
   assert(shutdown.update(true) == SafeShutdownProgress::idle);
   shutdown.request();
   assert(shutdown.pending());
-  assert(shutdown.update(false) == SafeShutdownProgress::waitingForAsr);
+  assert(shutdown.update(false) == SafeShutdownProgress::waitingForServices);
   assert(shutdown.pending());
   assert(shutdown.update(true) == SafeShutdownProgress::ready);
   assert(!shutdown.pending());

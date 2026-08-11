@@ -98,6 +98,8 @@ class StorageCoordinator {
                            uint32_t timeoutMs = 0);
 
   bool mutationActive() const;
+  bool readActive() const;
+  bool idle() const { return !mutationActive() && !readActive(); }
   StorageOwner mutationOwner() const;
   StorageOwner readOwner() const;
   StorageCoordinatorMetrics metrics() const;
@@ -131,6 +133,8 @@ class StorageCoordinator {
   uint16_t readDepth_ = 0;
   std::atomic<uint16_t> mutationReservationDepth_{0};
   std::atomic<uint16_t> mutationIoDepth_{0};
+  std::atomic<uint16_t> readReservationDepth_{0};
+  std::atomic<uint16_t> readIoDepth_{0};
   StorageCoordinatorMetrics metrics_{};
 };
 

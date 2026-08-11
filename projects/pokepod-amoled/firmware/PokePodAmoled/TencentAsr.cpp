@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "Base64Stream.h"
+#include "DeferredFileCleanup.h"
 #include "StorageCoordinator.h"
 #include "Tc3Policy.h"
 #include "TencentRootCa.h"
@@ -129,10 +130,20 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   }
   File audio;
   size_t audioBytes = 0;
+  DeferredFileCleanup audioCleanup;
+  bool audioCleanupStarted = false;
   auto closeAudio = [&]() {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read, 1000);
-    if (audio && lease) audio.close();
+    // The worker must not return while an open File can be closed by its local
+    // destructor outside the tencentRead IO lease.  Other owners hold physical
+    // IO only for bounded chunks, so retry here while retaining storageRead.
+    if (!audioCleanupStarted) {
+      audioCleanupStarted = audioCleanup.begin(
+          audio, nullptr, "", storageRead, StorageOwner::tencentRead,
+          StorageAccess::read);
+    }
+    while (audioCleanup.pending()) {
+      if (!audioCleanup.poll()) delay(1);
+    }
   };
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(

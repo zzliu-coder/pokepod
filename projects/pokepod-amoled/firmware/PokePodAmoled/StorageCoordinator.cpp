@@ -184,6 +184,7 @@ StorageReservation StorageCoordinator::reserve(StorageOwner owner,
     readOwner_ = owner;
     readContext_ = context;
     ++readDepth_;
+    readReservationDepth_.store(readDepth_, std::memory_order_release);
   }
   ++metrics_.reservations;
   unlock();
@@ -205,6 +206,8 @@ StorageIoLease StorageCoordinator::acquireIo(StorageOwner owner,
   ++metrics_.ioAcquires;
   if (access == StorageAccess::mutation) {
     mutationIoDepth_.fetch_add(1, std::memory_order_acq_rel);
+  } else {
+    readIoDepth_.fetch_add(1, std::memory_order_acq_rel);
   }
   return StorageIoLease(this, acquiredUs, access);
 }
@@ -218,6 +221,8 @@ void StorageCoordinator::releaseIo(uint64_t acquiredUs,
   }
   if (access == StorageAccess::mutation) {
     mutationIoDepth_.fetch_sub(1, std::memory_order_acq_rel);
+  } else {
+    readIoDepth_.fetch_sub(1, std::memory_order_acq_rel);
   }
   unlock();
 }
@@ -244,6 +249,7 @@ void StorageCoordinator::releaseReservation(StorageOwner owner,
       readOwner_ = StorageOwner::none;
       readContext_ = 0;
     }
+    readReservationDepth_.store(readDepth_, std::memory_order_release);
   }
   unlock();
 }
@@ -251,6 +257,11 @@ void StorageCoordinator::releaseReservation(StorageOwner owner,
 bool StorageCoordinator::mutationActive() const {
   return mutationReservationDepth_.load(std::memory_order_acquire) != 0 ||
       mutationIoDepth_.load(std::memory_order_acquire) != 0;
+}
+
+bool StorageCoordinator::readActive() const {
+  return readReservationDepth_.load(std::memory_order_acquire) != 0 ||
+      readIoDepth_.load(std::memory_order_acquire) != 0;
 }
 
 StorageOwner StorageCoordinator::mutationOwner() const {

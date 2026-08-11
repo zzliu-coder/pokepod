@@ -27,6 +27,7 @@
 #include "PowerDiagnostics.h"
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
+#include "ServiceQuiescencePolicy.h"
 #include "StorageCoordinator.h"
 #include "TencentWorker.h"
 #include "TlsExternalMemory.h"
@@ -100,6 +101,29 @@ PowerDecision currentPowerDecision;
 bool idleRadiosPaused = false;
 uint32_t nextSafeShutdownAttemptMs = 0;
 
+enum class PendingCaptureStop : uint8_t {
+  none = 0,
+  wirelessVoice,
+  localCapsule,
+};
+
+PendingCaptureStop pendingCaptureStop = PendingCaptureStop::none;
+RecorderStopReason pendingRecorderStopReason = RecorderStopReason::none;
+bool pendingCaptureForceAbort = false;
+bool pendingCaptureNotifyUser = false;
+bool pendingRecorderResultNotify = false;
+
+ServiceQuiescenceFacts serviceQuiescenceFacts(bool asrQuiesced) {
+  return {
+      asrQuiesced,
+      captureRuntime.running(),
+      pendingCaptureStop != PendingCaptureStop::none,
+      recorder.cleanupPending(),
+      audio.playbackCleanupPending(),
+      !StorageCoordinator::instance().idle(),
+  };
+}
+
 void noteUserActivity(uint32_t nowMs = millis()) {
   autoScreenOff.noteActivity(nowMs);
   if (idleRadiosPaused) {
@@ -138,7 +162,9 @@ void setScreenState(bool enabled) {
 PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
   PowerInputs input;
   input.screenOn = board.status().screenOn;
-  input.audioActive = audio.active() || recorder.recording() || audio.playing();
+  input.audioActive = audio.active() || recorder.recording() || audio.playing() ||
+      captureRuntime.running() || recorder.cleanupPending() ||
+      audio.playbackCleanupPending();
   const bool linkLeaseActive = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy() ||
       wirelessSync.openWindow() || capsuleLibrary.scanActive() ||
@@ -154,6 +180,7 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
       wifi.radioOn() || provisioningCoordinator.ownsWifi(),
       board.lowPowerWakeSourcesReady(),
       StorageCoordinator::instance().mutationActive(),
+      StorageCoordinator::instance().readActive(),
   };
   input = powerInputsWithFacts(input, facts);
   input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy() ||
@@ -180,6 +207,14 @@ void enterDeepSleep(const PowerInputs &inputs) {
     usb.log().println(
         "{\"event\":\"deep_sleep_deferred\",\"reason\":\"asr_busy\"}");
     noteUserActivity();
+    return;
+  }
+  (void)captureRuntime.pollFinalize(usb.log());
+  (void)recorder.pollCleanup(usb.log());
+  (void)audio.pollPlaybackCleanup(usb.log());
+  if (!servicesQuiesced(serviceQuiescenceFacts(true))) {
+    usb.log().println(
+        "{\"event\":\"deep_sleep_deferred\",\"reason\":\"storage_or_audio_busy\"}");
     return;
   }
   (void)board.takeTouchInterrupt();
@@ -216,15 +251,20 @@ bool advanceSafeShutdown(uint32_t nowMs) {
   }
   const bool asrQuiesced = tencentWorker.quiesce(
       nowMs, 2000, TencentCancelReason::shutdown);
+  (void)captureRuntime.pollFinalize(usb.log());
+  (void)recorder.pollCleanup(usb.log());
+  (void)audio.pollPlaybackCleanup(usb.log());
+  const bool localQuiesced = servicesQuiesced(
+      serviceQuiescenceFacts(asrQuiesced));
   usb.log().printf(
       "{\"event\":\"shutdown_asr_quiesce\",\"ok\":%s}\n",
       asrQuiesced ? "true" : "false");
   const SafeShutdownProgress progress =
-      safeShutdownQuiesce.update(asrQuiesced);
+      safeShutdownQuiesce.update(localQuiesced);
   if (progress != SafeShutdownProgress::ready) {
     nextSafeShutdownAttemptMs = millis() + 100;
     usb.log().println(
-        "{\"event\":\"safe_shutdown_deferred\",\"reason\":\"asr_busy\",\"storage_mounted\":true}");
+        "{\"event\":\"safe_shutdown_deferred\",\"reason\":\"service_or_storage_busy\",\"storage_mounted\":true}");
     return false;
   }
   nextSafeShutdownAttemptMs = 0;
@@ -353,6 +393,9 @@ void drawDashboard() {
   dashboard.draw(view);
 }
 
+bool requestCaptureStop(PendingCaptureStop owner, RecorderStopReason reason,
+                        bool forceAbort, bool notifyUser);
+
 bool startWirelessHold() {
   if (!capabilities.allows(kBleVoiceCapabilities)) {
     showMessage("无线语音服务未就绪");
@@ -379,8 +422,8 @@ bool startWirelessHold() {
     return false;
   }
   if (!bleVoice.startSession(sessionId, millis(), captureRouter)) {
-    captureRuntime.stop(usb.log());
-    captureRouter.release(AudioCaptureOwner::wirelessVoice);
+    (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                             RecorderStopReason::none, true, false);
     showMessage("无线麦克风暂时不可用");
     drawDashboard();
     return false;
@@ -414,33 +457,92 @@ bool drainCapturedAudio(uint32_t nowMs) {
   return ok;
 }
 
-bool stopWirelessHold() {
-  const bool captureStopped = captureRuntime.stop(usb.log());
-  const bool drained = drainCapturedAudio(millis());
-  if (!captureStopped || !drained || captureRuntime.incomplete()) {
-    bleVoice.abortSession(VoiceSessionError::notifyFailed);
-  } else {
-    bleVoice.endSession();
-  }
-  wirelessUiActive = false;
-  noteUserActivity();
-  transientMessage = "";
-  transientUntilMs = 0;
-  drawDashboard();
-  return true;
-}
+bool consumeRecorderTerminal(bool notifyUser);
 
-bool stopLocalCapture(RecorderStopReason reason) {
-  const bool captureStopped = captureRuntime.stop(usb.log());
+bool finishPendingCaptureStop() {
+  if (pendingCaptureStop == PendingCaptureStop::none ||
+      captureRuntime.running()) {
+    return pendingCaptureStop == PendingCaptureStop::none;
+  }
   const bool drained = drainCapturedAudio(millis());
-  const bool complete = captureStopped && drained &&
-      !captureRuntime.incomplete();
+  const bool complete = drained && !captureRuntime.incomplete() &&
+      !pendingCaptureForceAbort;
+  const PendingCaptureStop owner = pendingCaptureStop;
+  const bool notifyUser = pendingCaptureNotifyUser;
+  const RecorderStopReason reason = pendingRecorderStopReason;
+  pendingCaptureStop = PendingCaptureStop::none;
+  pendingCaptureForceAbort = false;
+  pendingCaptureNotifyUser = false;
+  pendingRecorderStopReason = RecorderStopReason::none;
+
+  if (owner == PendingCaptureStop::wirelessVoice) {
+    if (complete) bleVoice.endSession();
+    else bleVoice.abortSession(VoiceSessionError::notifyFailed);
+    captureRouter.release(AudioCaptureOwner::wirelessVoice);
+    wirelessUiActive = false;
+    dashboard.invalidate();
+    return complete;
+  }
+
   if (recorder.recording()) {
     if (complete) recorder.stop(usb.log(), reason);
     else recorder.abortCapture(usb.log());
   }
   captureRouter.release(AudioCaptureOwner::localCapsule);
+  const bool recorderClean = recorder.pollCleanup(usb.log());
+  if (!recorderClean || recorder.cleanupPending()) {
+    pendingRecorderResultNotify = pendingRecorderResultNotify || notifyUser;
+  } else {
+    consumeRecorderTerminal(notifyUser);
+  }
+  dashboard.invalidate();
   return complete;
+}
+
+bool requestCaptureStop(PendingCaptureStop owner, RecorderStopReason reason,
+                        bool forceAbort, bool notifyUser) {
+  if (pendingCaptureStop != PendingCaptureStop::none &&
+      pendingCaptureStop != owner) {
+    return false;
+  }
+  pendingCaptureStop = owner;
+  pendingRecorderStopReason = reason;
+  pendingCaptureForceAbort = pendingCaptureForceAbort || forceAbort;
+  pendingCaptureNotifyUser = pendingCaptureNotifyUser || notifyUser;
+  const bool stopped = captureRuntime.stop(usb.log());
+  if (stopped) return finishPendingCaptureStop();
+  return false;
+}
+
+void pollDeferredServiceCleanup() {
+  const bool captureFinalized = captureRuntime.pollFinalize(usb.log());
+  if (captureFinalized && pendingCaptureStop != PendingCaptureStop::none) {
+    (void)finishPendingCaptureStop();
+  }
+  const bool recorderClean = recorder.pollCleanup(usb.log());
+  if (recorderClean && !recorder.cleanupPending() &&
+      pendingRecorderResultNotify) {
+    const bool notifyUser = pendingRecorderResultNotify;
+    pendingRecorderResultNotify = false;
+    (void)consumeRecorderTerminal(notifyUser);
+  }
+  (void)audio.pollPlaybackCleanup(usb.log());
+}
+
+bool stopWirelessHold() {
+  const bool captureStopped = requestCaptureStop(
+      PendingCaptureStop::wirelessVoice, RecorderStopReason::none,
+      false, false);
+  noteUserActivity();
+  transientMessage = "";
+  transientUntilMs = 0;
+  drawDashboard();
+  return captureStopped;
+}
+
+bool stopLocalCapture(RecorderStopReason reason) {
+  return requestCaptureStop(PendingCaptureStop::localCapsule, reason,
+                            false, true);
 }
 
 bool consumeRecorderTerminal(bool notifyUser) {
@@ -512,7 +614,11 @@ void toggleRecording() {
       if (recorder.recording()) recorder.abortCapture(usb.log());
       captureRuntime.stop(usb.log());
       captureRouter.release(AudioCaptureOwner::localCapsule);
-      if (!consumeRecorderTerminal(true)) showMessage("录音启动失败");
+      if (!recorder.pollCleanup(usb.log()) || recorder.cleanupPending()) {
+        pendingRecorderResultNotify = true;
+      } else if (!consumeRecorderTerminal(true)) {
+        showMessage("录音启动失败");
+      }
     }
   }
   noteUserActivity();
@@ -1105,6 +1211,9 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  // These polls precede every transport/UI early return. Physical File close
+  // and late capture finalization therefore always make bounded progress.
+  pollDeferredServiceCleanup();
   const bool usbHostConnected = usb.hostConnected();
   const bool usbHostSessionClosed = usb.takeHostSessionClosed();
   if ((lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed) {
@@ -1179,25 +1288,20 @@ void loop() {
   } else if (captureRuntime.running()) {
     const bool wasRecording = recorder.recording();
     if (!drainCapturedAudio(now) && captureRouter.wirelessStreaming()) {
-      captureRuntime.stop(usb.log());
-      bleVoice.abortSession(VoiceSessionError::queueOverflow);
-      wirelessUiActive = false;
+      (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                               RecorderStopReason::none, true, false);
       showMessage("无线语音已中断");
     }
     if (wasRecording && !recorder.recording()) {
-      captureRuntime.stop(usb.log());
-      drainCapturedAudio(now);
-      captureRouter.release(AudioCaptureOwner::localCapsule);
-      consumeRecorderTerminal(true);
+      (void)requestCaptureStop(PendingCaptureStop::localCapsule,
+                               RecorderStopReason::maxDuration, false, true);
       drawDashboard();
     }
   }
   bleVoice.poll(now);
   if (wirelessUiActive && !bleVoice.streaming()) {
-    captureRuntime.stop(usb.log());
-    captureRouter.release(AudioCaptureOwner::wirelessVoice);
-    wirelessUiActive = false;
-    dashboard.invalidate();
+    (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                             RecorderStopReason::none, true, false);
   }
   if (captureRouter.available() && !captureRuntime.running() &&
       !audio.playing() && audio.active()) {

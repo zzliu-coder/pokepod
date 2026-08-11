@@ -16,6 +16,7 @@ PowerDecision powerDecisionFor(const StorageCoordinator &coordinator) {
   input.idleMs = kDeepSleepTimeoutMs;
   PowerFacts facts;
   facts.storageMutationActive = coordinator.mutationActive();
+  facts.storageReadActive = coordinator.readActive();
   return decidePower(powerInputsWithFacts(input, facts));
 }
 
@@ -39,8 +40,8 @@ int main() {
   }
   assert(!coordinator.mutationActive());
 
-  // Read reservations never become power-blocking storage mutations.  This
-  // covers cloud reads, playback, font glyph loading and Link downloads.
+  // Any live read reservation blocks unmount/deep sleep until its File is
+  // physically closed. This covers cloud reads, playback and Link downloads.
   const StorageOwner readOwners[] = {
       StorageOwner::tencentRead,
       StorageOwner::audioPlayback,
@@ -55,7 +56,9 @@ int main() {
     assert(readReservation);
     assert(coordinator.readOwner() == owner);
     assert(!coordinator.mutationActive());
-    assert(powerDecisionFor(coordinator).requestDeepSleep);
+    assert(coordinator.readActive());
+    assert(!coordinator.idle());
+    assert(!powerDecisionFor(coordinator).requestDeepSleep);
     {
       StorageIoLease read = coordinator.acquireIo(owner, StorageAccess::read);
       assert(read);
@@ -65,6 +68,8 @@ int main() {
                                 StorageAccess::mutation));
     readReservation.release();
     assert(coordinator.readOwner() == StorageOwner::none);
+    assert(!coordinator.readActive());
+    assert(coordinator.idle());
     assert(!coordinator.mutationActive());
   }
 
@@ -140,9 +145,10 @@ int main() {
   assert(!entered.load());
   readHeld.release();
   assert(coordinator.readOwner() == StorageOwner::none);
+  assert(!coordinator.readActive());
 
-  // The power fact is exact across tasks. A long read holds the physical
-  // storage mutex but never appears as a mutation; a write lease does.
+  // The power fact is exact across tasks. A physical read or write lease keeps
+  // SD mounted until the operation ends.
   std::atomic<bool> leaseReady{false};
   std::atomic<bool> releaseLease{false};
   std::thread readIoHolder([&]() {
@@ -154,9 +160,12 @@ int main() {
   });
   while (!leaseReady.load()) std::this_thread::yield();
   assert(!coordinator.mutationActive());
-  assert(powerDecisionFor(coordinator).requestDeepSleep);
+  assert(coordinator.readActive());
+  assert(!powerDecisionFor(coordinator).requestDeepSleep);
   releaseLease.store(true);
   readIoHolder.join();
+  assert(!coordinator.readActive());
+  assert(powerDecisionFor(coordinator).requestDeepSleep);
 
   leaseReady.store(false);
   releaseLease.store(false);

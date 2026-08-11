@@ -1,9 +1,11 @@
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "FS.h"
 
@@ -387,6 +389,44 @@ void runCorruptCheckpointRecovery() {
   assert(state->directories.count(staging) == 1);
 }
 
+void runRecorderDeferredCleanupAcrossContexts() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  WavRecorder recorder;
+  prepareRecorder(storage, recorder, log);
+  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
+  std::array<int16_t, 320> samples{};
+  assert(recorder.appendMono16(samples.data(), samples.size(), log));
+
+  state->fail(fakefs::Operation::close, UINT32_MAX,
+              fakefs::FaultAction::returnFailure);
+  std::atomic<bool> aborted{true};
+  std::thread foreignContext([&]() {
+    aborted.store(recorder.abortCapture(log));
+  });
+  foreignContext.join();
+  assert(!aborted.load());
+  assert(recorder.cleanupPending());
+  assert(!recorder.terminalResult().pending());
+  assert(StorageCoordinator::instance().mutationOwner() ==
+         StorageOwner::recorder);
+  assert(state->fault.seen == 0);
+
+  // The original reservation context can later perform the physical close,
+  // publish the terminal result and release storage for the next session.
+  assert(recorder.pollCleanup(log));
+  assert(state->fault.seen > 0);
+  state->clearFault();
+  assert(!recorder.cleanupPending());
+  assert(recorder.terminalResult().failureStage ==
+         RecorderFailureStage::captureIncomplete);
+  assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
+  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace()));
+  assert(recorder.abortCapture(log) == false);
+  assert(!recorder.cleanupPending());
+}
+
 }  // namespace
 
 int main() {
@@ -395,6 +435,7 @@ int main() {
   runTransactionEdgeCases();
   runRecorderFaultsAndReset();
   runCorruptCheckpointRecovery();
+  runRecorderDeferredCleanupAcrossContexts();
 
   const RecordingSpaceSnapshot oneByteShort{
       kRecordingRequiredFreeBytes - 1U, 0, true};

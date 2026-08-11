@@ -16,6 +16,7 @@ struct PowerFacts {
   bool wifiRadioActive = false;
   bool wakeSourcesReady = false;
   bool storageMutationActive = false;
+  bool storageReadActive = false;
 };
 
 inline bool powerHostSessionActive(const PowerFacts &facts) {

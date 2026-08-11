@@ -77,6 +77,12 @@ int main() {
   assert(deepSleepBlockers(input) == 0);
   assert(decidePower(input).requestDeepSleep);
 
+  PowerFacts activeRead;
+  activeRead.storageReadActive = true;
+  input = powerInputsWithFacts(idleInput(kDeepSleepTimeoutMs), activeRead);
+  assert(hasBlocker(input, PowerBlocker::storageBusy));
+  assert(!decidePower(input).requestDeepSleep);
+
   // The absolute 60 s / 180 s boundaries do not depend on periodic UI work.
   input = idleInput(kLightSleepTimeoutMs - 1);
   assert(!decidePower(input).allowLightSleep);

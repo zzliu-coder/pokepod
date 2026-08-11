@@ -16,7 +16,8 @@ assert "fontRead" in coordinator
 assert "StorageReservation playbackReservation_" in audio_h
 assert "StorageOwner::audioPlayback, StorageAccess::read" in audio
 assert "playbackReservation_ = std::move(storage)" in audio
-assert "playbackReservation_.release()" in audio
+assert "playbackCleanup_.begin" in audio
+assert "playbackCleanup_.poll()" in audio
 assert audio.count("StorageOwner::audioPlayback") >= 5
 assert font.count("StorageOwner::fontRead") >= 2
 assert "if (!fontIo) return false" in font

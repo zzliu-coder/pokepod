@@ -42,6 +42,7 @@ assert "BleConnectionPowerMode::idle" in ble
 assert "usb.tinyUsbMounted()," in main
 assert "usb.cdcSessionActive()," in main
 assert "StorageCoordinator::instance().mutationActive()," in main
+assert "StorageCoordinator::instance().readActive()," in main
 assert "board.lowPowerWakeSourcesReady(),\n      recorder.recording()," not in main
 assert "input = powerInputsWithFacts(input, facts)" in main
 

@@ -25,6 +25,11 @@ class WavRecorder {
             RecorderStopReason reason = RecorderStopReason::user);
   bool abortCapture(Print &log);
   bool recoverInterrupted(Print &log, const String &recoveredAt);
+  // Failure cleanup can be deferred while another storage context owns the
+  // physical SD bus.  The application polls this once per loop; until it
+  // completes the recorder keeps its mutation reservation and rejects reuse.
+  bool pollCleanup(Print &log);
+  bool cleanupPending() const { return cleanupPending_; }
 
   bool recording() const { return recording_; }
   uint32_t durationMs() const;
@@ -81,6 +86,9 @@ class WavRecorder {
   CapsuleTransaction transaction_;
   RecorderOutcomeState terminalState_;
   AudioFrontEnd audioFrontEnd_;
+  bool cleanupPending_ = false;
+  RecorderTerminal cleanupTerminal_ = RecorderTerminal::none;
+  RecorderFailureStage cleanupStage_ = RecorderFailureStage::none;
 };
 
 }  // namespace pokepod

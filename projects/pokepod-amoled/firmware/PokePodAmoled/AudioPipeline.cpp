@@ -169,7 +169,7 @@ void AudioPipeline::observeCapturedMono(const int16_t *samples, size_t count) {
 }
 
 bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
-  if (!available_ || playing_) return false;
+  if (!available_ || playing_ || playbackCleanup_.pending()) return false;
   lastPlaybackError_ = "none";
   StorageReservation storage = StorageCoordinator::instance().reserve(
       StorageOwner::audioPlayback, StorageAccess::read, 50);
@@ -206,17 +206,19 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
     return false;
   }
   openIo.release();
+  playbackFile_ = std::move(file);
+  playbackReservation_ = std::move(storage);
   if (!startHardware(HardwareMode::playback, kCapsuleSampleRate, log)) {
-    StorageIoLease closeIo = StorageCoordinator::instance().acquireIo(
-        StorageOwner::audioPlayback, StorageAccess::read, 50);
-    file.close();
+    (void)playbackCleanup_.begin(
+        playbackFile_, nullptr, "", playbackReservation_,
+        StorageOwner::audioPlayback, StorageAccess::read);
+    playbackCleanupLogPending_ = true;
+    (void)pollPlaybackCleanup(log);
     lastPlaybackError_ = lastHardwareError_;
     ++playbackStartFailures_;
     log.println("{\"event\":\"playback_error\",\"stage\":\"hardware\"}");
     return false;
   }
-  playbackFile_ = file;
-  playbackReservation_ = std::move(storage);
   playbackFileRemaining_ = dataBytes;
   playbackBufferedBytes_ = 0;
   playbackBufferOffset_ = 0;
@@ -290,18 +292,27 @@ void AudioPipeline::pumpPlayback(Print &log) {
 
 void AudioPipeline::stopPlayback(Print &log) {
   if (!playing_) return;
-  StorageIoLease closeIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::audioPlayback, StorageAccess::read, 50);
-  playbackFile_.close();
   playbackFileRemaining_ = 0;
   playbackBufferedBytes_ = 0;
   playbackBufferOffset_ = 0;
   playing_ = false;
-  closeIo.release();
-  playbackReservation_.release();
   digitalWrite(kSpeakerAmpPin, LOW);
-  log.println("{\"event\":\"playback_stopped\"}");
   stopHardware(log);
+  (void)playbackCleanup_.begin(
+      playbackFile_, nullptr, "", playbackReservation_,
+      StorageOwner::audioPlayback, StorageAccess::read);
+  playbackCleanupLogPending_ = true;
+  (void)pollPlaybackCleanup(log);
+}
+
+bool AudioPipeline::pollPlaybackCleanup(Print &log) {
+  if (!playbackCleanup_.pending()) return true;
+  if (!playbackCleanup_.poll()) return false;
+  if (playbackCleanupLogPending_) {
+    log.println("{\"event\":\"playback_stopped\"}");
+    playbackCleanupLogPending_ = false;
+  }
+  return true;
 }
 
 }  // namespace pokepod

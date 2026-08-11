@@ -8,6 +8,7 @@
 #include "AudioBoardProfile.h"
 #include "PeakWindow.h"
 #include "PlaybackBufferPolicy.h"
+#include "DeferredFileCleanup.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
@@ -25,6 +26,8 @@ class AudioPipeline {
   bool startPlayback(fs::FS &fs, const String &path, Print &log);
   void pumpPlayback(Print &log);
   void stopPlayback(Print &log);
+  bool pollPlaybackCleanup(Print &log);
+  bool playbackCleanupPending() const { return playbackCleanup_.pending(); }
   bool ready() const { return available_; }
   bool active() const { return hardwareActive_; }
   bool playing() const { return playing_; }
@@ -63,6 +66,8 @@ class AudioPipeline {
   PeakWindow peakWindow_;
   File playbackFile_;
   StorageReservation playbackReservation_;
+  DeferredFileCleanup playbackCleanup_;
+  bool playbackCleanupLogPending_ = false;
   uint32_t playbackFileRemaining_ = 0;
   size_t playbackBufferedBytes_ = 0;
   size_t playbackBufferOffset_ = 0;

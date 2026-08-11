@@ -95,7 +95,7 @@ bool WavRecorder::start(Print &log, const String &recordingId,
 bool WavRecorder::startInternal(Print &log, const String &recordingId,
                                 const String &createdAt,
                                 const RecordingSpaceSnapshot *space) {
-  if (recording_) {
+  if (recording_ || cleanupPending_ || file_) {
     log.println("{\"event\":\"recording_error\",\"stage\":\"invalid_start\"}");
     return false;
   }
@@ -341,7 +341,9 @@ bool WavRecorder::abortCapture(Print &log) {
 }
 
 void WavRecorder::resetSessionState() {
-  if (file_) file_.close();
+  // An open handle is owned by either the active recording or its deferred
+  // cleanup.  Closing it here would bypass the StorageCoordinator lease.
+  if (file_ || cleanupPending_) return;
   recording_ = false;
   recordingId_ = "";
   createdAt_ = "";
@@ -361,21 +363,44 @@ void WavRecorder::resetSessionState() {
 bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
                                 RecorderFailureStage stage) {
   recording_ = false;
+  if (!cleanupPending_) {
+    cleanupPending_ = true;
+    cleanupTerminal_ = terminal;
+    cleanupStage_ = stage;
+  }
+  (void)pollCleanup(log);
+  return false;
+}
+
+bool WavRecorder::pollCleanup(Print &log) {
+  if (!cleanupPending_) return true;
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      activeStorageOwner(), StorageAccess::mutation, 0);
+  if (!lease) return false;
+
+  // Persist the failed checkpoint while the recorder still owns both the
+  // logical mutation reservation and physical IO lease.  Failure to persist
+  // does not justify leaking an open handle; recovery will retain the partial
+  // staging directory and fail closed on the next boot.
+  if (checkpointInitialized_ &&
+      cleanupStage_ != RecorderFailureStage::recoveryCheckpoint) {
+    (void)persistCheckpoint(true, cleanupStage_, log);
+  }
   if (file_) {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        activeStorageOwner(), StorageAccess::mutation, 1000);
     file_.flush();
     file_.close();
   }
-  if (checkpointInitialized_ && stage != RecorderFailureStage::recoveryCheckpoint) {
-    persistCheckpoint(true, stage, log);
-  }
-  terminalState_.fail(terminal, stage, dataBytes_);
-  log.printf("{\"event\":\"recording_terminal\",\"ok\":false,\"stage\":\"%s\",\"bytes\":%lu}\n",
-             recorderFailureStageName(stage),
-             static_cast<unsigned long>(dataBytes_));
+  lease.release();
   storageReservation_.release();
-  return false;
+
+  terminalState_.fail(cleanupTerminal_, cleanupStage_, dataBytes_);
+  log.printf("{\"event\":\"recording_terminal\",\"ok\":false,\"stage\":\"%s\",\"bytes\":%lu}\n",
+             recorderFailureStageName(cleanupStage_),
+             static_cast<unsigned long>(dataBytes_));
+  cleanupPending_ = false;
+  cleanupTerminal_ = RecorderTerminal::none;
+  cleanupStage_ = RecorderFailureStage::none;
+  return true;
 }
 
 bool WavRecorder::ensureDirectory(const char *path, Print &log) {
