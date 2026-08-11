@@ -73,11 +73,51 @@ bool WavRecorder::begin(fs::FS &fs, Print &log) {
 
 bool WavRecorder::start(Print &log, const String &recordingId,
                         const String &createdAt) {
-  if (recording_ || fs_ == nullptr || !isUuid(recordingId.c_str()) ||
-      createdAt.isEmpty()) {
+  // The integration layer must provide a fresh SD capacity snapshot.  Keep
+  // this overload so older callers still compile, but fail closed until they
+  // adopt the admission-aware API.
+  const RecordingSpaceSnapshot unknown{};
+  return startInternal(log, recordingId, createdAt, &unknown);
+}
+
+bool WavRecorder::start(Print &log, const String &recordingId,
+                        const String &createdAt,
+                        const RecordingSpaceSnapshot &space) {
+  return startInternal(log, recordingId, createdAt, &space);
+}
+
+bool WavRecorder::startInternal(Print &log, const String &recordingId,
+                                const String &createdAt,
+                                const RecordingSpaceSnapshot *space) {
+  if (recording_) {
     log.println("{\"event\":\"recording_error\",\"stage\":\"invalid_start\"}");
     return false;
   }
+  resetSessionState();
+  if (fs_ == nullptr || !isUuid(recordingId.c_str()) || createdAt.isEmpty()) {
+    return finishFailure(log, RecorderTerminal::admissionFailure,
+                         RecorderFailureStage::invalidStart);
+  }
+
+  const RecordingAdmission admission =
+      evaluateRecordingAdmission(space == nullptr
+                                     ? RecordingSpaceSnapshot{}
+                                     : *space);
+  if (!admission.allowed()) {
+    RecorderFailureStage stage = RecorderFailureStage::insufficientSpace;
+    if (admission.reason == RecordingAdmissionReason::capacityUnknown) {
+      stage = RecorderFailureStage::capacityUnknown;
+    } else if (admission.reason ==
+               RecordingAdmissionReason::invalidCapacity) {
+      stage = RecorderFailureStage::capacityInvalid;
+    }
+    log.printf("{\"event\":\"recording_admission_rejected\",\"stage\":\"%s\",\"available_bytes\":%llu,\"required_bytes\":%llu}\n",
+               recorderFailureStageName(stage),
+               static_cast<unsigned long long>(admission.availableBytes),
+               static_cast<unsigned long long>(admission.requiredBytes));
+    return finishFailure(log, RecorderTerminal::admissionFailure, stage);
+  }
+
   recordingId_ = recordingId;
   createdAt_ = createdAt;
   directory_ = String(kCapsuleStaging) + "/" + recordingId_;
@@ -85,26 +125,28 @@ bool WavRecorder::start(Print &log, const String &recordingId,
   finalPath_ = directory_ + "/audio.wav";
 
   if (fs_->exists(directory_)) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"staging_exists\"}");
-    return false;
+    return finishFailure(log, RecorderTerminal::commitFailure,
+                         RecorderFailureStage::stagingExists);
   }
   if (!fs_->mkdir(directory_)) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"mkdir\"}");
-    return false;
+    return finishFailure(log, RecorderTerminal::storageFailure,
+                         RecorderFailureStage::createDirectory);
   }
-  if (!writeProcessingMetadata(log, "recording", 1, nullptr, nullptr)) return false;
+  if (!writeProcessingMetadata(log, "recording", 1, nullptr, nullptr)) {
+    return finishFailure(log, RecorderTerminal::metadataFailure,
+                         RecorderFailureStage::initialMetadata);
+  }
 
   file_ = fs_->open(partialPath_, FILE_WRITE);
   if (!file_) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"open\"}");
-    return false;
+    return finishFailure(log, RecorderTerminal::storageFailure,
+                         RecorderFailureStage::openAudio);
   }
-  dataBytes_ = 0;
-  audioFrontEnd_.reset();
   if (!writeHeader(0)) {
     file_.close();
     fs_->remove(partialPath_);
-    return false;
+    return finishFailure(log, RecorderTerminal::headerFailure,
+                         RecorderFailureStage::initialHeader);
   }
   recording_ = true;
   log.printf("{\"event\":\"recording_started\",\"id\":\"%s\",\"format\":\"16k_s16le_mono\"}\n",
@@ -128,41 +170,101 @@ bool WavRecorder::append(const uint8_t *data, size_t length, Print &log) {
       if (written != converted) {
         log.printf("{\"event\":\"recording_error\",\"stage\":\"short_write\",\"expected\":%u,\"actual\":%u}\n",
                    static_cast<unsigned>(converted), static_cast<unsigned>(written));
-        stop(log);
-        return false;
+        return finishFailure(log, RecorderTerminal::storageFailure,
+                             RecorderFailureStage::shortWrite);
       }
     }
     offset += inputBytes;
   }
-  if (durationMs() >= kMaxRecordingMs) return stop(log);
+  if (durationMs() >= kMaxRecordingMs) {
+    return stop(log, RecorderStopReason::maxDuration);
+  }
   return true;
 }
 
-bool WavRecorder::stop(Print &log) {
+bool WavRecorder::stop(Print &log, RecorderStopReason reason) {
   if (!recording_) return false;
   recording_ = false;
   file_.flush();
-  bool ok = file_.seek(0) && writeHeader(dataBytes_);
+  if (file_.getWriteError() != 0) {
+    file_.close();
+    return finishFailure(log, RecorderTerminal::storageFailure,
+                         RecorderFailureStage::flushAudio);
+  }
+  const bool headerOk = file_.seek(0) && writeHeader(dataBytes_);
   file_.flush();
+  const bool finalFlushOk = file_.getWriteError() == 0;
   file_.close();
-  if (ok) ok = finalizePartialAudio(log);
-  if (ok) ok = writeCapsuleMetadata(log, createdAt_);
-  if (ok) ok = writeProcessingMetadata(log, "queued", 2, nullptr, nullptr);
-  if (ok) ok = commitStagingDirectory(log);
+  if (!headerOk) {
+    return finishFailure(log, RecorderTerminal::headerFailure,
+                         RecorderFailureStage::finalHeader);
+  }
+  if (!finalFlushOk) {
+    return finishFailure(log, RecorderTerminal::storageFailure,
+                         RecorderFailureStage::flushAudio);
+  }
+  if (dataBytes_ == 0) {
+    return finishFailure(log, RecorderTerminal::tooShort,
+                         RecorderFailureStage::emptyAudio);
+  }
+  if (!finalizePartialAudio(log)) {
+    return finishFailure(log, RecorderTerminal::commitFailure,
+                         RecorderFailureStage::commitAudio);
+  }
+  if (!writeCapsuleMetadata(log, createdAt_)) {
+    return finishFailure(log, RecorderTerminal::metadataFailure,
+                         RecorderFailureStage::capsuleMetadata);
+  }
+  if (!writeProcessingMetadata(log, "queued", 2, nullptr, nullptr)) {
+    return finishFailure(log, RecorderTerminal::metadataFailure,
+                         RecorderFailureStage::processingMetadata);
+  }
+  if (!commitStagingDirectory(log)) {
+    return finishFailure(log, RecorderTerminal::commitFailure,
+                         RecorderFailureStage::commitDirectory);
+  }
+  terminalState_.complete(reason, dataBytes_);
   const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
-  log.printf("{\"event\":\"recording_stopped\",\"ok\":%s,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"noise_floor\":%u,\"suppressed_samples\":%lu,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
-             ok ? "true" : "false", static_cast<unsigned long>(durationMs()),
+  log.printf("{\"event\":\"recording_stopped\",\"ok\":true,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"noise_floor\":%u,\"suppressed_samples\":%lu,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
+             static_cast<unsigned long>(durationMs()),
              static_cast<unsigned long>(dataBytes_), finalPath_.c_str(),
              audioInputChannelName(audio.selectedChannel), audio.leftPeak,
              audio.rightPeak, audio.outputPeak, audio.estimatedNoiseFloor,
              static_cast<unsigned long>(audio.suppressedSamples),
              static_cast<unsigned long>(audio.limitedSamples),
              static_cast<unsigned long>(audio.maximumGainQ12));
-  return ok;
+  return true;
 }
 
 uint32_t WavRecorder::durationMs() const {
   return audioDurationMs(dataBytes_);
+}
+
+void WavRecorder::resetSessionState() {
+  if (file_) file_.close();
+  recording_ = false;
+  recordingId_ = "";
+  createdAt_ = "";
+  directory_ = "";
+  partialPath_ = "";
+  finalPath_ = "";
+  dataBytes_ = 0;
+  terminalState_.reset();
+  audioFrontEnd_.reset();
+}
+
+bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
+                                RecorderFailureStage stage) {
+  recording_ = false;
+  if (file_) {
+    file_.flush();
+    file_.close();
+  }
+  terminalState_.fail(terminal, stage, dataBytes_);
+  log.printf("{\"event\":\"recording_terminal\",\"ok\":false,\"stage\":\"%s\",\"bytes\":%lu}\n",
+             recorderFailureStageName(stage),
+             static_cast<unsigned long>(dataBytes_));
+  return false;
 }
 
 bool WavRecorder::ensureDirectory(const char *path, Print &log) {
@@ -178,8 +280,8 @@ bool WavRecorder::writeTextAtomically(const String &finalPath,
   File output = fs_->open(partial, FILE_WRITE);
   if (!output) return false;
   const size_t bytes = output.print(text);
-  const bool wrote = bytes == text.length() && output.getWriteError() == 0;
   output.flush();
+  const bool wrote = bytes == text.length() && output.getWriteError() == 0;
   output.close();
   if (!wrote) {
     fs_->remove(partial);
@@ -198,7 +300,8 @@ bool WavRecorder::writeHeader(uint32_t dataBytes) {
   if (!file_) return false;
   uint8_t header[kWavHeaderBytes];
   encodeWavHeader(header, dataBytes);
-  return file_.write(header, sizeof(header)) == sizeof(header);
+  return file_.write(header, sizeof(header)) == sizeof(header) &&
+      file_.getWriteError() == 0;
 }
 
 bool WavRecorder::finalizePartialAudio(Print &log) {
