@@ -1321,10 +1321,18 @@ void loop() {
     audio.pumpPlayback(usb.log());
   } else if (captureRuntime.running()) {
     const bool wasRecording = recorder.recording();
-    if (!drainCapturedAudio(now) && captureRouter.wirelessStreaming()) {
-      (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
-                               RecorderStopReason::none, true, false);
-      showMessage("无线语音已中断");
+    if (!drainCapturedAudio(now)) {
+      if (captureRouter.localRecording() &&
+          recorder.ownedBy(RecorderOperationOwner::localApp)) {
+        (void)recorder.abortCapture(usb.log());
+        (void)requestCaptureStop(PendingCaptureStop::localCapsule,
+                                 RecorderStopReason::none, true, true);
+        showMessage("录音已中断");
+      } else if (captureRouter.wirelessStreaming()) {
+        (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                                 RecorderStopReason::none, true, false);
+        showMessage("无线语音已中断");
+      }
     }
     if (recorder.ownedBy(RecorderOperationOwner::localApp) &&
         recorder.stopRequested() &&
@@ -1333,7 +1341,8 @@ void loop() {
                                recorder.requestedStopReason(), false, true);
       drawDashboard();
     } else if (recorder.ownedBy(RecorderOperationOwner::localApp) &&
-               wasRecording && !recorder.recording()) {
+               wasRecording && !recorder.recording() &&
+               pendingCaptureStop == PendingCaptureStop::none) {
       (void)requestCaptureStop(PendingCaptureStop::localCapsule,
                                RecorderStopReason::none, true, true);
       drawDashboard();

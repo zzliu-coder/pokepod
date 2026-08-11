@@ -161,6 +161,37 @@ void runStorageContextOwnsReservationAndFile() {
                             "/audio.wav") == 1U);
 }
 
+void runCaptureAbortCannotPublishQueued() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  WavRecorder recorder;
+  assert(recorder.begin(storage, log));
+  finishBootRecovery(recorder, state, log);
+  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+                        RecorderOperationOwner::localApp));
+  appendFrame(recorder, log);
+  assert(recorder.abortCapture(log));
+  drive(recorder, state, log, 5000U, nullptr);
+  assert(recorder.terminalResult().terminal ==
+         RecorderTerminal::captureFailure);
+  assert(state->directories.count(std::string(kCapsuleInbox) + "/" +
+                                  kFirstId) == 0U);
+  const std::string failed = std::string(kCapsuleStaging) + "/" + kFirstId;
+  assert(state->files.count(failed + "/audio.wav.part") == 1U);
+  assert(failedCheckpoint(state, kFirstId).failureStage ==
+         static_cast<uint8_t>(RecorderFailureStage::captureIncomplete));
+  RecorderOutcome acknowledged;
+  assert(recorder.takeTerminalResult(acknowledged));
+
+  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+                        RecorderOperationOwner::localApp));
+  appendFrame(recorder, log);
+  assert(recorder.stop(log));
+  drive(recorder, state, log, 6000U, nullptr);
+  assert(recorder.terminalResult().success());
+}
+
 void runAbsoluteGateAndUsbNullGate() {
   QuietPrint log;
   auto state = std::make_shared<fakefs::State>();
@@ -615,6 +646,7 @@ void runAutomaticMaximumDuration() {
 int main() {
   runNormalPendingAndSecondRecording();
   runStorageContextOwnsReservationAndFile();
+  runCaptureAbortCannotPublishQueued();
   runAbsoluteGateAndUsbNullGate();
   runFailureCheckpointAndRecoveryTruth();
   runIncrementalBootRecoveryBudget();

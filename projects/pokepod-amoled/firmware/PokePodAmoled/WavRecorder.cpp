@@ -163,6 +163,7 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
   storageCancellationGate_.reset();
   periodicCheckpointPhase_ = PeriodicCheckpointPhase::idle;
   storageStartCancelled_.store(false, std::memory_order_release);
+  storageAbortRequested_.store(false, std::memory_order_release);
   storageStartSucceeded_.store(false, std::memory_order_release);
   while (xSemaphoreTake(storageStartAck_, 0) == pdTRUE) {}
   const uint32_t startWaitBeganMs = millis();
@@ -405,8 +406,14 @@ bool WavRecorder::stop(Print &log, RecorderStopReason reason) {
   finalizePrimitiveFailures_ = 0;
   finalizePhase_ = FinalizePhase::flushAudio;
   finalizePending_ = true;
+#if defined(ARDUINO_ARCH_ESP32)
+  const uint32_t publishedBytes =
+      acceptedDataBytes_.load(std::memory_order_acquire);
+#else
+  const uint32_t publishedBytes = dataBytes_;
+#endif
   log.printf("{\"event\":\"recording_finalize_pending\",\"bytes\":%lu}\n",
-             static_cast<unsigned long>(dataBytes_));
+             static_cast<unsigned long>(publishedBytes));
 #if defined(ARDUINO_ARCH_ESP32)
   xTaskNotifyGive(storageTask_);
 #endif
@@ -425,9 +432,21 @@ uint32_t WavRecorder::durationMs() const {
 
 bool WavRecorder::abortCapture(Print &log) {
   if (!recording_) return false;
+#if defined(ARDUINO_ARCH_ESP32)
+  (void)log;
+  // File/runner/phase state belongs exclusively to the storage task.
+  // Keep recording=true until the owner task drains this command. That fact
+  // prevents the task from taking its no-work exit if abort is published just
+  // after it checked the command flag. The application stops capture at once;
+  // the task alone publishes recording=false and durable failure cleanup.
+  storageAbortRequested_.store(true, std::memory_order_release);
+  xTaskNotifyGive(storageTask_);
+  return true;
+#else
   (void)finishFailure(log, RecorderTerminal::captureFailure,
                       RecorderFailureStage::captureIncomplete);
   return true;
+#endif
 }
 
 bool WavRecorder::finalizeFailure(Print &log, RecorderTerminal terminal,
@@ -1648,6 +1667,14 @@ void WavRecorder::storageTaskMain() {
           storageSessionActive_.store(false, std::memory_order_release);
           break;
         }
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+      }
+      if (storageAbortRequested_.exchange(false,
+                                          std::memory_order_acq_rel)) {
+        storageQueue_.reset();
+        (void)finishFailure(*log, RecorderTerminal::captureFailure,
+                            RecorderFailureStage::captureIncomplete);
         vTaskDelay(pdMS_TO_TICKS(1));
         continue;
       }

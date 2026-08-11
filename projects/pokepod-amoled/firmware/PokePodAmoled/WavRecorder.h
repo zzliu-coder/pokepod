@@ -338,6 +338,7 @@ class WavRecorder {
   std::atomic<bool> storageStartRequested_{false};
   std::atomic<bool> storageStartSucceeded_{false};
   std::atomic<bool> storageStartCancelled_{false};
+  std::atomic<bool> storageAbortRequested_{false};
   std::atomic<bool> storageGateObserved_{false};
   std::atomic<uint32_t> storageNowMs_{0};
   std::atomic<uint32_t> acceptedDataBytes_{0};

@@ -26,6 +26,7 @@ assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in wav
 assert '"pokepod_recorder_storage"' in wav
 assert "storageQueue_.push(data, length)" in wav
 assert "std::atomic<RecorderStopReason> automaticStopReason_" in wav_h
+assert "std::atomic<bool> storageAbortRequested_" in wav_h
 assert "#if defined(ARDUINO_ARCH_ESP32)\n  if (!recording_ || data == nullptr)" in wav
 assert "#if defined(ARDUINO_ARCH_ESP32)\n  if (!recording_ || data == nullptr || length == 0" in wav
 assert "pollPeriodicCheckpoint" in wav
@@ -56,11 +57,25 @@ assert "fs_->open(partialPath_, FILE_WRITE)" in storage_start
 append_start = wav.index("bool WavRecorder::appendMonoBytes")
 append_end = wav.index("bool WavRecorder::storageAppendMonoBytes", append_start)
 assert "persistCheckpoint" not in wav[append_start:append_end]
+abort_capture = wav[
+    wav.index("bool WavRecorder::abortCapture"):
+    wav.index("bool WavRecorder::finalizeFailure")
+]
+arduino_abort = abort_capture[
+    abort_capture.index("#if defined(ARDUINO_ARCH_ESP32)"):
+    abort_capture.index("#else")
+]
+assert "finishFailure" not in arduino_abort
+assert "storageAbortRequested_.store(true" in arduino_abort
+assert "recording_.store(false" not in arduino_abort
 
 assert "RecorderOperationOwner::localApp" in app
 assert "recorder.ownedBy(RecorderOperationOwner::localApp)" in app
 assert "pendingRecorderFinalize && !recorder.operationActive()" in app
 assert "captureRouter.release(AudioCaptureOwner::localCapsule)" in app
+assert "if (captureRouter.localRecording()" in app
+assert "(void)recorder.abortCapture(usb.log())" in app
+assert "录音已中断" in app
 assert "recorder.operationActive() || pendingRecorderFinalize" in app
 assert "recorder.pollCleanup" not in app
 assert "recorder.recoverInterrupted" not in app
