@@ -43,7 +43,8 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
              PowerDiagnostics &powerDiagnostics,
              RuntimePowerManager &power, WirelessSyncIdentity &identity,
              LinkServiceCoordinator &coordinator, Print &log,
-             AudioCaptureRuntime *captureRuntime = nullptr);
+             AudioCaptureRuntime *captureRuntime = nullptr,
+             const CapabilityRegistry *capabilities = nullptr);
   void poll(uint32_t nowMs, bool networkConnected);
   void enforceDeadline(uint32_t nowMs);
   void open(uint32_t nowMs);

@@ -90,6 +90,15 @@ int main() {
   assert(!battery.update(6, false));
   assert(!battery.update(7, false));
 
+  SafeShutdownQuiescePolicy shutdown;
+  assert(shutdown.update(true) == SafeShutdownProgress::idle);
+  shutdown.request();
+  assert(shutdown.pending());
+  assert(shutdown.update(false) == SafeShutdownProgress::waitingForAsr);
+  assert(shutdown.pending());
+  assert(shutdown.update(true) == SafeShutdownProgress::ready);
+  assert(!shutdown.pending());
+
   AutoScreenOffPolicy autoOff;
   autoOff.begin(0xfffffff0U);
   assert(!autoOff.shouldTurnOff(0x00000005U, true, false, 32));

@@ -56,7 +56,9 @@ int main() {
   DeviceHealthState health;
   health.ioExpander = health.display = health.touch = health.sdCard = true;
   health.rtc = health.imu = health.pmu = health.audio = health.usb = true;
+  health.capsuleLibrary = true;
   health.recorder = health.bleVoice = health.link = health.wifi = true;
+  health.transcription = true;
   health.fullTextFont = true;
   assert(health.ready());
   health.touch = false;
@@ -67,6 +69,12 @@ int main() {
   health.pmu = true;
   health.fullTextFont = false;
   assert(!health.ready());
+
+  assert(uiActionRequiresCapsuleLibrary(UiAction::openCapsule));
+  assert(uiActionRequiresCapsuleLibrary(UiAction::play));
+  assert(uiActionRequiresCapsuleLibrary(UiAction::bulkTrash));
+  assert(!uiActionRequiresCapsuleLibrary(UiAction::capsuleRecord));
+  assert(!uiActionRequiresCapsuleLibrary(UiAction::wechatVoice));
 
   UiState state;
   assert(state.screen() == UiScreen::home);

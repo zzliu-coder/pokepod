@@ -29,7 +29,8 @@ bool WirelessSyncService::begin(
     PowerDiagnostics &powerDiagnostics,
     RuntimePowerManager &power, WirelessSyncIdentity &identity,
     LinkServiceCoordinator &coordinator, Print &log,
-    AudioCaptureRuntime *captureRuntime) {
+    AudioCaptureRuntime *captureRuntime,
+    const CapabilityRegistry *capabilities) {
   identity_ = &identity;
   log_ = &log;
   authenticator_.begin(identity, replay_, log);
@@ -39,7 +40,7 @@ bool WirelessSyncService::begin(
                        &coordinator,
                        LinkTransport::wifi, nullptr,
                        &window_.transferGate(), nullptr, &tls_,
-                       captureRuntime);
+                       captureRuntime, capabilities);
   observedMaintenanceStartRevision_ = link_.maintenanceStartRevision();
   observedMaintenanceCompletionRevision_ =
       link_.maintenanceCompletionRevision();

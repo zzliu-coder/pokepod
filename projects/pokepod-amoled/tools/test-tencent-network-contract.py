@@ -94,6 +94,19 @@ require(main, "selected->status == CapsuleStatus::queued",
         "queued transient failures cannot be manually retried")
 require(main, "tencentWorker.quiesce(",
         "deep sleep and shutdown do not quiesce ASR storage/network work")
+require(main, "safe_shutdown_deferred",
+        "safe shutdown does not report deferred ASR quiescence")
+shutdown = main[main.index("bool advanceSafeShutdown("):
+                main.index("String recordingId()")]
+require(shutdown, "if (progress != SafeShutdownProgress::ready)",
+        "safe shutdown does not gate teardown on actual ASR quiescence")
+if shutdown.index("SD_MMC.end()") < shutdown.index(
+        "if (progress != SafeShutdownProgress::ready)"):
+    raise SystemExit(
+        "FAIL tencent_network_contract: SD is unmounted before ASR quiescence")
+require(main, "if (!safeShutdownQuiesce.pending() &&\n"
+              "      currentPowerDecision.requestDeepSleep",
+        "a deferred safe shutdown can fall through into deep sleep")
 require(link, "tencent_->quiesce(",
         "Link reboot can restart while ASR still owns resources")
 

@@ -331,6 +331,28 @@ class LowBatteryShutdownPolicy {
   bool critical_ = false;
 };
 
+enum class SafeShutdownProgress : uint8_t {
+  idle,
+  waitingForAsr,
+  ready,
+};
+
+class SafeShutdownQuiescePolicy {
+ public:
+  void request() { pending_ = true; }
+  bool pending() const { return pending_; }
+
+  SafeShutdownProgress update(bool asrQuiesced) {
+    if (!pending_) return SafeShutdownProgress::idle;
+    if (!asrQuiesced) return SafeShutdownProgress::waitingForAsr;
+    pending_ = false;
+    return SafeShutdownProgress::ready;
+  }
+
+ private:
+  bool pending_ = false;
+};
+
 class AutoScreenOffPolicy {
  public:
   static constexpr uint32_t kDefaultDimTimeoutMs = 12000;

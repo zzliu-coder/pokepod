@@ -11,6 +11,7 @@
 #include "LinkTransferStepper.h"
 #include "MaintenanceCompletionTracker.h"
 #include "CapsuleTransaction.h"
+#include "CapabilityRegistry.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
@@ -52,7 +53,8 @@ class PokePodLinkService {
              LinkTransferGate *transferGate = nullptr,
              ProvisioningCoordinator *provisioningCoordinator = nullptr,
              LinkWriteChannel *writeChannel = nullptr,
-             AudioCaptureRuntime *captureRuntime = nullptr);
+             AudioCaptureRuntime *captureRuntime = nullptr,
+             const CapabilityRegistry *capabilities = nullptr);
   void poll(uint32_t nowMs);
   void disconnect();
   bool active() const { return sessionActive_; }
@@ -166,6 +168,7 @@ class PokePodLinkService {
   BoardServices *board_ = nullptr;
   AudioPipeline *audio_ = nullptr;
   AudioCaptureRuntime *captureRuntime_ = nullptr;
+  const CapabilityRegistry *capabilities_ = nullptr;
   AudioCaptureRouter *captureRouter_ = nullptr;
   UsbLinkBridge *usb_ = nullptr;
   BleVoiceService *bleVoice_ = nullptr;

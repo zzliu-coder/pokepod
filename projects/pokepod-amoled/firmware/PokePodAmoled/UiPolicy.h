@@ -60,7 +60,9 @@ struct DeviceHealthState {
   bool pmu = false;
   bool audio = false;
   bool usb = false;
+  bool capsuleLibrary = false;
   bool recorder = false;
+  bool transcription = false;
   bool bleVoice = false;
   bool link = false;
   bool wifi = false;
@@ -68,7 +70,8 @@ struct DeviceHealthState {
 
   bool ready() const {
     return ioExpander && display && touch && sdCard && rtc && imu && pmu &&
-        audio && usb && recorder && bleVoice && link && wifi && fullTextFont;
+        audio && usb && capsuleLibrary && recorder && transcription &&
+        bleVoice && link && wifi && fullTextFont;
   }
 };
 
@@ -205,6 +208,34 @@ enum class UiAction : uint8_t {
   bulkTrash,
   undoTrash,
 };
+
+inline bool uiActionRequiresCapsuleLibrary(UiAction action) {
+  switch (action) {
+    case UiAction::undoTrash:
+    case UiAction::openCapsule:
+    case UiAction::openCapsuleScope:
+    case UiAction::selectScopeInbox:
+    case UiAction::selectScopeFavorites:
+    case UiAction::selectScopePending:
+    case UiAction::selectScopeFailed:
+    case UiAction::selectScopeArchive:
+    case UiAction::selectScopeTrash:
+    case UiAction::openDetailMore:
+    case UiAction::play:
+    case UiAction::favorite:
+    case UiAction::archive:
+    case UiAction::retry:
+    case UiAction::trash:
+    case UiAction::requestPurge:
+    case UiAction::confirmPurge:
+    case UiAction::bulkFavorite:
+    case UiAction::bulkArchive:
+    case UiAction::bulkTrash:
+      return true;
+    default:
+      return false;
+  }
+}
 
 inline int8_t capsuleScopeIndexForAction(UiAction action) {
   switch (action) {

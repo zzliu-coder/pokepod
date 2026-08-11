@@ -378,16 +378,17 @@ void Dashboard::drawHome(const DashboardView &view) {
     return;
   }
   drawHomeAction(ui::kHomePrimaryTop, ui::kHomePrimaryConnectedBottom,
-                 false, false);
+                 false, false, view.localCapsulesReady);
   drawHomeAction(ui::kHomeSecondaryTop, ui::kHomeSecondaryBottom,
                  true, view.wirelessHolding, view.bleVoiceReady);
 }
 
 void Dashboard::drawHomeAction(int16_t top, int16_t bottom, bool wireless,
                                bool holding, bool enabled) {
-  const uint16_t accent = wireless
-      ? (enabled ? ui::kWireless : ui::kMuted) : ui::kAccent;
-  const uint16_t dim = wireless ? ui::kWirelessDim : ui::kAccentDim;
+  const uint16_t accent = enabled
+      ? (wireless ? ui::kWireless : ui::kAccent) : ui::kMuted;
+  const uint16_t dim = enabled
+      ? (wireless ? ui::kWirelessDim : ui::kAccentDim) : ui::kDisabled;
   const uint16_t fill = holding ? dim : ui::kSurface;
   display_->fillRoundRect(20, top, 328, bottom - top, 28, fill);
   display_->drawRoundRect(20, top, 328, bottom - top, 28,
@@ -406,7 +407,7 @@ void Dashboard::drawHomeAction(int16_t top, int16_t bottom, bool wireless,
                      ui::kInk, fill, 0, false, UiTextSize::display, true);
   renderer_.drawText(wireless ? (holding ? "松开结束" :
                                   (enabled ? "按住说话" : "等待 Mac 应用")) :
-                                  "轻触录音",
+                                  (enabled ? "轻触录音" : "本地胶囊不可用"),
                      132, centerY + 10, 190, 1,
                      accent, fill, 0, false, UiTextSize::body, true);
 }
@@ -426,7 +427,10 @@ void Dashboard::drawCapsules(const DashboardView &view) {
                      ui::kMuted, ui::kBackground);
   if (count == 0) {
     drawCapsuleOrb(230, ui::kDisabled, ui::kSurfaceRaised, 88);
-    drawCenteredText("暂无胶囊", 326, UiTextSize::body, ui::kMuted, true);
+    drawCenteredText(view.capsuleLibraryReady ? "暂无胶囊" : "本地胶囊不可用",
+                     326, UiTextSize::body,
+                     view.capsuleLibraryReady ? ui::kMuted : ui::kError,
+                     true);
     return;
   }
   drawCapsuleRows(view);
@@ -730,15 +734,21 @@ void Dashboard::drawDevice(const DashboardView &view) {
   health.pmu = view.board->pmu;
   health.audio = view.audioReady;
   health.usb = view.usbReady;
+  health.capsuleLibrary = view.capsuleLibraryReady;
   health.recorder = view.recorderReady;
+  health.transcription = view.transcriptionReady;
   health.bleVoice = view.bleVoiceServiceReady;
   health.link = view.linkReady;
   health.wifi = view.wifiServiceReady;
   health.fullTextFont = renderer_.sdFontReady();
-  const String healthText = health.ready() ? "硬件正常" : "硬件需检查";
+  const bool partlyUsable = view.capsuleLibraryReady ||
+      view.localCapsulesReady || view.bleVoiceServiceReady;
+  const String healthText = health.ready()
+      ? "硬件正常" : (partlyUsable ? "部分功能可用" : "硬件需检查");
   const int16_t healthWidth = renderer_.measureTextWidth(healthText);
   renderer_.drawText(healthText, 348 - healthWidth, 66, healthWidth, 1,
-                     health.ready() ? ui::kAccent : ui::kError,
+                     health.ready() ? ui::kAccent :
+                         (partlyUsable ? ui::kWaiting : ui::kError),
                      ui::kBackground);
 
   const bool wifiEnabled = view.settings != nullptr &&
@@ -1471,6 +1481,10 @@ uint64_t Dashboard::signature(const DashboardView &view,
     value.add(view.board->imu);
     value.add(view.board->pmu);
     value.add(view.audioReady);
+    value.add(view.capsuleLibraryReady);
+    value.add(view.localCapsulesReady);
+    value.add(view.recorderReady);
+    value.add(view.transcriptionReady);
     value.add(view.usbReady);
     value.add(renderer_.sdFontReady());
     value.add(view.provisioningDiagnostics == nullptr

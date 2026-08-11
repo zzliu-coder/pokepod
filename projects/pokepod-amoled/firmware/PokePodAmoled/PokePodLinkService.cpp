@@ -127,6 +127,26 @@ bool sameUuid(const char *left, const char *right) {
          strcasecmp(left, right) == 0;
 }
 
+uint16_t requiredCapabilitiesForLinkOperation(const char *operation) {
+  if (operation == nullptr) return 0;
+  if (strcmp(operation, "record") == 0 ||
+      strcmp(operation, "stop") == 0) {
+    return kRecordingCapabilities;
+  }
+  if (strcmp(operation, "font-write") == 0) {
+    return capabilityMask(DeviceCapability::storage);
+  }
+  if (strcmp(operation, "fingerprint") == 0 ||
+      strcmp(operation, "read") == 0 ||
+      strcmp(operation, "stage-write") == 0 ||
+      strcmp(operation, "command") == 0 ||
+      strcmp(operation, "commit") == 0 ||
+      strcmp(operation, "result") == 0) {
+    return kCapsuleBrowsingCapabilities;
+  }
+  return 0;
+}
+
 }  // namespace
 
 bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
@@ -146,12 +166,14 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                LinkTransferGate *transferGate,
                                ProvisioningCoordinator *provisioningCoordinator,
                                LinkWriteChannel *writeChannel,
-                               AudioCaptureRuntime *captureRuntime) {
+                               AudioCaptureRuntime *captureRuntime,
+                               const CapabilityRegistry *capabilities) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
   audio_ = &audio;
   captureRuntime_ = captureRuntime;
+  capabilities_ = capabilities;
   captureRouter_ = &captureRouter;
   usb_ = &usb;
   bleVoice_ = &bleVoice;
@@ -363,6 +385,15 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       jsonInt64(root, "version") != kLinkVersion) {
     cJSON_Delete(root);
     sendError(requestId, "malformed Link v2 request");
+    rememberCompleted(requestId);
+    return;
+  }
+
+  const uint16_t required = requiredCapabilitiesForLinkOperation(operation);
+  if (required != 0 && capabilities_ != nullptr &&
+      !capabilities_->allows(required)) {
+    cJSON_Delete(root);
+    sendError(requestId, "required device capability is not ready");
     rememberCompleted(requestId);
     return;
   }
@@ -643,6 +674,21 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         String(tencent_->lastPsramFreeBeforeTls());
     extra += ",\"sdReady\":";
     extra += status.sdCard ? "true" : "false";
+    if (capabilities_ != nullptr) {
+      extra += ",\"capabilityObservedMask\":" +
+          String(capabilities_->observedMask());
+      extra += ",\"capabilityReadyMask\":" +
+          String(capabilities_->readyMask());
+      extra += ",\"capsuleLibraryReady\":" +
+          String(capabilities_->ready(DeviceCapability::capsuleLibrary)
+                     ? "true" : "false");
+      extra += ",\"recorderReady\":" +
+          String(capabilities_->ready(DeviceCapability::recording)
+                     ? "true" : "false");
+      extra += ",\"asrWorkerReady\":" +
+          String(capabilities_->ready(DeviceCapability::transcription)
+                     ? "true" : "false");
+    }
     extra += ",\"variant\":\"" + String(variantName(status.variant)) + "\"";
     extra += ",\"ioExpander\":" + String(status.ioExpander ? "true" : "false");
     extra += ",\"display\":" + String(status.display ? "true" : "false");
@@ -899,9 +945,11 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     } else sendOk(requestId);
   } else if (strcmp(operation, "record") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
-    else if (audio_ == nullptr || !audio_->ready() || !board_->sdReady() ||
+    else if ((capabilities_ != nullptr &&
+              !capabilities_->allows(kRecordingCapabilities)) ||
+             audio_ == nullptr || !audio_->ready() || !board_->sdReady() ||
              captureRuntime_ == nullptr || !captureRuntime_->ready()) {
-      sendError(requestId, "audio or SD is not ready");
+      sendError(requestId, "recording capability is not ready");
     } else {
       const String id = newUuid();
       tencent_->wake();
