@@ -63,10 +63,22 @@ assert "releaseRequestLease()" in start_advance
 process = CPP[CPP.index("void PokePodLinkService::processRequest("):
               CPP.index("bool PokePodLinkService::beginIncoming(")]
 assert "linkRecordingStart_.ownsRequest(requestId)" in process
-assert process.index("linkRecordingStart_.ownsRequest(requestId)") < process.index(
-    "completed_.contains(requestId)")
+assert "linkRecordingStart_.active() || linkRecordingStop_.active()" in process
+assert "sendBusy(requestId);" in process
+async_guard = process.index(
+    "linkRecordingStart_.active() || linkRecordingStop_.active()")
+assert async_guard < process.index("cJSON_ParseWithLength")
+assert async_guard < process.index("acquireRequestLease(requestId)")
 assert process.index("handleImmediate(requestId, root)") < process.rindex(
     "linkRecordingStart_.ownsRequest(requestId)")
+
+queue = CPP[CPP.index("bool PokePodLinkService::queueFrame("):
+            CPP.index("void PokePodLinkService::advanceTransmit(")]
+assert "requestId == requestLeaseOwnerRequestId_" in queue
+lease = CPP[CPP.index("bool PokePodLinkService::acquireRequestLease("):
+            CPP.index("bool PokePodLinkService::foregroundBusy(")]
+assert "requestLeaseOwnerRequestId_ = requestId" in lease
+assert "requestLeaseOwnerRequestId_ = 0" in lease
 
 poll = CPP[CPP.index("void PokePodLinkService::pollDeferredCleanup()"):
            CPP.index("void PokePodLinkService::poll(uint32_t nowMs)")]

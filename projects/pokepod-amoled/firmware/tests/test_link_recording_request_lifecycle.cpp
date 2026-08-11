@@ -26,6 +26,12 @@ struct LifecycleHarness {
     return true;
   }
 
+  bool blocksOtherRequest(uint32_t requestId) const {
+    if (!request.active() && !cleanup.active()) return false;
+    return !request.ownsRequest(requestId) &&
+        !cleanup.ownsRequest(requestId);
+  }
+
   void pollStart(uint32_t nowMs, bool gate, bool ack, bool success,
                  bool transportAlive = true) {
     const RecorderStartPollResult result =
@@ -63,6 +69,8 @@ int main() {
   assert(success.accept(70, 700, 100));
   assert(success.accept(70, 701, 101));
   assert(success.starts == 1);
+  assert(success.blocksOtherRequest(90));
+  assert(success.leaseHeld);
   success.pollStart(102, true, false, false);
   assert(success.leaseHeld);
   assert(!success.completed);
@@ -71,6 +79,7 @@ int main() {
   assert(success.completed);
   assert(success.responded);
   assert(!success.leaseHeld);
+  assert(!success.blocksOtherRequest(90));
 
   // A negative storage ACK remains owned until recorder cleanup reaches its
   // terminal fact; only then is the failure response/completion published.
@@ -80,9 +89,12 @@ int main() {
   assert(failed.leaseHeld);
   assert(!failed.completed);
   assert(failed.cleanup.ownsRequest(71));
+  assert(failed.blocksOtherRequest(91));
+  assert(failed.leaseHeld);
   failed.finishCleanup(true);
   assert(failed.completed);
   assert(failed.responded);
+  assert(!failed.blocksOtherRequest(91));
 
   // At the absolute Wi-Fi deadline, the gate wins over a simultaneous ACK.
   // Disconnect suppresses a response and never creates a false completion.

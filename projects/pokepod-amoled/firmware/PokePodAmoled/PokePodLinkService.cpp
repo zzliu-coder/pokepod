@@ -498,12 +498,16 @@ void PokePodLinkService::processFrame() {
 
 void PokePodLinkService::processRequest(uint32_t requestId,
                                         const uint8_t *payload, size_t size) {
-  // A retransmission of an in-flight recording request shares the original
-  // terminal response. Sending a second response here would race the storage
-  // ACK and could let the client release the session before admission ended.
+  // An asynchronous recording request is the sole owner of the coordinator
+  // lease until its real recorder terminal. Coalesce the same request id and
+  // reject every other request before it can acquire/release that lease.
   if (requestId != 0 &&
-      (linkRecordingStart_.ownsRequest(requestId) ||
-       linkRecordingStop_.ownsRequest(requestId))) return;
+      (linkRecordingStart_.active() || linkRecordingStop_.active())) {
+    if (linkRecordingStart_.ownsRequest(requestId) ||
+        linkRecordingStop_.ownsRequest(requestId)) return;
+    sendBusy(requestId);
+    return;
+  }
   if (requestId == 0 || completed_.contains(requestId) ||
       incomingKind_ != IncomingKind::none) {
     sendError(requestId, requestId == 0 ? "requestId must be non-zero" :
@@ -3949,7 +3953,8 @@ bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
     *targetCompletion = TxCompletion::none;
     return false;
   }
-  if (requestLeaseHeld_ && activeMaintenance_.isEmpty()) {
+  if (requestLeaseHeld_ && requestId == requestLeaseOwnerRequestId_ &&
+      activeMaintenance_.isEmpty()) {
     releaseRequestLeaseWhenTxDrained_ = true;
   }
   return true;
@@ -4457,6 +4462,7 @@ bool PokePodLinkService::acquireRequestLease(uint32_t requestId) {
   if (requestLeaseHeld_) return true;
   if (coordinator_ == nullptr || transport_ == LinkTransport::none) {
     requestLeaseHeld_ = true;
+    requestLeaseOwnerRequestId_ = requestId;
     return true;
   }
   if (!coordinator_->acquire(transport_)) {
@@ -4464,6 +4470,7 @@ bool PokePodLinkService::acquireRequestLease(uint32_t requestId) {
     return false;
   }
   requestLeaseHeld_ = true;
+  requestLeaseOwnerRequestId_ = requestId;
   return true;
 }
 
@@ -4479,6 +4486,7 @@ void PokePodLinkService::releaseRequestLease() {
 
 void PokePodLinkService::releaseRequestLeaseNow() {
   if (!requestLeaseHeld_) {
+    requestLeaseOwnerRequestId_ = 0;
     releaseRequestLeaseWhenTxDrained_ = false;
     return;
   }
@@ -4486,6 +4494,7 @@ void PokePodLinkService::releaseRequestLeaseNow() {
     coordinator_->release(transport_);
   }
   requestLeaseHeld_ = false;
+  requestLeaseOwnerRequestId_ = 0;
   releaseRequestLeaseWhenTxDrained_ = false;
 }
 

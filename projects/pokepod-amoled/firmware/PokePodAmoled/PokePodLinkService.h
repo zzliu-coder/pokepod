@@ -322,6 +322,7 @@ class PokePodLinkService {
   LinkTransferGate *transferGate_ = nullptr;
   LinkWriteChannel *writeChannel_ = nullptr;
   bool requestLeaseHeld_ = false;
+  uint32_t requestLeaseOwnerRequestId_ = 0;
   bool releaseRequestLeaseWhenTxDrained_ = false;
   CapsuleTransaction transaction_;
   CapsuleTransactionRunner transactionRunner_;
