@@ -107,6 +107,10 @@ class CapsuleLibrary {
   uint32_t maxScanUs() const { return maxScanUs_; }
   bool indexOverflow() const { return indexOverflow_; }
   size_t indexedCount() const { return locatorCount_; }
+  size_t customPathBytes() const { return pathPoolUsed_; }
+  static constexpr size_t customPathCapacity() {
+    return kCapsuleCustomPathPoolBytes;
+  }
   size_t pendingCount() const;
   const CapsuleSummary *at(size_t index, bool loadPreview = false) const;
   const CapsuleSummary *nextQueued() const;
@@ -197,7 +201,17 @@ class CapsuleLibrary {
                              const String &directoryId,
                              CapsuleSummary &record,
                              bool detectAudio = true) const;
-  void copyToLocator(const CapsuleSummary &record, CapsuleLocator &locator) const;
+  bool copyToLocator(const CapsuleSummary &record, CapsuleLocator &locator,
+                     char *pathPool, size_t &pathPoolUsed) const;
+  bool copyIndexedLocator(const CapsuleLocator &source,
+                          CapsuleLocator &destination, char *pathPool,
+                          size_t &pathPoolUsed) const;
+  bool rebuildPublishedIndex(const CapsuleSummary *replacement,
+                             size_t replaceIndex, bool append,
+                             size_t removeIndex);
+  bool storeCustomPath(const String &directory, CapsuleLocator &locator,
+                       char *pathPool, size_t &pathPoolUsed) const;
+  bool customPath(const CapsuleLocator &locator, String &directory) const;
   bool hydrateLocator(const CapsuleLocator &locator,
                       CapsuleSummary &record) const;
   bool resolveLocator(const CapsuleLocator &locator, String &directory,
@@ -220,8 +234,12 @@ class CapsuleLibrary {
   CapsuleTransaction transaction_;
   CapsuleLocator *locators_ = nullptr;
   CapsuleLocator *scanLocators_ = nullptr;
+  char *pathPool_ = nullptr;
+  char *scanPathPool_ = nullptr;
   size_t locatorCount_ = 0;
   size_t scanLocatorCount_ = 0;
+  size_t pathPoolUsed_ = 0;
+  size_t scanPathPoolUsed_ = 0;
   std::vector<size_t> order_;
   std::vector<size_t> visible_;
   struct DetailCacheEntry {
@@ -252,6 +270,7 @@ class CapsuleLibrary {
   bool scanCancelRequested_ = false;
   bool scanFailureRequested_ = false;
   bool scanIndexOverflow_ = false;
+  bool scanPathFailure_ = false;
   bool scanRequested_ = false;
   CapsuleScanBudget requestedScanBudget_{};
   int64_t scanStartedUs_ = 0;

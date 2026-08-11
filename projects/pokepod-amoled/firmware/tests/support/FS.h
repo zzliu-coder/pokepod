@@ -55,6 +55,7 @@ struct State {
   std::set<std::string> directories{"/"};
   FaultPlan fault;
   uint32_t operations = 0;
+  uint64_t openNextFileCalls = 0;
 
   void clearFault() { fault = {}; }
 
@@ -240,6 +241,7 @@ class File {
         handle_->childIndex >= handle_->children.size()) {
       return {};
     }
+    ++handle_->state->openNextFileCalls;
     const std::string path = handle_->children[handle_->childIndex++];
     auto child = std::make_shared<fakefs::Handle>();
     child->state = handle_->state;

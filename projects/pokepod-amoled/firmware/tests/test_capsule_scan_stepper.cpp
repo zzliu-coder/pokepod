@@ -127,6 +127,37 @@ std::vector<FixtureRecord> seedFixture(
   return records;
 }
 
+FixtureRecord seedCustomRecord(
+    size_t index, const std::shared_ptr<fakefs::State> &filesystem,
+    const std::string &parent = "/PokeCapsule/Projects/Nested") {
+  FixtureRecord record;
+  record.id = uuidFor(index);
+  record.folder = parent.substr(std::string("/PokeCapsule/").size());
+  record.directory = parent + "/" + record.id;
+  record.wav = index % 2 == 0;
+  filesystem->seed(record.directory + "/capsule.json",
+                   capsuleJson(record.id, index));
+  filesystem->seed(record.directory + "/processing.json",
+                   processingJson(record.id, "ready",
+                                  record.wav ? "audio.wav" : "audio.m4a"));
+  filesystem->seed(record.directory + (record.wav ? "/audio.wav"
+                                                   : "/audio.m4a"),
+                   "fixture-audio");
+  filesystem->seed(record.directory + "/raw.txt", "custom preview text");
+  return record;
+}
+
+std::vector<FixtureRecord> seedCustomFixture(
+    size_t first, size_t count,
+    const std::shared_ptr<fakefs::State> &filesystem) {
+  std::vector<FixtureRecord> records;
+  records.reserve(count);
+  for (size_t index = first; index < first + count; ++index) {
+    records.push_back(seedCustomRecord(index, filesystem));
+  }
+  return records;
+}
+
 void finishScan(CapsuleLibrary &library) {
   while (library.scanState() == CapsuleScanState::running) {
     library.stepScan();
@@ -250,6 +281,94 @@ void runProductionCancelAndCapacityFailure() {
   assert(library.indexedCount() == original.size());
 }
 
+void runProductionCustomPathIndex() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  const auto records = seedCustomFixture(0, 360, state);
+  assert(library.startScan({1, 1024}));
+  finishScan(library);
+  assert(library.scanState() == CapsuleScanState::completed);
+  assert(library.indexedCount() == records.size());
+  assert(library.customPathBytes() > records.size() * 64);
+  assert(library.customPathBytes() <= library.customPathCapacity());
+
+  // Hydrating 360 custom records churns the 12-entry detail cache repeatedly.
+  // Every directory was captured in the published PSRAM path generation, so
+  // no post-publish tree enumeration is permitted.
+  const uint64_t enumerationsAfterPublish = state->openNextFileCalls;
+  for (const FixtureRecord &record : records) {
+    CapsuleSummary hydrated;
+    assert(library.hydrate(record.id.c_str(), hydrated, true));
+    assert(hydrated.directory == record.directory.c_str());
+    assert(hydrated.folder == "Projects/Nested");
+  }
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+
+  // Incremental metadata and move/restore operations compact into the spare
+  // locator/path generation. They never fall back to a recursive custom-path
+  // lookup and preserve the original folder semantics.
+  const FixtureRecord &changed = records[123];
+  assert(library.toggleFavorite(changed.id.c_str()));
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+  assert(library.archive(changed.id.c_str()));
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+  assert(library.unarchive(changed.id.c_str()));
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+  assert(library.trash(changed.id.c_str(), "2026-08-11T12:00:00Z"));
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+  assert(library.restore(changed.id.c_str()));
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+  CapsuleSummary restored;
+  assert(library.hydrate(changed.id.c_str(), restored));
+  assert(restored.folder == "Projects/Nested");
+  assert(restored.directory == changed.directory.c_str());
+  assert(state->openNextFileCalls == enumerationsAfterPublish);
+
+  // A cancelled rebuild cannot expose its staged path generation.
+  const size_t oldCount = library.indexedCount();
+  const size_t oldPathBytes = library.customPathBytes();
+  seedCustomRecord(360, state);
+  assert(library.startScan({1, 1024}));
+  for (size_t slice = 0; slice < 40; ++slice) {
+    assert(library.stepScan() == CapsuleScanState::running);
+  }
+  library.cancelScan();
+  finishScan(library);
+  assert(library.scanState() == CapsuleScanState::cancelled);
+  assert(library.indexedCount() == oldCount);
+  assert(library.customPathBytes() == oldPathBytes);
+  assert(library.hydrate(changed.id.c_str(), restored));
+  assert(restored.directory == changed.directory.c_str());
+}
+
+void runProductionCustomPathFailClosed() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const FixtureRecord original = seedCustomRecord(0, state);
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  const size_t oldPathBytes = library.customPathBytes();
+
+  // This path exceeds the existing 255-byte storage contract. The complete
+  // staged generation fails closed and the previously published locator/path
+  // pair remains readable.
+  const std::string longParent =
+      "/PokeCapsule/" + std::string(220, 'x') + "/Nested";
+  seedCustomRecord(1, state, longParent);
+  assert(library.startScan({1, 1024}));
+  finishScan(library);
+  assert(library.scanState() == CapsuleScanState::failed);
+  assert(library.indexedCount() == 1);
+  assert(library.customPathBytes() == oldPathBytes);
+  CapsuleSummary hydrated;
+  assert(library.hydrate(original.id.c_str(), hydrated));
+  assert(hydrated.directory == original.directory.c_str());
+}
+
 void runProductionQueuedRescanGate() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS filesystem(state);
@@ -302,7 +421,8 @@ void runProductionHeapSoak() {
   assert(library.begin(filesystem, log));
   const size_t fixedIndexBytes = fake_heap_caps::liveBytes();
   assert(fixedIndexBytes ==
-         2 * kCapsuleLocatorCapacity * sizeof(CapsuleLocator));
+         2 * kCapsuleLocatorCapacity * sizeof(CapsuleLocator) +
+         2 * kCapsuleCustomPathPoolBytes);
 
   CapsuleSummary detail;
   for (size_t cycle = 0; cycle < 10000; ++cycle) {
@@ -323,6 +443,8 @@ void runProductionHeapSoak() {
 int main() {
   runProductionLargeFixture();
   runProductionCancelAndCapacityFailure();
+  runProductionCustomPathIndex();
+  runProductionCustomPathFailClosed();
   runProductionQueuedRescanGate();
   runProductionHeapSoak();
   assert(fake_heap_caps::liveBytes() == 0);

@@ -57,6 +57,8 @@ void copyFixed(char (&destination)[Capacity], const String &source) {
 CapsuleLibrary::~CapsuleLibrary() {
   if (locators_ != nullptr) heap_caps_free(locators_);
   if (scanLocators_ != nullptr) heap_caps_free(scanLocators_);
+  if (pathPool_ != nullptr) heap_caps_free(pathPool_);
+  if (scanPathPool_ != nullptr) heap_caps_free(scanPathPool_);
 }
 
 bool CapsuleLibrary::allocateIndex() {
@@ -70,12 +72,22 @@ bool CapsuleLibrary::allocateIndex() {
         kCapsuleLocatorCapacity, sizeof(CapsuleLocator),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   }
-  if (locators_ == nullptr || scanLocators_ == nullptr) {
+  if (pathPool_ == nullptr) {
+    pathPool_ = static_cast<char *>(heap_caps_calloc(
+        kCapsuleCustomPathPoolBytes, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (scanPathPool_ == nullptr) {
+    scanPathPool_ = static_cast<char *>(heap_caps_calloc(
+        kCapsuleCustomPathPoolBytes, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (locators_ == nullptr || scanLocators_ == nullptr ||
+      pathPool_ == nullptr || scanPathPool_ == nullptr) {
     if (log_ != nullptr) {
       log_->printf("{\"event\":\"capsule_index_allocation_failed\","
                    "\"bytes\":%u}\n",
-                   static_cast<unsigned>(kCapsuleLocatorCapacity *
-                                         sizeof(CapsuleLocator)));
+                   static_cast<unsigned>(
+                       2 * kCapsuleLocatorCapacity * sizeof(CapsuleLocator) +
+                       2 * kCapsuleCustomPathPoolBytes));
     }
     return false;
   }
@@ -261,10 +273,10 @@ CapsuleScanState CapsuleLibrary::stepScan() {
         record.audioFormat = "m4a-aac-lc";
       }
     }
-    if (!appendStagedRecord(record)) scanIndexOverflow_ = true;
+    (void)appendStagedRecord(record);
     scanPending_ = ScanPendingRecord();
   }
-  if (scanIndexOverflow_) {
+  if (scanIndexOverflow_ || scanPathFailure_) {
     // Defer terminal cleanup to one final bounded slice so persistent
     // directory handles are closed under the same physical IO lease.
     scanFailureRequested_ = true;
@@ -390,8 +402,16 @@ bool CapsuleLibrary::readPendingMetadataSlice() {
 }
 
 bool CapsuleLibrary::appendStagedRecord(const CapsuleSummary &record) {
-  if (scanLocatorCount_ >= kCapsuleLocatorCapacity) return false;
-  copyToLocator(record, scanLocators_[scanLocatorCount_++]);
+  if (scanLocatorCount_ >= kCapsuleLocatorCapacity) {
+    scanIndexOverflow_ = true;
+    return false;
+  }
+  if (!copyToLocator(record, scanLocators_[scanLocatorCount_], scanPathPool_,
+                     scanPathPoolUsed_)) {
+    scanPathFailure_ = true;
+    return false;
+  }
+  ++scanLocatorCount_;
   return true;
 }
 
@@ -402,9 +422,11 @@ void CapsuleLibrary::resetScanTransient() {
   scanDirectoryOpen_ = false;
   scanPending_ = ScanPendingRecord();
   scanLocatorCount_ = 0;
+  scanPathPoolUsed_ = 0;
   scanCancelRequested_ = false;
   scanFailureRequested_ = false;
   scanIndexOverflow_ = false;
+  scanPathFailure_ = false;
 }
 
 void CapsuleLibrary::finishScan(CapsuleScanState state) {
@@ -415,7 +437,9 @@ void CapsuleLibrary::finishScan(CapsuleScanState state) {
 
   if (state == CapsuleScanState::completed) {
     std::swap(locators_, scanLocators_);
+    std::swap(pathPool_, scanPathPool_);
     locatorCount_ = scanLocatorCount_;
+    pathPoolUsed_ = scanPathPoolUsed_;
     indexOverflow_ = false;
     invalidateRecordCache();
     requestPublish();
@@ -442,9 +466,16 @@ void CapsuleLibrary::finishScan(CapsuleScanState state) {
                    "\"capacity\":%u}\n",
                    static_cast<unsigned>(kCapsuleLocatorCapacity));
     }
+    if (scanPathFailure_ && log_ != nullptr) {
+      log_->printf("{\"event\":\"capsule_custom_path_index_failed\","
+                   "\"poolBytes\":%u,\"maxPathBytes\":%u}\n",
+                   static_cast<unsigned>(kCapsuleCustomPathPoolBytes),
+                   static_cast<unsigned>(kCapsuleTransactionPathBytes - 1));
+    }
   }
   scanDirectories_.clear();
   scanLocatorCount_ = 0;
+  scanPathPoolUsed_ = 0;
 }
 
 bool CapsuleLibrary::includeInboxCapsule(const String &id) {
@@ -943,8 +974,19 @@ bool CapsuleLibrary::refreshRecord(const String &id, const String &directory,
   }
   const size_t index = recordIndex(id);
   if (index < locatorCount_) {
-    replaceIndexedRecord(index, refreshed);
+    if (!replaceIndexedRecord(index, refreshed)) {
+      if (log_ != nullptr) {
+        log_->printf("{\"event\":\"capsule_index_refresh_failed\","
+                     "\"capsuleId\":\"%s\"}\n", id.c_str());
+      }
+      ++refreshFallbackCount_;
+      return requestScan();
+    }
   } else if (!appendIndexedRecord(refreshed)) {
+    if (log_ != nullptr) {
+      log_->printf("{\"event\":\"capsule_index_append_failed\","
+                   "\"capsuleId\":\"%s\"}\n", id.c_str());
+    }
     ++refreshFallbackCount_;
     return requestScan();
   }
@@ -971,20 +1013,20 @@ bool CapsuleLibrary::refreshExisting(const String &id) {
 void CapsuleLibrary::removeIndexedRecord(const String &id) {
   const size_t index = recordIndex(id);
   if (index >= locatorCount_) return;
-  if (index + 1 < locatorCount_) {
-    memmove(locators_ + index, locators_ + index + 1,
-            (locatorCount_ - index - 1) * sizeof(CapsuleLocator));
+  if (!rebuildPublishedIndex(nullptr, locatorCount_, false, index)) {
+    ++refreshFallbackCount_;
+    (void)requestScan();
+    return;
   }
-  --locatorCount_;
-  memset(locators_ + locatorCount_, 0, sizeof(CapsuleLocator));
   invalidateRecordCache();
   requestPublish();
 }
 
 bool CapsuleLibrary::appendIndexedRecord(const CapsuleSummary &record) {
   if (locatorCount_ >= kCapsuleLocatorCapacity) return false;
-  copyToLocator(record, locators_[locatorCount_]);
-  ++locatorCount_;
+  if (!rebuildPublishedIndex(&record, locatorCount_, true, locatorCount_)) {
+    return false;
+  }
   invalidateRecordCache(record.id);
   return true;
 }
@@ -992,13 +1034,36 @@ bool CapsuleLibrary::appendIndexedRecord(const CapsuleSummary &record) {
 bool CapsuleLibrary::replaceIndexedRecord(size_t index,
                                           const CapsuleSummary &record) {
   if (index >= locatorCount_) return false;
-  copyToLocator(record, locators_[index]);
+  if (!rebuildPublishedIndex(&record, index, false, locatorCount_)) {
+    return false;
+  }
   invalidateRecordCache(record.id);
   return true;
 }
 
-void CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
-                                   CapsuleLocator &locator) const {
+bool CapsuleLibrary::storeCustomPath(const String &directory,
+                                     CapsuleLocator &locator, char *pathPool,
+                                     size_t &pathPoolUsed) const {
+  if (pathPool == nullptr ||
+      !capsuleTransactionPathValid(directory.c_str())) {
+    return false;
+  }
+  const size_t length = directory.length();
+  const size_t required = length + 1;
+  if (length > UINT16_MAX || required > kCapsuleCustomPathPoolBytes ||
+      pathPoolUsed > kCapsuleCustomPathPoolBytes - required) {
+    return false;
+  }
+  memcpy(pathPool + pathPoolUsed, directory.c_str(), required);
+  locator.customPathOffset = static_cast<uint32_t>(pathPoolUsed);
+  locator.customPathLength = static_cast<uint16_t>(length);
+  pathPoolUsed += required;
+  return true;
+}
+
+bool CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
+                                   CapsuleLocator &locator, char *pathPool,
+                                   size_t &pathPoolUsed) const {
   locator = CapsuleLocator();
   copyFixed(locator.id, record.id);
   copyFixed(locator.createdAt, record.createdAt);
@@ -1012,6 +1077,12 @@ void CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
     locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::trash);
   } else {
     locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::custom);
+  }
+  if (static_cast<CapsuleStorageArea>(locator.storageArea) ==
+          CapsuleStorageArea::custom &&
+      !storeCustomPath(record.directory, locator, pathPool, pathPoolUsed)) {
+    locator = CapsuleLocator();
+    return false;
   }
   if (record.audioFile == "audio.wav") {
     locator.audioKind = static_cast<uint8_t>(CapsuleAudioKind::wav);
@@ -1030,6 +1101,82 @@ void CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
   }
   if (record.status == CapsuleStatus::failed) locator.flags |= locatorFailed;
   if (record.status == CapsuleStatus::damaged) locator.flags |= locatorDamaged;
+  return true;
+}
+
+bool CapsuleLibrary::copyIndexedLocator(const CapsuleLocator &source,
+                                        CapsuleLocator &destination,
+                                        char *pathPool,
+                                        size_t &pathPoolUsed) const {
+  destination = source;
+  if (static_cast<CapsuleStorageArea>(source.storageArea) !=
+      CapsuleStorageArea::custom) {
+    destination.customPathOffset = kCapsuleCustomPathMissing;
+    destination.customPathLength = 0;
+    return true;
+  }
+  String directory;
+  if (!customPath(source, directory)) return false;
+  destination.customPathOffset = kCapsuleCustomPathMissing;
+  destination.customPathLength = 0;
+  return storeCustomPath(directory, destination, pathPool, pathPoolUsed);
+}
+
+bool CapsuleLibrary::rebuildPublishedIndex(const CapsuleSummary *replacement,
+                                           size_t replaceIndex, bool append,
+                                           size_t removeIndex) {
+  if (scanStepper_.active() || scanLocators_ == nullptr ||
+      scanPathPool_ == nullptr) {
+    return false;
+  }
+  size_t stagedCount = 0;
+  size_t stagedPathBytes = 0;
+  for (size_t index = 0; index < locatorCount_; ++index) {
+    if (index == removeIndex) continue;
+    if (stagedCount >= kCapsuleLocatorCapacity) return false;
+    bool copied = false;
+    if (replacement != nullptr && index == replaceIndex) {
+      copied = copyToLocator(*replacement, scanLocators_[stagedCount],
+                             scanPathPool_, stagedPathBytes);
+    } else {
+      copied = copyIndexedLocator(locators_[index],
+                                  scanLocators_[stagedCount], scanPathPool_,
+                                  stagedPathBytes);
+    }
+    if (!copied) return false;
+    ++stagedCount;
+  }
+  if (append) {
+    if (replacement == nullptr || stagedCount >= kCapsuleLocatorCapacity ||
+        !copyToLocator(*replacement, scanLocators_[stagedCount],
+                       scanPathPool_, stagedPathBytes)) {
+      return false;
+    }
+    ++stagedCount;
+  }
+  std::swap(locators_, scanLocators_);
+  std::swap(pathPool_, scanPathPool_);
+  locatorCount_ = stagedCount;
+  pathPoolUsed_ = stagedPathBytes;
+  return true;
+}
+
+bool CapsuleLibrary::customPath(const CapsuleLocator &locator,
+                                String &directory) const {
+  if (pathPool_ == nullptr ||
+      locator.customPathOffset == kCapsuleCustomPathMissing ||
+      locator.customPathLength == 0 ||
+      locator.customPathOffset > pathPoolUsed_ ||
+      locator.customPathLength > pathPoolUsed_ - locator.customPathOffset ||
+      locator.customPathOffset + locator.customPathLength >=
+          kCapsuleCustomPathPoolBytes ||
+      pathPool_[locator.customPathOffset + locator.customPathLength] != '\0') {
+    return false;
+  }
+  directory = String(pathPool_ + locator.customPathOffset);
+  return directory.length() == locator.customPathLength &&
+      capsuleTransactionPathValid(directory.c_str()) &&
+      capsuleDirectoryHash(directory.c_str()) == locator.directoryHash;
 }
 
 bool CapsuleLibrary::findLocatorInFolder(
@@ -1094,27 +1241,28 @@ bool CapsuleLibrary::resolveLocator(const CapsuleLocator &locator,
                                directory, folder);
   }
   if (area != CapsuleStorageArea::custom) return false;
-
-  File root = fs_->open(kCapsuleRoot);
-  if (!root || !root.isDirectory()) return false;
-  File entry = root.openNextFile();
-  while (entry) {
-    const String fullName = entry.name();
-    const bool isDirectory = entry.isDirectory();
-    entry.close();
-    const int slash = fullName.lastIndexOf('/');
-    const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
-    if (isDirectory && !name.startsWith(".") && name != "Inbox" &&
-        name != "Archive" &&
-        findLocatorInFolder(String(kCapsuleRoot) + "/" + name, name, 1,
-                            locator, directory, folder)) {
-      root.close();
-      return true;
-    }
-    entry = root.openNextFile();
+  if (!customPath(locator, directory)) return false;
+  const String rootPrefix = String(kCapsuleRoot) + "/";
+  const String idSuffix = String("/") + locator.id;
+  if (!directory.startsWith(rootPrefix.c_str()) ||
+      !directory.endsWith(idSuffix.c_str())) {
+    directory = String();
+    return false;
   }
-  root.close();
-  return false;
+  const int lastSlash = directory.lastIndexOf('/');
+  if (lastSlash <= static_cast<int>(rootPrefix.length())) {
+    directory = String();
+    return false;
+  }
+  folder = directory.substring(rootPrefix.length(), lastSlash);
+  if (folder.isEmpty() || folder.startsWith(".") ||
+      folder == "Inbox" || folder.startsWith("Inbox/") ||
+      folder == "Archive" || folder.startsWith("Archive/")) {
+    directory = String();
+    folder = String();
+    return false;
+  }
+  return true;
 }
 
 bool CapsuleLibrary::hydrateLocator(const CapsuleLocator &locator,

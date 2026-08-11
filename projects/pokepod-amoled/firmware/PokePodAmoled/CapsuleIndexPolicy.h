@@ -5,11 +5,19 @@
 #include <string.h>
 
 #include "CapsuleBrowserState.h"
+#include "CapsuleTransactionPolicy.h"
 
 namespace pokepod {
 
 constexpr size_t kCapsuleLocatorCapacity = 512;
 constexpr size_t kCapsuleDetailCacheCapacity = 12;
+// Paths accepted by the storage transaction layer are shorter than 256 bytes.
+// One compact pool therefore covers the complete 512-record locator capacity,
+// including a trailing NUL for every custom path. Two pools are allocated in
+// PSRAM so a rebuild can publish locators and paths as one atomic generation.
+constexpr size_t kCapsuleCustomPathPoolBytes =
+    kCapsuleLocatorCapacity * kCapsuleTransactionPathBytes;
+constexpr uint32_t kCapsuleCustomPathMissing = UINT32_MAX;
 
 enum CapsuleLocatorFlag : uint16_t {
   locatorFavorite = 1U << 0,
@@ -42,6 +50,8 @@ struct CapsuleLocator {
   char id[37]{};
   char createdAt[32]{};
   uint64_t directoryHash = 0;
+  uint32_t customPathOffset = kCapsuleCustomPathMissing;
+  uint16_t customPathLength = 0;
   uint16_t flags = 0;
   uint8_t status = 0;
   uint8_t storageArea = static_cast<uint8_t>(CapsuleStorageArea::inbox);
@@ -55,6 +65,11 @@ static_assert(sizeof(CapsuleLocator) * kCapsuleLocatorCapacity <= 80 * 1024,
 static_assert(sizeof(CapsuleLocator) * kCapsuleLocatorCapacity * 2 <=
                   160 * 1024,
               "double-buffered capsule indexes exceed the PSRAM budget");
+static_assert(kCapsuleCustomPathPoolBytes == 128 * 1024,
+              "custom locator pool budget changed unexpectedly");
+static_assert(kCapsuleCustomPathPoolBytes >=
+                  kCapsuleLocatorCapacity * kCapsuleTransactionPathBytes,
+              "custom locator pool cannot represent a full legal index");
 
 inline uint64_t capsuleDirectoryHash(const char *value) {
   uint64_t hash = UINT64_C(14695981039346656037);

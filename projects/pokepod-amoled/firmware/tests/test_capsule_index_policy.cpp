@@ -34,6 +34,7 @@ int main() {
   static_assert(kCapsuleLocatorCapacity >= 320);
   static_assert(sizeof(CapsuleLocator) <= 160);
   static_assert(sizeof(CapsuleLocator) * kCapsuleLocatorCapacity <= 80 * 1024);
+  static_assert(kCapsuleCustomPathPoolBytes == 128 * 1024);
 
   std::vector<CapsuleLocator> locators;
   locators.reserve(320);
@@ -87,9 +88,13 @@ int main() {
       "00000000-0000-4000-8000-000000000401";
   future.directoryHash = capsuleDirectoryHash(path);
   future.storageArea = static_cast<uint8_t>(CapsuleStorageArea::custom);
+  future.customPathOffset = 17;
+  future.customPathLength = std::strlen(path);
   assert(future.directoryHash == capsuleDirectoryHash(path));
   assert(future.directoryHash != capsuleDirectoryHash(
       "/PokeCapsule/Inbox/00000000-0000-4000-8000-000000000401"));
+  assert(future.customPathOffset == 17);
+  assert(future.customPathLength == std::strlen(path));
   std::printf("PASS capsule_index_policy (320 fixtures, locator=%zu bytes, "
               "index=%zu bytes)\n",
               sizeof(CapsuleLocator),
