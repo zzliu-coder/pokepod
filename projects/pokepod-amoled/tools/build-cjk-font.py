@@ -103,11 +103,56 @@ def points_for_size(size: int, all_points: list[int]) -> list[int]:
     return all_points
 
 
+def encode_packbits(data: bytes) -> bytes:
+    """Encode bytes as bounded PackBits-style literal/repeat packets.
+
+    A control byte with bit 7 clear is followed by 1..128 literal bytes.
+    A control byte with bit 7 set is followed by one byte repeated 1..128
+    times.  Runs shorter than three bytes stay literal so compression never
+    expands them just to save one input byte.
+    """
+    encoded = bytearray()
+    offset = 0
+    while offset < len(data):
+        run = 1
+        while (
+            offset + run < len(data)
+            and data[offset + run] == data[offset]
+            and run < 128
+        ):
+            run += 1
+        if run >= 3:
+            encoded.extend((0x80 | (run - 1), data[offset]))
+            offset += run
+            continue
+
+        literal_start = offset
+        offset += run
+        while offset < len(data) and offset - literal_start < 128:
+            run = 1
+            while (
+                offset + run < len(data)
+                and data[offset + run] == data[offset]
+                and run < 128
+            ):
+                run += 1
+            if run >= 3:
+                break
+            if offset + run - literal_start > 128:
+                break
+            offset += run
+        literal = data[literal_start:offset]
+        encoded.append(len(literal) - 1)
+        encoded.extend(literal)
+    return bytes(encoded)
+
+
 def write_header(path: Path, font_path: Path, points: list[int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "#pragma once",
         "",
+        "#include <stddef.h>",
         "#include <stdint.h>",
         "",
         "// Generated from every Chinese character and UI punctuation mark in PokePodAmoled source.",
@@ -115,24 +160,67 @@ def write_header(path: Path, font_path: Path, points: list[int]) -> None:
         "",
         "namespace pokepod {",
         "",
+        "struct FixedGlyphIndex {",
+        "  uint32_t codepoint;",
+        "  uint32_t dataOffset;",
+        "  uint16_t dataLength;",
+        "  uint8_t advance;",
+        "  uint8_t reserved;",
+        "};",
+        "static_assert(sizeof(FixedGlyphIndex) == 12, \"fixed glyph index layout changed\");",
+        "",
+        "inline bool decodeFixedGlyphRle(const uint8_t *encoded, size_t encodedBytes,",
+        "                                uint8_t *decoded, size_t decodedBytes) {",
+        "  if (encoded == nullptr || decoded == nullptr) return false;",
+        "  size_t input = 0;",
+        "  size_t output = 0;",
+        "  while (input < encodedBytes) {",
+        "    const uint8_t control = encoded[input++];",
+        "    const size_t length = static_cast<size_t>(control & 0x7fU) + 1U;",
+        "    if (length > decodedBytes - output) return false;",
+        "    if ((control & 0x80U) != 0) {",
+        "      if (input >= encodedBytes) return false;",
+        "      const uint8_t value = encoded[input++];",
+        "      for (size_t count = 0; count < length; ++count) decoded[output++] = value;",
+        "    } else {",
+        "      if (length > encodedBytes - input) return false;",
+        "      for (size_t count = 0; count < length; ++count) decoded[output++] = encoded[input++];",
+        "    }",
+        "  }",
+        "  return output == decodedBytes;",
+        "}",
+        "",
     ]
     for size in FIXED_SIZES:
         size_points = points_for_size(size, points)
-        bitmap_bytes = (size * size + 1) // 2
-        type_name = f"FixedGlyph{size}"
         array_name = f"kFixedGlyphs{size}"
-        lines.append(
-            f"struct {type_name} {{ uint32_t codepoint; uint8_t advance; uint8_t bitmap[{bitmap_bytes}]; }};"
-        )
-        lines.append(f"static constexpr {type_name} {array_name}[] = {{")
+        data_name = f"kFixedGlyphData{size}"
+        glyphs: list[tuple[int, int, int, bytes]] = []
+        data = bytearray()
         for point in size_points:
             advance, bitmap = render_glyph(font_path, point, size)
-            encoded = ", ".join(f"0x{value:02x}" for value in bitmap)
-            lines.append(f"  {{0x{point:04x}, {advance}, {{{encoded}}}}},")
+            encoded = encode_packbits(bitmap)
+            glyphs.append((point, advance, len(data), encoded))
+            data.extend(encoded)
+        lines.append(f"static constexpr FixedGlyphIndex {array_name}[] = {{")
+        for point, advance, offset, encoded in glyphs:
+            lines.append(
+                f"  {{0x{point:04x}, {offset}, {len(encoded)}, {advance}, 0}},"
+            )
         lines.extend([
             "};",
             f"static constexpr uint32_t {array_name}Count =",
             f"    sizeof({array_name}) / sizeof({array_name}[0]);",
+            f"static constexpr uint8_t {data_name}[] = {{",
+        ])
+        for offset in range(0, len(data), 24):
+            encoded_line = ", ".join(
+                f"0x{value:02x}" for value in data[offset:offset + 24]
+            )
+            lines.append(f"  {encoded_line},")
+        lines.extend([
+            "};",
+            f"static constexpr uint32_t {data_name}Bytes = sizeof({data_name});",
             "",
         ])
     lines.extend(["}  // namespace pokepod", ""])

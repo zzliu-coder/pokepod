@@ -38,9 +38,9 @@ int16_t lineHeight(UiTextSize size) {
   return glyphPixels(size) + (size == UiTextSize::compact ? 5 : 7);
 }
 
-template <typename Glyph>
-bool findFixedGlyph(const Glyph *glyphs, uint32_t count, uint32_t codepoint,
-                    uint8_t &advance, uint8_t *bitmap,
+bool findFixedGlyph(const FixedGlyphIndex *glyphs, uint32_t count,
+                    const uint8_t *data, uint32_t dataBytes,
+                    uint32_t codepoint, uint8_t &advance, uint8_t *bitmap,
                     uint16_t bitmapBytes) {
   uint32_t low = 0;
   uint32_t high = count;
@@ -50,13 +50,16 @@ bool findFixedGlyph(const Glyph *glyphs, uint32_t count, uint32_t codepoint,
     else high = middle;
   }
   if (low >= count || glyphs[low].codepoint != codepoint) return false;
-  advance = glyphs[low].advance;
-  memcpy(bitmap, glyphs[low].bitmap, bitmapBytes);
+  const FixedGlyphIndex &glyph = glyphs[low];
+  if (glyph.dataOffset > dataBytes ||
+      glyph.dataLength > dataBytes - glyph.dataOffset) return false;
+  if (!decodeFixedGlyphRle(data + glyph.dataOffset, glyph.dataLength,
+                           bitmap, bitmapBytes)) return false;
+  advance = glyph.advance;
   return true;
 }
 
-template <typename Glyph>
-uint8_t findFixedAdvance(const Glyph *glyphs, uint32_t count,
+uint8_t findFixedAdvance(const FixedGlyphIndex *glyphs, uint32_t count,
                          uint32_t codepoint) {
   uint32_t low = 0;
   uint32_t high = count;
@@ -230,17 +233,21 @@ bool ChineseRenderer::loadFixed(uint32_t codepoint, UiTextSize size,
   const uint16_t bytes = fontBitmapBytes(glyph.pixels, glyph.pixels);
   switch (size) {
     case UiTextSize::compact:
-      return findFixedGlyph(kFixedGlyphs16, kFixedGlyphs16Count, codepoint,
-                            glyph.advance, glyph.bitmap, bytes);
+      return findFixedGlyph(kFixedGlyphs16, kFixedGlyphs16Count,
+                            kFixedGlyphData16, kFixedGlyphData16Bytes,
+                            codepoint, glyph.advance, glyph.bitmap, bytes);
     case UiTextSize::body:
-      return findFixedGlyph(kFixedGlyphs20, kFixedGlyphs20Count, codepoint,
-                            glyph.advance, glyph.bitmap, bytes);
+      return findFixedGlyph(kFixedGlyphs20, kFixedGlyphs20Count,
+                            kFixedGlyphData20, kFixedGlyphData20Bytes,
+                            codepoint, glyph.advance, glyph.bitmap, bytes);
     case UiTextSize::display:
-      return findFixedGlyph(kFixedGlyphs28, kFixedGlyphs28Count, codepoint,
-                            glyph.advance, glyph.bitmap, bytes);
+      return findFixedGlyph(kFixedGlyphs28, kFixedGlyphs28Count,
+                            kFixedGlyphData28, kFixedGlyphData28Bytes,
+                            codepoint, glyph.advance, glyph.bitmap, bytes);
     case UiTextSize::timer:
-      return findFixedGlyph(kFixedGlyphs36, kFixedGlyphs36Count, codepoint,
-                            glyph.advance, glyph.bitmap, bytes);
+      return findFixedGlyph(kFixedGlyphs36, kFixedGlyphs36Count,
+                            kFixedGlyphData36, kFixedGlyphData36Bytes,
+                            codepoint, glyph.advance, glyph.bitmap, bytes);
   }
   return false;
 }
