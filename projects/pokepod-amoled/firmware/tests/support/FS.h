@@ -135,6 +135,12 @@ class File {
   explicit operator bool() const { return handle_ && handle_->open; }
   bool isDirectory() const { return *this && handle_->directory; }
   size_t size() const { return *this ? handle_->buffer.size() : 0; }
+  int available() const {
+    return !*this || handle_->directory ||
+        handle_->position >= handle_->buffer.size()
+        ? 0
+        : static_cast<int>(handle_->buffer.size() - handle_->position);
+  }
   const char *name() const {
     return *this ? handle_->path.c_str() : "";
   }
@@ -390,6 +396,22 @@ class FS {
     const bool removed = state_->files.erase(path) != 0;
     state_->after(fakefs::Operation::remove, action);
     return removed;
+  }
+
+  bool rmdir(const String &path) { return rmdir(path.c_str()); }
+  bool rmdir(const char *path) {
+    if (path == nullptr || std::strcmp(path, "/") == 0) return false;
+    const std::string key(path);
+    const std::string prefix = key + "/";
+    for (const auto &entry : state_->files) {
+      if (entry.first.compare(0, prefix.size(), prefix) == 0) return false;
+    }
+    for (const auto &entry : state_->directories) {
+      if (entry != key && entry.compare(0, prefix.size(), prefix) == 0) {
+        return false;
+      }
+    }
+    return state_->directories.erase(key) != 0;
   }
 
  private:

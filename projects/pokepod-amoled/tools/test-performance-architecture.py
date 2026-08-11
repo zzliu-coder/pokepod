@@ -37,8 +37,8 @@ require(library, "deferredPublish_.begin();",
         "batch mutations do not coalesce visible-index publication")
 if "kMaxCapsulesOnDevice = 96" in library:
     raise SystemExit("FAIL performance_architecture: filesystem scan still truncates at 96")
-scan_start = library.index("void CapsuleLibrary::scanFolder")
-scan_end = library.index("bool CapsuleLibrary::readRecord", scan_start)
+scan_start = library.index("bool CapsuleLibrary::processDirectorySlice")
+scan_end = library.index("bool CapsuleLibrary::openPendingMetadata", scan_start)
 if "readBestText" in library[scan_start:scan_end]:
     raise SystemExit("FAIL performance_architecture: scan eagerly reads preview text")
 read_start = library.index("bool CapsuleLibrary::readRecord")
@@ -47,6 +47,12 @@ if "readBestText" in library[read_start:read_end]:
     raise SystemExit("FAIL performance_architecture: metadata hydration reads body text")
 require(library, "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT",
         "capsule locator index is not allocated in PSRAM")
+require(library, "std::swap(locators_, scanLocators_)",
+        "full scans do not atomically publish a staged PSRAM index")
+require(library, "scanOwner_, StorageAccess::read, 0",
+        "scan slices can block waiting for the physical SD mutex")
+require(library_header, "CapsuleScanState stepScan()",
+        "capsule scan is not exposed as a bounded production service")
 require(library_header, "std::array<DetailCacheEntry, kCapsuleDetailCacheCapacity>",
         "capsule details do not use a bounded cache")
 require(index_policy, "kCapsuleLocatorCapacity = 512",
@@ -56,6 +62,9 @@ require(index_policy, "sizeof(CapsuleLocator) <= 160",
 require(index_policy,
         "sizeof(CapsuleLocator) * kCapsuleLocatorCapacity <= 80 * 1024",
         "capsule locator index lacks a total PSRAM budget gate")
+require(index_policy,
+        "sizeof(CapsuleLocator) * kCapsuleLocatorCapacity * 2 <=",
+        "double-buffered capsule indexes lack a PSRAM budget gate")
 for eager_detail in (
     "char directory[", "char folder[", "char title[", "char updatedAt[",
     "char errorStage[", "char error[", "char audioFile[",

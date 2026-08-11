@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <type_traits>
 
@@ -23,7 +24,15 @@ class String {
   const char *c_str() const { return value_.c_str(); }
   size_t length() const { return value_.size(); }
   bool isEmpty() const { return value_.empty(); }
-  void reserve(size_t capacity) { value_.reserve(capacity); }
+  bool reserve(size_t capacity) {
+    value_.reserve(capacity);
+    return value_.capacity() >= capacity;
+  }
+  bool concat(const char *value, size_t length) {
+    if (value == nullptr && length != 0) return false;
+    value_.append(value == nullptr ? "" : value, length);
+    return true;
+  }
 
   bool startsWith(const char *prefix) const {
     if (prefix == nullptr) return false;
@@ -52,6 +61,27 @@ class String {
   int lastIndexOf(char needle) const {
     const size_t index = value_.find_last_of(needle);
     return index == std::string::npos ? -1 : static_cast<int>(index);
+  }
+
+  int indexOf(char needle) const {
+    const size_t index = value_.find(needle);
+    return index == std::string::npos ? -1 : static_cast<int>(index);
+  }
+
+  int indexOf(const char *needle) const {
+    if (needle == nullptr) return -1;
+    const size_t index = value_.find(needle);
+    return index == std::string::npos ? -1 : static_cast<int>(index);
+  }
+
+  void trim() {
+    const auto whitespace = [](unsigned char value) {
+      return std::isspace(value) != 0;
+    };
+    const auto first = std::find_if_not(value_.begin(), value_.end(), whitespace);
+    const auto last = std::find_if_not(value_.rbegin(), value_.rend(), whitespace)
+                          .base();
+    value_ = first < last ? std::string(first, last) : std::string();
   }
 
   bool equalsIgnoreCase(const String &other) const {

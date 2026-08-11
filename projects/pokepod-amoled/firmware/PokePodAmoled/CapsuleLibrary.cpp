@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "CapsuleCompatibilityPolicy.h"
+#include "CapsuleMetadataCodec.h"
 #include "CapsulePolicy.h"
 
 namespace pokepod {
@@ -36,15 +37,6 @@ const char *jsonString(cJSON *root, const char *name) {
       ? item->valuestring : nullptr;
 }
 
-int jsonInt(cJSON *root, const char *name, int fallback = -1) {
-  cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
-  return cJSON_IsNumber(item) ? item->valueint : fallback;
-}
-
-bool jsonBool(cJSON *root, const char *name) {
-  return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, name));
-}
-
 void replaceStringOrNull(cJSON *root, const char *name, const String &value) {
   cJSON *replacement = value.isEmpty() ? cJSON_CreateNull()
                                         : cJSON_CreateString(value.c_str());
@@ -64,14 +56,21 @@ void copyFixed(char (&destination)[Capacity], const String &source) {
 
 CapsuleLibrary::~CapsuleLibrary() {
   if (locators_ != nullptr) heap_caps_free(locators_);
+  if (scanLocators_ != nullptr) heap_caps_free(scanLocators_);
 }
 
 bool CapsuleLibrary::allocateIndex() {
-  if (locators_ != nullptr) return true;
-  locators_ = static_cast<CapsuleLocator *>(heap_caps_calloc(
-      kCapsuleLocatorCapacity, sizeof(CapsuleLocator),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (locators_ == nullptr) {
+    locators_ = static_cast<CapsuleLocator *>(heap_caps_calloc(
+        kCapsuleLocatorCapacity, sizeof(CapsuleLocator),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (scanLocators_ == nullptr) {
+    scanLocators_ = static_cast<CapsuleLocator *>(heap_caps_calloc(
+        kCapsuleLocatorCapacity, sizeof(CapsuleLocator),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (locators_ == nullptr || scanLocators_ == nullptr) {
     if (log_ != nullptr) {
       log_->printf("{\"event\":\"capsule_index_allocation_failed\","
                    "\"bytes\":%u}\n",
@@ -112,52 +111,305 @@ bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
 }
 
 bool CapsuleLibrary::scan() {
-  if (fs_ == nullptr) return false;
-  StorageIoLease scanIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::capsuleTransaction, StorageAccess::read, 1000);
-  if (!scanIo) return false;
-  if (!allocateIndex()) return false;
-  const int64_t startedUs = esp_timer_get_time();
-  locatorCount_ = 0;
-  indexOverflow_ = false;
-  invalidateRecordCache();
-  scanFolder(kCapsuleInbox, "Inbox", 0);
-  scanFolder(kCapsuleArchive, "Archive", 0);
-  scanFolder(kCapsuleTrash, ".trash", 0);
-  File root = fs_->open(kCapsuleRoot);
-  if (root && root.isDirectory()) {
-    File entry = root.openNextFile();
-    while (entry) {
-      const String fullName = entry.name();
-      const bool directory = entry.isDirectory();
-      entry.close();
-      const int slash = fullName.lastIndexOf('/');
-      const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
-      if (directory && !name.startsWith(".") && name != "Inbox" &&
-          name != "Archive") {
-        scanFolder(String(kCapsuleRoot) + "/" + name, name, 1);
-      }
-      entry = root.openNextFile();
+  // Compatibility path for boot and mutation recovery. Product UI/Link code
+  // uses startScan()+stepScan() so each loop turn performs one bounded slice.
+  if (!startScanWithOwner({}, StorageOwner::capsuleTransaction)) return false;
+  while (scanStepper_.active()) stepScan();
+  return scanStepper_.state() == CapsuleScanState::completed;
+}
+
+bool CapsuleLibrary::startScan(const CapsuleScanBudget &budget) {
+  return startScanWithOwner(budget, StorageOwner::capsuleScan);
+}
+
+bool CapsuleLibrary::startScanWithOwner(const CapsuleScanBudget &budget,
+                                        StorageOwner owner) {
+  if (fs_ == nullptr || scanStepper_.active() || !allocateIndex()) return false;
+  scanReservation_ = StorageCoordinator::instance().reserve(
+      owner, StorageAccess::read,
+      owner == StorageOwner::capsuleScan ? 0 : 1000);
+  if (!scanReservation_) return false;
+  scanOwner_ = owner;
+  resetScanTransient();
+  scanDirectories_.reserve(64);
+  scanDirectories_.push_back({kCapsuleInbox, "Inbox", 0, false});
+  scanDirectories_.push_back({kCapsuleArchive, "Archive", 0, false});
+  scanDirectories_.push_back({kCapsuleTrash, ".trash", 0, false});
+  scanDirectories_.push_back({kCapsuleRoot, "", 0, true});
+  scanStartedUs_ = esp_timer_get_time();
+  maximumScanStepUs_ = 0;
+  maximumScanLeaseUs_ = 0;
+  scanStepper_.begin(budget);
+  return true;
+}
+
+CapsuleScanState CapsuleLibrary::stepScan() {
+  if (!scanStepper_.active()) return scanStepper_.state();
+  const int64_t stepStartedUs = esp_timer_get_time();
+  const auto finishStepTiming = [this, stepStartedUs]() {
+    const uint32_t elapsed = static_cast<uint32_t>(
+        esp_timer_get_time() - stepStartedUs);
+    if (elapsed > maximumScanStepUs_) maximumScanStepUs_ = elapsed;
+  };
+  if (scanCancelRequested_ || scanFailureRequested_) {
+    if (!scanStepper_.startSlice()) return scanStepper_.state();
+    const int64_t leaseStartedUs = esp_timer_get_time();
+    StorageIoLease scanIo = StorageCoordinator::instance().acquireIo(
+        scanOwner_, StorageAccess::read, 0);
+    if (!scanIo) {
+      scanStepper_.finishSlice();
+      finishStepTiming();
+      return scanStepper_.state();
     }
-    root.close();
+    if (scanDirectory_) scanDirectory_.close();
+    if (scanPending_.file) scanPending_.file.close();
+    scanDirectoryOpen_ = false;
+    scanIo.release();
+    const uint32_t leaseElapsed = static_cast<uint32_t>(
+        esp_timer_get_time() - leaseStartedUs);
+    if (leaseElapsed > maximumScanLeaseUs_) {
+      maximumScanLeaseUs_ = leaseElapsed;
+    }
+    scanStepper_.finishSlice();
+    finishScan(scanCancelRequested_ ? CapsuleScanState::cancelled
+                                    : CapsuleScanState::failed);
+    finishStepTiming();
+    return scanStepper_.state();
   }
-  requestPublish();
-  const uint32_t elapsedUs = static_cast<uint32_t>(
-      esp_timer_get_time() - startedUs);
-  lastScanUs_ = elapsedUs;
-  if (elapsedUs > maxScanUs_) maxScanUs_ = elapsedUs;
-  ++fullScanCount_;
-  if (log_ != nullptr) {
-    log_->printf("{\"event\":\"capsule_scan\",\"count\":%u,\"pending\":%u}\n",
-                 static_cast<unsigned>(locatorCount_),
-                 static_cast<unsigned>(pendingCount()));
+  if (!scanStepper_.startSlice()) return scanStepper_.state();
+
+  bool recordReady = false;
+  bool traversalComplete = false;
+  const int64_t leaseStartedUs = esp_timer_get_time();
+  StorageIoLease scanIo = StorageCoordinator::instance().acquireIo(
+      scanOwner_, StorageAccess::read, 0);
+  if (!scanIo) {
+    scanStepper_.finishSlice();
+    finishStepTiming();
+    return scanStepper_.state();
   }
-  if (indexOverflow_ && log_ != nullptr) {
-    log_->printf("{\"event\":\"capsule_index_capacity_exceeded\","
-                 "\"capacity\":%u}\n",
-                 static_cast<unsigned>(kCapsuleLocatorCapacity));
+  if (scanPending_.phase != ScanMetadataPhase::none) {
+    recordReady = readPendingMetadataSlice();
+    if (recordReady) {
+      scanPending_.hasWav = fs_->exists(
+          scanPending_.directory + "/audio.wav");
+      scanPending_.hasM4a = fs_->exists(
+          scanPending_.directory + "/audio.m4a");
+    }
+  } else {
+    traversalComplete = processDirectorySlice();
   }
-  return !indexOverflow_;
+  scanIo.release();
+  const uint32_t leaseElapsed = static_cast<uint32_t>(
+      esp_timer_get_time() - leaseStartedUs);
+  if (leaseElapsed > maximumScanLeaseUs_) {
+    maximumScanLeaseUs_ = leaseElapsed;
+  }
+  scanStepper_.finishSlice();
+
+  if (recordReady) {
+    CapsuleSummary record;
+    const bool damaged = scanPending_.damaged ||
+        !readRecordText(scanPending_.directory, scanPending_.folder,
+                        scanPending_.capsuleText,
+                        scanPending_.processingText, record, false);
+    if (damaged) {
+      populateDamagedRecord(scanPending_.directory, scanPending_.folder,
+                            scanPending_.id, record, false);
+    }
+    if (record.status == CapsuleStatus::damaged) {
+      if (scanPending_.hasWav) {
+        record.audioFile = "audio.wav";
+        record.audioFormat = "wav-pcm-s16le";
+      } else if (scanPending_.hasM4a) {
+        record.audioFile = "audio.m4a";
+        record.audioFormat = "m4a-aac-lc";
+      }
+    }
+    if (!appendStagedRecord(record)) scanIndexOverflow_ = true;
+    scanPending_ = ScanPendingRecord();
+  }
+  if (scanIndexOverflow_) {
+    // Defer terminal cleanup to one final bounded slice so persistent
+    // directory handles are closed under the same physical IO lease.
+    scanFailureRequested_ = true;
+  } else if (traversalComplete &&
+             scanPending_.phase == ScanMetadataPhase::none) {
+    finishScan(CapsuleScanState::completed);
+  }
+  finishStepTiming();
+  return scanStepper_.state();
+}
+
+void CapsuleLibrary::cancelScan() {
+  if (scanStepper_.active()) scanCancelRequested_ = true;
+}
+
+bool CapsuleLibrary::processDirectorySlice() {
+  while (scanDirectoryIndex_ < scanDirectories_.size()) {
+    const ScanDirectoryTask task = scanDirectories_[scanDirectoryIndex_];
+    if (!scanDirectoryOpen_) {
+      if (scanStepper_.remainingDirectoryEntries() == 0) return false;
+      scanStepper_.consumeDirectoryEntry();
+      scanDirectory_ = fs_->open(task.path);
+      scanDirectoryOpen_ = scanDirectory_ && scanDirectory_.isDirectory();
+      if (!scanDirectoryOpen_) {
+        if (scanDirectory_) scanDirectory_.close();
+        ++scanDirectoryIndex_;
+      }
+      return false;
+    }
+    if (scanStepper_.remainingDirectoryEntries() == 0) return false;
+    scanStepper_.consumeDirectoryEntry();
+    File entry = scanDirectory_.openNextFile();
+    if (!entry) {
+      scanDirectory_.close();
+      scanDirectoryOpen_ = false;
+      ++scanDirectoryIndex_;
+      return false;
+    }
+    const String fullName = entry.name();
+    const bool isDirectory = entry.isDirectory();
+    entry.close();
+    const int slash = fullName.lastIndexOf('/');
+    const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
+    if (!isDirectory) return false;
+    if (task.discoverRoot) {
+      if (!name.startsWith(".") && name != "Inbox" && name != "Archive") {
+        scanDirectories_.push_back(
+            {String(kCapsuleRoot) + "/" + name, name, 1, false});
+      }
+    } else if (isUuid(name.c_str())) {
+      scanPending_.directory = task.path + "/" + name;
+      scanPending_.folder = task.folder;
+      scanPending_.id = name;
+      scanPending_.phase = ScanMetadataPhase::capsule;
+    } else if (task.depth < 2 && !name.startsWith(".")) {
+      scanDirectories_.push_back(
+          {task.path + "/" + name, task.folder + "/" + name,
+           static_cast<uint8_t>(task.depth + 1), false});
+    }
+    return false;
+  }
+  return true;
+}
+
+bool CapsuleLibrary::openPendingMetadata(const char *name) {
+  scanPending_.file = fs_->open(scanPending_.directory + "/" + name,
+                                FILE_READ);
+  if (!scanPending_.file || scanPending_.file.isDirectory() ||
+      scanPending_.file.size() == 0 ||
+      scanPending_.file.size() > kMaxMetadataBytes) {
+    if (scanPending_.file) scanPending_.file.close();
+    scanPending_.damaged = true;
+    scanPending_.phase = ScanMetadataPhase::ready;
+    return false;
+  }
+  return true;
+}
+
+bool CapsuleLibrary::readPendingMetadataSlice() {
+  if (scanPending_.phase == ScanMetadataPhase::ready) return true;
+  String *target = scanPending_.phase == ScanMetadataPhase::capsule
+      ? &scanPending_.capsuleText : &scanPending_.processingText;
+  const char *name = scanPending_.phase == ScanMetadataPhase::capsule
+      ? "capsule.json" : "processing.json";
+  if (!scanPending_.file && !openPendingMetadata(name)) return true;
+
+  uint8_t chunk[512];
+  while (scanPending_.file.available() &&
+         scanStepper_.remainingReadBytes() > 0) {
+    const size_t request = scanStepper_.remainingReadBytes() < sizeof(chunk)
+        ? scanStepper_.remainingReadBytes() : sizeof(chunk);
+    const int count = scanPending_.file.read(chunk, request);
+    if (count <= 0) {
+      scanPending_.damaged = true;
+      scanPending_.file.close();
+      scanPending_.phase = ScanMetadataPhase::ready;
+      return true;
+    }
+    const size_t accepted = scanStepper_.consumeReadBytes(
+        static_cast<size_t>(count));
+    target->concat(reinterpret_cast<const char *>(chunk), accepted);
+    if (target->length() > kMaxMetadataBytes) {
+      scanPending_.damaged = true;
+      scanPending_.file.close();
+      scanPending_.phase = ScanMetadataPhase::ready;
+      return true;
+    }
+  }
+  if (scanPending_.file.available()) return false;
+  scanPending_.file.close();
+  target->trim();
+  if (target->isEmpty()) {
+    scanPending_.damaged = true;
+    scanPending_.phase = ScanMetadataPhase::ready;
+    return true;
+  }
+  if (scanPending_.phase == ScanMetadataPhase::capsule) {
+    scanPending_.phase = ScanMetadataPhase::processing;
+    return false;
+  }
+  scanPending_.phase = ScanMetadataPhase::ready;
+  return true;
+}
+
+bool CapsuleLibrary::appendStagedRecord(const CapsuleSummary &record) {
+  if (scanLocatorCount_ >= kCapsuleLocatorCapacity) return false;
+  copyToLocator(record, scanLocators_[scanLocatorCount_++]);
+  return true;
+}
+
+void CapsuleLibrary::resetScanTransient() {
+  // Every terminal path closes open handles while holding its short IO lease.
+  scanDirectories_.clear();
+  scanDirectoryIndex_ = 0;
+  scanDirectoryOpen_ = false;
+  scanPending_ = ScanPendingRecord();
+  scanLocatorCount_ = 0;
+  scanCancelRequested_ = false;
+  scanFailureRequested_ = false;
+  scanIndexOverflow_ = false;
+}
+
+void CapsuleLibrary::finishScan(CapsuleScanState state) {
+  // Filesystem handles have already been closed inside the current slice.
+  scanDirectoryOpen_ = false;
+  scanPending_ = ScanPendingRecord();
+  scanReservation_.release();
+
+  if (state == CapsuleScanState::completed) {
+    std::swap(locators_, scanLocators_);
+    locatorCount_ = scanLocatorCount_;
+    indexOverflow_ = false;
+    invalidateRecordCache();
+    requestPublish();
+    ++fullScanCount_;
+    const uint32_t elapsedUs = static_cast<uint32_t>(
+        esp_timer_get_time() - scanStartedUs_);
+    lastScanUs_ = elapsedUs;
+    if (elapsedUs > maxScanUs_) maxScanUs_ = elapsedUs;
+    scanStepper_.complete();
+    if (log_ != nullptr) {
+      log_->printf("{\"event\":\"capsule_scan\",\"count\":%u,"
+                   "\"pending\":%u,\"slices\":%u}\n",
+                   static_cast<unsigned>(locatorCount_),
+                   static_cast<unsigned>(pendingCount()),
+                   static_cast<unsigned>(scanStepper_.slices()));
+    }
+  } else if (state == CapsuleScanState::cancelled) {
+    scanStepper_.cancel();
+  } else {
+    scanStepper_.fail();
+    indexOverflow_ = scanIndexOverflow_;
+    if (scanIndexOverflow_ && log_ != nullptr) {
+      log_->printf("{\"event\":\"capsule_index_capacity_exceeded\","
+                   "\"capacity\":%u}\n",
+                   static_cast<unsigned>(kCapsuleLocatorCapacity));
+    }
+  }
+  scanDirectories_.clear();
+  scanLocatorCount_ = 0;
 }
 
 bool CapsuleLibrary::includeInboxCapsule(const String &id) {
@@ -165,118 +417,61 @@ bool CapsuleLibrary::includeInboxCapsule(const String &id) {
   return refreshRecord(id, String(kCapsuleInbox) + "/" + id, "Inbox");
 }
 
-void CapsuleLibrary::scanFolder(const String &path, const String &folder,
-                                uint8_t depth) {
-  if (indexOverflow_) return;
-  File directory = fs_->open(path);
-  if (!directory || !directory.isDirectory()) return;
-  File entry = directory.openNextFile();
-  while (entry && !indexOverflow_) {
-    const String fullName = entry.name();
-    const bool isDirectory = entry.isDirectory();
-    entry.close();
-    const int slash = fullName.lastIndexOf('/');
-    const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
-    if (isDirectory && isUuid(name.c_str())) {
-      CapsuleSummary record;
-      if (readRecord(path + "/" + name, folder, record) &&
-          !appendIndexedRecord(record)) {
-        indexOverflow_ = true;
-      }
-    } else if (isDirectory && depth < 2 && !name.startsWith(".")) {
-      scanFolder(path + "/" + name, folder + "/" + name, depth + 1);
-    }
-    entry = directory.openNextFile();
-  }
-  directory.close();
-}
-
 bool CapsuleLibrary::readRecord(const String &directory, const String &folder,
                                 CapsuleSummary &record) const {
+  return readRecordText(
+      directory, folder,
+      readText(directory + "/capsule.json", kMaxMetadataBytes),
+      readText(directory + "/processing.json", kMaxMetadataBytes), record);
+}
+
+bool CapsuleLibrary::readRecordText(const String &directory,
+                                    const String &folder,
+                                    const String &capsuleText,
+                                    const String &processingText,
+                                    CapsuleSummary &record,
+                                    bool detectDamagedAudio) const {
   const int slash = directory.lastIndexOf('/');
   const String directoryId = slash >= 0
       ? directory.substring(slash + 1) : directory;
   if (!isUuid(directoryId.c_str())) return false;
-  const String capsuleText = readText(directory + "/capsule.json", kMaxMetadataBytes);
-  const String processingText = readText(directory + "/processing.json", kMaxMetadataBytes);
-  if (capsuleText.isEmpty() || processingText.isEmpty()) {
-    populateDamagedRecord(directory, folder, directoryId, record);
+  CapsuleDecodedMetadata decoded;
+  if (!CapsuleMetadataCodec::decode(directoryId, capsuleText, processingText,
+                                    decoded)) {
+    populateDamagedRecord(directory, folder, directoryId, record,
+                          detectDamagedAudio);
     return true;
   }
-  cJSON *capsule = cJSON_ParseWithLength(capsuleText.c_str(), capsuleText.length());
-  cJSON *processing = cJSON_ParseWithLength(processingText.c_str(), processingText.length());
-  if (capsule == nullptr || processing == nullptr) {
-    cJSON_Delete(capsule);
-    cJSON_Delete(processing);
-    populateDamagedRecord(directory, folder, directoryId, record);
-    return true;
-  }
-  const char *id = jsonString(capsule, "id");
-  const char *processingId = jsonString(processing, "capsuleId");
-  const bool valid = isUuid(id) && processingId != nullptr &&
-      strcasecmp(id, processingId) == 0 && directoryId.equalsIgnoreCase(id);
-  if (valid) {
-    record.id = id;
-    record.directory = directory;
-    record.folder = folder;
-    const char *title = jsonString(capsule, "title");
-    const char *createdAt = jsonString(capsule, "createdAt");
-    const char *updatedAt = jsonString(capsule, "updatedAt");
-    const char *audioFile = jsonString(processing, "audioFile");
-    const char *audioFormat = jsonString(processing, "audioFormat");
-    const char *wireStatus = jsonString(processing, "status");
-    const char *errorStage = jsonString(processing, "errorStage");
-    const char *error = jsonString(processing, "error");
-    record.title = title == nullptr ? "语音胶囊" : title;
-    record.createdAt = createdAt == nullptr ? "" : createdAt;
-    record.updatedAt = updatedAt == nullptr ? "" : updatedAt;
-    record.audioFile = audioFile == nullptr ? "" : audioFile;
-    record.errorStage = errorStage == nullptr ? "" : errorStage;
-    record.error = error == nullptr ? "" : error;
-    record.favorite = jsonBool(capsule, "favorite");
-    record.archived = folder == "Archive" || folder.startsWith("Archive/");
-    record.trashed = folder == ".trash" || folder.startsWith(".trash/");
-    record.capsuleSchemaVersion = jsonInt(capsule, "schemaVersion");
-    record.processingSchemaVersion = jsonInt(processing, "schemaVersion");
-    record.audioFormat = record.processingSchemaVersion == 1
-        ? "m4a-aac-lc" : (audioFormat == nullptr ? "" : audioFormat);
-    record.revision = jsonInt(capsule, "revision", 1);
-    record.processingRevision = jsonInt(processing, "revision");
-    const int durationMs = jsonInt(processing, "durationMs");
-    const int sampleRateHz = record.processingSchemaVersion == 1
-        ? 16000 : jsonInt(processing, "sampleRateHz");
-    const int channels = record.processingSchemaVersion == 1
-        ? 1 : jsonInt(processing, "channels");
-    const int bitsPerSample = record.processingSchemaVersion == 1
-        ? 16 : jsonInt(processing, "bitsPerSample");
-    record.durationMs = durationMs < 0 ? 0 : static_cast<uint32_t>(durationMs);
-    record.sampleRateHz = sampleRateHz < 0 ? 0 : sampleRateHz;
-    record.channels = channels < 0 ? 0 : channels;
-    record.bitsPerSample = bitsPerSample < 0 ? 0 : bitsPerSample;
-    record.status = parseStatus(wireStatus);
-    CapsuleWireMetadata metadata;
-    metadata.capsuleSchemaVersion = record.capsuleSchemaVersion;
-    metadata.processingSchemaVersion = record.processingSchemaVersion;
-    metadata.processingRevision = record.processingRevision;
-    metadata.durationMs = durationMs;
-    metadata.status = wireStatus;
-    metadata.audioFile = audioFile;
-    metadata.audioFormat = audioFormat;
-    metadata.sampleRateHz = sampleRateHz;
-    metadata.channels = channels;
-    metadata.bitsPerSample = bitsPerSample;
-    record.readOnly = !capsuleRecordWritable(metadata);
-  } else {
-    populateDamagedRecord(directory, folder, directoryId, record);
-  }
-  cJSON_Delete(capsule);
-  cJSON_Delete(processing);
+  record = CapsuleSummary();
+  record.id = decoded.id;
+  record.directory = directory;
+  record.folder = folder;
+  record.title = decoded.title;
+  record.createdAt = decoded.createdAt;
+  record.updatedAt = decoded.updatedAt;
+  record.audioFile = decoded.audioFile;
+  record.audioFormat = decoded.audioFormat;
+  record.errorStage = decoded.errorStage;
+  record.error = decoded.error;
+  record.status = parseStatus(decoded.status.c_str());
+  record.favorite = decoded.favorite;
+  record.archived = folder == "Archive" || folder.startsWith("Archive/");
+  record.trashed = folder == ".trash" || folder.startsWith(".trash/");
+  record.readOnly = decoded.readOnly;
+  record.capsuleSchemaVersion = decoded.capsuleSchemaVersion;
+  record.processingSchemaVersion = decoded.processingSchemaVersion;
+  record.revision = decoded.revision;
+  record.processingRevision = decoded.processingRevision;
+  record.durationMs = decoded.durationMs;
+  record.sampleRateHz = decoded.sampleRateHz;
+  record.channels = decoded.channels;
+  record.bitsPerSample = decoded.bitsPerSample;
   return true;
 }
 
 void CapsuleLibrary::populateDamagedRecord(
     const String &directory, const String &folder, const String &directoryId,
-    CapsuleSummary &record) const {
+    CapsuleSummary &record, bool detectAudio) const {
   record = CapsuleSummary();
   record.id = directoryId;
   record.directory = directory;
@@ -286,10 +481,11 @@ void CapsuleLibrary::populateDamagedRecord(
   record.readOnly = true;
   record.archived = folder == "Archive" || folder.startsWith("Archive/");
   record.trashed = folder == ".trash" || folder.startsWith(".trash/");
-  if (fs_ != nullptr && fs_->exists(directory + "/audio.wav")) {
+  if (detectAudio && fs_ != nullptr && fs_->exists(directory + "/audio.wav")) {
     record.audioFile = "audio.wav";
     record.audioFormat = "wav-pcm-s16le";
-  } else if (fs_ != nullptr && fs_->exists(directory + "/audio.m4a")) {
+  } else if (detectAudio && fs_ != nullptr &&
+             fs_->exists(directory + "/audio.m4a")) {
     record.audioFile = "audio.m4a";
     record.audioFormat = "m4a-aac-lc";
   }
@@ -331,6 +527,16 @@ const CapsuleSummary *CapsuleLibrary::nextQueued() const {
 const CapsuleSummary *CapsuleLibrary::find(const String &id) const {
   const size_t index = recordIndex(id);
   return index < locatorCount_ ? cachedRecord(index, false) : nullptr;
+}
+
+bool CapsuleLibrary::hydrate(const String &id, CapsuleSummary &record,
+                             bool loadPreview) const {
+  const size_t index = recordIndex(id);
+  if (index >= locatorCount_ || !hydrateLocator(locators_[index], record)) {
+    return false;
+  }
+  if (loadPreview) record.preview = readBestText(record, kPreviewBytes);
+  return true;
 }
 
 bool CapsuleLibrary::markTranscribing(const String &id) {

@@ -38,6 +38,7 @@ python3 "$SCRIPT_DIR/../tools/test-build-portability.py"
 python3 "$SCRIPT_DIR/../tools/test-hardmac-workflow.py"
 python3 "$SCRIPT_DIR/../tools/test-capsule-local-management.py"
 python3 "$SCRIPT_DIR/../tools/test-storage-entrypoints.py"
+python3 "$SCRIPT_DIR/../tools/test-capsule-scan-service.py"
 
 if rg -q 'USBAudioCard|USBHIDKeyboard|UsbVoiceBridge|dictate-start|dictate-stop' \
   "$SCRIPT_DIR/PokePodAmoled" "$SCRIPT_DIR/build.sh"

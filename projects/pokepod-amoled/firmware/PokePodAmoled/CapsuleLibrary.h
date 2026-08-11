@@ -8,6 +8,7 @@
 #include "CapsuleBrowserState.h"
 #include "CapsuleTransaction.h"
 #include "CapsuleIndexPolicy.h"
+#include "CapsuleScanStepper.h"
 #include "DeferredPublish.h"
 #include "StorageCoordinator.h"
 
@@ -76,6 +77,19 @@ class CapsuleLibrary {
 
   bool begin(fs::FS &fs, Print &log);
   bool scan();
+  bool startScan(const CapsuleScanBudget &budget = {});
+  CapsuleScanState stepScan();
+  void cancelScan();
+  CapsuleScanState scanState() const { return scanStepper_.state(); }
+  uint32_t scanSlices() const { return scanStepper_.slices(); }
+  size_t maximumScanEntriesPerSlice() const {
+    return scanStepper_.maximumDirectoryEntries();
+  }
+  size_t maximumScanBytesPerSlice() const {
+    return scanStepper_.maximumReadBytes();
+  }
+  uint32_t maximumScanStepUs() const { return maximumScanStepUs_; }
+  uint32_t maximumScanLeaseUs() const { return maximumScanLeaseUs_; }
   bool includeInboxCapsule(const String &id);
   size_t count() const { return visible_.size(); }
   uint32_t revision() const { return revision_; }
@@ -90,6 +104,8 @@ class CapsuleLibrary {
   const CapsuleSummary *at(size_t index, bool loadPreview = false) const;
   const CapsuleSummary *nextQueued() const;
   const CapsuleSummary *find(const String &id) const;
+  bool hydrate(const String &id, CapsuleSummary &record,
+               bool loadPreview = false) const;
 
   bool markTranscribing(const String &id);
   bool commitRawText(const String &id, const String &text);
@@ -112,7 +128,44 @@ class CapsuleLibrary {
   static const char *statusName(CapsuleStatus status);
 
  private:
-  void scanFolder(const String &path, const String &folder, uint8_t depth);
+  struct ScanDirectoryTask {
+    String path;
+    String folder;
+    uint8_t depth = 0;
+    bool discoverRoot = false;
+  };
+  enum class ScanMetadataPhase : uint8_t {
+    none = 0,
+    capsule,
+    processing,
+    ready,
+  };
+  struct ScanPendingRecord {
+    String directory;
+    String folder;
+    String id;
+    String capsuleText;
+    String processingText;
+    File file;
+    ScanMetadataPhase phase = ScanMetadataPhase::none;
+    bool damaged = false;
+    bool hasWav = false;
+    bool hasM4a = false;
+  };
+
+  bool readRecordText(const String &directory, const String &folder,
+                      const String &capsuleText,
+                      const String &processingText,
+                      CapsuleSummary &record,
+                      bool detectDamagedAudio = true) const;
+  bool openPendingMetadata(const char *name);
+  bool readPendingMetadataSlice();
+  bool processDirectorySlice();
+  bool appendStagedRecord(const CapsuleSummary &record);
+  bool startScanWithOwner(const CapsuleScanBudget &budget,
+                          StorageOwner owner);
+  void finishScan(CapsuleScanState state);
+  void resetScanTransient();
   bool readRecord(const String &directory, const String &folder,
                   CapsuleSummary &record) const;
   String readText(const String &path, size_t maxBytes) const;
@@ -135,7 +188,8 @@ class CapsuleLibrary {
   bool replaceIndexedRecord(size_t index, const CapsuleSummary &record);
   void populateDamagedRecord(const String &directory, const String &folder,
                              const String &directoryId,
-                             CapsuleSummary &record) const;
+                             CapsuleSummary &record,
+                             bool detectAudio = true) const;
   void copyToLocator(const CapsuleSummary &record, CapsuleLocator &locator) const;
   bool hydrateLocator(const CapsuleLocator &locator,
                       CapsuleSummary &record) const;
@@ -158,7 +212,9 @@ class CapsuleLibrary {
   Print *log_ = nullptr;
   CapsuleTransaction transaction_;
   CapsuleLocator *locators_ = nullptr;
+  CapsuleLocator *scanLocators_ = nullptr;
   size_t locatorCount_ = 0;
+  size_t scanLocatorCount_ = 0;
   std::vector<size_t> order_;
   std::vector<size_t> visible_;
   struct DetailCacheEntry {
@@ -179,6 +235,20 @@ class CapsuleLibrary {
   uint32_t refreshFallbackCount_ = 0;
   uint32_t lastScanUs_ = 0;
   uint32_t maxScanUs_ = 0;
+  CapsuleScanStepper scanStepper_;
+  StorageReservation scanReservation_;
+  std::vector<ScanDirectoryTask> scanDirectories_;
+  size_t scanDirectoryIndex_ = 0;
+  File scanDirectory_;
+  ScanPendingRecord scanPending_;
+  bool scanDirectoryOpen_ = false;
+  bool scanCancelRequested_ = false;
+  bool scanFailureRequested_ = false;
+  bool scanIndexOverflow_ = false;
+  int64_t scanStartedUs_ = 0;
+  StorageOwner scanOwner_ = StorageOwner::capsuleScan;
+  uint32_t maximumScanStepUs_ = 0;
+  uint32_t maximumScanLeaseUs_ = 0;
 };
 
 }  // namespace pokepod

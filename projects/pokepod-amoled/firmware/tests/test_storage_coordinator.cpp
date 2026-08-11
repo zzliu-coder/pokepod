@@ -45,6 +45,7 @@ int main() {
       StorageOwner::tencentRead,
       StorageOwner::audioPlayback,
       StorageOwner::fontRead,
+      StorageOwner::capsuleScan,
       StorageOwner::usbLink,
       StorageOwner::wifiLink,
   };

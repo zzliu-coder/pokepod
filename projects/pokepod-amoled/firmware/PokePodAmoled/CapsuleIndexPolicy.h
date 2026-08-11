@@ -52,6 +52,9 @@ static_assert(sizeof(CapsuleLocator) <= 160,
               "capsule locator exceeds the per-record PSRAM budget");
 static_assert(sizeof(CapsuleLocator) * kCapsuleLocatorCapacity <= 80 * 1024,
               "capsule locator index exceeds the total PSRAM budget");
+static_assert(sizeof(CapsuleLocator) * kCapsuleLocatorCapacity * 2 <=
+                  160 * 1024,
+              "double-buffered capsule indexes exceed the PSRAM budget");
 
 inline uint64_t capsuleDirectoryHash(const char *value) {
   uint64_t hash = UINT64_C(14695981039346656037);
