@@ -30,6 +30,10 @@ class AudioCaptureSource {
   virtual ~AudioCaptureSource() = default;
   virtual bool start() = 0;
   virtual void stop() = 0;
+  // Some platform adapters can distinguish a DMA overrun from a timeout or
+  // short read. Adapters that only expose a byte count must leave this false;
+  // a zero overrun counter then means "not observable", not "no loss".
+  virtual bool overrunObservable() const { return false; }
   virtual AudioCaptureReadResult readStereo48(uint8_t *output,
                                               size_t capacity,
                                               uint32_t timeoutMs) = 0;
@@ -47,6 +51,7 @@ enum class AudioCaptureCycleResult : uint8_t {
 
 struct AudioCaptureServiceMetrics {
   AudioCaptureRingMetrics ring;
+  bool sourceOverrunObservable = false;
   uint32_t readCalls = 0;
   uint32_t shortReads = 0;
   uint32_t timeouts = 0;
@@ -76,6 +81,7 @@ class AudioCaptureService {
   bool startSession(uint32_t sessionId, AudioCaptureSource &source) {
     if (running_ || sessionId == 0 || !source.start()) return false;
     source_ = &source;
+    sourceOverrunObservable_ = source.overrunObservable();
     running_ = true;
     sessionId_ = sessionId;
     nextSequence_ = 0;
@@ -147,11 +153,16 @@ class AudioCaptureService {
         raw_, sizeof(raw_), converted_, sizeof(converted_));
     rawUsed_ = 0;
     appendConverted(converted_, convertedBytes, nowMs);
+    // A driver overrun makes the session incomplete even when the bytes that
+    // remain happen to form a publishable 20 ms frame. Keep that frame for
+    // diagnostics/tail continuity, while giving data-loss evidence priority
+    // over the queue outcome returned to the realtime owner.
+    if (read.status == AudioCaptureReadStatus::overrun) {
+      return AudioCaptureCycleResult::sourceOverrun;
+    }
     if (lastFrameDropped_) return AudioCaptureCycleResult::frameDropped;
     if (lastFrameQueued_) return AudioCaptureCycleResult::frameQueued;
-    return read.status == AudioCaptureReadStatus::overrun
-        ? AudioCaptureCycleResult::sourceOverrun
-        : AudioCaptureCycleResult::partialInput;
+    return AudioCaptureCycleResult::partialInput;
   }
 
   bool pop(AudioCaptureFrame &frame) { return ring_.pop(frame); }
@@ -164,6 +175,7 @@ class AudioCaptureService {
   AudioCaptureServiceMetrics metrics() const {
     AudioCaptureServiceMetrics value;
     value.ring = ring_.metrics();
+    value.sourceOverrunObservable = sourceOverrunObservable_;
     value.readCalls = readCalls_.load(std::memory_order_relaxed);
     value.shortReads = shortReads_.load(std::memory_order_relaxed);
     value.timeouts = timeouts_.load(std::memory_order_relaxed);
@@ -212,6 +224,7 @@ class AudioCaptureService {
   bool running_ = false;
   bool lastFrameQueued_ = false;
   bool lastFrameDropped_ = false;
+  bool sourceOverrunObservable_ = false;
   uint32_t sessionId_ = 0;
   uint32_t nextSequence_ = 0;
   std::atomic<uint32_t> readCalls_{0};

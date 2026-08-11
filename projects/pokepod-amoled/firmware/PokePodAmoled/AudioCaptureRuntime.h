@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 
 #include "AudioCaptureService.h"
+#include "AudioCaptureSessionState.h"
 #include "AudioPipeline.h"
 
 namespace pokepod {
@@ -24,11 +25,13 @@ class AudioCaptureRuntime {
   bool begin(BoardVariant variant, Print &log);
   bool start(AudioPipeline &audio, uint32_t sessionId, Print &log);
   bool stop(Print &log);
+  bool pollFinalize(Print &log);
   bool pop(AudioCaptureFrame &frame) { return service_.pop(frame); }
 
   bool ready() const { return ready_; }
-  bool running() const {
-    return active_.load(std::memory_order_acquire);
+  bool running() const { return sessionState_.busy(); }
+  bool finalizePending() const {
+    return sessionState_.finalizePending() || sessionState_.stopRequested();
   }
   bool incomplete() const {
     return incomplete_.load(std::memory_order_acquire);
@@ -42,6 +45,10 @@ class AudioCaptureRuntime {
     void bind(AudioPipeline *audio) { audio_ = audio; }
     bool start() override { return audio_ != nullptr && audio_->active(); }
     void stop() override {}
+    // Arduino-ESP32 ESP_I2S::readBytes exposes only the byte count. The
+    // adapter cannot truthfully distinguish RX DMA overrun from short/zero
+    // reads, so diagnostics must report this capability as unavailable.
+    bool overrunObservable() const override { return false; }
     AudioCaptureReadResult readStereo48(uint8_t *output, size_t capacity,
                                         uint32_t timeoutMs) override;
 
@@ -51,14 +58,14 @@ class AudioCaptureRuntime {
 
   static void taskThunk(void *context);
   void taskMain();
+  bool finalizeStoppedSession(Print &log);
 
   AudioCaptureService<kRingFrames> service_;
   PipelineSource source_;
   TaskHandle_t task_ = nullptr;
   SemaphoreHandle_t stopped_ = nullptr;
   AudioPipeline *audio_ = nullptr;
-  std::atomic<bool> active_{false};
-  std::atomic<bool> stopRequested_{false};
+  AudioCaptureSessionState sessionState_;
   std::atomic<bool> incomplete_{false};
   bool ready_ = false;
   AudioDspProfile profile_ = AudioDspProfile::unavailable;

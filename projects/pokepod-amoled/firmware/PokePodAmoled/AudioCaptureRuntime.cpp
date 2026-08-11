@@ -41,7 +41,7 @@ bool AudioCaptureRuntime::begin(BoardVariant variant, Print &log) {
   }
   ready_ = true;
   log.printf(
-      "{\"event\":\"capture_task\",\"ok\":true,\"priority\":%u,\"stack_bytes\":%u,\"ring_frames\":%u,\"dsp_profile\":\"%s\"}\n",
+      "{\"event\":\"capture_task\",\"ok\":true,\"priority\":%u,\"stack_bytes\":%u,\"ring_frames\":%u,\"dsp_profile\":\"%s\",\"source_overrun_observable\":false}\n",
       static_cast<unsigned>(kTaskPriority),
       static_cast<unsigned>(kTaskStackBytes),
       static_cast<unsigned>(kRingFrames), audioDspProfileName(profile_));
@@ -61,27 +61,53 @@ bool AudioCaptureRuntime::start(AudioPipeline &audio, uint32_t sessionId,
     audio.stopHardware(log);
     return false;
   }
+  if (!sessionState_.begin()) {
+    service_.stopSession();
+    source_.bind(nullptr);
+    audio_ = nullptr;
+    audio.stopHardware(log);
+    return false;
+  }
   incomplete_.store(false, std::memory_order_release);
-  stopRequested_.store(false, std::memory_order_release);
-  active_.store(true, std::memory_order_release);
   xTaskNotifyGive(task_);
   return true;
 }
 
 bool AudioCaptureRuntime::stop(Print &log) {
   if (!running()) return true;
-  stopRequested_.store(true, std::memory_order_release);
+  if (sessionState_.finalizePending()) {
+    if (xSemaphoreTake(stopped_, pdMS_TO_TICKS(kStopTimeoutMs)) != pdTRUE) {
+      return false;
+    }
+    if (!sessionState_.acknowledgeTaskStopped()) return false;
+    return finalizeStoppedSession(log);
+  }
+  if (!sessionState_.requestStop()) return false;
   xTaskNotifyGive(task_);
   if (xSemaphoreTake(stopped_, pdMS_TO_TICKS(kStopTimeoutMs)) != pdTRUE) {
     incomplete_.store(true, std::memory_order_release);
     log.println("{\"event\":\"capture_task_stop\",\"ok\":false,\"stage\":\"timeout\"}");
     return false;
   }
+  if (!sessionState_.acknowledgeTaskStopped()) return false;
+  return finalizeStoppedSession(log);
+}
+
+bool AudioCaptureRuntime::pollFinalize(Print &log) {
+  if (!sessionState_.finalizePending()) return !running();
+  if (xSemaphoreTake(stopped_, 0) != pdTRUE) return false;
+  if (!sessionState_.acknowledgeTaskStopped()) return false;
+  return finalizeStoppedSession(log);
+}
+
+bool AudioCaptureRuntime::finalizeStoppedSession(Print &log) {
+  if (!sessionState_.finalizePending()) return false;
   service_.stopSession();
   source_.bind(nullptr);
   AudioPipeline *audio = audio_;
   audio_ = nullptr;
   if (audio != nullptr) audio->stopHardware(log);
+  if (!sessionState_.finishFinalize()) return false;
   log.printf(
       "{\"event\":\"capture_task_stop\",\"ok\":true,\"incomplete\":%s,\"stack_high_water\":%u}\n",
       incomplete() ? "true" : "false",
@@ -100,8 +126,7 @@ void AudioCaptureRuntime::taskThunk(void *context) {
 void AudioCaptureRuntime::taskMain() {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    while (active_.load(std::memory_order_acquire)) {
-      if (stopRequested_.load(std::memory_order_acquire)) break;
+    while (sessionState_.captureActive()) {
       const AudioCaptureCycleResult cycle = service_.captureOnce(millis());
       if (cycle == AudioCaptureCycleResult::frameDropped ||
           cycle == AudioCaptureCycleResult::sourceTimeout ||
@@ -111,7 +136,7 @@ void AudioCaptureRuntime::taskMain() {
       }
       if (cycle == AudioCaptureCycleResult::sourceFailure) taskYIELD();
     }
-    if (active_.exchange(false, std::memory_order_acq_rel)) {
+    if (sessionState_.taskStopped()) {
       xSemaphoreGive(stopped_);
     }
   }

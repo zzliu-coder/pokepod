@@ -33,6 +33,8 @@ class FakeCaptureSource final : public AudioCaptureSource {
     active = false;
   }
 
+  bool overrunObservable() const override { return true; }
+
   AudioCaptureReadResult readStereo48(uint8_t *output, size_t capacity,
                                       uint32_t timeoutMs) override {
     assert(active);
@@ -130,13 +132,16 @@ int main() {
   // The first complete raw block primes channel selection and FIR state.
   assert(service.captureOnce(2) == AudioCaptureCycleResult::partialInput);
   AudioCaptureCycleResult result = service.captureOnce(22);
-  assert(result == AudioCaptureCycleResult::frameQueued);
+  // Data-loss evidence has terminal priority even when the remaining bytes
+  // still produce a valid frame. The frame remains available to the consumer.
+  assert(result == AudioCaptureCycleResult::sourceOverrun);
   result = service.captureOnce(42);
   assert(result == AudioCaptureCycleResult::frameQueued);
   // The fixed two-frame ring refuses the next frame and records exact loss.
   result = service.captureOnce(62);
   assert(result == AudioCaptureCycleResult::frameDropped);
   AudioCaptureServiceMetrics metrics = service.metrics();
+  assert(metrics.sourceOverrunObservable);
   assert(metrics.ring.sessionId == 77);
   assert(metrics.ring.currentFrames == 2);
   assert(metrics.ring.highWaterFrames == 2);
@@ -166,5 +171,6 @@ int main() {
   AudioCaptureService<> refusedService;
   assert(!refusedService.startSession(88, refused));
   assert(!refusedService.running());
+  assert(!refusedService.metrics().sourceOverrunObservable);
   return 0;
 }
