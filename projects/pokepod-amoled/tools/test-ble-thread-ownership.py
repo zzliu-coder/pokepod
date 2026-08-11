@@ -69,8 +69,6 @@ for signature in (
     "void BleVoiceService::handleMtu(",
     "void BleVoiceService::handleCommand(",
     "void BleVoiceService::handleAuthentication(",
-    "void BleVoiceService::handleNotifyStatus(",
-    "void BleVoiceService::handleControlNotifyStatus(",
     "void BleVoiceService::handleDeviceInfoRead(",
     "void BleVoiceService::handlePasskey(",
 ):
@@ -79,10 +77,25 @@ for signature in (
     for forbidden in ("controller_", "router_", "quality_", "notifyControl("):
         assert forbidden not in publisher, f"{signature}: {forbidden}"
 
+for signature, kind in (
+    ("void BleVoiceService::handleNotifyStatus(", "BleVoiceNotifyKind::audio"),
+    (
+        "void BleVoiceService::handleControlNotifyStatus(",
+        "BleVoiceNotifyKind::control",
+    ),
+):
+    publisher = body(signature)
+    assert "notifyCallbackBinding_.capture" in publisher, signature
+    assert kind in publisher, signature
+    assert "notifyStatusEvents_.publish(event);" in publisher, signature
+    for forbidden in ("controller_", "router_", "quality_", "notifyControl("):
+        assert forbidden not in publisher, f"{signature}: {forbidden}"
+
 poll = body("void BleVoiceService::poll(")
 assert poll.index("drainCallbackEvents(nowMs);") < poll.index(
     "controller_.poll(nowMs)"
 )
+assert "audioNotifyIdentity_ = {};" in poll
 assert "processCallbackEvent(event, nowMs);" in body(
     "void BleVoiceService::drainCallbackEvents("
 )
@@ -91,18 +104,55 @@ assert "controller_.abort" in body("void BleVoiceService::processDisconnect(")
 assert "controller_.markSessionEndSent" in body(
     "void BleVoiceService::processControlNotifyStatus("
 )
+for signature in (
+    "void BleVoiceService::processNotifyStatus(",
+    "void BleVoiceService::processControlNotifyStatus(",
+):
+    resolver = body(signature)
+    assert "event.notifyIdentity.matches" in resolver, signature
+    assert "connectionGeneration_" in resolver, signature
+    assert "sessionGeneration_" in resolver, signature
+
+clear_control = body("void BleVoiceService::clearControlNotify(")
+assert "notifyCallbackBinding_.invalidate();" in clear_control
+assert "controlNotifyIdentity_ = {};" in clear_control
+reset_audio = body("void BleVoiceService::resetAudioNotify(")
+assert "notifyCallbackBinding_.invalidate();" in reset_audio
+assert "audioNotifyIdentity_ = {};" in reset_audio
 
 assert "std::atomic<uint32_t> head_{0}" in MAILBOX
 assert "std::atomic<uint32_t> tail_{0}" in MAILBOX
 assert "class BleVoiceCallbackSecuritySnapshot" in MAILBOX
+assert "class BleVoiceNotifyCallbackBinding" in MAILBOX
+assert "struct BleVoiceNotifyIdentity" in MAILBOX
+assert "class BleVoicePhysicalDisconnectLatch" in MAILBOX
 assert "expected != connectionId" in MAILBOX
-assert "callbackSecurity_.observeConnect(connectionId, peerBonded);" in SERVICE
-assert "callbackSecurity_.observeDisconnect(connectionId);" in SERVICE
+connect_callback = body("void BleVoiceService::handleConnect(")
+assert "callbackSecurity_.observeConnect" in connect_callback
+assert "&event.connectionGeneration" in connect_callback
+disconnect_callback = body("void BleVoiceService::handleDisconnect(")
+assert "callbackSecurity_.observeDisconnect" in disconnect_callback
+assert "&event.connectionGeneration" in disconnect_callback
 assert "BleVoiceCallbackEvent events_[Capacity]" in MAILBOX
 assert "accepting_.store(false" in MAILBOX
 assert "overflowed_.store(true" in MAILBOX
+assert "ownerTask != callbackTask" in MAILBOX
+assert "attemptToken == other.attemptToken" in MAILBOX
 assert "static constexpr size_t kCommandBytes = 8" in MAILBOX
 assert "static constexpr size_t kCallbackEventCapacity = 16" in HEADER
+assert "static constexpr size_t kNotifyStatusEventCapacity = 4" in HEADER
+
+overflow = body("void BleVoiceService::drainCallbackEvents(")
+assert "finishCallbackOverflowIfDisconnected(nowMs);" in overflow
+assert "resetAfterOverflow" not in overflow
+overflow_finish = body(
+    "bool BleVoiceService::finishCallbackOverflowIfDisconnected("
+)
+assert "physicalDisconnect.matches(callbackOverflowEpoch_)" in overflow_finish
+assert overflow_finish.index("physicalDisconnect.matches") < overflow_finish.index(
+    "resetAfterOverflow"
+)
+assert "physicalDisconnects_.observe" in disconnect_callback
 
 # BLE Voice v1 UUIDs and wire sizes stay byte-for-byte compatible.
 for invariant in (

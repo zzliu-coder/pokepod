@@ -88,8 +88,9 @@ class BleVoiceService {
                      size_t length);
   void handleAuthentication(uint16_t connectionId, bool success,
                             const uint8_t *peerAddress);
-  void handleNotifyStatus(bool acceptedByHost);
-  void handleControlNotifyStatus(bool acceptedByHost);
+  void handleNotifyStatus(bool acceptedByHost, uintptr_t callbackTask);
+  void handleControlNotifyStatus(bool acceptedByHost,
+                                 uintptr_t callbackTask);
   void handleDeviceInfoRead();
   void handlePasskey(uint32_t passkey);
 
@@ -106,22 +107,30 @@ class BleVoiceService {
                      uint16_t code = 0);
   bool publishCallbackEvent(const BleVoiceCallbackEvent &event);
   void drainCallbackEvents(uint32_t nowMs);
+  void drainNotifyStatusEvents(uint32_t nowMs);
   void processCallbackEvent(const BleVoiceCallbackEvent &event,
                             uint32_t nowMs);
-  void processConnect(uint16_t connectionId, const uint8_t *peerAddress,
-                      bool peerBonded);
-  void processDisconnect(uint16_t connectionId, uint32_t nowMs);
-  void processMtu(uint16_t connectionId, uint16_t mtu);
+  void processConnect(uint16_t connectionId, uint32_t connectionGeneration,
+                      const uint8_t *peerAddress, bool peerBonded);
+  void processDisconnect(uint16_t connectionId,
+                         uint32_t connectionGeneration, uint32_t nowMs);
+  void processMtu(uint16_t connectionId, uint32_t connectionGeneration,
+                  uint16_t mtu);
   void processCommand(uint16_t connectionId, const uint8_t *bytes,
-                      size_t length, uint32_t nowMs);
+                      size_t length, uint32_t connectionGeneration,
+                      uint32_t nowMs);
   void processAuthentication(uint16_t connectionId, bool success,
-                             const uint8_t *peerAddress, uint32_t nowMs);
-  void processNotifyStatus(bool acceptedByHost);
-  void processControlNotifyStatus(bool acceptedByHost, uint32_t nowMs);
+                             const uint8_t *peerAddress,
+                             uint32_t connectionGeneration,
+                             uint32_t nowMs);
+  void processNotifyStatus(const BleVoiceCallbackEvent &event);
+  void processControlNotifyStatus(const BleVoiceCallbackEvent &event,
+                                  uint32_t nowMs);
   void processDeviceInfoRead();
   void processPasskey(uint32_t passkey);
   void failClosedCallbackOverflow(uint32_t nowMs,
-                                  uint16_t callbackConnectionId);
+                                  const BleVoiceConnectionEpoch &epoch);
+  bool finishCallbackOverflowIfDisconnected(uint32_t nowMs);
   void refreshCallbackSnapshot(uint32_t nowMs);
   void clearControlNotify();
   void restartAdvertising();
@@ -130,6 +139,9 @@ class BleVoiceService {
   void requestConnectionPowerMode(BleConnectionPowerMode mode);
   void resetAudioNotify();
   void failAudioNotify(VoiceSessionError error);
+  BleVoiceNotifyIdentity nextNotifyIdentity(BleVoiceNotifyKind kind);
+  bool beginNotifyCallback(const BleVoiceNotifyIdentity &identity);
+  void endNotifyCallback();
 
   BLEServer *server_ = nullptr;
   BLECharacteristic *info_ = nullptr;
@@ -140,9 +152,16 @@ class BleVoiceService {
   BleSingleConnectionPolicy connectionPolicy_;
   VoiceSessionController controller_;
   static constexpr size_t kCallbackEventCapacity = 16;
+  static constexpr size_t kNotifyStatusEventCapacity = 4;
   static constexpr uint32_t kControlNotifyTimeoutMs = 40;
   BleVoiceCallbackMailbox<kCallbackEventCapacity> callbackEvents_;
+  // notify() invokes its first status callback on the Arduino owner task. Keep
+  // those events separate so the NimBLE-host callback mailbox remains SPSC.
+  BleVoiceCallbackMailbox<kNotifyStatusEventCapacity> notifyStatusEvents_;
+  BleVoiceNotifyCallbackBinding notifyCallbackBinding_;
+  BleVoicePhysicalDisconnectLatch physicalDisconnects_;
   bool callbackOverflowHandled_ = false;
+  BleVoiceConnectionEpoch callbackOverflowEpoch_;
   BleVoiceCallbackSecuritySnapshot callbackSecurity_;
   mutable portMUX_TYPE qualityMux_ = portMUX_INITIALIZER_UNLOCKED;
   mutable portMUX_TYPE notifyMux_ = portMUX_INITIALIZER_UNLOCKED;
@@ -154,6 +173,9 @@ class BleVoiceService {
   bool appReady_ = false;
   bool bonded_ = false;
   uint16_t connectionId_ = 0;
+  uint32_t connectionGeneration_ = 0;
+  uint32_t sessionGeneration_ = 0;
+  uint32_t notifyAttemptToken_ = 0;
   uint8_t currentPeerAddress_[6] = {};
   bool currentPeerAddressValid_ = false;
   uint16_t mtu_ = 23;
@@ -162,10 +184,12 @@ class BleVoiceService {
   bool controlNotifyPending_ = false;
   uint32_t controlNotifyStartedAtMs_ = 0;
   ControlNotifyPurpose controlNotifyPurpose_ = ControlNotifyPurpose::none;
+  BleVoiceNotifyIdentity controlNotifyIdentity_;
   volatile bool audioNotifyResolved_ = false;
   volatile bool audioNotifyAccepted_ = false;
   volatile bool audioNotifyPending_ = false;
   BleNotifyInFlight audioNotify_;
+  BleVoiceNotifyIdentity audioNotifyIdentity_;
   BleVoiceAudioFrame audioInFlightFrame_;
   VoiceSessionError reportedError_ = VoiceSessionError::none;
   int batteryPercent_ = -1;

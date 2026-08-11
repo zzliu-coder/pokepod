@@ -34,6 +34,33 @@ BleVoiceCallbackEvent command(uint16_t connectionId,
   return value;
 }
 
+BleVoiceNotifyIdentity notifyIdentity(BleVoiceNotifyKind kind,
+                                      uint16_t connectionId,
+                                      uint32_t connectionGeneration,
+                                      uint32_t sessionGeneration,
+                                      uint32_t attemptToken) {
+  BleVoiceNotifyIdentity identity;
+  identity.kind = kind;
+  identity.connectionId = connectionId;
+  identity.connectionGeneration = connectionGeneration;
+  identity.sessionGeneration = sessionGeneration;
+  identity.attemptToken = attemptToken;
+  return identity;
+}
+
+BleVoiceCallbackEvent notifyStatus(const BleVoiceNotifyIdentity &identity,
+                                   bool accepted) {
+  BleVoiceCallbackEvent value;
+  value.type = identity.kind == BleVoiceNotifyKind::audio
+      ? BleVoiceCallbackEventType::audioNotifyStatus
+      : BleVoiceCallbackEventType::controlNotifyStatus;
+  value.connectionId = identity.connectionId;
+  value.connectionGeneration = identity.connectionGeneration;
+  value.notifyIdentity = identity;
+  value.flag = accepted;
+  return value;
+}
+
 void waitFor(const std::atomic<int> &phase, int expected) {
   while (phase.load(std::memory_order_acquire) != expected) {
     std::this_thread::yield();
@@ -91,6 +118,34 @@ struct MainOwnerModel {
   AudioCaptureRouter router;
   VoiceSessionController controller;
   BleNotifyInFlight notify;
+};
+
+struct NotifySettlementModel {
+  void begin(const BleVoiceNotifyIdentity &identity) {
+    pending = identity;
+    resolved = false;
+    accepted = false;
+  }
+
+  void invalidate() { pending = {}; }
+
+  void consume(const BleVoiceCallbackEvent &value,
+               uint32_t currentConnectionGeneration,
+               uint32_t currentSessionGeneration) {
+    if (!value.notifyIdentity.matches(pending) ||
+        value.notifyIdentity.connectionGeneration !=
+            currentConnectionGeneration ||
+        value.notifyIdentity.sessionGeneration != currentSessionGeneration) {
+      return;
+    }
+    accepted = value.flag;
+    resolved = true;
+    pending = {};
+  }
+
+  BleVoiceNotifyIdentity pending;
+  bool resolved = false;
+  bool accepted = false;
 };
 
 template <size_t Capacity>
@@ -237,6 +292,8 @@ int main() {
                            false, true, 123456);
   assert(security.passkey() == 123456);
   assert(security.observeConnect(10, false));
+  const uint32_t firstGeneration = security.connectionGeneration();
+  assert(firstGeneration != 0);
   assert(security.connectionId() == 10);
   assert(security.securityAllowed());
   assert(security.authorizationAllowed(10));
@@ -258,7 +315,82 @@ int main() {
   assert(!security.securityAllowed());
   assert(security.passkey() == 654321);
   assert(security.observeConnect(12, true));
+  assert(security.connectionGeneration() != firstGeneration);
   assert(security.authorizationAllowed(12));
+
+  // notify() status is admitted only while the exact Arduino owner task is
+  // inside the call. A delayed NimBLE-host callback cannot borrow the token of
+  // a new connection/session/attempt, even when it arrives during that call.
+  constexpr uintptr_t kArduinoTask = 0x1001;
+  constexpr uintptr_t kNimbleHostTask = 0x2002;
+  BleVoiceNotifyCallbackBinding notifyBinding;
+  NotifySettlementModel settlement;
+  const BleVoiceNotifyIdentity oldAudio = notifyIdentity(
+      BleVoiceNotifyKind::audio, 10, 1, 1, 101);
+  assert(notifyBinding.begin(oldAudio, kArduinoTask));
+  BleVoiceNotifyIdentity capturedOld;
+  assert(notifyBinding.capture(BleVoiceNotifyKind::audio, kArduinoTask,
+                               capturedOld));
+  const BleVoiceCallbackEvent queuedOld = notifyStatus(capturedOld, true);
+  notifyBinding.invalidate();
+
+  // Timeout invalidates the old pending. Physical disconnect and reconnect
+  // advance both connection and session generations before a new attempt.
+  settlement.begin(oldAudio);
+  settlement.invalidate();
+  const BleVoiceNotifyIdentity newAudio = notifyIdentity(
+      BleVoiceNotifyKind::audio, 10, 2, 2, 102);
+  settlement.begin(newAudio);
+  assert(notifyBinding.begin(newAudio, kArduinoTask));
+  BleVoiceNotifyIdentity stolen;
+  assert(!notifyBinding.capture(BleVoiceNotifyKind::audio, kNimbleHostTask,
+                                stolen));
+  settlement.consume(queuedOld, 2, 2);
+  assert(!settlement.resolved);
+  BleVoiceNotifyIdentity capturedNew;
+  assert(notifyBinding.capture(BleVoiceNotifyKind::audio, kArduinoTask,
+                               capturedNew));
+  notifyBinding.invalidate();
+  settlement.consume(notifyStatus(capturedNew, true), 2, 2);
+  assert(settlement.resolved && settlement.accepted);
+
+  // Exercise the actual two-thread collision: a retired host callback races
+  // the owner callback while the new attempt window is armed.
+  const BleVoiceNotifyIdentity racedAudio = notifyIdentity(
+      BleVoiceNotifyKind::audio, 10, 3, 3, 103);
+  assert(notifyBinding.begin(racedAudio, kArduinoTask));
+  std::atomic<int> notifyRacePhase{0};
+  std::atomic<bool> retiredCaptured{true};
+  std::thread retiredHostCallback([&]() {
+    waitFor(notifyRacePhase, 1);
+    BleVoiceNotifyIdentity candidate;
+    retiredCaptured.store(
+        notifyBinding.capture(BleVoiceNotifyKind::audio, kNimbleHostTask,
+                              candidate),
+        std::memory_order_release);
+    notifyRacePhase.store(2, std::memory_order_release);
+  });
+  notifyRacePhase.store(1, std::memory_order_release);
+  BleVoiceNotifyIdentity ownerCapture;
+  assert(notifyBinding.capture(BleVoiceNotifyKind::audio, kArduinoTask,
+                               ownerCapture));
+  waitFor(notifyRacePhase, 2);
+  retiredHostCallback.join();
+  notifyBinding.invalidate();
+  assert(!retiredCaptured.load(std::memory_order_acquire));
+  assert(ownerCapture.matches(racedAudio));
+
+  // The same exact-match rule protects a delayed sessionEnd control result
+  // from completing the next voice session.
+  const BleVoiceNotifyIdentity oldControl = notifyIdentity(
+      BleVoiceNotifyKind::control, 10, 2, 2, 201);
+  const BleVoiceNotifyIdentity newControl = notifyIdentity(
+      BleVoiceNotifyKind::control, 10, 3, 3, 202);
+  settlement.begin(newControl);
+  settlement.consume(notifyStatus(oldControl, true), 3, 3);
+  assert(!settlement.resolved);
+  settlement.consume(notifyStatus(newControl, true), 3, 3);
+  assert(settlement.resolved && settlement.accepted);
 
   // Capacity exhaustion is sticky and fail-closed. No later session event can
   // sneak through until the main owner explicitly resets the mailbox.
@@ -269,6 +401,19 @@ int main() {
   assert(overflow.overflowed());
   assert(!overflow.accepting());
   assert(!overflow.publish(event(BleVoiceCallbackEventType::disconnect, 7)));
+  // Admission stays closed until the separately latched physical disconnect
+  // confirms the exact overflowing connection generation. A stale disconnect
+  // with a reused connection handle cannot reopen it.
+  BleVoicePhysicalDisconnectLatch physicalDisconnect;
+  const BleVoiceConnectionEpoch overflowingEpoch{7, 70};
+  physicalDisconnect.observe(7, 69);
+  BleVoiceConnectionEpoch observedEpoch;
+  assert(physicalDisconnect.latest(observedEpoch));
+  assert(!observedEpoch.matches(overflowingEpoch));
+  assert(!overflow.accepting());
+  physicalDisconnect.observe(7, 70);
+  assert(physicalDisconnect.latest(observedEpoch));
+  assert(observedEpoch.matches(overflowingEpoch));
   assert(overflow.resetAfterOverflow());
   assert(!overflow.overflowed() && overflow.accepting());
   assert(overflow.publish(event(BleVoiceCallbackEventType::connect, 8)));

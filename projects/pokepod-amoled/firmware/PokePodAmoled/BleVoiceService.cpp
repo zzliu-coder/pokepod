@@ -8,6 +8,10 @@
 namespace pokepod {
 namespace {
 
+uintptr_t currentTaskToken() {
+  return reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle());
+}
+
 class ServerCallbacks final : public BLEServerCallbacks {
  public:
   explicit ServerCallbacks(BleVoiceService &owner) : owner_(owner) {}
@@ -81,7 +85,8 @@ class AudioCallbacks final : public BLECharacteristicCallbacks {
  public:
   explicit AudioCallbacks(BleVoiceService &owner) : owner_(owner) {}
   void onStatus(BLECharacteristic *, Status status, uint32_t) override {
-    owner_.handleNotifyStatus(status == Status::SUCCESS_NOTIFY);
+    owner_.handleNotifyStatus(status == Status::SUCCESS_NOTIFY,
+                              currentTaskToken());
   }
 
  private:
@@ -92,7 +97,8 @@ class ControlCallbacks final : public BLECharacteristicCallbacks {
  public:
   explicit ControlCallbacks(BleVoiceService &owner) : owner_(owner) {}
   void onStatus(BLECharacteristic *, Status status, uint32_t) override {
-    owner_.handleControlNotifyStatus(status == Status::SUCCESS_NOTIFY);
+    owner_.handleControlNotifyStatus(status == Status::SUCCESS_NOTIFY,
+                                     currentTaskToken());
   }
 
  private:
@@ -362,20 +368,38 @@ BleVoiceQualitySnapshot BleVoiceService::quality() const {
   return value;
 }
 
-void BleVoiceService::handleNotifyStatus(bool acceptedByHost) {
+void BleVoiceService::handleNotifyStatus(bool acceptedByHost,
+                                         uintptr_t callbackTask) {
   BleVoiceCallbackEvent event;
   event.type = BleVoiceCallbackEventType::audioNotifyStatus;
+  if (!notifyCallbackBinding_.capture(BleVoiceNotifyKind::audio,
+                                      callbackTask,
+                                      event.notifyIdentity)) {
+    return;
+  }
+  event.connectionId = event.notifyIdentity.connectionId;
+  event.connectionGeneration =
+      event.notifyIdentity.connectionGeneration;
   event.flag = acceptedByHost;
   event.occurredAtMs = millis();
-  publishCallbackEvent(event);
+  notifyStatusEvents_.publish(event);
 }
 
-void BleVoiceService::handleControlNotifyStatus(bool acceptedByHost) {
+void BleVoiceService::handleControlNotifyStatus(bool acceptedByHost,
+                                                uintptr_t callbackTask) {
   BleVoiceCallbackEvent event;
   event.type = BleVoiceCallbackEventType::controlNotifyStatus;
+  if (!notifyCallbackBinding_.capture(BleVoiceNotifyKind::control,
+                                      callbackTask,
+                                      event.notifyIdentity)) {
+    return;
+  }
+  event.connectionId = event.notifyIdentity.connectionId;
+  event.connectionGeneration =
+      event.notifyIdentity.connectionGeneration;
   event.flag = acceptedByHost;
   event.occurredAtMs = millis();
-  publishCallbackEvent(event);
+  notifyStatusEvents_.publish(event);
 }
 
 void BleVoiceService::handleDeviceInfoRead() {
@@ -391,24 +415,23 @@ bool BleVoiceService::publishCallbackEvent(
 }
 
 void BleVoiceService::drainCallbackEvents(uint32_t nowMs) {
-  if (callbackEvents_.overflowed()) {
-    uint16_t callbackConnectionId = kInvalidBleConnectionId;
-    BleVoiceCallbackEvent dropped;
-    while (callbackEvents_.take(dropped)) {
-      if (dropped.type == BleVoiceCallbackEventType::connect) {
-        callbackConnectionId = dropped.connectionId;
-      } else if (dropped.type == BleVoiceCallbackEventType::disconnect &&
-                 dropped.connectionId == callbackConnectionId) {
-        callbackConnectionId = kInvalidBleConnectionId;
-      }
-    }
+  if (callbackEvents_.overflowed() || notifyStatusEvents_.overflowed()) {
+    callbackEvents_.closeAdmission();
+    notifyStatusEvents_.closeAdmission();
     if (!callbackOverflowHandled_) {
       callbackOverflowHandled_ = true;
-      failClosedCallbackOverflow(nowMs, callbackConnectionId);
+      if (connectionPolicy_.hasCurrent()) {
+        callbackOverflowEpoch_.connectionId =
+            connectionPolicy_.currentConnectionId();
+        callbackOverflowEpoch_.generation = connectionGeneration_;
+      } else {
+        callbackOverflowEpoch_.connectionId = callbackSecurity_.connectionId();
+        callbackOverflowEpoch_.generation =
+            callbackSecurity_.connectionGeneration();
+      }
+      failClosedCallbackOverflow(nowMs, callbackOverflowEpoch_);
     }
-    if (callbackEvents_.resetAfterOverflow()) {
-      callbackOverflowHandled_ = false;
-    }
+    finishCallbackOverflowIfDisconnected(nowMs);
     return;
   }
 
@@ -419,6 +442,23 @@ void BleVoiceService::drainCallbackEvents(uint32_t nowMs) {
     ++consumed;
     if (callbackEvents_.overflowed()) break;
   }
+  if (callbackEvents_.overflowed()) {
+    drainCallbackEvents(nowMs);
+    return;
+  }
+  drainNotifyStatusEvents(nowMs);
+  if (notifyStatusEvents_.overflowed()) drainCallbackEvents(nowMs);
+}
+
+void BleVoiceService::drainNotifyStatusEvents(uint32_t nowMs) {
+  BleVoiceCallbackEvent event;
+  size_t consumed = 0;
+  while (consumed < kNotifyStatusEventCapacity &&
+         notifyStatusEvents_.take(event)) {
+    processCallbackEvent(event, nowMs);
+    ++consumed;
+    if (notifyStatusEvents_.overflowed()) break;
+  }
 }
 
 void BleVoiceService::processCallbackEvent(
@@ -428,30 +468,33 @@ void BleVoiceService::processCallbackEvent(
       : event.occurredAtMs;
   switch (event.type) {
     case BleVoiceCallbackEventType::connect:
-      processConnect(event.connectionId,
+      processConnect(event.connectionId, event.connectionGeneration,
                      event.peerAddressValid ? event.peerAddress : nullptr,
                      event.flag);
       break;
     case BleVoiceCallbackEventType::disconnect:
-      processDisconnect(event.connectionId, eventAtMs);
+      processDisconnect(event.connectionId,
+                        event.connectionGeneration, eventAtMs);
       break;
     case BleVoiceCallbackEventType::mtu:
-      processMtu(event.connectionId, event.value16);
+      processMtu(event.connectionId,
+                 event.connectionGeneration, event.value16);
       break;
     case BleVoiceCallbackEventType::command:
       processCommand(event.connectionId, event.data, event.dataLength,
-                     eventAtMs);
+                     event.connectionGeneration, eventAtMs);
       break;
     case BleVoiceCallbackEventType::authentication:
       processAuthentication(
           event.connectionId, event.flag,
-          event.peerAddressValid ? event.peerAddress : nullptr, eventAtMs);
+          event.peerAddressValid ? event.peerAddress : nullptr,
+          event.connectionGeneration, eventAtMs);
       break;
     case BleVoiceCallbackEventType::audioNotifyStatus:
-      processNotifyStatus(event.flag);
+      processNotifyStatus(event);
       break;
     case BleVoiceCallbackEventType::controlNotifyStatus:
-      processControlNotifyStatus(event.flag, eventAtMs);
+      processControlNotifyStatus(event, eventAtMs);
       break;
     case BleVoiceCallbackEventType::deviceInfoRead:
       processDeviceInfoRead();
@@ -462,29 +505,39 @@ void BleVoiceService::processCallbackEvent(
   }
 }
 
-void BleVoiceService::processNotifyStatus(bool acceptedByHost) {
-  portENTER_CRITICAL(&qualityMux_);
-  quality_.recordNotifyStatus(acceptedByHost);
-  portEXIT_CRITICAL(&qualityMux_);
-  if (audioNotifyPending_) {
-    audioNotifyAccepted_ = acceptedByHost;
-    audioNotifyResolved_ = true;
+void BleVoiceService::processNotifyStatus(
+    const BleVoiceCallbackEvent &event) {
+  if (!audioNotifyPending_ ||
+      !event.notifyIdentity.matches(audioNotifyIdentity_) ||
+      event.notifyIdentity.connectionGeneration != connectionGeneration_ ||
+      event.notifyIdentity.sessionGeneration != sessionGeneration_) {
+    return;
   }
+  portENTER_CRITICAL(&qualityMux_);
+  quality_.recordNotifyStatus(event.flag);
+  portEXIT_CRITICAL(&qualityMux_);
+  audioNotifyAccepted_ = event.flag;
+  audioNotifyResolved_ = true;
 }
 
-void BleVoiceService::processControlNotifyStatus(bool acceptedByHost,
-                                                 uint32_t nowMs) {
+void BleVoiceService::processControlNotifyStatus(
+    const BleVoiceCallbackEvent &event, uint32_t nowMs) {
+  if (!controlNotifyPending_ ||
+      !event.notifyIdentity.matches(controlNotifyIdentity_) ||
+      event.notifyIdentity.connectionGeneration != connectionGeneration_ ||
+      event.notifyIdentity.sessionGeneration != sessionGeneration_) {
+    return;
+  }
   portENTER_CRITICAL(&qualityMux_);
-  quality_.recordControlNotifyStatus(acceptedByHost);
+  quality_.recordControlNotifyStatus(event.flag);
   portEXIT_CRITICAL(&qualityMux_);
-  if (!controlNotifyPending_) return;
   const ControlNotifyPurpose purpose = controlNotifyPurpose_;
   clearControlNotify();
-  if (acceptedByHost && purpose == ControlNotifyPurpose::sessionEnd) {
+  if (event.flag && purpose == ControlNotifyPurpose::sessionEnd) {
     controller_.markSessionEndSent(nowMs);
     return;
   }
-  if (!acceptedByHost &&
+  if (!event.flag &&
       (purpose == ControlNotifyPurpose::sessionStart ||
        purpose == ControlNotifyPurpose::sessionEnd)) {
     failAudioNotify(VoiceSessionError::notifyFailed);
@@ -509,7 +562,7 @@ void BleVoiceService::poll(uint32_t nowMs) {
     if (connectionPolicy_.hasCurrent()) {
       const uint16_t connectionId = connectionPolicy_.currentConnectionId();
       if (server_ != nullptr) server_->disconnect(connectionId);
-      processDisconnect(connectionId, nowMs);
+      processDisconnect(connectionId, connectionGeneration_, nowMs);
     }
   }
   if (!controller_.poll(nowMs) &&
@@ -551,6 +604,8 @@ void BleVoiceService::poll(uint32_t nowMs) {
     portENTER_CRITICAL(&notifyMux_);
     audioNotifyPending_ = false;
     portEXIT_CRITICAL(&notifyMux_);
+    audioNotifyIdentity_ = {};
+    notifyCallbackBinding_.invalidate();
   }
 
   if (audioNotify_.accepted()) {
@@ -582,10 +637,16 @@ void BleVoiceService::poll(uint32_t nowMs) {
     audioNotifyResolved_ = false;
     audioNotifyAccepted_ = false;
     portEXIT_CRITICAL(&notifyMux_);
+    audioNotifyIdentity_ = nextNotifyIdentity(BleVoiceNotifyKind::audio);
+    if (!beginNotifyCallback(audioNotifyIdentity_)) {
+      failAudioNotify(VoiceSessionError::notifyFailed);
+      return;
+    }
     portENTER_CRITICAL(&qualityMux_);
     quality_.recordNotifyAttempt();
     portEXIT_CRITICAL(&qualityMux_);
     audio_->notify();
+    endNotifyCallback();
   }
   if (controller_.state() == VoiceSessionState::ending &&
       controller_.queuedFrames() == 0 &&
@@ -679,6 +740,8 @@ bool BleVoiceService::startSession(uint32_t sessionId, uint32_t nowMs,
       !controller_.begin(sessionId, nowMs, connected_, mtu_, router)) {
     return false;
   }
+  ++sessionGeneration_;
+  if (sessionGeneration_ == 0) ++sessionGeneration_;
   requestConnectionPowerMode(BleConnectionPowerMode::voice);
   resetAudioNotify();
   reportedError_ = VoiceSessionError::none;
@@ -723,11 +786,13 @@ void BleVoiceService::handleConnect(uint16_t connectionId,
   if (peerAddress != nullptr) {
     memcpy(event.peerAddress, peerAddress, sizeof(event.peerAddress));
   }
-  callbackSecurity_.observeConnect(connectionId, peerBonded);
+  callbackSecurity_.observeConnect(connectionId, peerBonded,
+                                   &event.connectionGeneration);
   publishCallbackEvent(event);
 }
 
 void BleVoiceService::processConnect(uint16_t connectionId,
+                                     uint32_t connectionGeneration,
                                      const uint8_t *peerAddress,
                                      bool peerBonded) {
   const BleConnectDecision decision = connectionPolicy_.connect(connectionId);
@@ -739,10 +804,16 @@ void BleVoiceService::processConnect(uint16_t connectionId,
     return;
   }
   if (decision == BleConnectDecision::alreadyCurrent) return;
+  if (connectionGeneration == 0) {
+    connectionPolicy_.disconnect(connectionId);
+    if (server_ != nullptr) server_->disconnect(connectionId);
+    return;
+  }
   connected_ = true;
   authenticated_ = false;
   appReady_ = false;
   connectionId_ = connectionId;
+  connectionGeneration_ = connectionGeneration;
   connectionPowerMode_ = BleConnectionPowerMode::voice;
   requestConnectionPowerMode(BleConnectionPowerMode::idle);
   currentPeerAddressValid_ = peerAddress != nullptr;
@@ -762,12 +833,24 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
   event.type = BleVoiceCallbackEventType::disconnect;
   event.connectionId = connectionId;
   event.occurredAtMs = millis();
-  callbackSecurity_.observeDisconnect(connectionId);
+  if (!callbackSecurity_.observeDisconnect(connectionId,
+                                           &event.connectionGeneration)) {
+    return;
+  }
+  physicalDisconnects_.observe(connectionId, event.connectionGeneration);
   publishCallbackEvent(event);
 }
 
 void BleVoiceService::processDisconnect(uint16_t connectionId,
+                                        uint32_t connectionGeneration,
                                         uint32_t nowMs) {
+  if (connectionGeneration == 0 ||
+      connectionGeneration != connectionGeneration_) {
+    if (log_ != nullptr) {
+      log_->println("{\"event\":\"ble_voice_stale_disconnect_ignored\"}");
+    }
+    return;
+  }
   if (!connectionPolicy_.disconnect(connectionId)) {
     if (log_ != nullptr) {
       log_->println("{\"event\":\"ble_voice_stale_disconnect_ignored\"}");
@@ -792,6 +875,7 @@ void BleVoiceService::processDisconnect(uint16_t connectionId,
   peerPolicy_.disconnected();
   mtu_ = 23;
   connectionId_ = 0;
+  connectionGeneration_ = 0;
   connectionPowerMode_ = BleConnectionPowerMode::idle;
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
@@ -825,13 +909,17 @@ void BleVoiceService::handleMtu(uint16_t connectionId, uint16_t mtu) {
   BleVoiceCallbackEvent event;
   event.type = BleVoiceCallbackEventType::mtu;
   event.connectionId = connectionId;
+  event.connectionGeneration = callbackSecurity_.generationFor(connectionId);
   event.value16 = mtu;
   event.occurredAtMs = millis();
   publishCallbackEvent(event);
 }
 
-void BleVoiceService::processMtu(uint16_t connectionId, uint16_t mtu) {
-  if (!connectionPolicy_.isCurrent(connectionId)) return;
+void BleVoiceService::processMtu(uint16_t connectionId,
+                                 uint32_t connectionGeneration,
+                                 uint16_t mtu) {
+  if (!connectionPolicy_.isCurrent(connectionId) ||
+      connectionGeneration != connectionGeneration_) return;
   mtu_ = mtu;
   if (log_ != nullptr) {
     log_->printf("{\"event\":\"ble_voice_mtu\",\"mtu\":%u,\"ready\":%s}\n",
@@ -844,6 +932,7 @@ void BleVoiceService::handleCommand(uint16_t connectionId,
   BleVoiceCallbackEvent event;
   event.type = BleVoiceCallbackEventType::command;
   event.connectionId = connectionId;
+  event.connectionGeneration = callbackSecurity_.generationFor(connectionId);
   event.occurredAtMs = millis();
   event.dataLength = length > UINT8_MAX ? UINT8_MAX
                                         : static_cast<uint8_t>(length);
@@ -857,8 +946,10 @@ void BleVoiceService::handleCommand(uint16_t connectionId,
 
 void BleVoiceService::processCommand(uint16_t connectionId,
                                      const uint8_t *bytes, size_t length,
+                                     uint32_t connectionGeneration,
                                      uint32_t nowMs) {
-  if (!connectionPolicy_.commandAllowed(connectionId)) {
+  if (!connectionPolicy_.commandAllowed(connectionId) ||
+      connectionGeneration != connectionGeneration_) {
     if (log_ != nullptr) {
       log_->println("{\"event\":\"ble_voice_stale_command_ignored\"}");
     }
@@ -920,7 +1011,11 @@ void BleVoiceService::handleAuthentication(uint16_t connectionId, bool success,
                                            const uint8_t *peerAddress) {
   BleVoiceCallbackEvent event;
   event.type = BleVoiceCallbackEventType::authentication;
-  event.connectionId = connectionId;
+  event.connectionId = connectionId == kInvalidBleConnectionId
+      ? callbackSecurity_.connectionId()
+      : connectionId;
+  event.connectionGeneration =
+      callbackSecurity_.generationFor(event.connectionId);
   event.flag = success;
   event.occurredAtMs = millis();
   event.peerAddressValid = peerAddress != nullptr;
@@ -933,11 +1028,13 @@ void BleVoiceService::handleAuthentication(uint16_t connectionId, bool success,
 void BleVoiceService::processAuthentication(uint16_t connectionId,
                                             bool success,
                                             const uint8_t *peerAddress,
+                                            uint32_t connectionGeneration,
                                             uint32_t nowMs) {
   if (connectionId == kInvalidBleConnectionId) {
     connectionId = connectionIdForPeer(peerAddress);
   }
   if (!connectionPolicy_.authenticationAllowed(connectionId) ||
+      connectionGeneration != connectionGeneration_ ||
       connectionIdForPeer(peerAddress) != connectionId) {
     if (log_ != nullptr) {
       log_->println("{\"event\":\"ble_voice_stale_auth_ignored\"}");
@@ -987,6 +1084,11 @@ bool BleVoiceService::notifyControl(BleVoiceEventType type, uint32_t sessionId,
   const size_t size = encodeBleVoiceControl(control, bytes, sizeof(bytes));
   if (size == 0) return false;
   event_->setValue(bytes, size);
+  controlNotifyIdentity_ = nextNotifyIdentity(BleVoiceNotifyKind::control);
+  if (!beginNotifyCallback(controlNotifyIdentity_)) {
+    controlNotifyIdentity_ = {};
+    return false;
+  }
   controlNotifyPending_ = true;
   controlNotifyStartedAtMs_ = millis();
   if (type == BleVoiceEventType::sessionStart) {
@@ -1002,25 +1104,55 @@ bool BleVoiceService::notifyControl(BleVoiceEventType type, uint32_t sessionId,
   quality_.recordControlNotifyAttempt();
   portEXIT_CRITICAL(&qualityMux_);
   event_->notify();
+  endNotifyCallback();
   // NimBLE may report host-queue acceptance synchronously from notify(). The
   // callback only enqueues that result; poll() resolves this pending control.
   return true;
 }
 
 void BleVoiceService::clearControlNotify() {
+  notifyCallbackBinding_.invalidate();
   controlNotifyPending_ = false;
   controlNotifyStartedAtMs_ = 0;
   controlNotifyPurpose_ = ControlNotifyPurpose::none;
+  controlNotifyIdentity_ = {};
 }
 
 void BleVoiceService::resetAudioNotify() {
+  notifyCallbackBinding_.invalidate();
   audioNotify_.reset();
+  audioNotifyIdentity_ = {};
   memset(&audioInFlightFrame_, 0, sizeof(audioInFlightFrame_));
   portENTER_CRITICAL(&notifyMux_);
   audioNotifyPending_ = false;
   audioNotifyResolved_ = false;
   audioNotifyAccepted_ = false;
   portEXIT_CRITICAL(&notifyMux_);
+}
+
+BleVoiceNotifyIdentity BleVoiceService::nextNotifyIdentity(
+    BleVoiceNotifyKind kind) {
+  BleVoiceNotifyIdentity identity;
+  if (!connectionPolicy_.hasCurrent() || connectionGeneration_ == 0) {
+    return identity;
+  }
+  ++notifyAttemptToken_;
+  if (notifyAttemptToken_ == 0) ++notifyAttemptToken_;
+  identity.kind = kind;
+  identity.connectionId = connectionPolicy_.currentConnectionId();
+  identity.connectionGeneration = connectionGeneration_;
+  identity.sessionGeneration = sessionGeneration_;
+  identity.attemptToken = notifyAttemptToken_;
+  return identity;
+}
+
+bool BleVoiceService::beginNotifyCallback(
+    const BleVoiceNotifyIdentity &identity) {
+  return notifyCallbackBinding_.begin(identity, currentTaskToken());
+}
+
+void BleVoiceService::endNotifyCallback() {
+  notifyCallbackBinding_.invalidate();
 }
 
 void BleVoiceService::failAudioNotify(VoiceSessionError error) {
@@ -1037,22 +1169,12 @@ void BleVoiceService::failAudioNotify(VoiceSessionError error) {
 }
 
 void BleVoiceService::failClosedCallbackOverflow(
-    uint32_t nowMs, uint16_t callbackConnectionId) {
+    uint32_t nowMs, const BleVoiceConnectionEpoch &epoch) {
   if (log_ != nullptr) {
     log_->println(
         "{\"event\":\"ble_voice_callback_overflow\",\"action\":\"disconnect\"}");
   }
-  uint16_t connectionId = callbackConnectionId;
-  if (connectionPolicy_.hasCurrent()) {
-    connectionId = connectionPolicy_.currentConnectionId();
-  }
-  if (connectionId != kInvalidBleConnectionId && server_ != nullptr) {
-    server_->disconnect(connectionId);
-  }
-  if (connectionPolicy_.hasCurrent()) {
-    processDisconnect(connectionPolicy_.currentConnectionId(), nowMs);
-    return;
-  }
+  notifyCallbackBinding_.invalidate();
   if (controller_.active()) {
     controller_.abort(VoiceSessionError::disconnected);
     reportedError_ = VoiceSessionError::disconnected;
@@ -1068,12 +1190,39 @@ void BleVoiceService::failClosedCallbackOverflow(
   connected_ = authenticated_ = appReady_ = false;
   peerPolicy_.disconnected();
   mtu_ = 23;
-  connectionId_ = 0;
   connectionPowerMode_ = BleConnectionPowerMode::idle;
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
-  callbackSecurity_.clearConnection();
   refreshCallbackSnapshot(nowMs);
+  if (epoch.valid() && server_ != nullptr) {
+    server_->disconnect(epoch.connectionId);
+  }
+}
+
+bool BleVoiceService::finishCallbackOverflowIfDisconnected(uint32_t nowMs) {
+  if (!callbackOverflowHandled_) return false;
+  bool confirmed = !callbackOverflowEpoch_.valid();
+  BleVoiceConnectionEpoch physicalDisconnect;
+  if (!confirmed && physicalDisconnects_.latest(physicalDisconnect)) {
+    confirmed = physicalDisconnect.matches(callbackOverflowEpoch_);
+  }
+  if (!confirmed) return false;
+
+  const BleVoiceConnectionEpoch closedEpoch = callbackOverflowEpoch_;
+  callbackEvents_.resetAfterOverflow();
+  notifyStatusEvents_.resetAfterOverflow();
+  callbackOverflowHandled_ = false;
+  callbackOverflowEpoch_ = {};
+
+  if (closedEpoch.valid() && connectionPolicy_.hasCurrent() &&
+      connectionPolicy_.currentConnectionId() == closedEpoch.connectionId &&
+      connectionGeneration_ == closedEpoch.generation) {
+    processDisconnect(closedEpoch.connectionId, closedEpoch.generation,
+                      nowMs);
+  } else if (!idlePaused_) {
+    restartAdvertising();
+  }
+  return true;
 }
 
 void BleVoiceService::refreshCallbackSnapshot(uint32_t nowMs) {
