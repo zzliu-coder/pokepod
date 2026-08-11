@@ -60,11 +60,15 @@ struct DeviceHealthState {
   bool pmu = false;
   bool audio = false;
   bool usb = false;
+  bool recorder = false;
+  bool bleVoice = false;
+  bool link = false;
+  bool wifi = false;
   bool fullTextFont = false;
 
   bool ready() const {
     return ioExpander && display && touch && sdCard && rtc && imu && pmu &&
-        audio && usb && fullTextFont;
+        audio && usb && recorder && bleVoice && link && wifi && fullTextFont;
   }
 };
 

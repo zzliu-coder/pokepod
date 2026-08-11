@@ -14,6 +14,7 @@
 #include "CapsuleLibrary.h"
 #include "CapsulePolicy.h"
 #include "CapsuleUndoState.h"
+#include "CapabilityRegistry.h"
 #include "Dashboard.h"
 #include "DeviceConfig.h"
 #include "ProvisioningPortal.h"
@@ -63,6 +64,7 @@ RaiseToWakePolicy raiseToWake;
 RuntimePowerManager runtimePower;
 AutoScreenOffPolicy autoScreenOff;
 LowBatteryShutdownPolicy lowBatteryShutdown;
+CapabilityRegistry capabilities;
 
 uint8_t audioBuffer[kAudioBytesPerChunk];
 TouchGestureTracker touchGesture;
@@ -257,6 +259,10 @@ void drawDashboard() {
   view.library = &capsuleLibrary;
   view.settings = &deviceConfig.settings();
   view.audioReady = audio.ready();
+  view.recorderReady = capabilities.ready(DeviceCapability::recording);
+  view.bleVoiceServiceReady = capabilities.ready(DeviceCapability::bleVoice);
+  view.linkReady = capabilities.ready(DeviceCapability::link);
+  view.wifiServiceReady = capabilities.ready(DeviceCapability::wifi);
   view.usbReady = usb.ready();
   view.usbConnected = usbCableConnected();
   view.bleVoiceConnected = bleVoice.connected();
@@ -306,6 +312,11 @@ void drawDashboard() {
 }
 
 bool startWirelessHold() {
+  if (!capabilities.allows(kBleVoiceCapabilities)) {
+    showMessage("无线语音服务未就绪");
+    drawDashboard();
+    return false;
+  }
   if (!bleVoice.appReady()) {
     showMessage(bleVoice.connected() ? "蓝牙连接质量不足" : "等待 Mac 应用");
     drawDashboard();
@@ -385,6 +396,8 @@ void toggleRecording() {
     consumeRecorderTerminal(true);
   } else if (tencentWorker.working()) {
     showMessage("当前胶囊正在转写");
+  } else if (!capabilities.allows(kRecordingCapabilities)) {
+    showMessage(board.sdReady() ? "录音服务未就绪" : "请插入 microSD 卡");
   } else if (!board.sdReady()) {
     showMessage("请插入 microSD 卡");
   } else if (!audio.ready()) {
@@ -614,6 +627,11 @@ void pollTouch() {
       dashboard.openProvisioningLog();
       drawDashboard();
     } else if (action == UiAction::wifiToggle) {
+      if (!capabilities.allows(kWifiCapabilities)) {
+        showMessage("Wi-Fi 服务未就绪");
+        drawDashboard();
+        return;
+      }
       if (wifiUiSwitchOn(wifi.phase())) {
         if (wirelessSync.openWindow()) wirelessSync.close();
         if (deviceConfig.setWifiEnabled(false, usb.log())) {
@@ -636,6 +654,11 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openBluetoothPairing) {
+      if (!capabilities.ready(DeviceCapability::bleVoice)) {
+        showMessage("蓝牙服务未就绪");
+        drawDashboard();
+        return;
+      }
       dashboard.openBluetoothPairing();
       drawDashboard();
     } else if (action == UiAction::toggleBluetoothPairing) {
@@ -661,6 +684,11 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openComputerSync) {
+      if (!capabilities.allows(kComputerSyncCapabilities)) {
+        showMessage("电脑同步服务未就绪");
+        drawDashboard();
+        return;
+      }
       if (computerSyncEntryDecision(wirelessSync.openWindow()) ==
           ComputerSyncEntryDecision::openAndNavigate) {
         wirelessSync.open(now);
@@ -675,6 +703,11 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {
+      if (!capabilities.allows(kWifiCapabilities)) {
+        showMessage("Wi-Fi 服务未就绪");
+        drawDashboard();
+        return;
+      }
       if (wirelessSync.openWindow()) wirelessSync.close();
       if (provisioningCoordinator.request(now)) {
         showMessage("正在准备配网热点");
@@ -836,6 +869,8 @@ void pollTouch() {
         if (audio.playing()) {
           audio.stopPlayback(usb.log());
           showMessage("已停止播放");
+        } else if (!capabilities.allows(kPlaybackCapabilities)) {
+          showMessage("播放服务未就绪");
         } else if (!captureRouter.available() || recorder.recording()) {
           showMessage("麦克风使用中，暂时无法播放");
         } else if (tencentWorker.working()) {
@@ -862,10 +897,18 @@ void setup() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
 
   board.begin(Serial);
+  const BoardStatus &bootBoard = board.status();
+  capabilities.record(DeviceCapability::display, bootBoard.display);
+  capabilities.record(DeviceCapability::touch, bootBoard.touch);
+  capabilities.record(DeviceCapability::storage, bootBoard.sdCard);
+  capabilities.record(DeviceCapability::rtc, bootBoard.rtc);
+  capabilities.record(DeviceCapability::imu, bootBoard.imu);
+  capabilities.record(DeviceCapability::pmu, bootBoard.pmu);
   beginTlsExternalMemory(Serial);
   provisioningDiagnostics.begin(
       Serial, static_cast<uint16_t>(esp_reset_reason()));
-  audio.begin(Serial);
+  const bool audioStarted = audio.begin(Serial);
+  capabilities.record(DeviceCapability::audio, audioStarted);
   const bool usbStarted = usb.begin(board.status().variant);
   runtimePower.begin(usb.log());
   const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();
@@ -875,18 +918,23 @@ void setup() {
       bootPower.ext1WakeMask, bootPower.automaticPmSupported,
       bootPower.bleModemSleepSupported, board.status().batteryPercent);
   const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
+  capabilities.record(DeviceCapability::bleVoice, bleStarted);
   deviceConfig.begin(usb.log());
   const bool syncIdentityStarted =
       wirelessSyncIdentity.begin(ESP.getEfuseMac(), usb.log());
-  if (board.sdReady() && recorder.begin(SD_MMC, usb.log())) {
+  bool recorderStarted = false;
+  if (board.sdReady() && (recorderStarted = recorder.begin(SD_MMC, usb.log()))) {
     recorder.recoverInterrupted(usb.log(), board.utcNow());
     capsuleLibrary.begin(SD_MMC, usb.log());
     tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
   }
-  wifi.begin(deviceConfig, usb.log());
+  capabilities.record(DeviceCapability::recording, recorderStarted);
+  const bool wifiStarted = wifi.begin(deviceConfig, usb.log());
+  capabilities.record(DeviceCapability::wifi, wifiStarted);
   provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
                                 provisioningDiagnostics, usb.log());
-  linkService.begin(usb.stream(), SD_MMC, board, audio, captureRouter,
+  const bool usbLinkStarted = linkService.begin(
+                    usb.stream(), SD_MMC, board, audio, captureRouter,
                     usb, bleVoice,
                     dashboard,
                     capsuleLibrary, recorder,
@@ -901,6 +949,14 @@ void setup() {
       provisioningDiagnostics, powerDiagnostics, runtimePower,
       wirelessSyncIdentity,
       linkCoordinator, usb.log());
+  capabilities.record(DeviceCapability::link,
+                      usbLinkStarted && syncIdentityStarted &&
+                          wifiSyncStarted);
+  usb.log().printf(
+      "{\"event\":\"boot_capabilities\",\"ready_mask\":%u,\"missing_mask\":%u,\"all_ready\":%s}\n",
+      static_cast<unsigned>(capabilities.readyMask()),
+      static_cast<unsigned>(capabilities.missingMask()),
+      capabilities.allReady() ? "true" : "false");
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
   if (provisioningDiagnostics.recoveredInterruptedSession()) {
     showMessage("上次配网被重启中断 · 见诊断", 5000);

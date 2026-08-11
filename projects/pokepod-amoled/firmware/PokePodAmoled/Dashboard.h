@@ -32,6 +32,10 @@ struct DashboardView {
   const CapsuleLibrary *library = nullptr;
   const DeviceSettings *settings = nullptr;
   bool audioReady = false;
+  bool recorderReady = false;
+  bool bleVoiceServiceReady = false;
+  bool linkReady = false;
+  bool wifiServiceReady = false;
   bool usbReady = false;
   bool usbConnected = false;
   bool bleVoiceConnected = false;

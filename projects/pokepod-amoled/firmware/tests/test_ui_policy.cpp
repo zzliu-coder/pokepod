@@ -53,8 +53,11 @@ int main() {
   assert(!isBackEdgeSwipe(0, ui::kTouchSwipeThreshold));
   assert(!isBackEdgeSwipe(200, 100));
 
-  DeviceHealthState health = {
-      true, true, true, true, true, true, true, true, true, true};
+  DeviceHealthState health;
+  health.ioExpander = health.display = health.touch = health.sdCard = true;
+  health.rtc = health.imu = health.pmu = health.audio = health.usb = true;
+  health.recorder = health.bleVoice = health.link = health.wifi = true;
+  health.fullTextFont = true;
   assert(health.ready());
   health.touch = false;
   assert(!health.ready());

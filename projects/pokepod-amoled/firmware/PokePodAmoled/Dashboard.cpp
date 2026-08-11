@@ -730,6 +730,10 @@ void Dashboard::drawDevice(const DashboardView &view) {
   health.pmu = view.board->pmu;
   health.audio = view.audioReady;
   health.usb = view.usbReady;
+  health.recorder = view.recorderReady;
+  health.bleVoice = view.bleVoiceServiceReady;
+  health.link = view.linkReady;
+  health.wifi = view.wifiServiceReady;
   health.fullTextFont = renderer_.sdFontReady();
   const String healthText = health.ready() ? "硬件正常" : "硬件需检查";
   const int16_t healthWidth = renderer_.measureTextWidth(healthText);
