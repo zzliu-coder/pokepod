@@ -25,7 +25,20 @@ assert "kRecorderStorageQueueFrames = 128" in storage_queue
 assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in wav
 assert '"pokepod_recorder_storage"' in wav
 assert "storageQueue_.push(data, length)" in wav
+assert "std::atomic<RecorderStopReason> automaticStopReason_" in wav_h
+assert "#if defined(ARDUINO_ARCH_ESP32)\n  if (!recording_ || data == nullptr)" in wav
+assert "#if defined(ARDUINO_ARCH_ESP32)\n  if (!recording_ || data == nullptr || length == 0" in wav
 assert "pollPeriodicCheckpoint" in wav
+public_poll = wav[
+    wav.index("bool WavRecorder::pollFinalize(Print"):
+    wav.index("void WavRecorder::resetSessionState")
+]
+assert "periodicCheckpointPhase_" not in public_poll
+assert "transactionRunner_.active()" not in wav_h[
+    wav_h.index("#if defined(ARDUINO_ARCH_ESP32)",
+                wav_h.index("bool operationActive() const")):
+    wav_h.index("#else", wav_h.index("bool operationActive() const"))
+]
 assert "storageStartRequested_.store(true" in wav
 assert "xSemaphoreTake(storageStartAck_" in wav
 assert "startStorageSession(*log)" in wav

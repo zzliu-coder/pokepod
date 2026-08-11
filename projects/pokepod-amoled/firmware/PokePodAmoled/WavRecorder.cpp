@@ -165,6 +165,7 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
   storageStartCancelled_.store(false, std::memory_order_release);
   storageStartSucceeded_.store(false, std::memory_order_release);
   while (xSemaphoreTake(storageStartAck_, 0) == pdTRUE) {}
+  const uint32_t startWaitBeganMs = millis();
   storageSessionActive_.store(true, std::memory_order_release);
   storageStartRequested_.store(true, std::memory_order_release);
   xTaskNotifyGive(storageTask_);
@@ -175,7 +176,12 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
         "{\"event\":\"recording_error\",\"stage\":\"storage_start_timeout\"}");
     return false;
   }
-  return storageStartSucceeded_.load(std::memory_order_acquire);
+  const bool started = storageStartSucceeded_.load(std::memory_order_acquire);
+  log.printf(
+      "{\"event\":\"recording_storage_start_ack\",\"ok\":%s,\"latency_ms\":%lu}\n",
+      started ? "true" : "false",
+      static_cast<unsigned long>(millis() - startWaitBeganMs));
+  return started;
 #else
   return startStorageSession(log);
 #endif
@@ -265,7 +271,11 @@ bool WavRecorder::startStorageSession(Print &log) {
 }
 
 bool WavRecorder::append(const uint8_t *data, size_t length, Print &log) {
+#if defined(ARDUINO_ARCH_ESP32)
+  if (!recording_ || data == nullptr) return false;
+#else
   if (!recording_ || !file_ || data == nullptr) return false;
+#endif
   uint8_t mono[AudioFrontEnd::kSelectionReplayOutputBytes];
   size_t offset = 0;
   while (offset + 4 <= length) {
@@ -309,10 +319,17 @@ bool WavRecorder::appendMono16(const int16_t *samples, size_t sampleCount,
 bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
                                   Print &log) {
   if (automaticStopRequested_) return true;
+#if defined(ARDUINO_ARCH_ESP32)
+  if (!recording_ || data == nullptr || length == 0 ||
+      (length & 1U) != 0) {
+    return false;
+  }
+#else
   if (!recording_ || !file_ || data == nullptr || length == 0 ||
       (length & 1U) != 0) {
     return false;
   }
+#endif
 #if defined(ARDUINO_ARCH_ESP32)
   const uint32_t accepted = acceptedDataBytes_.load(std::memory_order_acquire);
   if (accepted >= kMaximumRecordingAudioBytes) return false;
@@ -483,10 +500,11 @@ void WavRecorder::completeFinalize(Print &log) {
              static_cast<unsigned long>(audio.maximumGainQ12));
 #if defined(ARDUINO_ARCH_ESP32)
   log.printf(
-      "{\"event\":\"recording_storage_queue\",\"high_water_frames\":%u,\"dropped_frames\":%lu,\"capacity_frames\":%u}\n",
+      "{\"event\":\"recording_storage_queue\",\"high_water_frames\":%u,\"dropped_frames\":%lu,\"capacity_frames\":%u,\"task_stack_high_water_words\":%u}\n",
       static_cast<unsigned>(storageQueue_.highWater()),
       static_cast<unsigned long>(storageQueue_.dropped()),
-      static_cast<unsigned>(kRecorderStorageQueueFrames));
+      static_cast<unsigned>(kRecorderStorageQueueFrames),
+      static_cast<unsigned>(uxTaskGetStackHighWaterMark(storageTask_)));
 #endif
   finalizeStopReason_ = RecorderStopReason::none;
   storageReservation_.release();
@@ -1145,7 +1163,6 @@ bool WavRecorder::pollFinalize(Print &log, uint32_t nowMs,
   if (bootRecoveryPending_) {
     return pollStorage(log, nowMs, nullptr);
   }
-  storageLog_ = &log;
   storageNowMs_.store(nowMs, std::memory_order_release);
   if (operationOwner_.load(std::memory_order_acquire) ==
       RecorderOperationOwner::linkWifi) {
@@ -1155,8 +1172,8 @@ bool WavRecorder::pollFinalize(Print &log, uint32_t nowMs,
     }
   }
   if (recording_ || finalizePending_ || cleanupPending_ ||
-      !storageQueue_.empty() ||
-      periodicCheckpointPhase_ != PeriodicCheckpointPhase::idle) {
+      storageSessionActive_.load(std::memory_order_acquire) ||
+      storageStartRequested_.load(std::memory_order_acquire)) {
     storageSessionActive_.store(true, std::memory_order_release);
     xTaskNotifyGive(storageTask_);
     return false;

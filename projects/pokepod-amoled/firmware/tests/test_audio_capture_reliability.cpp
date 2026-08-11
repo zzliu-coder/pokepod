@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #include <array>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 #include "AudioCaptureRing.h"
@@ -105,6 +107,31 @@ int main() {
   }
   assert(!storageQueue.push(monoFrame, sizeof(monoFrame)));
   assert(storageQueue.dropped() == 1U);
+
+  // Exercise the actual SPSC publication boundary from two host threads.
+  storageQueue.reset();
+  std::atomic<uint32_t> consumed{0};
+  std::thread storageOwner([&]() {
+    RecorderStorageFrame queued;
+    while (consumed.load(std::memory_order_acquire) < 50U) {
+      if (storageQueue.pop(queued)) {
+        assert(queued.length == sizeof(monoFrame));
+        consumed.fetch_add(1, std::memory_order_release);
+      } else {
+        std::this_thread::yield();
+      }
+    }
+  });
+  uint32_t concurrentUiTicks = 0;
+  for (uint32_t frame = 0; frame < 50U; ++frame) {
+    while (!storageQueue.push(monoFrame, sizeof(monoFrame))) {
+      std::this_thread::yield();
+    }
+    ++concurrentUiTicks;
+  }
+  storageOwner.join();
+  assert(concurrentUiTicks == 50U);
+  assert(consumed.load(std::memory_order_acquire) == 50U);
 
   AudioCaptureRing<2> ring;
   ring.resetSession(41);

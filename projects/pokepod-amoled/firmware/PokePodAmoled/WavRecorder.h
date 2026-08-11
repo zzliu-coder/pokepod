@@ -54,17 +54,22 @@ class WavRecorder {
   bool recording() const { return recording_; }
   bool finalizing() const { return finalizePending_; }
   bool operationActive() const {
-    return recording_ || automaticStopRequested_ || finalizePending_ ||
-        cleanupPending_ || bootRecoveryPending_ || transactionRunner_.active()
 #if defined(ARDUINO_ARCH_ESP32)
-        || storageSessionActive_.load(std::memory_order_acquire) ||
+    // UI/power code reads only atomics shared by the storage task. Runner and
+    // checkpoint phases remain private to their owning task.
+    return recording_ || automaticStopRequested_ || finalizePending_ ||
+        cleanupPending_ || bootRecoveryPending_ ||
+        storageSessionActive_.load(std::memory_order_acquire) ||
         storageStartRequested_.load(std::memory_order_acquire)
-#endif
         ;
+#else
+    return recording_ || automaticStopRequested_ || finalizePending_ ||
+        cleanupPending_ || bootRecoveryPending_ || transactionRunner_.active();
+#endif
   }
   bool stopRequested() const { return automaticStopRequested_; }
   RecorderStopReason requestedStopReason() const {
-    return automaticStopReason_;
+    return automaticStopReason_.load(std::memory_order_acquire);
   }
   RecorderOperationOwner operationOwner() const { return operationOwner_; }
   bool ownedBy(RecorderOperationOwner owner) const {
@@ -285,7 +290,8 @@ class WavRecorder {
   RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;
   uint8_t finalizePrimitiveFailures_ = 0;
   std::atomic<bool> automaticStopRequested_{false};
-  RecorderStopReason automaticStopReason_ = RecorderStopReason::none;
+  std::atomic<RecorderStopReason> automaticStopReason_{
+      RecorderStopReason::none};
   std::atomic<bool> cleanupPending_{false};
   CleanupPhase cleanupPhase_ = CleanupPhase::idle;
   uint8_t cleanupPrimitiveFailures_ = 0;
