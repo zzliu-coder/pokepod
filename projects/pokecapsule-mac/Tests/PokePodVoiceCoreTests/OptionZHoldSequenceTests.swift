@@ -4,15 +4,32 @@ import XCTest
 final class OptionZHoldSequenceTests: XCTestCase {
     func testPressUsesPhysicalLeftOptionBeforeZ() {
         XCTAssertEqual(OptionZHoldSequence.press, [
-            .init(virtualKey: 58, keyDown: true, alternateDown: true),
-            .init(virtualKey: 6, keyDown: true, alternateDown: true),
+            .init(
+                virtualKey: 58,
+                keyDown: true,
+                alternateDown: true,
+                leftAlternateDown: true),
+            .init(
+                virtualKey: 6,
+                keyDown: true,
+                alternateDown: true,
+                leftAlternateDown: true),
         ])
+        XCTAssertEqual(OptionZHoldSequence.leftAlternateDeviceMask, 0x20)
     }
 
     func testReleaseLiftsZBeforeLeftOption() {
         XCTAssertEqual(OptionZHoldSequence.release, [
-            .init(virtualKey: 6, keyDown: false, alternateDown: true),
-            .init(virtualKey: 58, keyDown: false, alternateDown: false),
+            .init(
+                virtualKey: 6,
+                keyDown: false,
+                alternateDown: true,
+                leftAlternateDown: true),
+            .init(
+                virtualKey: 58,
+                keyDown: false,
+                alternateDown: false,
+                leftAlternateDown: false),
         ])
     }
 }

@@ -41,7 +41,11 @@ final class ShortcutController {
             virtualKey: CGKeyCode(transition.virtualKey),
             keyDown: transition.keyDown
         ) else { return false }
-        event.flags = transition.alternateDown ? .maskAlternate : []
+        var rawFlags = transition.alternateDown ? CGEventFlags.maskAlternate.rawValue : 0
+        if transition.leftAlternateDown {
+            rawFlags |= OptionZHoldSequence.leftAlternateDeviceMask
+        }
+        event.flags = CGEventFlags(rawValue: rawFlags)
         event.setIntegerValueField(.keyboardEventAutorepeat, value: 0)
         event.post(tap: .cghidEventTap)
         return true
