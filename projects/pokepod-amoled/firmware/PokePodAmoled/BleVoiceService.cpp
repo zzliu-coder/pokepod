@@ -17,7 +17,8 @@ class ServerCallbacks final : public BLEServerCallbacks {
     owner_.handleConnect(param == nullptr ? kInvalidBleConnectionId
                                           : param->connect.conn_id,
                          param == nullptr ? nullptr
-                                          : param->connect.remote_bda);
+                                          : param->connect.remote_bda,
+                         false);
   }
   void onDisconnect(BLEServer *, esp_ble_gatts_cb_param_t *param) override {
     owner_.handleDisconnect(param == nullptr ? kInvalidBleConnectionId
@@ -33,7 +34,8 @@ class ServerCallbacks final : public BLEServerCallbacks {
     owner_.handleConnect(desc == nullptr ? kInvalidBleConnectionId
                                          : desc->conn_handle,
                          desc == nullptr ? nullptr
-                                         : desc->peer_id_addr.val);
+                                         : desc->peer_id_addr.val,
+                         desc != nullptr && desc->sec_state.bonded);
   }
   void onDisconnect(BLEServer *, ble_gap_conn_desc *desc) override {
     owner_.handleDisconnect(desc == nullptr ? kInvalidBleConnectionId
@@ -109,24 +111,24 @@ class DeviceInfoCallbacks final : public BLECharacteristicCallbacks {
 class SecurityCallbacks final : public BLESecurityCallbacks {
  public:
   explicit SecurityCallbacks(BleVoiceService &owner) : owner_(owner) {}
-  uint32_t onPassKeyRequest() override { return owner_.passkey(); }
+  uint32_t onPassKeyRequest() override { return owner_.callbackPasskey(); }
   void onPassKeyNotify(uint32_t passkey) override {
     owner_.handlePasskey(passkey);
   }
   bool onSecurityRequest() override {
-    return owner_.securityAllowed(millis());
+    return owner_.callbackSecurityAllowed();
   }
   bool onConfirmPIN(uint32_t pin) override {
     owner_.handlePasskey(pin);
-    return owner_.securityAllowed(millis());
+    return owner_.callbackSecurityAllowed();
   }
   bool onAuthorizationRequest(uint16_t connectionId, uint16_t, bool) override {
-    return owner_.authorizationAllowed(connectionId, millis());
+    return owner_.callbackAuthorizationAllowed(connectionId);
   }
 #if defined(CONFIG_BLUEDROID_ENABLED)
   void onAuthenticationComplete(esp_ble_auth_cmpl_t result) override {
-    owner_.handleAuthentication(owner_.connectionIdForPeer(result.bd_addr),
-                                result.success, result.bd_addr);
+    owner_.handleAuthentication(kInvalidBleConnectionId, result.success,
+                                result.bd_addr);
   }
 #elif defined(CONFIG_NIMBLE_ENABLED)
   void onAuthenticationComplete(ble_gap_conn_desc *desc) override {
@@ -259,6 +261,7 @@ bool BleVoiceService::begin(const String &deviceId, Print &log) {
   BLESecurity::setPassKey(true, passkey_);
   BLESecurity::regenPassKeyOnConnect(true);
   bonded_ = hasBond();
+  refreshCallbackSnapshot(millis());
 
   server_ = BLEDevice::createServer();
   if (server_ == nullptr) return false;
@@ -360,31 +363,155 @@ BleVoiceQualitySnapshot BleVoiceService::quality() const {
 }
 
 void BleVoiceService::handleNotifyStatus(bool acceptedByHost) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::audioNotifyStatus;
+  event.flag = acceptedByHost;
+  event.occurredAtMs = millis();
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::handleControlNotifyStatus(bool acceptedByHost) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::controlNotifyStatus;
+  event.flag = acceptedByHost;
+  event.occurredAtMs = millis();
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::handleDeviceInfoRead() {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::deviceInfoRead;
+  event.occurredAtMs = millis();
+  publishCallbackEvent(event);
+}
+
+bool BleVoiceService::publishCallbackEvent(
+    const BleVoiceCallbackEvent &event) {
+  return callbackEvents_.publish(event);
+}
+
+void BleVoiceService::drainCallbackEvents(uint32_t nowMs) {
+  if (callbackEvents_.overflowed()) {
+    uint16_t callbackConnectionId = kInvalidBleConnectionId;
+    BleVoiceCallbackEvent dropped;
+    while (callbackEvents_.take(dropped)) {
+      if (dropped.type == BleVoiceCallbackEventType::connect) {
+        callbackConnectionId = dropped.connectionId;
+      } else if (dropped.type == BleVoiceCallbackEventType::disconnect &&
+                 dropped.connectionId == callbackConnectionId) {
+        callbackConnectionId = kInvalidBleConnectionId;
+      }
+    }
+    if (!callbackOverflowHandled_) {
+      callbackOverflowHandled_ = true;
+      failClosedCallbackOverflow(nowMs, callbackConnectionId);
+    }
+    if (callbackEvents_.resetAfterOverflow()) {
+      callbackOverflowHandled_ = false;
+    }
+    return;
+  }
+
+  BleVoiceCallbackEvent event;
+  size_t consumed = 0;
+  while (consumed < kCallbackEventCapacity && callbackEvents_.take(event)) {
+    processCallbackEvent(event, nowMs);
+    ++consumed;
+    if (callbackEvents_.overflowed()) break;
+  }
+}
+
+void BleVoiceService::processCallbackEvent(
+    const BleVoiceCallbackEvent &event, uint32_t nowMs) {
+  const uint32_t eventAtMs = event.occurredAtMs == 0
+      ? nowMs
+      : event.occurredAtMs;
+  switch (event.type) {
+    case BleVoiceCallbackEventType::connect:
+      processConnect(event.connectionId,
+                     event.peerAddressValid ? event.peerAddress : nullptr,
+                     event.flag);
+      break;
+    case BleVoiceCallbackEventType::disconnect:
+      processDisconnect(event.connectionId, eventAtMs);
+      break;
+    case BleVoiceCallbackEventType::mtu:
+      processMtu(event.connectionId, event.value16);
+      break;
+    case BleVoiceCallbackEventType::command:
+      processCommand(event.connectionId, event.data, event.dataLength,
+                     eventAtMs);
+      break;
+    case BleVoiceCallbackEventType::authentication:
+      processAuthentication(
+          event.connectionId, event.flag,
+          event.peerAddressValid ? event.peerAddress : nullptr, eventAtMs);
+      break;
+    case BleVoiceCallbackEventType::audioNotifyStatus:
+      processNotifyStatus(event.flag);
+      break;
+    case BleVoiceCallbackEventType::controlNotifyStatus:
+      processControlNotifyStatus(event.flag, eventAtMs);
+      break;
+    case BleVoiceCallbackEventType::deviceInfoRead:
+      processDeviceInfoRead();
+      break;
+    case BleVoiceCallbackEventType::passkey:
+      processPasskey(event.value32);
+      break;
+  }
+}
+
+void BleVoiceService::processNotifyStatus(bool acceptedByHost) {
   portENTER_CRITICAL(&qualityMux_);
   quality_.recordNotifyStatus(acceptedByHost);
   portEXIT_CRITICAL(&qualityMux_);
-  portENTER_CRITICAL(&notifyMux_);
   if (audioNotifyPending_) {
     audioNotifyAccepted_ = acceptedByHost;
     audioNotifyResolved_ = true;
   }
-  portEXIT_CRITICAL(&notifyMux_);
 }
 
-void BleVoiceService::handleControlNotifyStatus(bool acceptedByHost) {
+void BleVoiceService::processControlNotifyStatus(bool acceptedByHost,
+                                                 uint32_t nowMs) {
   portENTER_CRITICAL(&qualityMux_);
   quality_.recordControlNotifyStatus(acceptedByHost);
   portEXIT_CRITICAL(&qualityMux_);
-  controlNotifyAccepted_ = acceptedByHost;
-  controlNotifyResolved_ = true;
+  if (!controlNotifyPending_) return;
+  const ControlNotifyPurpose purpose = controlNotifyPurpose_;
+  clearControlNotify();
+  if (acceptedByHost && purpose == ControlNotifyPurpose::sessionEnd) {
+    controller_.markSessionEndSent(nowMs);
+    return;
+  }
+  if (!acceptedByHost &&
+      (purpose == ControlNotifyPurpose::sessionStart ||
+       purpose == ControlNotifyPurpose::sessionEnd)) {
+    failAudioNotify(VoiceSessionError::notifyFailed);
+    return;
+  }
 }
 
-void BleVoiceService::handleDeviceInfoRead() {
+void BleVoiceService::processDeviceInfoRead() {
   updateDeviceInfo();
 }
 
 void BleVoiceService::poll(uint32_t nowMs) {
+  drainCallbackEvents(nowMs);
   if (pairingUntilMs_ != 0 && !pairingMode(nowMs)) pairingUntilMs_ = 0;
+  refreshCallbackSnapshot(nowMs);
+  if (controlNotifyPending_ &&
+      nowMs - controlNotifyStartedAtMs_ >= kControlNotifyTimeoutMs) {
+    clearControlNotify();
+    portENTER_CRITICAL(&qualityMux_);
+    quality_.recordControlNotifyStatus(false);
+    portEXIT_CRITICAL(&qualityMux_);
+    if (connectionPolicy_.hasCurrent()) {
+      const uint16_t connectionId = connectionPolicy_.currentConnectionId();
+      if (server_ != nullptr) server_->disconnect(connectionId);
+      processDisconnect(connectionId, nowMs);
+    }
+  }
   if (!controller_.poll(nowMs) &&
       controller_.error() != reportedError_) {
     reportedError_ = controller_.error();
@@ -462,11 +589,10 @@ void BleVoiceService::poll(uint32_t nowMs) {
   }
   if (controller_.state() == VoiceSessionState::ending &&
       controller_.queuedFrames() == 0 &&
-      audioNotify_.snapshot().state == BleNotifyInFlightState::idle) {
+      audioNotify_.snapshot().state == BleNotifyInFlightState::idle &&
+      !controlNotifyPending_) {
     const uint32_t sessionId = controller_.sessionId();
-    if (notifyControl(BleVoiceEventType::sessionEnd, sessionId)) {
-      controller_.markSessionEndSent(nowMs);
-    }
+    notifyControl(BleVoiceEventType::sessionEnd, sessionId);
   }
 }
 
@@ -486,12 +612,14 @@ void BleVoiceService::activatePairingMode(uint32_t nowMs) {
   pairingUntilMs_ = nowMs + 120000;
   passkey_ = BLESecurity::generateRandomPassKey();
   BLESecurity::setPassKey(true, passkey_);
+  refreshCallbackSnapshot(nowMs);
   restartAdvertising();
 }
 
 void BleVoiceService::cancelPairingMode() {
   pairingUntilMs_ = 0;
   connectionPolicy_.cancelPairingRequest();
+  refreshCallbackSnapshot(millis());
   if (!bonded_ && connected_ && server_ != nullptr) {
     server_->disconnect(connectionPolicy_.currentConnectionId());
   }
@@ -506,6 +634,7 @@ void BleVoiceService::forgetMac() {
   appReady_ = authenticated_ = false;
   pairingUntilMs_ = 0;
   connectionPolicy_.cancelPairingRequest();
+  refreshCallbackSnapshot(millis());
   if (server_ != nullptr && connected_) {
     server_->disconnect(connectionPolicy_.currentConnectionId());
   }
@@ -540,6 +669,8 @@ void BleVoiceService::prepareForDeepSleep() {
   }
   BLEDevice::deinit(false);
   connected_ = authenticated_ = appReady_ = false;
+  callbackSecurity_.clearConnection();
+  refreshCallbackSnapshot(millis());
 }
 
 bool BleVoiceService::startSession(uint32_t sessionId, uint32_t nowMs,
@@ -581,7 +712,24 @@ void BleVoiceService::abortSession(VoiceSessionError error) {
 }
 
 void BleVoiceService::handleConnect(uint16_t connectionId,
-                                    const uint8_t *peerAddress) {
+                                    const uint8_t *peerAddress,
+                                    bool peerBonded) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::connect;
+  event.connectionId = connectionId;
+  event.occurredAtMs = millis();
+  event.flag = peerBonded;
+  event.peerAddressValid = peerAddress != nullptr;
+  if (peerAddress != nullptr) {
+    memcpy(event.peerAddress, peerAddress, sizeof(event.peerAddress));
+  }
+  callbackSecurity_.observeConnect(connectionId, peerBonded);
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::processConnect(uint16_t connectionId,
+                                     const uint8_t *peerAddress,
+                                     bool peerBonded) {
   const BleConnectDecision decision = connectionPolicy_.connect(connectionId);
   if (decision == BleConnectDecision::rejectSecondary) {
     if (log_ != nullptr) {
@@ -603,16 +751,28 @@ void BleVoiceService::handleConnect(uint16_t connectionId,
   } else {
     memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
   }
-  peerPolicy_.connected(isBondedPeer(peerAddress));
+  peerPolicy_.connected(peerBonded || isBondedPeer(peerAddress));
   mtu_ = 23;
+  refreshCallbackSnapshot(millis());
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_connected\"}");
 }
 
 void BleVoiceService::handleDisconnect(uint16_t connectionId) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::disconnect;
+  event.connectionId = connectionId;
+  event.occurredAtMs = millis();
+  callbackSecurity_.observeDisconnect(connectionId);
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::processDisconnect(uint16_t connectionId,
+                                        uint32_t nowMs) {
   if (!connectionPolicy_.disconnect(connectionId)) {
     if (log_ != nullptr) {
       log_->println("{\"event\":\"ble_voice_stale_disconnect_ignored\"}");
     }
+    if (!connected_ && !idlePaused_) restartAdvertising();
     return;
   }
   const bool startPairing = connectionPolicy_.consumePairingAfterDisconnect();
@@ -627,6 +787,7 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
     reportedError_ = VoiceSessionError::none;
   }
   resetAudioNotify();
+  clearControlNotify();
   connected_ = authenticated_ = appReady_ = false;
   peerPolicy_.disconnected();
   mtu_ = 23;
@@ -634,9 +795,11 @@ void BleVoiceService::handleDisconnect(uint16_t connectionId) {
   connectionPowerMode_ = BleConnectionPowerMode::idle;
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
+  callbackSecurity_.clearConnection();
+  refreshCallbackSnapshot(nowMs);
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_disconnected\"}");
   if (startPairing) {
-    activatePairingMode(millis());
+    activatePairingMode(nowMs);
   } else if (!idlePaused_) {
     restartAdvertising();
   }
@@ -659,6 +822,15 @@ void BleVoiceService::requestConnectionPowerMode(
 }
 
 void BleVoiceService::handleMtu(uint16_t connectionId, uint16_t mtu) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::mtu;
+  event.connectionId = connectionId;
+  event.value16 = mtu;
+  event.occurredAtMs = millis();
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::processMtu(uint16_t connectionId, uint16_t mtu) {
   if (!connectionPolicy_.isCurrent(connectionId)) return;
   mtu_ = mtu;
   if (log_ != nullptr) {
@@ -669,6 +841,23 @@ void BleVoiceService::handleMtu(uint16_t connectionId, uint16_t mtu) {
 
 void BleVoiceService::handleCommand(uint16_t connectionId,
                                     const uint8_t *bytes, size_t length) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::command;
+  event.connectionId = connectionId;
+  event.occurredAtMs = millis();
+  event.dataLength = length > UINT8_MAX ? UINT8_MAX
+                                        : static_cast<uint8_t>(length);
+  const size_t copyLength =
+      length < sizeof(event.data) ? length : sizeof(event.data);
+  if (bytes != nullptr && copyLength != 0) {
+    memcpy(event.data, bytes, copyLength);
+  }
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::processCommand(uint16_t connectionId,
+                                     const uint8_t *bytes, size_t length,
+                                     uint32_t nowMs) {
   if (!connectionPolicy_.commandAllowed(connectionId)) {
     if (log_ != nullptr) {
       log_->println("{\"event\":\"ble_voice_stale_command_ignored\"}");
@@ -676,7 +865,7 @@ void BleVoiceService::handleCommand(uint16_t connectionId,
     return;
   }
   if (!peerPolicy_.commandAllowed(connected_, authenticated_,
-                                  pairingMode(millis()))) {
+                                  pairingMode(nowMs))) {
     if (log_ != nullptr) {
       log_->println("{\"event\":\"ble_voice_command_rejected\",\"reason\":\"unauthorized_peer\"}");
     }
@@ -694,7 +883,7 @@ void BleVoiceService::handleCommand(uint16_t connectionId,
       appReady_ = authenticated_ && mtuReady();
       notifyControl(BleVoiceEventType::status, 0, appReady_ ? 1 : 2);
     } else {
-      controller_.markReady(command.sessionId, millis());
+      controller_.markReady(command.sessionId, nowMs);
     }
   } else if (type == BleVoiceCommandType::reject && command.code == 100) {
     forgetMac();
@@ -713,6 +902,7 @@ void BleVoiceService::handleCommand(uint16_t connectionId,
     notifyControl(BleVoiceEventType::status, command.sessionId,
                   appReady_ ? 1 : 2);
   }
+  refreshCallbackSnapshot(nowMs);
 }
 
 uint16_t BleVoiceService::connectionIdForPeer(
@@ -728,6 +918,25 @@ uint16_t BleVoiceService::connectionIdForPeer(
 
 void BleVoiceService::handleAuthentication(uint16_t connectionId, bool success,
                                            const uint8_t *peerAddress) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::authentication;
+  event.connectionId = connectionId;
+  event.flag = success;
+  event.occurredAtMs = millis();
+  event.peerAddressValid = peerAddress != nullptr;
+  if (peerAddress != nullptr) {
+    memcpy(event.peerAddress, peerAddress, sizeof(event.peerAddress));
+  }
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::processAuthentication(uint16_t connectionId,
+                                            bool success,
+                                            const uint8_t *peerAddress,
+                                            uint32_t nowMs) {
+  if (connectionId == kInvalidBleConnectionId) {
+    connectionId = connectionIdForPeer(peerAddress);
+  }
   if (!connectionPolicy_.authenticationAllowed(connectionId) ||
       connectionIdForPeer(peerAddress) != connectionId) {
     if (log_ != nullptr) {
@@ -735,7 +944,7 @@ void BleVoiceService::handleAuthentication(uint16_t connectionId, bool success,
     }
     return;
   }
-  const bool allowed = success && securityAllowed(millis());
+  const bool allowed = success && securityAllowed(nowMs);
   authenticated_ = allowed;
   if (allowed) {
     retainOnlyBond(peerAddress);
@@ -744,6 +953,7 @@ void BleVoiceService::handleAuthentication(uint16_t connectionId, bool success,
     pairingUntilMs_ = 0;
   }
   if (!allowed && server_ != nullptr) server_->disconnect(connectionId);
+  refreshCallbackSnapshot(nowMs);
   if (log_ != nullptr) {
     log_->printf("{\"event\":\"ble_voice_auth\",\"ok\":%s}\n",
                  allowed ? "true" : "false");
@@ -751,7 +961,16 @@ void BleVoiceService::handleAuthentication(uint16_t connectionId, bool success,
 }
 
 void BleVoiceService::handlePasskey(uint32_t passkey) {
+  BleVoiceCallbackEvent event;
+  event.type = BleVoiceCallbackEventType::passkey;
+  event.value32 = passkey;
+  event.occurredAtMs = millis();
+  publishCallbackEvent(event);
+}
+
+void BleVoiceService::processPasskey(uint32_t passkey) {
   passkey_ = passkey;
+  refreshCallbackSnapshot(millis());
   if (log_ != nullptr) {
     log_->println("{\"event\":\"ble_voice_passkey_updated\"}");
   }
@@ -759,7 +978,7 @@ void BleVoiceService::handlePasskey(uint32_t passkey) {
 
 bool BleVoiceService::notifyControl(BleVoiceEventType type, uint32_t sessionId,
                                     uint16_t code) {
-  if (!connected_ || event_ == nullptr) return false;
+  if (!connected_ || event_ == nullptr || controlNotifyPending_) return false;
   BleVoiceControl control;
   control.type = static_cast<uint8_t>(type);
   control.sessionId = sessionId;
@@ -768,15 +987,30 @@ bool BleVoiceService::notifyControl(BleVoiceEventType type, uint32_t sessionId,
   const size_t size = encodeBleVoiceControl(control, bytes, sizeof(bytes));
   if (size == 0) return false;
   event_->setValue(bytes, size);
-  controlNotifyResolved_ = false;
-  controlNotifyAccepted_ = false;
+  controlNotifyPending_ = true;
+  controlNotifyStartedAtMs_ = millis();
+  if (type == BleVoiceEventType::sessionStart) {
+    controlNotifyPurpose_ = ControlNotifyPurpose::sessionStart;
+  } else if (type == BleVoiceEventType::sessionEnd) {
+    controlNotifyPurpose_ = ControlNotifyPurpose::sessionEnd;
+  } else if (type == BleVoiceEventType::error) {
+    controlNotifyPurpose_ = ControlNotifyPurpose::error;
+  } else {
+    controlNotifyPurpose_ = ControlNotifyPurpose::generic;
+  }
   portENTER_CRITICAL(&qualityMux_);
   quality_.recordControlNotifyAttempt();
   portEXIT_CRITICAL(&qualityMux_);
   event_->notify();
-  // Arduino-ESP32 reports the NimBLE host queue result synchronously through
-  // onStatus. This is host acceptance only; it is not an air-delivery ACK.
-  return controlNotifyResolved_ && controlNotifyAccepted_;
+  // NimBLE may report host-queue acceptance synchronously from notify(). The
+  // callback only enqueues that result; poll() resolves this pending control.
+  return true;
+}
+
+void BleVoiceService::clearControlNotify() {
+  controlNotifyPending_ = false;
+  controlNotifyStartedAtMs_ = 0;
+  controlNotifyPurpose_ = ControlNotifyPurpose::none;
 }
 
 void BleVoiceService::resetAudioNotify() {
@@ -790,6 +1024,7 @@ void BleVoiceService::resetAudioNotify() {
 }
 
 void BleVoiceService::failAudioNotify(VoiceSessionError error) {
+  clearControlNotify();
   resetAudioNotify();
   controller_.abort(error);
   reportedError_ = error;
@@ -799,6 +1034,56 @@ void BleVoiceService::failAudioNotify(VoiceSessionError error) {
   updateDeviceInfo();
   notifyControl(BleVoiceEventType::error, controller_.sessionId(),
                 static_cast<uint16_t>(error));
+}
+
+void BleVoiceService::failClosedCallbackOverflow(
+    uint32_t nowMs, uint16_t callbackConnectionId) {
+  if (log_ != nullptr) {
+    log_->println(
+        "{\"event\":\"ble_voice_callback_overflow\",\"action\":\"disconnect\"}");
+  }
+  uint16_t connectionId = callbackConnectionId;
+  if (connectionPolicy_.hasCurrent()) {
+    connectionId = connectionPolicy_.currentConnectionId();
+  }
+  if (connectionId != kInvalidBleConnectionId && server_ != nullptr) {
+    server_->disconnect(connectionId);
+  }
+  if (connectionPolicy_.hasCurrent()) {
+    processDisconnect(connectionPolicy_.currentConnectionId(), nowMs);
+    return;
+  }
+  if (controller_.active()) {
+    controller_.abort(VoiceSessionError::disconnected);
+    reportedError_ = VoiceSessionError::disconnected;
+    portENTER_CRITICAL(&qualityMux_);
+    quality_.recordSessionError(reportedError_);
+    portEXIT_CRITICAL(&qualityMux_);
+  } else {
+    controller_.complete();
+    reportedError_ = VoiceSessionError::none;
+  }
+  resetAudioNotify();
+  clearControlNotify();
+  connected_ = authenticated_ = appReady_ = false;
+  peerPolicy_.disconnected();
+  mtu_ = 23;
+  connectionId_ = 0;
+  connectionPowerMode_ = BleConnectionPowerMode::idle;
+  currentPeerAddressValid_ = false;
+  memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
+  callbackSecurity_.clearConnection();
+  refreshCallbackSnapshot(nowMs);
+}
+
+void BleVoiceService::refreshCallbackSnapshot(uint32_t nowMs) {
+  const bool pairingAllowed = pairingMode(nowMs);
+  callbackSecurity_.refreshFromMain(
+      connectionPolicy_.hasCurrent(),
+      connectionPolicy_.hasCurrent()
+          ? connectionPolicy_.currentConnectionId()
+          : kInvalidBleConnectionId,
+      peerPolicy_.securityAllowed(pairingAllowed), pairingAllowed, passkey_);
 }
 
 void BleVoiceService::restartAdvertising() {

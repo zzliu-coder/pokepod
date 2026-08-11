@@ -14,6 +14,7 @@
 #include "AudioCaptureRouter.h"
 #include "BlePeerPolicy.h"
 #include "BleConnectionPowerPolicy.h"
+#include "BleVoiceCallbackMailbox.h"
 #include "BleSingleConnectionPolicy.h"
 #include "BleVoiceProtocol.h"
 #include "BleVoiceQuality.h"
@@ -68,9 +69,19 @@ class BleVoiceService {
     return connectionPolicy_.isCurrent(connectionId) &&
         securityAllowed(nowMs);
   }
+  bool callbackSecurityAllowed() const {
+    return callbackSecurity_.securityAllowed();
+  }
+  bool callbackAuthorizationAllowed(uint16_t connectionId) const {
+    return callbackSecurity_.authorizationAllowed(connectionId);
+  }
+  uint32_t callbackPasskey() const {
+    return callbackSecurity_.passkey();
+  }
   uint16_t connectionIdForPeer(const uint8_t *peerAddress) const;
 
-  void handleConnect(uint16_t connectionId, const uint8_t *peerAddress);
+  void handleConnect(uint16_t connectionId, const uint8_t *peerAddress,
+                     bool peerBonded = false);
   void handleDisconnect(uint16_t connectionId);
   void handleMtu(uint16_t connectionId, uint16_t mtu);
   void handleCommand(uint16_t connectionId, const uint8_t *bytes,
@@ -83,8 +94,36 @@ class BleVoiceService {
   void handlePasskey(uint32_t passkey);
 
  private:
+  enum class ControlNotifyPurpose : uint8_t {
+    none,
+    generic,
+    sessionStart,
+    sessionEnd,
+    error,
+  };
+
   bool notifyControl(BleVoiceEventType type, uint32_t sessionId,
                      uint16_t code = 0);
+  bool publishCallbackEvent(const BleVoiceCallbackEvent &event);
+  void drainCallbackEvents(uint32_t nowMs);
+  void processCallbackEvent(const BleVoiceCallbackEvent &event,
+                            uint32_t nowMs);
+  void processConnect(uint16_t connectionId, const uint8_t *peerAddress,
+                      bool peerBonded);
+  void processDisconnect(uint16_t connectionId, uint32_t nowMs);
+  void processMtu(uint16_t connectionId, uint16_t mtu);
+  void processCommand(uint16_t connectionId, const uint8_t *bytes,
+                      size_t length, uint32_t nowMs);
+  void processAuthentication(uint16_t connectionId, bool success,
+                             const uint8_t *peerAddress, uint32_t nowMs);
+  void processNotifyStatus(bool acceptedByHost);
+  void processControlNotifyStatus(bool acceptedByHost, uint32_t nowMs);
+  void processDeviceInfoRead();
+  void processPasskey(uint32_t passkey);
+  void failClosedCallbackOverflow(uint32_t nowMs,
+                                  uint16_t callbackConnectionId);
+  void refreshCallbackSnapshot(uint32_t nowMs);
+  void clearControlNotify();
   void restartAdvertising();
   void activatePairingMode(uint32_t nowMs);
   void updateDeviceInfo();
@@ -100,6 +139,11 @@ class BleVoiceService {
   BlePeerPolicy peerPolicy_;
   BleSingleConnectionPolicy connectionPolicy_;
   VoiceSessionController controller_;
+  static constexpr size_t kCallbackEventCapacity = 16;
+  static constexpr uint32_t kControlNotifyTimeoutMs = 40;
+  BleVoiceCallbackMailbox<kCallbackEventCapacity> callbackEvents_;
+  bool callbackOverflowHandled_ = false;
+  BleVoiceCallbackSecuritySnapshot callbackSecurity_;
   mutable portMUX_TYPE qualityMux_ = portMUX_INITIALIZER_UNLOCKED;
   mutable portMUX_TYPE notifyMux_ = portMUX_INITIALIZER_UNLOCKED;
   BleVoiceQualityCounters quality_;
@@ -115,8 +159,9 @@ class BleVoiceService {
   uint16_t mtu_ = 23;
   uint32_t passkey_ = 0;
   uint32_t pairingUntilMs_ = 0;
-  volatile bool controlNotifyResolved_ = false;
-  volatile bool controlNotifyAccepted_ = false;
+  bool controlNotifyPending_ = false;
+  uint32_t controlNotifyStartedAtMs_ = 0;
+  ControlNotifyPurpose controlNotifyPurpose_ = ControlNotifyPurpose::none;
   volatile bool audioNotifyResolved_ = false;
   volatile bool audioNotifyAccepted_ = false;
   volatile bool audioNotifyPending_ = false;
