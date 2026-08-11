@@ -1076,7 +1076,7 @@ void setup() {
       wirelessSyncIdentity,
       linkCoordinator, usb.log(), &captureRuntime, &capabilities);
   capabilities.record(DeviceCapability::link,
-                      usbLinkStarted && syncIdentityStarted &&
+                      usbStarted && usbLinkStarted && syncIdentityStarted &&
                           wifiSyncStarted);
   const StartupCapabilityPresentation startup =
       startupCapabilityPresentation(capabilities);
