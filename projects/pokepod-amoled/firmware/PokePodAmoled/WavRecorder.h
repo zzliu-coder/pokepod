@@ -19,19 +19,46 @@ class WavRecorder {
   bool start(Print &log, const String &recordingId, const String &createdAt);
   bool start(Print &log, const String &recordingId, const String &createdAt,
              const RecordingSpaceSnapshot &space);
+  bool start(Print &log, const String &recordingId, const String &createdAt,
+             const RecordingSpaceSnapshot &space,
+             RecorderOperationOwner owner);
   bool append(const uint8_t *data, size_t length, Print &log);
   bool appendMono16(const int16_t *samples, size_t sampleCount, Print &log);
   bool stop(Print &log,
             RecorderStopReason reason = RecorderStopReason::user);
   bool abortCapture(Print &log);
-  bool recoverInterrupted(Print &log, const String &recoveredAt);
+  // Advances at most one recorder primitive or one bounded transaction poll.
+  // A null gate is the local/USB policy: no transfer-window deadline.
+  bool pollFinalize(Print &log, uint32_t nowMs = 0,
+                    CapsuleTransactionGate *gate = nullptr);
   // Failure cleanup can be deferred while another storage context owns the
   // physical SD bus.  The application polls this once per loop; until it
   // completes the recorder keeps its mutation reservation and rejects reuse.
-  bool pollCleanup(Print &log);
+  bool pollCleanup(Print &log, uint32_t nowMs = 0,
+                   CapsuleTransactionGate *gate = nullptr);
   bool cleanupPending() const { return cleanupPending_; }
+  bool recoveryPending() const { return bootRecoveryPending_; }
+  bool recoveryFailed() const { return bootRecoveryFailed_; }
+  bool takeRecoveryReady() {
+    const bool ready = bootRecoveryReady_;
+    bootRecoveryReady_ = false;
+    return ready;
+  }
 
   bool recording() const { return recording_; }
+  bool finalizing() const { return finalizePending_; }
+  bool operationActive() const {
+    return recording_ || automaticStopRequested_ || finalizePending_ ||
+        cleanupPending_ || bootRecoveryPending_ || transactionRunner_.active();
+  }
+  bool stopRequested() const { return automaticStopRequested_; }
+  RecorderStopReason requestedStopReason() const {
+    return automaticStopReason_;
+  }
+  RecorderOperationOwner operationOwner() const { return operationOwner_; }
+  bool ownedBy(RecorderOperationOwner owner) const {
+    return operationOwner_ == owner;
+  }
   uint32_t durationMs() const;
   const String &finalPath() const { return finalPath_; }
   const String &capsuleId() const { return recordingId_; }
@@ -48,29 +75,150 @@ class WavRecorder {
  private:
   bool startInternal(Print &log, const String &recordingId,
                      const String &createdAt,
-                     const RecordingSpaceSnapshot *space);
+                     const RecordingSpaceSnapshot *space,
+                     RecorderOperationOwner owner);
   void resetSessionState();
   bool finishFailure(Print &log, RecorderTerminal terminal,
                      RecorderFailureStage stage);
   bool ensureDirectory(const char *path, Print &log);
   bool writeTextAtomically(const String &finalPath, const String &text, Print &log);
   bool writeHeader(uint32_t dataBytes);
-  bool finalizePartialAudio(Print &log);
-  bool writeCapsuleMetadata(Print &log, const String &timestamp);
   bool writeProcessingMetadata(Print &log, const char *status, uint32_t revision,
                                const char *errorStage, const char *error);
-  bool commitStagingDirectory(Print &log);
-  bool recoverStagingDirectory(const String &stagingDirectory,
-                               const String &recordingId,
-                               const String &recoveredAt, Print &log);
   bool persistCheckpoint(bool failed, RecorderFailureStage stage,
                          Print &log);
-  bool removeCheckpoint();
   bool appendMonoBytes(const uint8_t *data, size_t length, Print &log);
   StorageOwner activeStorageOwner() const;
+  bool pollFinalizeRunner(Print &log, uint32_t nowMs,
+                          CapsuleTransactionGate *gate);
+  bool finalizeFailure(Print &log, RecorderTerminal terminal,
+                       RecorderFailureStage stage);
+  void completeFinalize(Print &log);
+  bool pollBootRecovery(Print &log, uint32_t nowMs);
+
+  class StringByteSource final : public CapsuleTransactionByteSource {
+   public:
+    void bind(const String &value) { value_ = &value; }
+    uint32_t length() const override {
+      return value_ == nullptr ? 0U : static_cast<uint32_t>(value_->length());
+    }
+    size_t readAt(uint32_t offset, uint8_t *destination,
+                  size_t maximumBytes) override {
+      if (value_ == nullptr || destination == nullptr ||
+          offset >= value_->length()) return 0;
+      size_t count = value_->length() - offset;
+      if (count > maximumBytes) count = maximumBytes;
+      memcpy(destination, value_->c_str() + offset, count);
+      return count;
+    }
+
+   private:
+    const String *value_ = nullptr;
+  };
+
+  class CheckpointByteSource final : public CapsuleTransactionByteSource {
+   public:
+    void bind(const StoredRecorderCheckpoint &checkpoint) {
+      checkpoint_ = &checkpoint;
+    }
+    uint32_t length() const override {
+      return checkpoint_ == nullptr ? 0U : sizeof(*checkpoint_);
+    }
+    size_t readAt(uint32_t offset, uint8_t *destination,
+                  size_t maximumBytes) override {
+      if (checkpoint_ == nullptr || destination == nullptr ||
+          offset >= sizeof(*checkpoint_)) return 0;
+      size_t count = sizeof(*checkpoint_) - offset;
+      if (count > maximumBytes) count = maximumBytes;
+      memcpy(destination,
+             reinterpret_cast<const uint8_t *>(checkpoint_) + offset, count);
+      return count;
+    }
+
+   private:
+    const StoredRecorderCheckpoint *checkpoint_ = nullptr;
+  };
+
+  enum class FinalizePhase : uint8_t {
+    idle = 0,
+    flushAudio,
+    seekHeader,
+    writeHeader,
+    finalFlush,
+    closeAudio,
+    startAudioAndProcessing,
+    pollAudioAndProcessing,
+    startCapsuleMetadata,
+    pollCapsuleMetadata,
+    checkInboxDirectory,
+    renameStagingDirectory,
+    checkCheckpoint,
+    removeCheckpoint,
+    quarantineCheckpoint,
+    complete,
+  };
+
+  enum class CleanupPhase : uint8_t {
+    idle = 0,
+    flushAudio,
+    closeAudio,
+    removeEmptyStaging,
+    startFailureCheckpoint,
+    pollFailureCheckpoint,
+    openFailureMarker,
+    writeFailureMarker,
+    flushFailureMarker,
+    closeFailureMarker,
+    openFailureMarkerReadback,
+    readFailureMarker,
+    closeFailureMarkerReadback,
+    renameFailureCheckpoint,
+    publishTerminal,
+  };
+
+  enum class RecoveryPhase : uint8_t {
+    transaction = 0,
+    reserve,
+    scanOpen,
+    scanNext,
+    closeEntry,
+    closeRoot,
+    checkFailureMarker,
+    checkFailedCheckpoint,
+    checkQuarantinedCheckpoint,
+    checkCheckpoint,
+    checkOrphanPartial,
+    openCheckpoint,
+    readCheckpoint,
+    closeCheckpoint,
+    checkCommittedAudio,
+    openPartial,
+    readCommittedHeader,
+    seekPartial,
+    readPartialCrc,
+    closePartial,
+    truncatePartial,
+    openPatch,
+    seekPatch,
+    writePatch,
+    flushPatch,
+    closePatch,
+    startFinalize,
+    quarantineCloseFile,
+    quarantineDestinationExists,
+    quarantineRename,
+    failureCloseFile,
+    failureCloseEntry,
+    failureCloseRoot,
+    failureDone,
+    done,
+    failed,
+  };
 
   fs::FS *fs_ = nullptr;
   File file_;
+  File recoveryRoot_;
+  File recoveryEntry_;
   String recordingId_;
   String createdAt_;
   String directory_;
@@ -78,17 +226,58 @@ class WavRecorder {
   String finalPath_;
   uint32_t dataBytes_ = 0;
   bool recording_ = false;
+  RecorderOperationOwner operationOwner_ = RecorderOperationOwner::none;
   bool checkpointInitialized_ = false;
   uint32_t checkpointCrcState_ = recorderAudioCrc32Begin();
   uint32_t checkpointedBytes_ = 0;
   StoredRecorderCheckpoint checkpoint_{};
   StorageReservation storageReservation_;
+  // Capture admission writes only bounded processing/checkpoint metadata with
+  // this synchronous helper. WAV facts, CRC, publish and boot recovery use the
+  // cooperative runner exclusively.
   CapsuleTransaction transaction_;
+  CapsuleTransactionRunner transactionRunner_;
+  CapsuleTransactionInput finalizeInputs_[2]{};
+  String processingMetadata_;
+  String capsuleMetadata_;
+  String inboxDirectory_;
+  String failureMarkerPath_;
+  StringByteSource processingSource_;
+  StringByteSource capsuleSource_;
+  CheckpointByteSource failureCheckpointSource_;
+  StoredRecorderCheckpoint failureMarkerReadback_{};
+  bool failureMarkerReadbackValid_ = false;
   RecorderOutcomeState terminalState_;
   AudioFrontEnd audioFrontEnd_;
+  FinalizePhase finalizePhase_ = FinalizePhase::idle;
+  bool finalizePending_ = false;
+  RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;
+  uint8_t finalizePrimitiveFailures_ = 0;
+  bool automaticStopRequested_ = false;
+  RecorderStopReason automaticStopReason_ = RecorderStopReason::none;
   bool cleanupPending_ = false;
+  CleanupPhase cleanupPhase_ = CleanupPhase::idle;
+  uint8_t cleanupPrimitiveFailures_ = 0;
   RecorderTerminal cleanupTerminal_ = RecorderTerminal::none;
   RecorderFailureStage cleanupStage_ = RecorderFailureStage::none;
+  bool bootRecoveryPending_ = false;
+  bool bootRecoveryReady_ = false;
+  bool bootRecoveryFailed_ = false;
+  bool recoveryFinalizeActive_ = false;
+  bool recoveryCandidate_ = false;
+  bool recoveryAudioCommitted_ = false;
+  RecoveryPhase recoveryPhase_ = RecoveryPhase::transaction;
+  String recoveryDirectory_;
+  String recoveryId_;
+  String recoveryCheckpointPath_;
+  StoredRecorderCheckpoint recoveryCheckpoint_{};
+  uint32_t recoveryDataBytes_ = 0;
+  uint32_t recoveryActualBytes_ = 0;
+  uint32_t recoveryRemaining_ = 0;
+  uint32_t recoveryCrcState_ = recorderAudioCrc32Begin();
+  StorageAccess recoveryFileAccess_ = StorageAccess::read;
+  uint16_t recoveryQuarantineSuffix_ = 0;
+  uint8_t recoveryBuffer_[512]{};
 };
 
 }  // namespace pokepod

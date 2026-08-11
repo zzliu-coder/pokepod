@@ -56,6 +56,9 @@ enum class CapsuleTransactionRunner::Phase : uint8_t {
   oldJournalExists,
   oldJournalRemove,
   publishJournal,
+  openPublishedJournal,
+  readPublishedJournal,
+  closePublishedJournal,
   publishPrepared,
   recoveryScanOpen,
   recoveryScanNext,
@@ -64,6 +67,12 @@ enum class CapsuleTransactionRunner::Phase : uint8_t {
   recoveryJournalOpen,
   recoveryJournalRead,
   recoveryJournalClose,
+  recoveryInvalidClose,
+  recoveryInvalidDestinationExists,
+  recoveryInvalidRename,
+  recoveryInvalidArtifactExists,
+  recoveryInvalidArtifactRename,
+  recoveryInvalidArtifactsDone,
   recoveryTargetFactOpen,
   recoveryStagedFactOpen,
   recoveryBackupExists,
@@ -113,10 +122,11 @@ bool CapsuleTransactionRunner::validInput(
     const CapsuleTransactionInput &input) {
   const bool memorySource = input.source != nullptr;
   const bool preparedSource = !input.preparedPath.isEmpty();
-  return capsuleTransactionPathValid(input.targetPath.c_str()) &&
+  return capsuleTransactionTargetPathValid(input.targetPath.c_str()) &&
       memorySource != preparedSource &&
       (!preparedSource ||
-       capsuleTransactionPathValid(input.preparedPath.c_str()));
+       capsuleTransactionPreparedPathValid(input.preparedPath.c_str(),
+                                           input.targetPath.c_str()));
 }
 
 void CapsuleTransactionRunner::resetOperationFields() {
@@ -129,14 +139,17 @@ void CapsuleTransactionRunner::resetOperationFields() {
   owner_ = StorageOwner::none;
   for (uint8_t index = 0; index < kCapsuleTransactionMaximumTargets; ++index) {
     targets_[index] = {};
+    requestedTargets_[index] = {};
   }
   targetCount_ = 0;
+  requestedTargetCount_ = 0;
   targetIndex_ = 0;
   cleanupIndex_ = 0;
   primitiveFailures_ = 0;
   factKind_ = FactKind::none;
   fileAccess_ = StorageAccess::read;
   journal_ = {};
+  journalReadback_ = {};
   recoveryDecision_ = CapsuleTransactionRecovery::ambiguous;
   key_ = "";
   base_ = "";
@@ -149,6 +162,12 @@ void CapsuleTransactionRunner::resetOperationFields() {
   cancellationRequested_ = false;
   preserveJournal_ = false;
   cleanupPathExists_ = false;
+  resumeCommitAfterRecovery_ = false;
+  recoveryHadBlocked_ = false;
+  journalReadbackValid_ = false;
+  quarantineSuffix_ = 0;
+  quarantineArtifactIndex_ = 0;
+  quarantineBasePath_ = "";
   lastPollBytes_ = 0;
   maximumPollBytes_ = 0;
   maximumIoBytes_ = 0;
@@ -181,10 +200,12 @@ bool CapsuleTransactionRunner::startCommit(
   if (!startCommon(owner, Mode::commit)) return false;
   key_ = key == nullptr ? "" : key;
   targetCount_ = count;
+  requestedTargetCount_ = count;
   for (uint8_t index = 0; index < count; ++index) {
     targets_[index].targetPath = targets[index].targetPath;
     targets_[index].source = targets[index].source;
     targets_[index].preparedPath = targets[index].preparedPath;
+    requestedTargets_[index] = targets_[index];
   }
   base_ = transactionBase(key_.c_str());
   return true;
@@ -218,11 +239,23 @@ String CapsuleTransactionRunner::sidePath(uint8_t index,
   return base_ + "." + String(index) + suffix;
 }
 
+String CapsuleTransactionRunner::quarantinePath() const {
+  return quarantineSuffix_ == 0
+      ? journalPath() + ".blocked"
+      : journalPath() + ".blocked." + String(quarantineSuffix_);
+}
+
 const char *CapsuleTransactionRunner::phaseName() const {
   switch (phase_) {
     case Phase::idle: return "idle";
     case Phase::reserve: return "reserve";
     case Phase::writeStage: return "write-stage";
+    case Phase::writeJournalTemporary:
+    case Phase::flushJournalTemporary:
+    case Phase::closeJournalTemporary: return "journal-write";
+    case Phase::openPublishedJournal:
+    case Phase::readPublishedJournal:
+    case Phase::closePublishedJournal: return "journal-readback";
     case Phase::readFact: return "crc";
     case Phase::publishJournal: return "publish-journal";
     case Phase::publishPrepared: return "publish-prepared";
@@ -232,7 +265,10 @@ const char *CapsuleTransactionRunner::phaseName() const {
     case Phase::recoveryScanCloseDirectory: return "scan";
     case Phase::recoveryJournalOpen:
     case Phase::recoveryJournalRead:
-    case Phase::recoveryJournalClose: return "journal";
+    case Phase::recoveryJournalClose:
+    case Phase::recoveryInvalidClose:
+    case Phase::recoveryInvalidDestinationExists:
+    case Phase::recoveryInvalidRename: return "journal";
     case Phase::commitTarget:
     case Phase::commitBackupRemove:
     case Phase::commitTargetRename:
@@ -534,6 +570,7 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
       if (!lease) return CapsuleTransactionPollResult::wouldBlock;
       if (fs_->exists(journalPath())) {
         journalDurable_ = true;
+        resumeCommitAfterRecovery_ = true;
         phase_ = Phase::recoveryJournalOpen;
       } else {
         targetIndex_ = 0;
@@ -750,12 +787,51 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
       return removeIfPresent(journalPath(), Phase::publishJournal);
     case Phase::publishJournal: {
       const CapsuleTransactionPollResult result = renamePath(
-          journalTemporaryPath(), journalPath(), Phase::publishPrepared);
-      if (phase_ == Phase::publishPrepared) {
+          journalTemporaryPath(), journalPath(), Phase::openPublishedJournal);
+      return result;
+    }
+    case Phase::openPublishedJournal: {
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::read, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      file_ = fs_->open(journalPath(), FILE_READ);
+      if (!file_) return primitiveFailed(false);
+      fileAccess_ = StorageAccess::read;
+      journalReadbackValid_ = !file_.isDirectory() &&
+          file_.size() == sizeof(journalReadback_);
+      phase_ = journalReadbackValid_ ? Phase::readPublishedJournal
+                                    : Phase::closePublishedJournal;
+      return CapsuleTransactionPollResult::progress;
+    }
+    case Phase::readPublishedJournal: {
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::read, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      const int bytes = file_.read(
+          reinterpret_cast<uint8_t *>(&journalReadback_),
+          sizeof(journalReadback_));
+      lastPollBytes_ = bytes > 0 ? static_cast<size_t>(bytes) : 0;
+      if (lastPollBytes_ > maximumIoBytes_) maximumIoBytes_ = lastPollBytes_;
+      journalReadbackValid_ =
+          bytes == static_cast<int>(sizeof(journalReadback_)) &&
+          validateCapsuleTransactionJournal(journalReadback_) &&
+          memcmp(&journalReadback_, &journal_, sizeof(journal_)) == 0;
+      phase_ = Phase::closePublishedJournal;
+      return CapsuleTransactionPollResult::progress;
+    }
+    case Phase::closePublishedJournal: {
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::read, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      file_.close();
+      if (!journalReadbackValid_ || file_.getWriteError() != 0) {
+        beginCleanup(CapsuleTransactionRunState::failed, false);
+      } else {
         journalDurable_ = true;
         targetIndex_ = 0;
+        phase_ = Phase::publishPrepared;
       }
-      return result;
+      return CapsuleTransactionPollResult::progress;
     }
     case Phase::publishPrepared:
       if (targetIndex_ >= targetCount_) {
@@ -838,7 +914,10 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
       file_ = fs_->open(journalPath(), FILE_READ);
       if (!file_ || file_.isDirectory() ||
           file_.size() != sizeof(journal_)) {
-        beginCleanup(CapsuleTransactionRunState::recoveryBlocked, true);
+        recoveryHadBlocked_ = true;
+        quarantineSuffix_ = 0;
+        phase_ = file_ ? Phase::recoveryInvalidClose
+                       : Phase::recoveryInvalidDestinationExists;
       } else {
         fileAccess_ = StorageAccess::read;
         phase_ = Phase::recoveryJournalRead;
@@ -855,7 +934,9 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
       if (lastPollBytes_ > maximumIoBytes_) maximumIoBytes_ = lastPollBytes_;
       if (bytes != static_cast<int>(sizeof(journal_)) ||
           !validateCapsuleTransactionJournal(journal_)) {
-        beginCleanup(CapsuleTransactionRunState::recoveryBlocked, true);
+        recoveryHadBlocked_ = true;
+        quarantineSuffix_ = 0;
+        phase_ = Phase::recoveryInvalidClose;
       } else {
         targetCount_ = journal_.targetCount;
         for (uint8_t index = 0; index < targetCount_; ++index) {
@@ -875,6 +956,96 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
     case Phase::recoveryJournalClose:
       targetIndex_ = 0;
       return closeHandle(Phase::recoveryTargetFactOpen, false);
+    case Phase::recoveryInvalidClose:
+      return closeHandle(Phase::recoveryInvalidDestinationExists, false);
+    case Phase::recoveryInvalidDestinationExists: {
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::read, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      if (fs_->exists(quarantinePath())) {
+        ++quarantineSuffix_;
+      } else {
+        phase_ = Phase::recoveryInvalidRename;
+      }
+      return CapsuleTransactionPollResult::progress;
+    }
+    case Phase::recoveryInvalidRename: {
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::mutation, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      quarantineBasePath_ = quarantinePath();
+      if (!fs_->rename(journalPath(), quarantineBasePath_)) {
+        if (++primitiveFailures_ < kCapsuleTransactionPermanentFailurePolls) {
+          return CapsuleTransactionPollResult::wouldBlock;
+        }
+        return finishTerminal(CapsuleTransactionRunState::recoveryBlocked);
+      }
+      primitiveFailures_ = 0;
+      journalDurable_ = false;
+      preserveJournal_ = false;
+      quarantineArtifactIndex_ = 0;
+      phase_ = Phase::recoveryInvalidArtifactExists;
+      return CapsuleTransactionPollResult::progress;
+    }
+    case Phase::recoveryInvalidArtifactExists: {
+      if (quarantineArtifactIndex_ >=
+          kCapsuleTransactionMaximumTargets * 2U) {
+        phase_ = Phase::recoveryInvalidArtifactsDone;
+        return CapsuleTransactionPollResult::progress;
+      }
+      const uint8_t index = quarantineArtifactIndex_ / 2U;
+      const char *suffix = (quarantineArtifactIndex_ & 1U) == 0U
+          ? ".new" : ".bak";
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::read, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      if (fs_->exists(sidePath(index, suffix))) {
+        phase_ = Phase::recoveryInvalidArtifactRename;
+      } else {
+        ++quarantineArtifactIndex_;
+      }
+      return CapsuleTransactionPollResult::progress;
+    }
+    case Phase::recoveryInvalidArtifactRename: {
+      const uint8_t index = quarantineArtifactIndex_ / 2U;
+      const char *suffix = (quarantineArtifactIndex_ & 1U) == 0U
+          ? ".new" : ".bak";
+      StorageIoLease lease = coordinator_->acquireIo(
+          owner_, StorageAccess::mutation, 0);
+      if (!lease) return CapsuleTransactionPollResult::wouldBlock;
+      const String destination = quarantineBasePath_ + ".artifact." +
+          String(index) + suffix;
+      if (!fs_->rename(sidePath(index, suffix), destination)) {
+        if (++primitiveFailures_ < kCapsuleTransactionPermanentFailurePolls) {
+          return CapsuleTransactionPollResult::wouldBlock;
+        }
+        return finishTerminal(CapsuleTransactionRunState::recoveryBlocked);
+      }
+      primitiveFailures_ = 0;
+      ++quarantineArtifactIndex_;
+      phase_ = Phase::recoveryInvalidArtifactExists;
+      return CapsuleTransactionPollResult::progress;
+    }
+    case Phase::recoveryInvalidArtifactsDone:
+      if (mode_ == Mode::commit && resumeCommitAfterRecovery_) {
+        resumeCommitAfterRecovery_ = false;
+        targetCount_ = requestedTargetCount_;
+        for (uint8_t index = 0; index < targetCount_; ++index) {
+          targets_[index] = requestedTargets_[index];
+        }
+        targetIndex_ = 0;
+        cleanupIndex_ = 0;
+        primitiveFailures_ = 0;
+        journal_ = {};
+        recoveryDecision_ = CapsuleTransactionRecovery::ambiguous;
+        phase_ = Phase::staleStagedExists;
+      } else {
+        base_ = "";
+        targetCount_ = 0;
+        targetIndex_ = 0;
+        phase_ = Phase::recoveryScanOpen;
+      }
+      return CapsuleTransactionPollResult::progress;
     case Phase::recoveryTargetFactOpen:
       return openRead(targets_[targetIndex_].targetPath, FactKind::target,
                       Phase::recoveryStagedFactOpen, Phase::readFact);
@@ -916,7 +1087,9 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
               "{\"event\":\"capsule_transaction_ambiguous\","
               "\"journal\":\"%s\"}\n", journalPath().c_str());
         }
-        beginCleanup(CapsuleTransactionRunState::recoveryBlocked, true);
+        recoveryHadBlocked_ = true;
+        quarantineSuffix_ = 0;
+        phase_ = Phase::recoveryInvalidDestinationExists;
       } else {
         targetIndex_ = 0;
         if (recoveryDecision_ == CapsuleTransactionRecovery::commitNew) {
@@ -1110,6 +1283,24 @@ CapsuleTransactionPollResult CapsuleTransactionRunner::step() {
       return removeIfPresent(journalPath(), Phase::cleanupDone);
     case Phase::cleanupDone:
       journalDurable_ = false;
+      if (mode_ == Mode::commit && resumeCommitAfterRecovery_ &&
+          !cancellationRequested_ &&
+          cleanupTerminal_ != CapsuleTransactionRunState::recoveryBlocked &&
+          cleanupTerminal_ != CapsuleTransactionRunState::cleanupBlocked) {
+        resumeCommitAfterRecovery_ = false;
+        targetCount_ = requestedTargetCount_;
+        for (uint8_t index = 0; index < targetCount_; ++index) {
+          targets_[index] = requestedTargets_[index];
+        }
+        targetIndex_ = 0;
+        cleanupIndex_ = 0;
+        primitiveFailures_ = 0;
+        journal_ = {};
+        recoveryDecision_ = CapsuleTransactionRecovery::ambiguous;
+        preserveJournal_ = false;
+        phase_ = Phase::staleStagedExists;
+        return CapsuleTransactionPollResult::progress;
+      }
       if (mode_ == Mode::recoverAll &&
           cleanupTerminal_ == CapsuleTransactionRunState::recovered &&
           !cancellationRequested_) {
@@ -1347,9 +1538,6 @@ bool CapsuleTransaction::recoverAll(StorageOwner owner) {
   StorageReservation reservation = coordinator_->reserve(
       owner, StorageAccess::mutation, 1000);
   if (!reservation) return false;
-  // Recover one journal per pass. A successful pass removes that journal, so
-  // the loop handles any finite queue without a heap list or a silent limit.
-  // Ambiguous state stops with the journal and side files preserved.
   for (;;) {
     String nextBase;
     {
@@ -1406,13 +1594,17 @@ bool CapsuleTransaction::commit(const char *key, const InputTarget *targets,
   journal.version = kCapsuleTransactionVersion;
   journal.targetCount = count;
   for (uint8_t index = 0; index < count; ++index) {
-    if (!capsuleTransactionPathValid(targets[index].path.c_str())) return false;
+    if (!capsuleTransactionTargetPathValid(targets[index].path.c_str()) ||
+        (!targets[index].preparedPath.isEmpty() &&
+         !capsuleTransactionPreparedPathValid(
+             targets[index].preparedPath.c_str(),
+             targets[index].path.c_str()))) return false;
     const String staged = sidePath(base, index, ".new");
     const String factsPath = targets[index].preparedPath.isEmpty()
         ? staged : targets[index].preparedPath;
     if (targets[index].preparedPath.isEmpty() &&
         !writeFile(staged, targets[index].bytes,
-                          targets[index].length, owner)) {
+                   targets[index].length, owner)) {
       cleanupBase(base, count, owner, false);
       return false;
     }
@@ -1437,10 +1629,6 @@ bool CapsuleTransaction::commit(const char *key, const InputTarget *targets,
     cleanupBase(base, count, owner, false);
     return false;
   }
-  // A unique producer file is moved only after the journal is durable. Before
-  // this point a reset leaves the source untouched; after it, recovery sees
-  // either the source or the journaled .new artifact and never needs a second
-  // full-size WAV copy.
   for (uint8_t index = 0; index < count; ++index) {
     if (targets[index].preparedPath.isEmpty()) continue;
     StorageIoLease lease = coordinator_->acquireIo(
@@ -1452,8 +1640,7 @@ bool CapsuleTransaction::commit(const char *key, const InputTarget *targets,
       return false;
     }
   }
-  if (!recoverBase(base, owner)) return false;
-  return true;
+  return recoverBase(base, owner);
 }
 
 bool CapsuleTransaction::writeTextAtomic(const String &path,

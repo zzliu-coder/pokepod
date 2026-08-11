@@ -235,6 +235,21 @@ RecordingSpaceSnapshot admittedSpace() {
 
 void prepareRecorder(fs::FS &storage, WavRecorder &recorder, Print &log) {
   assert(recorder.begin(storage, log));
+  uint32_t polls = 0;
+  while (recorder.recoveryPending() && polls++ < 10000U) {
+    (void)recorder.pollFinalize(log, polls, nullptr);
+  }
+  assert(polls < 10000U);
+  assert(recorder.takeRecoveryReady());
+}
+
+void drainRecorder(WavRecorder &recorder, Print &log) {
+  uint32_t polls = 0;
+  while (recorder.operationActive() && polls++ < 20000U) {
+    (void)recorder.pollFinalize(log, polls, nullptr);
+  }
+  assert(polls < 20000U);
+  assert(!recorder.operationActive());
 }
 
 void assertRecorderFault(fakefs::Operation operation,
@@ -257,9 +272,15 @@ void assertRecorderFault(fakefs::Operation operation,
     assert(!recorder.appendMono16(samples.data(), samples.size(), log));
   } else {
     assert(recorder.appendMono16(samples.data(), samples.size(), log));
-    state->fail(operation, 1, action);
-    assert(!recorder.stop(log));
+    if (operation == fakefs::Operation::rename ||
+        operation == fakefs::Operation::remove) {
+      state->failAlways(operation, action);
+    } else {
+      state->fail(operation, 1, action);
+    }
+    assert(recorder.stop(log));
   }
+  drainRecorder(recorder, log);
   state->clearFault();
 
   const RecorderOutcome outcome = recorder.terminalResult();
@@ -287,6 +308,7 @@ void assertRecorderShortWriteAt(uint32_t occurrence) {
     assert(appended == (block < occurrence));
   }
   state->clearFault();
+  drainRecorder(recorder, log);
   const RecorderOutcome outcome = recorder.terminalResult();
   assert(outcome.terminal == RecorderTerminal::storageFailure);
   assert(outcome.failureStage == RecorderFailureStage::shortWrite);
@@ -301,10 +323,11 @@ void runRecorderOpenFailure() {
   fs::FS storage(state);
   WavRecorder recorder;
   prepareRecorder(storage, recorder, log);
-  state->fail(fakefs::Operation::open, 1,
-              fakefs::FaultAction::returnFailure);
+  state->failAlways(fakefs::Operation::open,
+                    fakefs::FaultAction::returnFailure);
   assert(!recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
   state->clearFault();
+  drainRecorder(recorder, log);
   const RecorderOutcome outcome = recorder.terminalResult();
   assert(outcome.terminal == RecorderTerminal::metadataFailure);
   assert(outcome.failureStage == RecorderFailureStage::initialMetadata);
@@ -342,7 +365,10 @@ void runRecorderFaultsAndReset() {
               fakefs::FaultAction::shortWrite);
   assert(!recorder.appendMono16(first.data(), first.size(), log));
   state->clearFault();
+  drainRecorder(recorder, log);
 
+  RecorderOutcome acknowledged;
+  assert(recorder.takeTerminalResult(acknowledged));
   assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace()));
   assert(recorder.durationMs() == 0);
   assert(recorder.finalPath().endsWith("audio.wav"));
@@ -352,6 +378,7 @@ void runRecorderFaultsAndReset() {
   }
   assert(recorder.appendMono16(second.data(), second.size(), log));
   assert(recorder.stop(log));
+  drainRecorder(recorder, log);
   const RecorderOutcome outcome = recorder.terminalResult();
   assert(outcome.success());
   assert(outcome.dataBytes == second.size() * sizeof(int16_t));
@@ -383,10 +410,18 @@ void runCorruptCheckpointRecovery() {
   std::array<uint8_t, kWavHeaderBytes + 64000U> partial{};
   state->seedBytes(staging + "/audio.wav.part", partial.data(), partial.size());
 
-  assert(!recorder.recoverInterrupted(log, "2026-08-11T05:41:00Z"));
+  WavRecorder rebooted;
+  assert(rebooted.begin(storage, log));
+  uint32_t polls = 0;
+  while (rebooted.recoveryPending() && polls++ < 10000U) {
+    (void)rebooted.pollFinalize(log, polls, nullptr);
+  }
+  assert(polls < 10000U);
+  assert(!rebooted.recoveryFailed());
+  assert(rebooted.takeRecoveryReady());
   const std::string inbox = std::string(kCapsuleInbox) + "/" + kFirstId;
   assert(state->directories.count(inbox) == 0);
-  assert(state->directories.count(staging) == 1);
+  assert(state->directories.count(staging + ".blocked") == 1);
 }
 
 void runRecorderDeferredCleanupAcrossContexts() {
@@ -406,7 +441,7 @@ void runRecorderDeferredCleanupAcrossContexts() {
     aborted.store(recorder.abortCapture(log));
   });
   foreignContext.join();
-  assert(!aborted.load());
+  assert(aborted.load());
   assert(recorder.cleanupPending());
   assert(!recorder.terminalResult().pending());
   assert(StorageCoordinator::instance().mutationOwner() ==
@@ -415,15 +450,18 @@ void runRecorderDeferredCleanupAcrossContexts() {
 
   // The original reservation context can later perform the physical close,
   // publish the terminal result and release storage for the next session.
-  assert(recorder.pollCleanup(log));
+  while (recorder.cleanupPending()) (void)recorder.pollCleanup(log);
   assert(state->fault.seen > 0);
   state->clearFault();
   assert(!recorder.cleanupPending());
   assert(recorder.terminalResult().failureStage ==
          RecorderFailureStage::captureIncomplete);
   assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
+  RecorderOutcome acknowledged;
+  assert(recorder.takeTerminalResult(acknowledged));
   assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace()));
-  assert(recorder.abortCapture(log) == false);
+  assert(recorder.abortCapture(log));
+  drainRecorder(recorder, log);
   assert(!recorder.cleanupPending());
 }
 

@@ -66,7 +66,12 @@ String capsuleJson(const String &id, const String &timestamp) {
 bool WavRecorder::begin(fs::FS &fs, Print &log) {
   fs_ = &fs;
   if (!transaction_.begin(fs, log) ||
-      !transaction_.recoverAll(StorageOwner::recovery)) return false;
+      !transactionRunner_.begin(fs, log) ||
+      !transactionRunner_.startRecovery(StorageOwner::recovery)) return false;
+  bootRecoveryPending_ = true;
+  bootRecoveryReady_ = false;
+  bootRecoveryFailed_ = false;
+  recoveryPhase_ = RecoveryPhase::transaction;
   StorageReservation reservation = StorageCoordinator::instance().reserve(
       StorageOwner::recovery, StorageAccess::mutation, 1000);
   return reservation && ensureDirectory(kCapsuleRoot, log) &&
@@ -83,24 +88,37 @@ bool WavRecorder::start(Print &log, const String &recordingId,
   // this overload so older callers still compile, but fail closed until they
   // adopt the admission-aware API.
   const RecordingSpaceSnapshot unknown{};
-  return startInternal(log, recordingId, createdAt, &unknown);
+  return startInternal(log, recordingId, createdAt, &unknown,
+                       RecorderOperationOwner::localApp);
 }
 
 bool WavRecorder::start(Print &log, const String &recordingId,
                         const String &createdAt,
                         const RecordingSpaceSnapshot &space) {
-  return startInternal(log, recordingId, createdAt, &space);
+  return startInternal(log, recordingId, createdAt, &space,
+                       RecorderOperationOwner::localApp);
+}
+
+bool WavRecorder::start(Print &log, const String &recordingId,
+                        const String &createdAt,
+                        const RecordingSpaceSnapshot &space,
+                        RecorderOperationOwner owner) {
+  return startInternal(log, recordingId, createdAt, &space, owner);
 }
 
 bool WavRecorder::startInternal(Print &log, const String &recordingId,
                                 const String &createdAt,
-                                const RecordingSpaceSnapshot *space) {
-  if (recording_ || cleanupPending_ || file_) {
+                                const RecordingSpaceSnapshot *space,
+                                RecorderOperationOwner owner) {
+  if (operationActive() || bootRecoveryFailed_ || file_ ||
+      terminalState_.peek().pending()) {
     log.println("{\"event\":\"recording_error\",\"stage\":\"invalid_start\"}");
     return false;
   }
   resetSessionState();
-  if (fs_ == nullptr || !isUuid(recordingId.c_str()) || createdAt.isEmpty()) {
+  operationOwner_ = owner;
+  if (fs_ == nullptr || owner == RecorderOperationOwner::none ||
+      !isUuid(recordingId.c_str()) || createdAt.isEmpty()) {
     return finishFailure(log, RecorderTerminal::admissionFailure,
                          RecorderFailureStage::invalidStart);
   }
@@ -203,12 +221,15 @@ bool WavRecorder::append(const uint8_t *data, size_t length, Print &log) {
         data + offset, inputBytes, mono, sizeof(mono));
     if (converted > 0 && !appendMonoBytes(mono, converted, log)) return false;
     if (durationMs() >= kMaxRecordingMs) {
-      return stop(log, RecorderStopReason::maxDuration);
+      automaticStopRequested_ = true;
+      automaticStopReason_ = RecorderStopReason::maxDuration;
+      return true;
     }
     offset += inputBytes;
   }
   if (durationMs() >= kMaxRecordingMs) {
-    return stop(log, RecorderStopReason::maxDuration);
+    automaticStopRequested_ = true;
+    automaticStopReason_ = RecorderStopReason::maxDuration;
   }
   return true;
 }
@@ -224,13 +245,15 @@ bool WavRecorder::appendMono16(const int16_t *samples, size_t sampleCount,
     return false;
   }
   if (durationMs() >= kMaxRecordingMs) {
-    return stop(log, RecorderStopReason::maxDuration);
+    automaticStopRequested_ = true;
+    automaticStopReason_ = RecorderStopReason::maxDuration;
   }
   return true;
 }
 
 bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
                                   Print &log) {
+  if (automaticStopRequested_) return true;
   if (!recording_ || !file_ || data == nullptr || length == 0 ||
       (length & 1U) != 0) {
     return false;
@@ -268,65 +291,14 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
 bool WavRecorder::stop(Print &log, RecorderStopReason reason) {
   if (!recording_) return false;
   recording_ = false;
-  StorageIoLease stopIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::recorder, StorageAccess::mutation, 1000);
-  if (!stopIo) {
-    return finishFailure(log, RecorderTerminal::storageFailure,
-                         RecorderFailureStage::storageBusy);
-  }
-  file_.flush();
-  if (file_.getWriteError() != 0) {
-    file_.close();
-    return finishFailure(log, RecorderTerminal::storageFailure,
-                         RecorderFailureStage::flushAudio);
-  }
-  const bool headerOk = file_.seek(0) && writeHeader(dataBytes_);
-  file_.flush();
-  const bool finalFlushOk = file_.getWriteError() == 0;
-  file_.close();
-  stopIo.release();
-  if (!headerOk) {
-    return finishFailure(log, RecorderTerminal::headerFailure,
-                         RecorderFailureStage::finalHeader);
-  }
-  if (!finalFlushOk) {
-    return finishFailure(log, RecorderTerminal::storageFailure,
-                         RecorderFailureStage::flushAudio);
-  }
-  if (dataBytes_ == 0) {
-    return finishFailure(log, RecorderTerminal::tooShort,
-                         RecorderFailureStage::emptyAudio);
-  }
-  if (!finalizePartialAudio(log)) {
-    return finishFailure(log, RecorderTerminal::commitFailure,
-                         RecorderFailureStage::commitAudio);
-  }
-  if (!writeCapsuleMetadata(log, createdAt_)) {
-    return finishFailure(log, RecorderTerminal::metadataFailure,
-                         RecorderFailureStage::capsuleMetadata);
-  }
-  if (!writeProcessingMetadata(log, "queued", 2, nullptr, nullptr)) {
-    return finishFailure(log, RecorderTerminal::metadataFailure,
-                         RecorderFailureStage::processingMetadata);
-  }
-  if (!commitStagingDirectory(log)) {
-    return finishFailure(log, RecorderTerminal::commitFailure,
-                         RecorderFailureStage::commitDirectory);
-  }
-  if (!removeCheckpoint()) {
-    log.println("{\"event\":\"recording_warning\",\"stage\":\"checkpoint_cleanup\"}");
-  }
-  terminalState_.complete(reason, dataBytes_);
-  const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
-  log.printf("{\"event\":\"recording_stopped\",\"ok\":true,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"noise_floor\":%u,\"suppressed_samples\":%lu,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
-             static_cast<unsigned long>(durationMs()),
-             static_cast<unsigned long>(dataBytes_), finalPath_.c_str(),
-             audioInputChannelName(audio.selectedChannel), audio.leftPeak,
-             audio.rightPeak, audio.outputPeak, audio.estimatedNoiseFloor,
-             static_cast<unsigned long>(audio.suppressedSamples),
-             static_cast<unsigned long>(audio.limitedSamples),
-             static_cast<unsigned long>(audio.maximumGainQ12));
-  storageReservation_.release();
+  automaticStopRequested_ = false;
+  automaticStopReason_ = RecorderStopReason::none;
+  finalizeStopReason_ = reason;
+  finalizePrimitiveFailures_ = 0;
+  finalizePhase_ = FinalizePhase::flushAudio;
+  finalizePending_ = true;
+  log.printf("{\"event\":\"recording_finalize_pending\",\"bytes\":%lu}\n",
+             static_cast<unsigned long>(dataBytes_));
   return true;
 }
 
@@ -336,21 +308,745 @@ uint32_t WavRecorder::durationMs() const {
 
 bool WavRecorder::abortCapture(Print &log) {
   if (!recording_) return false;
-  return finishFailure(log, RecorderTerminal::captureFailure,
-                       RecorderFailureStage::captureIncomplete);
+  (void)finishFailure(log, RecorderTerminal::captureFailure,
+                      RecorderFailureStage::captureIncomplete);
+  return true;
+}
+
+bool WavRecorder::finalizeFailure(Print &log, RecorderTerminal terminal,
+                                  RecorderFailureStage stage) {
+  (void)finishFailure(log, terminal, stage);
+  return false;
+}
+
+bool WavRecorder::pollFinalizeRunner(Print &log, uint32_t nowMs,
+                                     CapsuleTransactionGate *gate) {
+  const CapsuleTransactionPollResult result = transactionRunner_.poll(nowMs,
+                                                                       gate);
+  if (result == CapsuleTransactionPollResult::progress ||
+      result == CapsuleTransactionPollResult::wouldBlock) {
+    return false;
+  }
+  if (result != CapsuleTransactionPollResult::committed) {
+    const RecorderFailureStage stage =
+        finalizePhase_ == FinalizePhase::pollAudioAndProcessing
+            ? RecorderFailureStage::commitAudio
+            : RecorderFailureStage::capsuleMetadata;
+    log.printf(
+        "{\"event\":\"recording_finalize_transaction_failed\","
+        "\"result\":%u,\"phase\":\"%s\"}\n",
+        static_cast<unsigned>(result), transactionRunner_.phaseName());
+    RecorderTerminal terminal = RecorderTerminal::commitFailure;
+    if (result == CapsuleTransactionPollResult::cancelled) {
+      terminal = RecorderTerminal::cancelled;
+    } else if (result == CapsuleTransactionPollResult::cleanupBlocked ||
+               result == CapsuleTransactionPollResult::recoveryBlocked) {
+      terminal = RecorderTerminal::cleanupBlocked;
+    }
+    return finalizeFailure(log, terminal, stage);
+  }
+  finalizePrimitiveFailures_ = 0;
+  finalizePhase_ =
+      finalizePhase_ == FinalizePhase::pollAudioAndProcessing
+          ? FinalizePhase::startCapsuleMetadata
+          : FinalizePhase::checkInboxDirectory;
+  return false;
+}
+
+void WavRecorder::completeFinalize(Print &log) {
+  if (recoveryFinalizeActive_) {
+    log.printf(
+        "{\"event\":\"recording_recovered\",\"id\":\"%s\",\"duration_ms\":%lu}\n",
+        recordingId_.c_str(), static_cast<unsigned long>(durationMs()));
+    finalizePending_ = false;
+    finalizePhase_ = FinalizePhase::idle;
+    recoveryFinalizeActive_ = false;
+    recoveryPhase_ = RecoveryPhase::scanNext;
+    recordingId_ = "";
+    createdAt_ = "";
+    directory_ = "";
+    partialPath_ = "";
+    finalPath_ = "";
+    dataBytes_ = 0;
+    return;
+  }
+  finalizePending_ = false;
+  finalizePhase_ = FinalizePhase::idle;
+  terminalState_.complete(finalizeStopReason_, dataBytes_);
+  const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
+  log.printf("{\"event\":\"recording_stopped\",\"ok\":true,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"noise_floor\":%u,\"suppressed_samples\":%lu,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
+             static_cast<unsigned long>(durationMs()),
+             static_cast<unsigned long>(dataBytes_), finalPath_.c_str(),
+             audioInputChannelName(audio.selectedChannel), audio.leftPeak,
+             audio.rightPeak, audio.outputPeak, audio.estimatedNoiseFloor,
+             static_cast<unsigned long>(audio.suppressedSamples),
+             static_cast<unsigned long>(audio.limitedSamples),
+             static_cast<unsigned long>(audio.maximumGainQ12));
+  finalizeStopReason_ = RecorderStopReason::none;
+  storageReservation_.release();
+  operationOwner_ = RecorderOperationOwner::none;
+}
+
+bool WavRecorder::pollBootRecovery(Print &log, uint32_t nowMs) {
+  const auto quarantine = [&]() {
+    recoveryCandidate_ = false;
+    recoveryQuarantineSuffix_ = 0;
+    recoveryPhase_ = file_ ? RecoveryPhase::quarantineCloseFile
+                           : RecoveryPhase::quarantineDestinationExists;
+    return false;
+  };
+  const auto fail = [&]() {
+    bootRecoveryReady_ = false;
+    recoveryCandidate_ = false;
+    recoveryPhase_ = file_ ? RecoveryPhase::failureCloseFile
+        : (recoveryEntry_ ? RecoveryPhase::failureCloseEntry
+                          : (recoveryRoot_ ? RecoveryPhase::failureCloseRoot
+                                           : RecoveryPhase::failureDone));
+    return false;
+  };
+
+  switch (recoveryPhase_) {
+    case RecoveryPhase::transaction: {
+      const CapsuleTransactionPollResult result =
+          transactionRunner_.poll(nowMs, nullptr);
+      if (result == CapsuleTransactionPollResult::progress ||
+          result == CapsuleTransactionPollResult::wouldBlock) return false;
+      if (result != CapsuleTransactionPollResult::recovered) return fail();
+      if (transactionRunner_.recoveryQuarantined()) {
+        log.println(
+            "{\"event\":\"recording_boot_recovery_quarantined\"}");
+      }
+      recoveryPhase_ = RecoveryPhase::reserve;
+      return false;
+    }
+    case RecoveryPhase::reserve: {
+      StorageReservation reservation = StorageCoordinator::instance().reserve(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!reservation) return false;
+      storageReservation_ = std::move(reservation);
+      recoveryPhase_ = RecoveryPhase::scanOpen;
+      return false;
+    }
+    case RecoveryPhase::scanOpen: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryRoot_ = fs_->open(kCapsuleStaging, FILE_READ);
+      if (!recoveryRoot_ || !recoveryRoot_.isDirectory()) return fail();
+      recoveryPhase_ = RecoveryPhase::scanNext;
+      return false;
+    }
+    case RecoveryPhase::scanNext: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryEntry_ = recoveryRoot_.openNextFile();
+      if (!recoveryEntry_) {
+        recoveryCandidate_ = false;
+        recoveryPhase_ = RecoveryPhase::closeRoot;
+        return false;
+      }
+      const String fullName = recoveryEntry_.name();
+      const int slash = fullName.lastIndexOf('/');
+      recoveryId_ = slash >= 0 ? fullName.substring(slash + 1) : fullName;
+      recoveryDirectory_ = String(kCapsuleStaging) + "/" + recoveryId_;
+      recoveryCandidate_ = recoveryEntry_.isDirectory() &&
+          isUuid(recoveryId_.c_str());
+      recoveryPhase_ = RecoveryPhase::closeEntry;
+      return false;
+    }
+    case RecoveryPhase::closeEntry: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryEntry_.close();
+      recoveryPhase_ = recoveryCandidate_ ? RecoveryPhase::checkFailureMarker
+                                          : RecoveryPhase::scanNext;
+      return false;
+    }
+    case RecoveryPhase::closeRoot: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryRoot_.close();
+      recoveryPhase_ = RecoveryPhase::done;
+      return false;
+    }
+    case RecoveryPhase::checkFailureMarker:
+    case RecoveryPhase::checkFailedCheckpoint:
+    case RecoveryPhase::checkQuarantinedCheckpoint:
+    case RecoveryPhase::checkCheckpoint: {
+      const String path = recoveryDirectory_ +
+          (recoveryPhase_ == RecoveryPhase::checkFailureMarker
+               ? "/recording.failure"
+               : (recoveryPhase_ == RecoveryPhase::checkFailedCheckpoint
+                      ? "/recording.failed.chk"
+                      : (recoveryPhase_ ==
+                                 RecoveryPhase::checkQuarantinedCheckpoint
+                             ? "/recording.failure.chk"
+                             : "/recording.chk")));
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      const bool exists = fs_->exists(path);
+      if ((recoveryPhase_ == RecoveryPhase::checkFailureMarker ||
+           recoveryPhase_ == RecoveryPhase::checkFailedCheckpoint ||
+           recoveryPhase_ == RecoveryPhase::checkQuarantinedCheckpoint) &&
+          exists) {
+        log.printf(
+            "{\"event\":\"recording_recovery_preserved\",\"id\":\"%s\"}\n",
+            recoveryId_.c_str());
+        recoveryCandidate_ = false;
+        recoveryPhase_ = RecoveryPhase::scanNext;
+      } else if (recoveryPhase_ == RecoveryPhase::checkFailureMarker) {
+        recoveryPhase_ = RecoveryPhase::checkFailedCheckpoint;
+      } else if (recoveryPhase_ == RecoveryPhase::checkFailedCheckpoint) {
+        recoveryPhase_ = RecoveryPhase::checkQuarantinedCheckpoint;
+      } else if (recoveryPhase_ ==
+                 RecoveryPhase::checkQuarantinedCheckpoint) {
+        recoveryPhase_ = RecoveryPhase::checkCheckpoint;
+      } else if (!exists) {
+        recoveryPhase_ = RecoveryPhase::checkOrphanPartial;
+      } else {
+        recoveryCheckpointPath_ = path;
+        recoveryPhase_ = RecoveryPhase::openCheckpoint;
+      }
+      return false;
+    }
+    case RecoveryPhase::checkOrphanPartial: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      if (fs_->exists(recoveryDirectory_ + "/audio.wav.part")) {
+        return quarantine();
+      }
+      recoveryCandidate_ = false;
+      recoveryPhase_ = RecoveryPhase::scanNext;
+      return false;
+    }
+    case RecoveryPhase::openCheckpoint: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      file_ = fs_->open(recoveryCheckpointPath_, FILE_READ);
+      recoveryFileAccess_ = StorageAccess::read;
+      if (!file_) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return quarantine();
+      }
+      finalizePrimitiveFailures_ = 0;
+      if (file_.isDirectory() ||
+          file_.size() != sizeof(recoveryCheckpoint_)) return quarantine();
+      recoveryPhase_ = RecoveryPhase::readCheckpoint;
+      return false;
+    }
+    case RecoveryPhase::readCheckpoint: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      const int bytes = file_.read(
+          reinterpret_cast<uint8_t *>(&recoveryCheckpoint_),
+          sizeof(recoveryCheckpoint_));
+      if (bytes != static_cast<int>(sizeof(recoveryCheckpoint_)) ||
+          !validateRecorderCheckpoint(recoveryCheckpoint_) ||
+          recoveryCheckpoint_.state !=
+              static_cast<uint8_t>(RecorderCheckpointState::recording) ||
+          strcmp(recoveryCheckpoint_.capsuleId, recoveryId_.c_str()) != 0) {
+        recoveryPhase_ = RecoveryPhase::closeCheckpoint;
+        recoveryCandidate_ = false;
+      } else {
+        recoveryPhase_ = RecoveryPhase::closeCheckpoint;
+      }
+      return false;
+    }
+    case RecoveryPhase::closeCheckpoint: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      file_.close();
+      recoveryPhase_ = recoveryCandidate_ ? RecoveryPhase::checkCommittedAudio
+                                          : RecoveryPhase::quarantineDestinationExists;
+      return false;
+    }
+    case RecoveryPhase::checkCommittedAudio: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryAudioCommitted_ =
+          fs_->exists(recoveryDirectory_ + "/audio.wav");
+      recoveryPhase_ = RecoveryPhase::openPartial;
+      return false;
+    }
+    case RecoveryPhase::openPartial: {
+      partialPath_ = recoveryDirectory_ +
+          (recoveryAudioCommitted_ ? "/audio.wav" : "/audio.wav.part");
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      file_ = fs_->open(partialPath_, FILE_READ);
+      recoveryFileAccess_ = StorageAccess::read;
+      if (!file_ || file_.isDirectory() || file_.size() <= kWavHeaderBytes ||
+          file_.size() - kWavHeaderBytes > kMaximumRecordingAudioBytes) {
+        return quarantine();
+      }
+      recoveryActualBytes_ =
+          static_cast<uint32_t>(file_.size() - kWavHeaderBytes) & ~1U;
+      recoveryDataBytes_ = recoveryCheckpoint_.confirmedDataBytes;
+      if (recoveryDataBytes_ == 0 ||
+          recoveryDataBytes_ > recoveryActualBytes_) return quarantine();
+      recoveryRemaining_ = recoveryDataBytes_;
+      recoveryCrcState_ = recorderAudioCrc32Begin();
+      recoveryPhase_ = recoveryAudioCommitted_
+          ? RecoveryPhase::readCommittedHeader : RecoveryPhase::seekPartial;
+      return false;
+    }
+    case RecoveryPhase::readCommittedHeader: {
+      uint8_t header[kWavHeaderBytes];
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      const int bytes = file_.read(header, sizeof(header));
+      uint32_t headerDataBytes = 0;
+      if (bytes != static_cast<int>(sizeof(header)) ||
+          !validCapsuleWavHeader(
+              header, sizeof(header),
+              kWavHeaderBytes + recoveryActualBytes_, headerDataBytes) ||
+          headerDataBytes != recoveryDataBytes_ ||
+          recoveryActualBytes_ != recoveryDataBytes_) {
+        return quarantine();
+      }
+      recoveryPhase_ = RecoveryPhase::seekPartial;
+      return false;
+    }
+    case RecoveryPhase::seekPartial: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      if (!file_.seek(kWavHeaderBytes)) return quarantine();
+      recoveryPhase_ = RecoveryPhase::readPartialCrc;
+      return false;
+    }
+    case RecoveryPhase::readPartialCrc: {
+      if (recoveryRemaining_ == 0) {
+        recoveryCandidate_ =
+            recorderAudioCrc32Finish(recoveryCrcState_) ==
+            recoveryCheckpoint_.audioCrc32;
+        recoveryPhase_ = RecoveryPhase::closePartial;
+        return false;
+      }
+      const size_t wanted = recoveryRemaining_ < sizeof(recoveryBuffer_)
+          ? recoveryRemaining_ : sizeof(recoveryBuffer_);
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      const int bytes = file_.read(recoveryBuffer_, wanted);
+      if (bytes != static_cast<int>(wanted)) return quarantine();
+      recoveryCrcState_ = recorderAudioCrc32Update(
+          recoveryCrcState_, recoveryBuffer_, wanted);
+      recoveryRemaining_ -= static_cast<uint32_t>(wanted);
+      return false;
+    }
+    case RecoveryPhase::closePartial: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      file_.close();
+      recoveryPhase_ = recoveryCandidate_
+          ? (recoveryAudioCommitted_ ? RecoveryPhase::startFinalize
+             : (recoveryActualBytes_ == recoveryDataBytes_
+                 ? RecoveryPhase::openPatch
+                 : RecoveryPhase::truncatePartial))
+          : RecoveryPhase::quarantineDestinationExists;
+      return false;
+    }
+    case RecoveryPhase::truncatePartial: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      const String mountedPath = String("/sdcard") + partialPath_;
+      if (::truncate(mountedPath.c_str(), static_cast<off_t>(
+              kWavHeaderBytes + recoveryDataBytes_)) != 0) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return quarantine();
+      }
+      finalizePrimitiveFailures_ = 0;
+      recoveryPhase_ = RecoveryPhase::openPatch;
+      return false;
+    }
+    case RecoveryPhase::openPatch: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      file_ = fs_->open(partialPath_, "r+");
+      recoveryFileAccess_ = StorageAccess::mutation;
+      if (!file_) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return quarantine();
+      }
+      finalizePrimitiveFailures_ = 0;
+      recoveryPhase_ = RecoveryPhase::seekPatch;
+      return false;
+    }
+    case RecoveryPhase::seekPatch: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      if (!file_.seek(0)) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return quarantine();
+      }
+      finalizePrimitiveFailures_ = 0;
+      recoveryPhase_ = RecoveryPhase::writePatch;
+      return false;
+    }
+    case RecoveryPhase::writePatch: {
+      uint8_t header[kWavHeaderBytes];
+      encodeWavHeader(header, recoveryDataBytes_);
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      if (file_.write(header, sizeof(header)) != sizeof(header) ||
+          file_.getWriteError() != 0) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return quarantine();
+      }
+      finalizePrimitiveFailures_ = 0;
+      recoveryPhase_ = RecoveryPhase::flushPatch;
+      return false;
+    }
+    case RecoveryPhase::flushPatch: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      file_.flush();
+      if (file_.getWriteError() != 0) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return quarantine();
+      }
+      finalizePrimitiveFailures_ = 0;
+      recoveryPhase_ = RecoveryPhase::closePatch;
+      return false;
+    }
+    case RecoveryPhase::closePatch: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      const int errorBefore = file_ ? file_.getWriteError() : 1;
+      file_.close();
+      if (errorBefore != 0 || file_.getWriteError() != 0) {
+        return quarantine();
+      }
+      recoveryPhase_ = RecoveryPhase::startFinalize;
+      return false;
+    }
+    case RecoveryPhase::startFinalize:
+      recordingId_ = recoveryId_;
+      createdAt_ = recoveryCheckpoint_.createdAt;
+      directory_ = recoveryDirectory_;
+      finalPath_ = directory_ + "/audio.wav";
+      dataBytes_ = recoveryDataBytes_;
+      checkpoint_ = recoveryCheckpoint_;
+      checkpointInitialized_ = true;
+      finalizeStopReason_ = RecorderStopReason::none;
+      finalizePrimitiveFailures_ = 0;
+      finalizePhase_ = recoveryAudioCommitted_
+          ? FinalizePhase::startCapsuleMetadata
+          : FinalizePhase::startAudioAndProcessing;
+      finalizePending_ = true;
+      recoveryFinalizeActive_ = true;
+      return false;
+    case RecoveryPhase::quarantineCloseFile: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, recoveryFileAccess_, 0);
+      if (!lease) return false;
+      file_.close();
+      recoveryPhase_ = RecoveryPhase::quarantineDestinationExists;
+      return false;
+    }
+    case RecoveryPhase::quarantineDestinationExists: {
+      const String destination = recoveryDirectory_ + ".blocked" +
+          (recoveryQuarantineSuffix_ == 0
+               ? String() : "." + String(recoveryQuarantineSuffix_));
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      if (fs_->exists(destination)) {
+        ++recoveryQuarantineSuffix_;
+      } else {
+        recoveryPhase_ = RecoveryPhase::quarantineRename;
+      }
+      return false;
+    }
+    case RecoveryPhase::quarantineRename: {
+      const String destination = recoveryDirectory_ + ".blocked" +
+          (recoveryQuarantineSuffix_ == 0
+               ? String() : "." + String(recoveryQuarantineSuffix_));
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!lease) return false;
+      if (!fs_->rename(recoveryDirectory_, destination)) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        finalizePrimitiveFailures_ = 0;
+        return fail();
+      }
+      finalizePrimitiveFailures_ = 0;
+      log.printf(
+          "{\"event\":\"recording_recovery_quarantined\",\"id\":\"%s\"}\n",
+          recoveryId_.c_str());
+      recoveryPhase_ = RecoveryPhase::scanNext;
+      return false;
+    }
+    case RecoveryPhase::failureCloseFile: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, recoveryFileAccess_, 0);
+      if (!lease) return false;
+      file_.close();
+      recoveryPhase_ = recoveryEntry_ ? RecoveryPhase::failureCloseEntry
+          : (recoveryRoot_ ? RecoveryPhase::failureCloseRoot
+                           : RecoveryPhase::failureDone);
+      return false;
+    }
+    case RecoveryPhase::failureCloseEntry: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryEntry_.close();
+      recoveryPhase_ = recoveryRoot_ ? RecoveryPhase::failureCloseRoot
+                                     : RecoveryPhase::failureDone;
+      return false;
+    }
+    case RecoveryPhase::failureCloseRoot: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return false;
+      recoveryRoot_.close();
+      recoveryPhase_ = RecoveryPhase::failureDone;
+      return false;
+    }
+    case RecoveryPhase::failureDone:
+      storageReservation_.release();
+      bootRecoveryPending_ = false;
+      bootRecoveryFailed_ = true;
+      recoveryPhase_ = RecoveryPhase::failed;
+      log.println("{\"event\":\"recording_boot_recovery_failed\"}");
+      return false;
+    case RecoveryPhase::done:
+      storageReservation_.release();
+      bootRecoveryPending_ = false;
+      bootRecoveryReady_ = true;
+      bootRecoveryFailed_ = false;
+      return true;
+    case RecoveryPhase::failed:
+      return false;
+  }
+  return fail();
+}
+
+bool WavRecorder::pollFinalize(Print &log, uint32_t nowMs,
+                               CapsuleTransactionGate *gate) {
+  if (bootRecoveryPending_ && !recoveryFinalizeActive_) {
+    return pollBootRecovery(log, nowMs);
+  }
+  if (cleanupPending_) return pollCleanup(log, nowMs, gate);
+  if (!finalizePending_) return true;
+
+  switch (finalizePhase_) {
+    case FinalizePhase::flushAudio: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      file_.flush();
+      if (file_.getWriteError() != 0) {
+        return finalizeFailure(log, RecorderTerminal::storageFailure,
+                               RecorderFailureStage::flushAudio);
+      }
+      finalizePhase_ = FinalizePhase::seekHeader;
+      return false;
+    }
+    case FinalizePhase::seekHeader: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      if (!file_.seek(0)) {
+        return finalizeFailure(log, RecorderTerminal::headerFailure,
+                               RecorderFailureStage::finalHeader);
+      }
+      finalizePhase_ = FinalizePhase::writeHeader;
+      return false;
+    }
+    case FinalizePhase::writeHeader: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      if (!writeHeader(dataBytes_)) {
+        return finalizeFailure(log, RecorderTerminal::headerFailure,
+                               RecorderFailureStage::finalHeader);
+      }
+      finalizePhase_ = FinalizePhase::finalFlush;
+      return false;
+    }
+    case FinalizePhase::finalFlush: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      file_.flush();
+      if (file_.getWriteError() != 0) {
+        return finalizeFailure(log, RecorderTerminal::storageFailure,
+                               RecorderFailureStage::flushAudio);
+      }
+      finalizePhase_ = FinalizePhase::closeAudio;
+      return false;
+    }
+    case FinalizePhase::closeAudio: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      file_.close();
+      if (file_.getWriteError() != 0) {
+        return finalizeFailure(log, RecorderTerminal::commitFailure,
+                               RecorderFailureStage::commitAudio);
+      }
+      if (dataBytes_ == 0) {
+        return finalizeFailure(log, RecorderTerminal::tooShort,
+                               RecorderFailureStage::emptyAudio);
+      }
+      finalizePhase_ = FinalizePhase::startAudioAndProcessing;
+      return false;
+    }
+    case FinalizePhase::startAudioAndProcessing:
+      processingMetadata_ = processingJson(recordingId_, durationMs(),
+                                           "queued", 2, nullptr, nullptr);
+      processingSource_.bind(processingMetadata_);
+      finalizeInputs_[0] = {finalPath_, nullptr, partialPath_};
+      finalizeInputs_[1] = {directory_ + "/processing.json",
+                            &processingSource_, String()};
+      if (!transactionRunner_.startCommit(recordingId_.c_str(),
+                                          finalizeInputs_, 2,
+                                          activeStorageOwner())) {
+        return finalizeFailure(log, RecorderTerminal::commitFailure,
+                               RecorderFailureStage::commitAudio);
+      }
+      finalizePhase_ = FinalizePhase::pollAudioAndProcessing;
+      return false;
+    case FinalizePhase::pollAudioAndProcessing:
+    case FinalizePhase::pollCapsuleMetadata:
+      return pollFinalizeRunner(log, nowMs, gate);
+    case FinalizePhase::startCapsuleMetadata:
+      capsuleMetadata_ = capsuleJson(recordingId_, createdAt_);
+      capsuleSource_.bind(capsuleMetadata_);
+      finalizeInputs_[0] = {directory_ + "/capsule.json",
+                            &capsuleSource_, String()};
+      if (!transactionRunner_.startCommit(recordingId_.c_str(),
+                                          finalizeInputs_, 1,
+                                          activeStorageOwner())) {
+        return finalizeFailure(log, RecorderTerminal::metadataFailure,
+                               RecorderFailureStage::capsuleMetadata);
+      }
+      finalizePhase_ = FinalizePhase::pollCapsuleMetadata;
+      return false;
+    case FinalizePhase::checkInboxDirectory: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::read, 0);
+      if (!lease) return false;
+      inboxDirectory_ = String(kCapsuleInbox) + "/" + recordingId_;
+      if (fs_->exists(inboxDirectory_)) {
+        return finalizeFailure(log, RecorderTerminal::commitFailure,
+                               RecorderFailureStage::commitDirectory);
+      }
+      finalizePhase_ = FinalizePhase::renameStagingDirectory;
+      return false;
+    }
+    case FinalizePhase::renameStagingDirectory: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      if (!fs_->rename(directory_, inboxDirectory_)) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        return finalizeFailure(log, RecorderTerminal::commitFailure,
+                               RecorderFailureStage::commitDirectory);
+      }
+      finalizePrimitiveFailures_ = 0;
+      directory_ = inboxDirectory_;
+      finalPath_ = directory_ + "/audio.wav";
+      finalizePhase_ = FinalizePhase::checkCheckpoint;
+      return false;
+    }
+    case FinalizePhase::checkCheckpoint: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::read, 0);
+      if (!lease) return false;
+      const String path = directory_ + "/recording.chk";
+      finalizePhase_ = fs_->exists(path) ? FinalizePhase::removeCheckpoint
+                                         : FinalizePhase::complete;
+      return false;
+    }
+    case FinalizePhase::removeCheckpoint: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      const String path = directory_ + "/recording.chk";
+      if (!fs_->remove(path)) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        log.println("{\"event\":\"recording_warning\",\"stage\":\"checkpoint_cleanup\"}");
+        finalizePrimitiveFailures_ = 0;
+        finalizePhase_ = FinalizePhase::quarantineCheckpoint;
+        return false;
+      }
+      finalizePrimitiveFailures_ = 0;
+      finalizePhase_ = FinalizePhase::complete;
+      return false;
+    }
+    case FinalizePhase::quarantineCheckpoint: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      const String path = directory_ + "/recording.chk";
+      const String stale = directory_ + "/recording.chk.stale";
+      if (!fs_->rename(path, stale)) {
+        if (++finalizePrimitiveFailures_ < 3) return false;
+        log.println(
+            "{\"event\":\"recording_cleanup_blocked\",\"artifact\":\"success_checkpoint\"}");
+      }
+      finalizePrimitiveFailures_ = 0;
+      finalizePhase_ = FinalizePhase::complete;
+      return false;
+    }
+    case FinalizePhase::complete:
+      completeFinalize(log);
+      return true;
+    case FinalizePhase::idle:
+      return true;
+  }
+  return finalizeFailure(log, RecorderTerminal::commitFailure,
+                         RecorderFailureStage::commitAudio);
 }
 
 void WavRecorder::resetSessionState() {
   // An open handle is owned by either the active recording or its deferred
   // cleanup.  Closing it here would bypass the StorageCoordinator lease.
-  if (file_ || cleanupPending_) return;
+  if (file_ || cleanupPending_ || finalizePending_) return;
   recording_ = false;
+  operationOwner_ = RecorderOperationOwner::none;
   recordingId_ = "";
   createdAt_ = "";
   directory_ = "";
   partialPath_ = "";
   finalPath_ = "";
   dataBytes_ = 0;
+  automaticStopRequested_ = false;
+  automaticStopReason_ = RecorderStopReason::none;
+  finalizePhase_ = FinalizePhase::idle;
+  finalizeStopReason_ = RecorderStopReason::none;
+  finalizePrimitiveFailures_ = 0;
+  processingMetadata_ = "";
+  capsuleMetadata_ = "";
+  inboxDirectory_ = "";
   checkpointInitialized_ = false;
   checkpointCrcState_ = recorderAudioCrc32Begin();
   checkpointedBytes_ = 0;
@@ -362,44 +1058,265 @@ void WavRecorder::resetSessionState() {
 
 bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
                                 RecorderFailureStage stage) {
+  (void)log;
   recording_ = false;
+  automaticStopRequested_ = false;
+  automaticStopReason_ = RecorderStopReason::none;
+  finalizePending_ = false;
+  finalizePhase_ = FinalizePhase::idle;
   if (!cleanupPending_) {
     cleanupPending_ = true;
+    cleanupPhase_ = file_ ? CleanupPhase::flushAudio
+                          : CleanupPhase::startFailureCheckpoint;
+    cleanupPrimitiveFailures_ = 0;
     cleanupTerminal_ = terminal;
     cleanupStage_ = stage;
   }
-  (void)pollCleanup(log);
   return false;
 }
 
-bool WavRecorder::pollCleanup(Print &log) {
+bool WavRecorder::pollCleanup(Print &log, uint32_t nowMs,
+                              CapsuleTransactionGate *gate) {
   if (!cleanupPending_) return true;
-  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      activeStorageOwner(), StorageAccess::mutation, 0);
-  if (!lease) return false;
-
-  // Persist the failed checkpoint while the recorder still owns both the
-  // logical mutation reservation and physical IO lease.  Failure to persist
-  // does not justify leaking an open handle; recovery will retain the partial
-  // staging directory and fail closed on the next boot.
-  if (checkpointInitialized_ &&
-      cleanupStage_ != RecorderFailureStage::recoveryCheckpoint) {
-    (void)persistCheckpoint(true, cleanupStage_, log);
-  }
-  if (file_) {
+  if (cleanupPhase_ == CleanupPhase::flushAudio) {
+    if (!file_) {
+      cleanupPhase_ = CleanupPhase::startFailureCheckpoint;
+      return false;
+    }
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
     file_.flush();
-    file_.close();
+    cleanupPhase_ = CleanupPhase::closeAudio;
+    return false;
   }
-  lease.release();
+  if (cleanupPhase_ == CleanupPhase::closeAudio) {
+    if (file_) {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          activeStorageOwner(), StorageAccess::mutation, 0);
+      if (!lease) return false;
+      file_.close();
+    }
+    cleanupPhase_ = CleanupPhase::startFailureCheckpoint;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::startFailureCheckpoint) {
+    if (!checkpointInitialized_ || directory_.isEmpty()) {
+      cleanupPhase_ = directory_.isEmpty()
+          ? CleanupPhase::publishTerminal
+          : CleanupPhase::removeEmptyStaging;
+      return false;
+    }
+    updateRecorderCheckpoint(checkpoint_, dataBytes_,
+                             recorderAudioCrc32Finish(checkpointCrcState_));
+    failRecorderCheckpoint(checkpoint_, cleanupStage_);
+    failureCheckpointSource_.bind(checkpoint_);
+    finalizeInputs_[0] = {directory_ + "/recording.failed.chk",
+                          &failureCheckpointSource_, String()};
+    const String failureKey = recordingId_ + "-failure";
+    if (!transactionRunner_.startCommit(failureKey.c_str(),
+                                        finalizeInputs_, 1,
+                                        activeStorageOwner())) {
+      log.println(
+          "{\"event\":\"recording_warning\",\"stage\":\"failed_checkpoint_start\"}");
+      if (cleanupTerminal_ != RecorderTerminal::cancelled) {
+        cleanupTerminal_ = RecorderTerminal::cleanupBlocked;
+      }
+      failureMarkerPath_ = directory_ + "/recording.failure";
+      cleanupPhase_ = CleanupPhase::openFailureMarker;
+      return false;
+    }
+    cleanupPhase_ = CleanupPhase::pollFailureCheckpoint;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::removeEmptyStaging) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    if (!fs_->rmdir(directory_)) {
+      log.println(
+          "{\"event\":\"recording_cleanup_blocked\",\"artifact\":\"empty_staging\"}");
+      cleanupTerminal_ = RecorderTerminal::cleanupBlocked;
+    }
+    cleanupPhase_ = CleanupPhase::publishTerminal;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::pollFailureCheckpoint) {
+    const CapsuleTransactionPollResult result =
+        transactionRunner_.poll(nowMs, gate);
+    if (result == CapsuleTransactionPollResult::progress ||
+        result == CapsuleTransactionPollResult::wouldBlock) {
+      return false;
+    }
+    if (result != CapsuleTransactionPollResult::committed) {
+      log.println(
+          "{\"event\":\"recording_warning\",\"stage\":\"failed_checkpoint_commit\"}");
+      if (cleanupTerminal_ != RecorderTerminal::cancelled) {
+        cleanupTerminal_ = RecorderTerminal::cleanupBlocked;
+      }
+      failureMarkerPath_ = directory_ + "/recording.failure";
+      cleanupPrimitiveFailures_ = 0;
+      cleanupPhase_ = CleanupPhase::openFailureMarker;
+      return false;
+    }
+    cleanupPhase_ = CleanupPhase::publishTerminal;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::openFailureMarker) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    file_ = fs_->open(failureMarkerPath_, FILE_WRITE);
+    if (!file_) {
+      if (++cleanupPrimitiveFailures_ < 3) return false;
+      cleanupPrimitiveFailures_ = 0;
+      cleanupPhase_ = CleanupPhase::renameFailureCheckpoint;
+      return false;
+    }
+    cleanupPrimitiveFailures_ = 0;
+    cleanupPhase_ = CleanupPhase::writeFailureMarker;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::writeFailureMarker) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    const size_t written = file_.write(
+        reinterpret_cast<const uint8_t *>(&checkpoint_),
+        sizeof(checkpoint_));
+    if (written != sizeof(checkpoint_) || file_.getWriteError() != 0) {
+      if (++cleanupPrimitiveFailures_ < 3) return false;
+      cleanupPrimitiveFailures_ = 0;
+      cleanupPhase_ = CleanupPhase::closeFailureMarker;
+      return false;
+    }
+    cleanupPrimitiveFailures_ = 0;
+    cleanupPhase_ = CleanupPhase::flushFailureMarker;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::flushFailureMarker) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    file_.flush();
+    if (file_.getWriteError() != 0) {
+      if (++cleanupPrimitiveFailures_ < 3) return false;
+      cleanupPrimitiveFailures_ = 0;
+    }
+    cleanupPhase_ = CleanupPhase::closeFailureMarker;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::closeFailureMarker) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    const int errorBefore = file_ ? file_.getWriteError() : 1;
+    if (file_) file_.close();
+    const int errorAfter = file_.getWriteError();
+    cleanupPhase_ = errorBefore == 0 && errorAfter == 0
+        ? CleanupPhase::openFailureMarkerReadback
+        : CleanupPhase::renameFailureCheckpoint;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::openFailureMarkerReadback) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::read, 0);
+    if (!lease) return false;
+    file_ = fs_->open(failureMarkerPath_, FILE_READ);
+    if (!file_) {
+      cleanupPhase_ = CleanupPhase::renameFailureCheckpoint;
+      return false;
+    }
+    failureMarkerReadbackValid_ = false;
+    cleanupPhase_ = CleanupPhase::readFailureMarker;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::readFailureMarker) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::read, 0);
+    if (!lease) return false;
+    const int bytes = file_.read(
+        reinterpret_cast<uint8_t *>(&failureMarkerReadback_),
+        sizeof(failureMarkerReadback_));
+    failureMarkerReadbackValid_ =
+        bytes == static_cast<int>(sizeof(failureMarkerReadback_)) &&
+        memcmp(&failureMarkerReadback_, &checkpoint_, sizeof(checkpoint_)) == 0 &&
+        validateRecorderCheckpoint(failureMarkerReadback_) &&
+        failureMarkerReadback_.state ==
+            static_cast<uint8_t>(RecorderCheckpointState::failed);
+    cleanupPhase_ = CleanupPhase::closeFailureMarkerReadback;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::closeFailureMarkerReadback) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::read, 0);
+    if (!lease) return false;
+    file_.close();
+    cleanupPhase_ = failureMarkerReadbackValid_
+        ? CleanupPhase::publishTerminal
+        : CleanupPhase::renameFailureCheckpoint;
+    return false;
+  }
+  if (cleanupPhase_ == CleanupPhase::renameFailureCheckpoint) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    const String checkpointPath = directory_ + "/recording.chk";
+    const String failedPath = directory_ + "/recording.failure.chk";
+    if (!fs_->rename(checkpointPath, failedPath)) {
+      if (++cleanupPrimitiveFailures_ < 3) return false;
+      log.println(
+          "{\"event\":\"recording_cleanup_blocked\",\"artifact\":\"failure_marker\"}");
+      cleanupTerminal_ = RecorderTerminal::cleanupBlocked;
+      cleanupPrimitiveFailures_ = 0;
+      if (recoveryFinalizeActive_) {
+        cleanupPending_ = false;
+        recoveryFinalizeActive_ = false;
+        finalizePending_ = false;
+        finalizePhase_ = FinalizePhase::idle;
+        recoveryPhase_ = recoveryRoot_ ? RecoveryPhase::failureCloseRoot
+                                       : RecoveryPhase::failureDone;
+      }
+      return false;
+    }
+    cleanupPrimitiveFailures_ = 0;
+    // The rename makes the old recording truth non-upgradable while writes
+    // are unavailable.  Publication still waits for a failed checkpoint with
+    // the current byte count and failure stage to commit and read back.
+    cleanupPhase_ = CleanupPhase::startFailureCheckpoint;
+    return false;
+  }
+  if (cleanupPhase_ != CleanupPhase::publishTerminal) return false;
+  if (recoveryFinalizeActive_) {
+    cleanupPending_ = false;
+    cleanupPhase_ = CleanupPhase::idle;
+    cleanupPrimitiveFailures_ = 0;
+    cleanupTerminal_ = RecorderTerminal::none;
+    cleanupStage_ = RecorderFailureStage::none;
+    finalizePending_ = false;
+    finalizePhase_ = FinalizePhase::idle;
+    recoveryFinalizeActive_ = false;
+    recoveryPhase_ = RecoveryPhase::scanNext;
+    recordingId_ = "";
+    createdAt_ = "";
+    directory_ = "";
+    partialPath_ = "";
+    finalPath_ = "";
+    dataBytes_ = 0;
+    checkpointInitialized_ = false;
+    return false;
+  }
   storageReservation_.release();
-
   terminalState_.fail(cleanupTerminal_, cleanupStage_, dataBytes_);
   log.printf("{\"event\":\"recording_terminal\",\"ok\":false,\"stage\":\"%s\",\"bytes\":%lu}\n",
              recorderFailureStageName(cleanupStage_),
              static_cast<unsigned long>(dataBytes_));
   cleanupPending_ = false;
+  cleanupPhase_ = CleanupPhase::idle;
+  cleanupPrimitiveFailures_ = 0;
   cleanupTerminal_ = RecorderTerminal::none;
   cleanupStage_ = RecorderFailureStage::none;
+  operationOwner_ = RecorderOperationOwner::none;
   return true;
 }
 
@@ -430,25 +1347,6 @@ bool WavRecorder::writeHeader(uint32_t dataBytes) {
       file_.getWriteError() == 0;
 }
 
-bool WavRecorder::finalizePartialAudio(Print &log) {
-  if (dataBytes_ == 0) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"empty_audio\"}");
-    return false;
-  }
-  if (!transaction_.commitPreparedFile(
-          recordingId_.c_str(), partialPath_, finalPath_,
-          activeStorageOwner())) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"audio_commit\"}");
-    return false;
-  }
-  return true;
-}
-
-bool WavRecorder::writeCapsuleMetadata(Print &log, const String &timestamp) {
-  return writeTextAtomically(directory_ + "/capsule.json",
-                             capsuleJson(recordingId_, timestamp), log);
-}
-
 bool WavRecorder::writeProcessingMetadata(Print &log, const char *status,
                                           uint32_t revision,
                                           const char *errorStage,
@@ -456,172 +1354,6 @@ bool WavRecorder::writeProcessingMetadata(Print &log, const char *status,
   return writeTextAtomically(directory_ + "/processing.json",
                              processingJson(recordingId_, durationMs(), status,
                                             revision, errorStage, error), log);
-}
-
-bool WavRecorder::commitStagingDirectory(Print &log) {
-  const String target = String(kCapsuleInbox) + "/" + recordingId_;
-  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      activeStorageOwner(), StorageAccess::mutation, 1000);
-  if (!lease) return false;
-  if (fs_->exists(target)) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"target_exists\"}");
-    return false;
-  }
-  if (!fs_->rename(directory_, target)) {
-    log.println("{\"event\":\"recording_error\",\"stage\":\"directory_commit\"}");
-    return false;
-  }
-  directory_ = target;
-  finalPath_ = target + "/audio.wav";
-  return true;
-}
-
-bool WavRecorder::recoverInterrupted(Print &log, const String &recoveredAt) {
-  if (fs_ == nullptr || recoveredAt.isEmpty()) return false;
-  StorageReservation reservation = StorageCoordinator::instance().reserve(
-      StorageOwner::recovery, StorageAccess::mutation, 1000);
-  if (!reservation) return false;
-  StorageIoLease scanIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::recovery, StorageAccess::read, 1000);
-  if (!scanIo) return false;
-  File root = fs_->open(kCapsuleStaging);
-  if (!root || !root.isDirectory()) return false;
-  bool recoveredAny = false;
-  File entry = root.openNextFile();
-  while (entry) {
-    const String fullName = entry.name();
-    const bool directory = entry.isDirectory();
-    entry.close();
-    const int slash = fullName.lastIndexOf('/');
-    const String id = slash >= 0 ? fullName.substring(slash + 1) : fullName;
-    if (directory && isUuid(id.c_str()) &&
-        recoverStagingDirectory(String(kCapsuleStaging) + "/" + id,
-                                id, recoveredAt, log)) {
-      recoveredAny = true;
-    }
-    entry = root.openNextFile();
-  }
-  root.close();
-  return recoveredAny;
-}
-
-bool WavRecorder::recoverStagingDirectory(const String &stagingDirectory,
-                                          const String &recordingId,
-                                          const String &recoveredAt,
-                                          Print &log) {
-  const String partial = stagingDirectory + "/audio.wav.part";
-  const String audio = stagingDirectory + "/audio.wav";
-  const String checkpointPath = stagingDirectory + "/recording.chk";
-  StorageIoLease recoveryIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::recovery, StorageAccess::mutation, 1000);
-  if (!recoveryIo) return false;
-  StoredRecorderCheckpoint stored{};
-  bool hasCheckpoint = false;
-  if (fs_->exists(checkpointPath)) {
-    File checkpointFile = fs_->open(checkpointPath, FILE_READ);
-    hasCheckpoint = checkpointFile && !checkpointFile.isDirectory() &&
-        checkpointFile.size() == sizeof(stored) &&
-        checkpointFile.read(reinterpret_cast<uint8_t *>(&stored),
-                            sizeof(stored)) == sizeof(stored) &&
-        validateRecorderCheckpoint(stored);
-    if (checkpointFile) checkpointFile.close();
-    if (!hasCheckpoint) return false;
-    if (!String(stored.capsuleId).equalsIgnoreCase(recordingId)) return false;
-    if (stored.state == static_cast<uint8_t>(RecorderCheckpointState::failed)) {
-      log.printf("{\"event\":\"recording_recovery_preserved\",\"id\":\"%s\",\"stage\":%u}\n",
-                 recordingId.c_str(), stored.failureStage);
-      return false;
-    }
-  }
-  if (!fs_->exists(audio) && fs_->exists(partial)) {
-    File interrupted = fs_->open(partial, FILE_READ);
-    if (!interrupted || interrupted.size() <= kWavHeaderBytes ||
-        interrupted.size() - kWavHeaderBytes >
-            kMaximumRecordingAudioBytes) {
-      if (interrupted) interrupted.close();
-      return false;
-    }
-    const uint32_t actualBytes = static_cast<uint32_t>(
-        interrupted.size() - kWavHeaderBytes);
-    uint32_t bytes = actualBytes & ~1U;
-    if (hasCheckpoint) {
-      uint32_t crcState = recorderAudioCrc32Begin();
-      uint8_t buffer[512];
-      uint32_t remaining = stored.confirmedDataBytes;
-      if (!interrupted.seek(kWavHeaderBytes)) {
-        interrupted.close();
-        return false;
-      }
-      while (remaining > 0) {
-        const size_t wanted = remaining < sizeof(buffer)
-            ? remaining : sizeof(buffer);
-        const int received = interrupted.read(buffer, wanted);
-        if (received <= 0) {
-          interrupted.close();
-          return false;
-        }
-        crcState = recorderAudioCrc32Update(
-            crcState, buffer, static_cast<size_t>(received));
-        remaining -= static_cast<uint32_t>(received);
-      }
-      const RecorderRecoveryPlan plan = planRecorderRecovery(
-          stored, actualBytes, recorderAudioCrc32Finish(crcState));
-      if (plan.disposition !=
-          RecorderRecoveryDisposition::recoverConfirmedAudio) {
-        interrupted.close();
-        return false;
-      }
-      bytes = plan.recoveredDataBytes;
-      interrupted.close();
-      const String mountedPath = String("/sdcard") + partial;
-      if (::truncate(mountedPath.c_str(),
-                     static_cast<off_t>(kWavHeaderBytes + bytes)) != 0) {
-        return false;
-      }
-    } else {
-      interrupted.close();
-    }
-    File patch = fs_->open(partial, "r+");
-    uint8_t header[kWavHeaderBytes];
-    encodeWavHeader(header, bytes);
-    const bool patched = patch && patch.seek(0) &&
-        patch.write(header, sizeof(header)) == sizeof(header);
-    if (patch) {
-      patch.flush();
-      patch.close();
-    }
-    if (!patched || !fs_->rename(partial, audio)) return false;
-  }
-  File recoveredAudio = fs_->open(audio, FILE_READ);
-  if (!recoveredAudio || recoveredAudio.size() <= kWavHeaderBytes ||
-      recoveredAudio.size() - kWavHeaderBytes >
-          kMaximumRecordingAudioBytes) {
-    if (recoveredAudio) recoveredAudio.close();
-    return false;
-  }
-  const uint32_t recoveredBytes =
-      static_cast<uint32_t>(recoveredAudio.size() - kWavHeaderBytes);
-  recoveredAudio.close();
-
-  recoveryIo.release();
-
-  recordingId_ = recordingId;
-  createdAt_ = hasCheckpoint ? String(stored.createdAt) : recoveredAt;
-  directory_ = stagingDirectory;
-  partialPath_ = partial;
-  finalPath_ = audio;
-  dataBytes_ = recoveredBytes;
-  if (!writeCapsuleMetadata(log, createdAt_) ||
-      !writeProcessingMetadata(log, "queued", 2, nullptr, nullptr) ||
-      !commitStagingDirectory(log)) {
-    return false;
-  }
-  if (!removeCheckpoint()) {
-    log.println("{\"event\":\"recording_warning\",\"stage\":\"checkpoint_cleanup\"}");
-  }
-  log.printf("{\"event\":\"recording_recovered\",\"id\":\"%s\",\"duration_ms\":%lu}\n",
-             recordingId_.c_str(), static_cast<unsigned long>(durationMs()));
-  return true;
 }
 
 StorageOwner WavRecorder::activeStorageOwner() const {
@@ -649,14 +1381,6 @@ bool WavRecorder::persistCheckpoint(bool failed, RecorderFailureStage stage,
   if (ok) checkpointedBytes_ = checkpoint_.confirmedDataBytes;
   else log.println("{\"event\":\"recording_error\",\"stage\":\"checkpoint_write\"}");
   return ok;
-}
-
-bool WavRecorder::removeCheckpoint() {
-  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      activeStorageOwner(), StorageAccess::mutation, 1000);
-  if (!lease) return false;
-  const String path = directory_ + "/recording.chk";
-  return !fs_->exists(path) || fs_->remove(path);
 }
 
 }  // namespace pokepod

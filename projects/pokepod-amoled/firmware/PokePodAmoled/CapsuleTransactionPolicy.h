@@ -68,11 +68,87 @@ inline bool capsuleTransactionPathValid(const char *path) {
       !(length >= 3 && strcmp(path + length - 3, "/..") == 0);
 }
 
+inline bool capsuleTransactionPathStartsWith(const char *path,
+                                             const char *prefix) {
+  return path != nullptr && prefix != nullptr &&
+      strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+inline bool capsuleTransactionPathEndsWith(const char *path,
+                                           const char *suffix) {
+  if (path == nullptr || suffix == nullptr) return false;
+  const size_t pathLength = strlen(path);
+  const size_t suffixLength = strlen(suffix);
+  return pathLength >= suffixLength &&
+      strcmp(path + pathLength - suffixLength, suffix) == 0;
+}
+
+// Durable journals are recovery authority. Targets therefore stay inside a
+// product data leaf and can never name the transaction store or its side
+// artifacts. The root and one-level protected paths are directories, not
+// transaction targets.
+inline bool capsuleTransactionTargetPathValid(const char *path) {
+  constexpr const char *root = "/PokeCapsule/";
+  if (!capsuleTransactionPathValid(path) ||
+      !capsuleTransactionPathStartsWith(path, root)) {
+    return false;
+  }
+  constexpr const char *system = "/PokeCapsule/.system/";
+  if (capsuleTransactionPathStartsWith(path, system)) {
+    const bool font = strcmp(
+        path, "/PokeCapsule/.system/fonts/cjk20.a4") == 0;
+    constexpr const char *incoming =
+        "/PokeCapsule/.system/commands/incoming/";
+    constexpr const char *results =
+        "/PokeCapsule/.system/commands/results/";
+    const char *leaf = nullptr;
+    if (capsuleTransactionPathStartsWith(path, incoming)) {
+      leaf = path + strlen(incoming);
+    } else if (capsuleTransactionPathStartsWith(path, results)) {
+      leaf = path + strlen(results);
+    }
+    const bool command = leaf != nullptr && leaf[0] != '\0' &&
+        strchr(leaf, '/') == nullptr &&
+        capsuleTransactionPathEndsWith(leaf, ".json");
+    if (!font && !command) return false;
+  }
+  const char *relative = path + strlen(root);
+  if (strchr(relative, '/') == nullptr) return false;
+  return !capsuleTransactionPathEndsWith(path, ".journal") &&
+      !capsuleTransactionPathEndsWith(path, ".journal.tmp") &&
+      !capsuleTransactionPathEndsWith(path, ".new") &&
+      !capsuleTransactionPathEndsWith(path, ".bak");
+}
+
+// Producer files are inputs, never journal-authorized recovery targets.
+inline bool capsuleTransactionPreparedPathValid(const char *path,
+                                                const char *target = nullptr) {
+  if (!capsuleTransactionPathValid(path) ||
+      capsuleTransactionPathEndsWith(path, ".journal") ||
+      capsuleTransactionPathEndsWith(path, ".journal.tmp") ||
+      capsuleTransactionPathEndsWith(path, ".new") ||
+      capsuleTransactionPathEndsWith(path, ".bak")) {
+    return false;
+  }
+  if (capsuleTransactionPathStartsWith(path, "/PokeCapsule/.staging/") ||
+      capsuleTransactionPathStartsWith(path, "/PokeCapsule/.recording/")) {
+    return true;
+  }
+  if (target == nullptr || !capsuleTransactionTargetPathValid(target) ||
+      !capsuleTransactionPathStartsWith(target, "/PokeCapsule/.system/")) {
+    return false;
+  }
+  const size_t targetLength = strlen(target);
+  return strlen(path) == targetLength + 5 &&
+      strncmp(path, target, targetLength) == 0 &&
+      strcmp(path + targetLength, ".part") == 0;
+}
+
 inline bool setCapsuleTransactionTarget(
     StoredCapsuleTransactionTarget &target, const char *path,
     uint32_t expectedLength, uint32_t expectedCrc32, bool hadOriginal) {
   memset(&target, 0, sizeof(target));
-  if (!capsuleTransactionPathValid(path)) return false;
+  if (!capsuleTransactionTargetPathValid(path)) return false;
   const size_t length = strlen(path);
   if (length >= sizeof(target.path)) return false;
   memcpy(target.path, path, length + 1);
@@ -101,7 +177,7 @@ inline bool validateCapsuleTransactionJournal(
     return false;
   }
   for (uint8_t index = 0; index < journal.targetCount; ++index) {
-    if (!capsuleTransactionPathValid(journal.targets[index].path) ||
+    if (!capsuleTransactionTargetPathValid(journal.targets[index].path) ||
         journal.targets[index].hadOriginal > 1) return false;
   }
   return true;

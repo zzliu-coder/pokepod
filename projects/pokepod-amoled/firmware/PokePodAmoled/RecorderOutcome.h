@@ -4,6 +4,13 @@
 
 namespace pokepod {
 
+enum class RecorderOperationOwner : uint8_t {
+  none = 0,
+  localApp,
+  linkUsb,
+  linkWifi,
+};
+
 enum class RecorderTerminal : uint8_t {
   none = 0,
   completed,
@@ -14,6 +21,8 @@ enum class RecorderTerminal : uint8_t {
   tooShort,
   admissionFailure,
   captureFailure,
+  cancelled,
+  cleanupBlocked,
 };
 
 enum class RecorderStopReason : uint8_t {

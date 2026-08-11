@@ -217,7 +217,7 @@ inline bool validateRecorderCheckpoint(
   const bool failedState =
       state == static_cast<uint8_t>(RecorderCheckpointState::failed);
   const uint8_t maximumStage =
-      static_cast<uint8_t>(RecorderFailureStage::storageBusy);
+      static_cast<uint8_t>(RecorderFailureStage::captureIncomplete);
   return checkpoint.magic == kRecorderCheckpointMagic &&
       checkpoint.version == kRecorderCheckpointVersion &&
       (recordingState || failedState) &&

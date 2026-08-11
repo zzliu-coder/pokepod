@@ -37,6 +37,7 @@ enum class FaultAction : uint8_t {
   shortRead,
   crashBefore,
   crashAfter,
+  corruptData,
 };
 
 struct SimulatedCrash final : public std::runtime_error {
@@ -57,13 +58,19 @@ struct State {
   std::map<std::string, std::vector<uint8_t>> files;
   std::set<std::string> directories{"/"};
   FaultPlan fault;
+  FaultPlan secondaryFault;
   uint32_t operations = 0;
   uint64_t openNextFileCalls = 0;
   size_t openHandles = 0;
   size_t maximumReadBytes = 0;
   size_t maximumWriteBytes = 0;
+  std::string lastOpenedPath;
+  bool lastOpenWritable = false;
 
-  void clearFault() { fault = {}; }
+  void clearFault() {
+    fault = {};
+    secondaryFault = {};
+  }
 
   void fail(Operation operation, uint32_t occurrence, FaultAction action) {
     fault.operation = operation;
@@ -78,19 +85,32 @@ struct State {
     fault.repeat = true;
   }
 
+  void failAlsoAlways(Operation operation, FaultAction action) {
+    secondaryFault.operation = operation;
+    secondaryFault.action = action;
+    secondaryFault.occurrence = 1;
+    secondaryFault.seen = 0;
+    secondaryFault.repeat = true;
+  }
+
   FaultAction before(Operation operation) {
     ++operations;
-    if (fault.action == FaultAction::none || fault.operation != operation) {
-      return FaultAction::none;
-    }
-    ++fault.seen;
-    if (!fault.repeat && fault.seen != fault.occurrence) {
-      return FaultAction::none;
-    }
-    if (fault.action == FaultAction::crashBefore) {
+    const auto match = [operation](FaultPlan &plan) {
+      if (plan.action == FaultAction::none || plan.operation != operation) {
+        return FaultAction::none;
+      }
+      ++plan.seen;
+      if (!plan.repeat && plan.seen != plan.occurrence) {
+        return FaultAction::none;
+      }
+      return plan.action;
+    };
+    FaultAction action = match(fault);
+    if (action == FaultAction::none) action = match(secondaryFault);
+    if (action == FaultAction::crashBefore) {
       throw SimulatedCrash(operation);
     }
-    return fault.action;
+    return action;
   }
 
   void after(Operation operation, FaultAction action) {
@@ -182,6 +202,9 @@ class File {
     }
     if (accepted != 0) {
       std::memcpy(handle_->buffer.data() + handle_->position, bytes, accepted);
+      if (action == fakefs::FaultAction::corruptData) {
+        handle_->buffer[handle_->position + accepted - 1U] ^= 0x5aU;
+      }
       handle_->position += accepted;
       handle_->dirty = true;
     }
@@ -235,6 +258,10 @@ class File {
     }
     if (handle_->dirty) {
       handle_->state->files[handle_->path] = handle_->buffer;
+      if (action == fakefs::FaultAction::corruptData &&
+          !handle_->state->files[handle_->path].empty()) {
+        handle_->state->files[handle_->path].back() ^= 0xa5U;
+      }
       handle_->state->addParents(handle_->path);
       handle_->dirty = false;
     }
@@ -329,6 +356,8 @@ class FS {
     const bool directory = state_->directories.count(key) != 0;
     const bool write = mode != nullptr &&
         (std::strchr(mode, 'w') != nullptr || std::strchr(mode, '+') != nullptr);
+    state_->lastOpenedPath = key;
+    state_->lastOpenWritable = write;
     if (!directory && !write && state_->files.count(key) == 0) return {};
 
     auto handle = std::make_shared<fakefs::Handle>();

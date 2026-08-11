@@ -114,6 +114,7 @@ class CapsuleTransactionRunner {
   bool reservationHeld() const {
     return static_cast<bool>(reservation_);
   }
+  bool recoveryQuarantined() const { return recoveryHadBlocked_; }
   size_t lastPollBytes() const { return lastPollBytes_; }
   size_t maximumPollBytes() const { return maximumPollBytes_; }
   size_t maximumIoBytes() const { return maximumIoBytes_; }
@@ -162,6 +163,7 @@ class CapsuleTransactionRunner {
   String sidePath(uint8_t index, const char *suffix) const;
   String journalPath() const { return base_ + ".journal"; }
   String journalTemporaryPath() const { return base_ + ".journal.tmp"; }
+  String quarantinePath() const;
   static bool validInput(const CapsuleTransactionInput &input);
 
   fs::FS *fs_ = nullptr;
@@ -178,13 +180,16 @@ class CapsuleTransactionRunner {
       CapsuleTransactionRunState::failed;
   StorageOwner owner_ = StorageOwner::none;
   TargetRuntime targets_[kCapsuleTransactionMaximumTargets];
+  TargetRuntime requestedTargets_[kCapsuleTransactionMaximumTargets];
   uint8_t targetCount_ = 0;
+  uint8_t requestedTargetCount_ = 0;
   uint8_t targetIndex_ = 0;
   uint8_t cleanupIndex_ = 0;
   uint8_t primitiveFailures_ = 0;
   FactKind factKind_ = FactKind::none;
   StorageAccess fileAccess_ = StorageAccess::read;
   StoredCapsuleTransactionJournal journal_{};
+  StoredCapsuleTransactionJournal journalReadback_{};
   CapsuleTransactionRecovery recoveryDecision_ =
       CapsuleTransactionRecovery::ambiguous;
   String key_;
@@ -198,6 +203,12 @@ class CapsuleTransactionRunner {
   bool cancellationRequested_ = false;
   bool preserveJournal_ = false;
   bool cleanupPathExists_ = false;
+  bool resumeCommitAfterRecovery_ = false;
+  bool recoveryHadBlocked_ = false;
+  bool journalReadbackValid_ = false;
+  uint16_t quarantineSuffix_ = 0;
+  uint8_t quarantineArtifactIndex_ = 0;
+  String quarantineBasePath_;
   size_t lastPollBytes_ = 0;
   size_t maximumPollBytes_ = 0;
   size_t maximumIoBytes_ = 0;

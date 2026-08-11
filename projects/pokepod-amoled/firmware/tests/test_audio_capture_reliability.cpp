@@ -80,6 +80,18 @@ int main() {
   static_assert(kAudioCaptureSamplesPerFrame == 320, "frame size changed");
   static_assert(AudioCaptureService<6>::kRawStereoBytesPerFrame == 3840,
                 "48 kHz stereo input block changed");
+  AudioCaptureRing<64> storageTailRing;
+  storageTailRing.resetSession(40);
+  int16_t storageTailSamples[kAudioCaptureSamplesPerFrame]{};
+  // A 1 s checkpoint/storage tail publishes 50 real-time frames while the
+  // loop is unavailable; the fixed production ring must retain all of them.
+  for (uint32_t frameIndex = 0; frameIndex < 50U; ++frameIndex) {
+    assert(storageTailRing.push(frameIndex, frameIndex * 20U,
+                                storageTailSamples,
+                                kAudioCaptureSamplesPerFrame));
+  }
+  assert(storageTailRing.metrics().droppedFrames == 0U);
+  assert(!storageTailRing.metrics().incomplete());
 
   AudioCaptureRing<2> ring;
   ring.resetSession(41);

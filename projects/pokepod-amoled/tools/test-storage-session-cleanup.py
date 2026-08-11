@@ -17,8 +17,14 @@ assert "if (!lease) return false;" in recorder
 assert recorder.index("if (!lease) return false;") < recorder.index(
     "terminalState_.fail(cleanupTerminal_"
 )
-assert "if (recording_ || cleanupPending_ || file_)" in recorder
-assert "if (file_) file_.close();" not in recorder
+assert "if (operationActive() || bootRecoveryFailed_ || file_ ||" in recorder
+assert "terminalState_.peek().pending()" in recorder
+leased_failure_close = recorder[recorder.index(
+    "CleanupPhase::closeFailureMarker"
+):recorder.index("CleanupPhase::openFailureMarkerReadback")]
+assert "StorageIoLease lease" in leased_failure_close
+assert leased_failure_close.index("if (!lease) return false;") < \
+    leased_failure_close.index("if (file_) file_.close();")
 
 assert "playbackCleanup_.begin" in audio
 assert "playbackCleanup_.poll()" in audio
@@ -34,7 +40,7 @@ assert app.index("pollDeferredServiceCleanup();") < app.index(
     "if (linkService.receivingBinary())"
 )
 assert "captureRuntime.pollFinalize" in app
-assert "recorder.cleanupPending()" in app
+assert "recorder.operationActive() || pendingRecorderFinalize" in app
 assert "audio.playbackCleanupPending()" in app
 assert "StorageCoordinator::instance().idle()" in app
 assert app.count("if (board.sdReady()) SD_MMC.end();") == 2

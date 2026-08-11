@@ -17,7 +17,12 @@ namespace pokepod {
 // reads, fixed-buffer DSP and SPSC publication.
 class AudioCaptureRuntime {
  public:
-  static constexpr size_t kRingFrames = 6;
+  // 64 x 20 ms retains 1.28 s of fixed-size mono frames. This covers the
+  // admitted 1 s storage-tail budget while the loop drains an SD write or a
+  // durable checkpoint transaction, without heap growth during capture.
+  static constexpr size_t kRingFrames = 64;
+  static_assert(kRingFrames * sizeof(AudioCaptureFrame) <= 48U * 1024U,
+                "capture ring must remain within the fixed RAM budget");
   static constexpr uint32_t kTaskStackBytes = 3072;
   static constexpr UBaseType_t kTaskPriority = 5;
   static constexpr uint32_t kStopTimeoutMs = 500;

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -87,6 +88,19 @@ void seedPattern(const std::shared_ptr<fakefs::State> &state,
     bytes[offset] = patternByte(offset, salt);
   }
   state->seedBytes(path, bytes.data(), bytes.size());
+}
+
+std::string transactionBaseFor(const char *key, const char *path) {
+  uint32_t crc = 0xffffffffU;
+  crc = capsuleTransactionCrc32Update(
+      crc, reinterpret_cast<const uint8_t *>(key), strlen(key));
+  crc = capsuleTransactionCrc32Update(
+      crc, reinterpret_cast<const uint8_t *>(path), strlen(path));
+  char name[80];
+  snprintf(name, sizeof(name),
+           "/PokeCapsule/.system/transactions/tx-%08lx",
+           static_cast<unsigned long>(~crc));
+  return name;
 }
 
 void recoverToCompletion(fs::FS &storage, QuietPrint &log,
@@ -432,6 +446,222 @@ void runPermanentRemoveRecovery() {
   assertPattern(state, input.targetPath.c_str(), source.length(), 107);
 }
 
+void runExistingJournalThenNewCommit() {
+  enum class OldRecoveryBranch : uint8_t {
+    commitNew,
+    rollbackOld,
+    alreadyCommitted,
+  };
+  for (const OldRecoveryBranch branch : {
+           OldRecoveryBranch::commitNew,
+           OldRecoveryBranch::rollbackOld,
+           OldRecoveryBranch::alreadyCommitted,
+       }) {
+    QuietPrint log;
+    auto state = std::make_shared<fakefs::State>();
+    fs::FS storage(state);
+    StorageCoordinator coordinator;
+    constexpr char kTarget[] =
+        "/PokeCapsule/Inbox/existing/capsule.json";
+    constexpr char kOldPrepared[] =
+        "/PokeCapsule/.staging/existing/old.json.part";
+    constexpr char kNewPrepared[] =
+        "/PokeCapsule/.staging/existing/new.json.part";
+    state->seed(kTarget, "original");
+
+    PatternSource oldMemory(16U * 1024U, 111);
+    seedPattern(state, kOldPrepared, 16U * 1024U, 111);
+    const CapsuleTransactionInput oldInput =
+        branch == OldRecoveryBranch::rollbackOld
+            ? CapsuleTransactionInput{kTarget, nullptr, kOldPrepared}
+            : CapsuleTransactionInput{kTarget, &oldMemory, ""};
+    {
+      CapsuleTransactionRunner old;
+      assert(old.begin(storage, log, coordinator));
+      assert(old.startCommit("same-key", &oldInput, 1,
+                             StorageOwner::capsuleTransaction));
+      const char *stopPhase =
+          branch == OldRecoveryBranch::rollbackOld ? "publish-prepared" :
+          (branch == OldRecoveryBranch::commitNew ? "commit" : "cleanup");
+      uint32_t polls = 0;
+      while (std::string(old.phaseName()) != stopPhase && polls++ < 10000U) {
+        assert(!terminalResult(old.poll(0, nullptr)));
+      }
+      assert(polls < 10000U);
+    }
+    assert(coordinator.mutationOwner() == StorageOwner::none);
+
+    seedPattern(state, kNewPrepared, 20U * 1024U, 113);
+    const CapsuleTransactionInput newInput{kTarget, nullptr, kNewPrepared};
+    CapsuleTransactionRunner current;
+    assert(current.begin(storage, log, coordinator));
+    assert(current.startCommit("same-key", &newInput, 1,
+                               StorageOwner::capsuleTransaction));
+    assert(drive(current, state) ==
+           CapsuleTransactionPollResult::committed);
+    assertPattern(state, kTarget, 20U * 1024U, 113);
+    assert(state->files.count(kNewPrepared) == 0);
+    assert(!current.reservationHeld());
+    assert(state->openHandles == 0);
+  }
+}
+
+void runForgedJournalTargetRejected() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  constexpr char kForgedJournal[] =
+      "/PokeCapsule/.system/transactions/tx-forged.journal";
+  state->seed("/foo", "protected");
+  StoredCapsuleTransactionJournal journal{};
+  journal.magic = kCapsuleTransactionMagic;
+  journal.version = kCapsuleTransactionVersion;
+  journal.targetCount = 1;
+  strcpy(journal.targets[0].path, "/foo");
+  journal.targets[0].expectedLength = 3;
+  journal.targets[0].expectedCrc32 = capsuleTransactionCrc32(
+      reinterpret_cast<const uint8_t *>("new"), 3);
+  journal.targets[0].hadOriginal = 1;
+  finalizeCapsuleTransactionJournal(journal);
+  assert(journal.crc32 == capsuleTransactionCrc32(
+      reinterpret_cast<const uint8_t *>(&journal),
+      offsetof(StoredCapsuleTransactionJournal, crc32)));
+  state->seedBytes(kForgedJournal,
+                   reinterpret_cast<const uint8_t *>(&journal),
+                   sizeof(journal));
+  state->seed(std::string(kForgedJournal) + ".blocked", "older-corrupt");
+
+  fs::FS storage(state);
+  StorageCoordinator coordinator;
+  CapsuleTransactionRunner recovery;
+  assert(recovery.begin(storage, log, coordinator));
+  assert(recovery.startRecovery());
+  assert(drive(recovery, state) == CapsuleTransactionPollResult::recovered);
+  assert(recovery.recoveryQuarantined());
+  assert(state->text("/foo") == "protected");
+  assert(state->files.count(kForgedJournal) == 0);
+  assert(state->text(std::string(kForgedJournal) + ".blocked") ==
+         "older-corrupt");
+  assert(state->files.count(std::string(kForgedJournal) + ".blocked.1") == 1);
+  assert(!recovery.reservationHeld());
+  assert(state->openHandles == 0);
+}
+
+void runCorruptJournalIsolation() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  StorageCoordinator coordinator;
+  PatternSource first(12U * 1024U, 117);
+  PatternSource second(12U * 1024U, 119);
+  const CapsuleTransactionInput inputs[2] = {
+      {"/PokeCapsule/Inbox/isolate-a/raw.txt", &first, ""},
+      {"/PokeCapsule/Inbox/isolate-b/raw.txt", &second, ""},
+  };
+  for (uint8_t index = 0; index < 2; ++index) {
+    CapsuleTransactionRunner interrupted;
+    assert(interrupted.begin(storage, log, coordinator));
+    const char *key = index == 0 ? "isolate-a" : "isolate-b";
+    assert(interrupted.startCommit(key, &inputs[index], 1,
+                                   StorageOwner::capsuleTransaction));
+    uint32_t polls = 0;
+    while (std::string(interrupted.phaseName()) != "commit" &&
+           polls++ < 10000U) {
+      assert(!terminalResult(interrupted.poll(0, nullptr)));
+    }
+    assert(polls < 10000U);
+  }
+  constexpr char kCorrupt[] =
+      "/PokeCapsule/.system/transactions/tx-00000000.journal";
+  state->seed(kCorrupt, "corrupt");
+
+  CapsuleTransactionRunner recovery;
+  assert(recovery.begin(storage, log, coordinator));
+  assert(recovery.startRecovery());
+  assert(drive(recovery, state) == CapsuleTransactionPollResult::recovered);
+  assert(recovery.recoveryQuarantined());
+  assertPattern(state, inputs[0].targetPath.c_str(), first.length(), 117);
+  assertPattern(state, inputs[1].targetPath.c_str(), second.length(), 119);
+  assert(state->files.count(kCorrupt) == 0);
+  assert(state->files.count(std::string(kCorrupt) + ".blocked") == 1);
+  assert(state->openHandles == 0);
+
+  CapsuleTransactionRunner secondPass;
+  assert(secondPass.begin(storage, log, coordinator));
+  assert(secondPass.startRecovery());
+  assert(drive(secondPass, state) ==
+         CapsuleTransactionPollResult::recovered);
+}
+
+void runCorruptSameBasePreservesSideEvidence() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  StorageCoordinator coordinator;
+  constexpr char kKey[] = "corrupt-same-base";
+  constexpr char kTarget[] =
+      "/PokeCapsule/Inbox/corrupt-same/raw.txt";
+  constexpr char kPrepared[] =
+      "/PokeCapsule/.staging/corrupt-same/raw.txt.part";
+  const std::string base = transactionBaseFor(kKey, kTarget);
+  state->seed(kTarget, "old-target");
+  state->seed(base + ".journal", "corrupt-journal");
+  state->seed(base + ".0.new", "old-staged-evidence");
+  state->seed(base + ".0.bak", "old-backup-evidence");
+  seedPattern(state, kPrepared, 20U * 1024U, 131);
+
+  const CapsuleTransactionInput input{kTarget, nullptr, kPrepared};
+  CapsuleTransactionRunner current;
+  assert(current.begin(storage, log, coordinator));
+  assert(current.startCommit(kKey, &input, 1,
+                             StorageOwner::capsuleTransaction));
+  assert(drive(current, state) == CapsuleTransactionPollResult::committed);
+  assertPattern(state, kTarget, 20U * 1024U, 131);
+  assert(state->text(base + ".journal.blocked") == "corrupt-journal");
+  assert(state->text(base + ".journal.blocked.artifact.0.new") ==
+         "old-staged-evidence");
+  assert(state->text(base + ".journal.blocked.artifact.0.bak") ==
+         "old-backup-evidence");
+  assert(state->openHandles == 0);
+  assert(!current.reservationHeld());
+}
+
+void runPublishedJournalReadbackRequired() {
+  for (const auto scenario : {
+           std::pair<fakefs::Operation, fakefs::FaultAction>{
+               fakefs::Operation::write, fakefs::FaultAction::corruptData},
+           {fakefs::Operation::flush, fakefs::FaultAction::corruptData},
+           {fakefs::Operation::read, fakefs::FaultAction::shortRead},
+       }) {
+    QuietPrint log;
+    auto state = std::make_shared<fakefs::State>();
+    fs::FS storage(state);
+    StorageCoordinator coordinator;
+    constexpr char kTarget[] =
+        "/PokeCapsule/Inbox/journal-readback/raw.txt";
+    state->seed(kTarget, "old-authoritative-target");
+    PatternSource source(16U * 1024U, 139);
+    const CapsuleTransactionInput input{kTarget, &source, ""};
+    CapsuleTransactionRunner runner;
+    assert(runner.begin(storage, log, coordinator));
+    assert(runner.startCommit("journal-readback", &input, 1,
+                              StorageOwner::capsuleTransaction));
+    const char *faultPhase = scenario.first == fakefs::Operation::read
+        ? "journal-readback" : "journal-write";
+    uint32_t polls = 0;
+    while (std::string(runner.phaseName()) != faultPhase && polls++ < 10000U) {
+      assert(!terminalResult(runner.poll(0, nullptr)));
+    }
+    assert(polls < 10000U);
+    state->fail(scenario.first, 1, scenario.second);
+    const CapsuleTransactionPollResult result = drive(runner, state);
+    assert(result == CapsuleTransactionPollResult::failed ||
+           result == CapsuleTransactionPollResult::cleanupBlocked);
+    assert(state->text(kTarget) == "old-authoritative-target");
+    assert(state->openHandles == 0);
+    assert(!runner.reservationHeld());
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -441,5 +671,10 @@ int main() {
   runPermanentFailureRecovery();
   runCrashCutpoints();
   runPermanentRemoveRecovery();
+  runExistingJournalThenNewCommit();
+  runForgedJournalTargetRejected();
+  runCorruptJournalIsolation();
+  runCorruptSameBasePreservesSideEvidence();
+  runPublishedJournalReadbackRequired();
   return 0;
 }
