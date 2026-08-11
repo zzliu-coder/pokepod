@@ -6,6 +6,15 @@ cd "$SCRIPT_DIR"
 
 swift build -c release --disable-sandbox --scratch-path "$SCRIPT_DIR/.build"
 
+LOCAL_SIGNING_NAME=${POKEPOD_CODESIGN_IDENTITY:-"PokePod Local Code Signing"}
+if security find-identity -v -p codesigning | grep -Fq "\"$LOCAL_SIGNING_NAME\""; then
+  CODE_SIGN_IDENTITY=$LOCAL_SIGNING_NAME
+  echo "Code signing identity: $CODE_SIGN_IDENTITY"
+else
+  CODE_SIGN_IDENTITY=-
+  echo "Code signing identity: ad-hoc (local identity unavailable)"
+fi
+
 DIST="$SCRIPT_DIR/dist"
 CAPSULE_APP="$DIST/PokeCapsule.app"
 VOICE_APP="$DIST/PokePod Voice.app"
@@ -25,7 +34,7 @@ assemble_app() {
   cp "$SCRIPT_DIR/Resources/$plist" "$contents/Info.plist"
   cp "$SCRIPT_DIR/Resources/PokeCapsule.icns" "$contents/Resources/$icon_name"
   plutil -lint "$contents/Info.plist"
-  codesign --force --sign - "$staged_app"
+  codesign --force --sign "$CODE_SIGN_IDENTITY" "$staged_app"
   codesign --verify --deep --strict "$staged_app"
 }
 

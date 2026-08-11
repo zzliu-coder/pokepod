@@ -7,7 +7,7 @@ struct PokePodVoiceApp: App {
     @StateObject private var model = VoiceRuntimeModel()
 
     init() {
-        Self.runShortcutDiagnosticIfRequested()
+        Self.runCommandLineDiagnosticIfRequested()
     }
 
     var body: some Scene {
@@ -19,8 +19,21 @@ struct PokePodVoiceApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    private static func runShortcutDiagnosticIfRequested() {
-        guard ProcessInfo.processInfo.arguments.contains("--verify-option-z-hold") else {
+    private static func runCommandLineDiagnosticIfRequested() {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--request-accessibility") {
+            let shortcut = ShortcutController()
+            shortcutDiagnostic = shortcut
+            shortcut.requestAuthorization()
+            print("accessibility request: trusted=\(shortcut.isAuthorized)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                shortcutDiagnostic = nil
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
+        guard arguments.contains("--verify-option-z-hold") else {
             return
         }
 
