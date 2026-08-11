@@ -39,7 +39,11 @@ bool CapsuleBatchJournalStore::create(
   const bool ok = first == sizeof(state) && second == sizeof(empty) &&
       file.getWriteError() == 0;
   file.close();
-  return ok;
+  if (!ok) return false;
+  lease.release();
+  StoredCapsuleBatchState verified;
+  return readStateSlot(path(transactionId), 0, verified, owner) &&
+      memcmp(&verified, &state, sizeof(state)) == 0;
 }
 
 bool CapsuleBatchJournalStore::load(
@@ -69,11 +73,14 @@ bool CapsuleBatchJournalStore::load(
 bool CapsuleBatchJournalStore::checkpoint(StoredCapsuleBatchState &state,
                                           StorageOwner owner) {
   if (!validCapsuleBatchState(state)) return false;
-  ++state.generation;
-  sealCapsuleBatchState(state);
-  const size_t slot = state.generation & 1U;
-  return writeStateSlot(path(state.transactionId), "r+",
-                        slot * sizeof(state), state, owner);
+  const StoredCapsuleBatchState candidate = nextCapsuleBatchCheckpoint(state);
+  const size_t slot = candidate.generation & 1U;
+  const String journalPath = path(candidate.transactionId);
+  if (!writeStateSlot(journalPath, "r+", slot * sizeof(candidate),
+                      candidate, owner)) return false;
+  StoredCapsuleBatchState verified;
+  return readStateSlot(journalPath, slot * sizeof(candidate), verified, owner) &&
+      acceptCapsuleBatchCheckpoint(state, candidate, verified);
 }
 
 bool CapsuleBatchJournalStore::writeStateSlot(
@@ -96,6 +103,23 @@ bool CapsuleBatchJournalStore::writeStateSlot(
   return ok;
 }
 
+bool CapsuleBatchJournalStore::readStateSlot(
+    const String &journalPath, size_t offset, StoredCapsuleBatchState &state,
+    StorageOwner owner) const {
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      owner, StorageAccess::read, 0);
+  if (!lease) return false;
+  File file = fs_->open(journalPath, FILE_READ);
+  if (!file || !file.seek(offset)) {
+    if (file) file.close();
+    return false;
+  }
+  const bool read = file.read(reinterpret_cast<uint8_t *>(&state),
+                              sizeof(state)) == sizeof(state);
+  file.close();
+  return read && validCapsuleBatchState(state);
+}
+
 bool CapsuleBatchJournalStore::writePlan(
     const StoredCapsuleBatchState &state, uint16_t index,
     StoredCapsuleBatchPlan &plan, StorageOwner owner) {
@@ -114,7 +138,11 @@ bool CapsuleBatchJournalStore::writePlan(
   file.flush();
   const bool ok = wrote && file.getWriteError() == 0;
   file.close();
-  return ok;
+  if (!ok) return false;
+  lease.release();
+  StoredCapsuleBatchPlan verified;
+  return readPlan(state, index, verified, owner) &&
+      memcmp(&verified, &plan, sizeof(plan)) == 0;
 }
 
 bool CapsuleBatchJournalStore::readPlan(

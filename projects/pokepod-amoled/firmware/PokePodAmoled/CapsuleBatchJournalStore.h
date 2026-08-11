@@ -39,6 +39,9 @@ class CapsuleBatchJournalStore {
   bool writeStateSlot(const String &path, const char *mode, size_t offset,
                       const StoredCapsuleBatchState &state,
                       StorageOwner owner) const;
+  bool readStateSlot(const String &path, size_t offset,
+                     StoredCapsuleBatchState &state,
+                     StorageOwner owner) const;
 
   fs::FS *fs_ = nullptr;
 };

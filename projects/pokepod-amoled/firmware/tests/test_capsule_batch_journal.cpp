@@ -23,6 +23,20 @@ int main() {
   sealCapsuleBatchState(second);
   assert(newestCapsuleBatchState(first, second) == &second);
 
+  // Failed inactive-slot writes never advance the durable generation, so all
+  // retries target the same slot and cannot overwrite the last valid slot.
+  StoredCapsuleBatchState durable = first;
+  const StoredCapsuleBatchState candidate =
+      nextCapsuleBatchCheckpoint(durable);
+  StoredCapsuleBatchState corrupt = candidate;
+  corrupt.crc32 ^= 1;
+  assert(!acceptCapsuleBatchCheckpoint(durable, candidate, corrupt));
+  assert(durable.generation == first.generation);
+  assert(!acceptCapsuleBatchCheckpoint(durable, candidate, corrupt));
+  assert(durable.generation == first.generation);
+  assert(acceptCapsuleBatchCheckpoint(durable, candidate, candidate));
+  assert(durable.generation == candidate.generation);
+
   // A torn newest slot leaves the previous checkpoint authoritative.
   second.operation[0] ^= 1;
   assert(newestCapsuleBatchState(first, second) == &first);

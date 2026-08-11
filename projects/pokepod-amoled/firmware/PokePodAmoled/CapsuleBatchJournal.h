@@ -105,6 +105,24 @@ inline const StoredCapsuleBatchState *newestCapsuleBatchState(
       ? &second : &first;
 }
 
+inline StoredCapsuleBatchState nextCapsuleBatchCheckpoint(
+    const StoredCapsuleBatchState &durable) {
+  StoredCapsuleBatchState candidate = durable;
+  ++candidate.generation;
+  sealCapsuleBatchState(candidate);
+  return candidate;
+}
+
+inline bool acceptCapsuleBatchCheckpoint(
+    StoredCapsuleBatchState &durable,
+    const StoredCapsuleBatchState &candidate,
+    const StoredCapsuleBatchState &readBack) {
+  if (!validCapsuleBatchState(candidate) ||
+      memcmp(&candidate, &readBack, sizeof(candidate)) != 0) return false;
+  durable = candidate;
+  return true;
+}
+
 // Converts an interrupted checkpoint into an idempotent recovery cursor.  An
 // apply whose post-checkpoint is missing is conservatively included in the
 // rollback prefix; per-item rollback must tolerate both old and new state.  A
