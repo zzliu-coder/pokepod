@@ -55,7 +55,12 @@ class WavRecorder {
   bool finalizing() const { return finalizePending_; }
   bool operationActive() const {
     return recording_ || automaticStopRequested_ || finalizePending_ ||
-        cleanupPending_ || bootRecoveryPending_ || transactionRunner_.active();
+        cleanupPending_ || bootRecoveryPending_ || transactionRunner_.active()
+#if defined(ARDUINO_ARCH_ESP32)
+        || storageSessionActive_.load(std::memory_order_acquire) ||
+        storageStartRequested_.load(std::memory_order_acquire)
+#endif
+        ;
   }
   bool stopRequested() const { return automaticStopRequested_; }
   RecorderStopReason requestedStopReason() const {
@@ -95,6 +100,7 @@ class WavRecorder {
                          Print &log);
   bool appendMonoBytes(const uint8_t *data, size_t length, Print &log);
   bool storageAppendMonoBytes(const uint8_t *data, size_t length, Print &log);
+  bool startStorageSession(Print &log);
   StorageOwner activeStorageOwner() const;
   bool pollFinalizeRunner(Print &log, uint32_t nowMs,
                           CapsuleTransactionGate *gate);
@@ -320,8 +326,12 @@ class WavRecorder {
   RecorderStorageFrame *storageQueueSlots_ = nullptr;
   RecorderStorageFrame storageFrame_{};
   TaskHandle_t storageTask_ = nullptr;
+  SemaphoreHandle_t storageStartAck_ = nullptr;
   Print *storageLog_ = nullptr;
   std::atomic<bool> storageSessionActive_{false};
+  std::atomic<bool> storageStartRequested_{false};
+  std::atomic<bool> storageStartSucceeded_{false};
+  std::atomic<bool> storageStartCancelled_{false};
   std::atomic<bool> storageGateObserved_{false};
   std::atomic<uint32_t> storageNowMs_{0};
   std::atomic<uint32_t> acceptedDataBytes_{0};

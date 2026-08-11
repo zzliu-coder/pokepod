@@ -4,6 +4,8 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
+#include <atomic>
 
 #include "../PokePodAmoled/StorageCoordinator.cpp"
 #include "../PokePodAmoled/CapsuleTransaction.cpp"
@@ -120,6 +122,43 @@ void runNormalPendingAndSecondRecording() {
   assert(recorder.stop(log));
   drive(recorder, state, log, 800000U, nullptr);
   assert(recorder.terminalResult().success());
+}
+
+void runStorageContextOwnsReservationAndFile() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  WavRecorder recorder;
+  assert(recorder.begin(storage, log));
+  finishBootRecovery(recorder, state, log);
+
+  std::atomic<bool> finished{false};
+  std::thread storageContext([&]() {
+    for (const char *id : {kFirstId, kSecondId}) {
+      assert(recorder.start(log, id, kCreatedAt, admittedSpace(),
+                            RecorderOperationOwner::localApp));
+      appendFrame(recorder, log);
+      assert(recorder.stop(log));
+      drive(recorder, state, log, 700000U, nullptr);
+      assert(recorder.terminalResult().success());
+      RecorderOutcome acknowledged;
+      assert(recorder.takeTerminalResult(acknowledged));
+      assert(StorageCoordinator::instance().idle());
+      assert(state->openHandles == 0U);
+    }
+    finished.store(true, std::memory_order_release);
+  });
+  uint32_t uiTicks = 0;
+  while (!finished.load(std::memory_order_acquire)) {
+    ++uiTicks;
+    std::this_thread::yield();
+  }
+  storageContext.join();
+  assert(uiTicks > 0U);
+  assert(state->files.count(std::string(kCapsuleInbox) + "/" + kFirstId +
+                            "/audio.wav") == 1U);
+  assert(state->files.count(std::string(kCapsuleInbox) + "/" + kSecondId +
+                            "/audio.wav") == 1U);
 }
 
 void runAbsoluteGateAndUsbNullGate() {
@@ -575,6 +614,7 @@ void runAutomaticMaximumDuration() {
 
 int main() {
   runNormalPendingAndSecondRecording();
+  runStorageContextOwnsReservationAndFile();
   runAbsoluteGateAndUsbNullGate();
   runFailureCheckpointAndRecoveryTruth();
   runIncrementalBootRecoveryBudget();

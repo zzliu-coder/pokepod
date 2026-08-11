@@ -26,6 +26,20 @@ assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in wav
 assert '"pokepod_recorder_storage"' in wav
 assert "storageQueue_.push(data, length)" in wav
 assert "pollPeriodicCheckpoint" in wav
+assert "storageStartRequested_.store(true" in wav
+assert "xSemaphoreTake(storageStartAck_" in wav
+assert "startStorageSession(*log)" in wav
+start_internal = wav[
+    wav.index("bool WavRecorder::startInternal"):
+    wav.index("bool WavRecorder::startStorageSession")
+]
+assert "StorageCoordinator::instance().reserve" not in start_internal
+storage_start = wav[
+    wav.index("bool WavRecorder::startStorageSession"):
+    wav.index("bool WavRecorder::append(")
+]
+assert "StorageCoordinator::instance().reserve" in storage_start
+assert "fs_->open(partialPath_, FILE_WRITE)" in storage_start
 append_start = wav.index("bool WavRecorder::appendMonoBytes")
 append_end = wav.index("bool WavRecorder::storageAppendMonoBytes", append_start)
 assert "persistCheckpoint" not in wav[append_start:append_end]
