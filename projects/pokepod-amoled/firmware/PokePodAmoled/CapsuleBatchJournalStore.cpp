@@ -2,9 +2,23 @@
 
 namespace pokepod {
 
+bool CapsuleBatchJournalStore::begin(fs::FS &fs, const char *directory) {
+  static constexpr const char *kPrefix =
+      "/PokeCapsule/.system/transactions/";
+  if (directory == nullptr || strncmp(directory, kPrefix, strlen(kPrefix)) != 0 ||
+      directory[strlen(kPrefix)] == '\0' || strchr(directory, '\\') != nullptr ||
+      strstr(directory, "//") != nullptr || strstr(directory, "/../") != nullptr ||
+      strstr(directory, "/./") != nullptr || directory[strlen(directory) - 1] == '/') {
+    return false;
+  }
+  fs_ = &fs;
+  directory_ = directory;
+  return true;
+}
+
 String CapsuleBatchJournalStore::path(const String &transactionId) const {
   return capsuleBatchUuid(transactionId.c_str())
-      ? String(kDirectory) + "/" + transactionId + ".cbj" : String();
+      ? directory_ + "/" + transactionId + ".cbj" : String();
 }
 
 String CapsuleBatchJournalStore::statePath(
@@ -45,7 +59,7 @@ bool CapsuleBatchJournalStore::create(
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       owner, StorageAccess::mutation, 0);
   if (!lease) return false;
-  if (!fs_->exists(kDirectory) && !fs_->mkdir(kDirectory)) return false;
+  if (!fs_->exists(directory_) && !fs_->mkdir(directory_)) return false;
   // The plan marker is created before state.  Startup scans only this marker,
   // so a cut here can never expose an authoritative state without a recovery
   // entry.  State slots are separate files: a failed close of the inactive
@@ -218,6 +232,19 @@ bool CapsuleBatchJournalStore::erase(const String &transactionId,
   return (!fs_->exists(first) || fs_->remove(first)) &&
       (!fs_->exists(second) || fs_->remove(second)) &&
       (!fs_->exists(marker) || fs_->remove(marker));
+}
+
+bool CapsuleBatchJournalStore::erasePart(const String &transactionId,
+                                         uint8_t part,
+                                         StorageOwner owner) {
+  if (fs_ == nullptr || !capsuleBatchUuid(transactionId.c_str()) ||
+      part > 2) return false;
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      owner, StorageAccess::mutation, 0);
+  if (!lease) return false;
+  const String target = part == 0 ? statePath(transactionId, 0) :
+      (part == 1 ? statePath(transactionId, 1) : path(transactionId));
+  return !fs_->exists(target) || fs_->remove(target);
 }
 
 bool CapsuleBatchJournalStore::quarantine(
