@@ -1249,8 +1249,9 @@ bool advanceStorageBoot(uint32_t nowMs) {
           usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
           dashboard, capsuleLibrary, recorder, deviceConfig, wifi,
           tencentWorker, provisioningDiagnostics, powerDiagnostics,
-          runtimePower, usb.log(), &linkCoordinator, LinkTransport::usb,
-          &wirelessSync, nullptr, &provisioningCoordinator, nullptr,
+          runtimePower, usb.log(), &linkCoordinator,
+          LinkTransport::usb, &wirelessSync,
+                    nullptr, &provisioningCoordinator, nullptr,
           &captureRuntime, &capabilities);
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
