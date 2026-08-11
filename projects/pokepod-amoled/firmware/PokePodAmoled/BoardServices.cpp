@@ -2,22 +2,24 @@
 
 #include <SD_MMC.h>
 #include <Wire.h>
+#include <driver/gpio.h>
+#include <esp_attr.h>
+#include <esp_sleep.h>
 #include <sys/time.h>
 #include <time.h>
 
+#include "HardwareSafetyPolicy.h"
 #include "TimePolicy.h"
 
 namespace pokepod {
 namespace {
 
-Arduino_IIC *gTouch = nullptr;
 volatile bool gTouchInterruptPending = false;
 
-void touchInterrupt() {
+void IRAM_ATTR touchInterrupt() {
+  // Keep the ISR independent from Arduino_DriveBus and I2C. The loop copies
+  // the pending state into the touch driver's flag before reading the device.
   gTouchInterruptPending = true;
-  if (gTouch != nullptr) {
-    gTouch->IIC_Interrupt_Flag = true;
-  }
 }
 
 bool setSystemClock(const RTC_DateTime &value) {
@@ -143,7 +145,6 @@ bool BoardServices::beginTouch(Print &log) {
     default:
       return false;
   }
-  gTouch = touch_;
   const bool ok = touch_ != nullptr && touch_->begin();
   log.printf("{\"event\":\"touch\",\"ok\":%s}\n", ok ? "true" : "false");
   return ok;
@@ -206,6 +207,9 @@ bool BoardServices::takeTouchInterrupt() {
   const bool pending = gTouchInterruptPending;
   gTouchInterruptPending = false;
   interrupts();
+  if (pending && touch_ != nullptr) {
+    touch_->IIC_Interrupt_Flag = true;
+  }
   return pending;
 }
 
@@ -222,6 +226,14 @@ bool BoardServices::configureScreenOffSensors(bool screenOff,
         imu_.enableAccelerometer();
     imuLowPower_ = false;
   } else if (raiseToWake) {
+    if (!status_.ioExpander) {
+      const bool disabled = imu_.disableAccelerometer();
+      imuLowPower_ = false;
+      log.printf(
+          "{\"event\":\"imu_power\",\"ok\":false,\"screen_off\":true,\"wake_on_motion\":true,\"reason\":\"io_expander_unavailable\",\"disabled\":%s}\n",
+          disabled ? "true" : "false");
+      return false;
+    }
     ok = imu_.configWakeOnMotion(
         200, SensorQMI8658::ACC_ODR_LOWPOWER_21Hz,
         SensorQMI8658::INTERRUPT_PIN_1, 1, 0x08) == 0;
@@ -238,7 +250,9 @@ bool BoardServices::configureScreenOffSensors(bool screenOff,
 }
 
 bool BoardServices::pollMotionWake() {
-  if (!status_.imu || !imuLowPower_) return false;
+  if (!canPollMotionWake(status_.imu, imuLowPower_, status_.ioExpander)) {
+    return false;
+  }
   const int level = expander_.digitalRead(6);
   if (level == imuInterruptBaseline_) return false;
   imu_.getIrqStatus();
@@ -301,9 +315,59 @@ void BoardServices::prepareForDeepSleep(bool keepTouchPowered, Print &log) {
              keepTouchPowered ? "true" : "false");
 }
 
-void BoardServices::safeShutdown() {
+[[noreturn]] void BoardServices::safeShutdown() {
+  safeShutdown(Serial);
+}
+
+[[noreturn]] void BoardServices::safeShutdown(Print &log) {
   setScreenOn(false);
-  if (status_.pmu) pmu_.shutdown();
+  digitalWrite(kSpeakerAmpPin, LOW);
+  if (status_.pmu) {
+    log.println("{\"event\":\"safe_shutdown\",\"stage\":\"pmu_request\"}");
+    log.flush();
+    pmu_.shutdown();
+    // A successful PMU request removes power. Returning here means firmware
+    // still executes, so continue into the deterministic fallback.
+    delay(250);
+  } else {
+    log.println(
+        "{\"event\":\"safe_shutdown\",\"stage\":\"pmu_unavailable\"}");
+  }
+  enterShutdownDeepSleepFallback(log);
+}
+
+[[noreturn]] void BoardServices::enterShutdownDeepSleepFallback(Print &log) {
+  constexpr uint32_t kBootReleaseWaitMs = 2000;
+  const uint32_t startedAt = millis();
+  pinMode(kBootButtonPin, INPUT_PULLUP);
+  while (digitalRead(kBootButtonPin) == LOW &&
+         static_cast<uint32_t>(millis() - startedAt) <
+             kBootReleaseWaitMs) {
+    delay(10);
+  }
+  const bool bootLineReleased = digitalRead(kBootButtonPin) == HIGH;
+  const ShutdownFallbackAction action = shutdownFallbackAction(
+      status_.pmu, true, bootLineReleased);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  if (action == ShutdownFallbackAction::deepSleepWithBootWake) {
+    const uint64_t wakeMask = 1ULL << kBootButtonPin;
+    const esp_err_t error = esp_sleep_enable_ext1_wakeup_io(
+        wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
+    if (error != ESP_OK) {
+      log.printf(
+          "{\"event\":\"safe_shutdown\",\"stage\":\"deep_sleep_arm\",\"ok\":false,\"error\":%ld}\n",
+          static_cast<long>(error));
+    } else {
+      log.println(
+          "{\"event\":\"safe_shutdown\",\"stage\":\"deep_sleep_fallback\",\"boot_wake\":true}");
+    }
+  } else {
+    log.println(
+        "{\"event\":\"safe_shutdown\",\"stage\":\"deep_sleep_fallback\",\"boot_wake\":false,\"reason\":\"boot_line_held\"}");
+  }
+  log.flush();
+  esp_deep_sleep_start();
+  while (true) delay(1000);
 }
 
 String BoardServices::utcNow() {
@@ -329,14 +393,22 @@ String BoardServices::utcNow() {
 }
 
 bool BoardServices::setUtcEpoch(time_t epoch) {
-  if (epoch < 1704067200) return false;
+  if (epoch < kMinimumTrustedUtcEpoch) return false;
   timeval value = {.tv_sec = epoch, .tv_usec = 0};
-  settimeofday(&value, nullptr);
+  if (!systemClockUpdateSucceeded(epoch, settimeofday(&value, nullptr))) {
+    return false;
+  }
   if (!status_.rtc) return true;
   struct tm timeInfo = {};
   if (gmtime_r(&epoch, &timeInfo) == nullptr) return false;
   rtc_.setDateTime(timeInfo);
-  return true;
+  const RTC_DateTime verified = rtc_.getDateTime();
+  return verified.getYear() == static_cast<uint16_t>(timeInfo.tm_year + 1900) &&
+      verified.getMonth() == static_cast<uint8_t>(timeInfo.tm_mon + 1) &&
+      verified.getDay() == static_cast<uint8_t>(timeInfo.tm_mday) &&
+      verified.getHour() == static_cast<uint8_t>(timeInfo.tm_hour) &&
+      verified.getMinute() == static_cast<uint8_t>(timeInfo.tm_min) &&
+      verified.getSecond() == static_cast<uint8_t>(timeInfo.tm_sec);
 }
 
 void BoardServices::ensureRtcTime(Print &log) {
@@ -344,7 +416,10 @@ void BoardServices::ensureRtcTime(Print &log) {
   const RTC_DateTime current = rtc_.getDateTime();
   if (rtc_.isClockIntegrityGuaranteed() && current.getYear() >= 2024 &&
       current.getYear() <= 2099) {
-    setSystemClock(current);
+    if (!setSystemClock(current)) {
+      log.println(
+          "{\"event\":\"rtc_bootstrap\",\"source\":\"rtc\",\"ok\":false,\"stage\":\"system_clock\"}");
+    }
     return;
   }
   int64_t utcEpoch = 0;

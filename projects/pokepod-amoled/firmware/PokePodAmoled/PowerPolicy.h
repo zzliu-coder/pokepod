@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "PowerFacts.h"
+
 namespace pokepod {
 
 enum class PowerMode : uint8_t {
@@ -32,13 +34,19 @@ struct PowerInputs {
   bool bleStreaming = false;
   bool wifiRadioOn = false;
   bool usbHostConnected = false;
+  bool usbMounted = false;
+  bool cdcSessionActive = false;
   bool vbusPresent = false;
+  bool charging = false;
   bool linkBusy = false;
+  bool linkLeaseActive = false;
   bool storageBusy = false;
+  bool storageMutationActive = false;
   bool networkBusy = false;
   bool provisioning = false;
   bool uiAnimating = false;
   bool automaticWakeEnabled = true;
+  bool wakeSourcesReady = false;
   bool criticalBattery = false;
   uint32_t idleMs = 0;
 };
@@ -62,6 +70,7 @@ enum class PowerBlocker : uint8_t {
   criticalBattery = 13,
   beforeLightTimeout = 14,
   beforeDeepTimeout = 15,
+  charging = 16,
 };
 
 constexpr PowerBlockerMask powerBlockerBit(PowerBlocker blocker) {
@@ -86,25 +95,75 @@ inline const char *powerBlockerKey(PowerBlocker blocker) {
     case PowerBlocker::criticalBattery: return "critical_battery";
     case PowerBlocker::beforeLightTimeout: return "before_light_timeout";
     case PowerBlocker::beforeDeepTimeout: return "before_deep_timeout";
+    case PowerBlocker::charging: return "charging";
   }
   return "unknown";
+}
+
+inline bool inputBleRadioActive(const PowerInputs &input) {
+  return input.bleConnected;
+}
+
+inline bool inputCdcSessionActive(const PowerInputs &input) {
+  // usbHostConnected remains as a compatibility alias until PokePodApp's
+  // single-owner integration switches to cdcSessionActive.
+  return input.cdcSessionActive || input.usbHostConnected;
+}
+
+inline bool inputLinkLeaseActive(const PowerInputs &input) {
+  return input.linkLeaseActive || input.linkBusy;
+}
+
+inline bool inputStorageMutationActive(const PowerInputs &input) {
+  return input.storageMutationActive || input.storageBusy;
+}
+
+inline bool automaticWakeUnavailable(const PowerInputs &input) {
+  return input.automaticWakeEnabled && !input.wakeSourcesReady;
+}
+
+inline PowerInputs powerInputsWithFacts(PowerInputs input,
+                                        const PowerFacts &facts) {
+  input.usbMounted = facts.usbMounted;
+  input.cdcSessionActive = facts.cdcSessionActive;
+  input.usbHostConnected = false;
+  input.vbusPresent = facts.vbusPresent;
+  input.charging = facts.charging;
+  input.linkLeaseActive = facts.linkLeaseActive;
+  input.linkBusy = false;
+  input.bleConnected = facts.bleRadioActive;
+  input.bleStreaming = facts.bleStreaming;
+  input.wifiRadioOn = facts.wifiRadioActive;
+  input.wakeSourcesReady = facts.wakeSourcesReady;
+  input.storageMutationActive = facts.storageMutationActive;
+  input.storageBusy = false;
+  return input;
 }
 
 inline PowerBlockerMask activePowerFacts(const PowerInputs &input) {
   PowerBlockerMask mask = 0;
   if (input.screenOn) mask |= powerBlockerBit(PowerBlocker::screenOn);
   if (input.audioActive) mask |= powerBlockerBit(PowerBlocker::audioActive);
-  if (input.bleConnected) mask |= powerBlockerBit(PowerBlocker::bleRadio);
+  if (inputBleRadioActive(input)) {
+    mask |= powerBlockerBit(PowerBlocker::bleRadio);
+  }
   if (input.bleStreaming) mask |= powerBlockerBit(PowerBlocker::bleStreaming);
   if (input.wifiRadioOn) mask |= powerBlockerBit(PowerBlocker::wifiRadio);
-  if (input.usbHostConnected) mask |= powerBlockerBit(PowerBlocker::usbHost);
+  if (inputCdcSessionActive(input)) {
+    mask |= powerBlockerBit(PowerBlocker::usbHost);
+  }
   if (input.vbusPresent) mask |= powerBlockerBit(PowerBlocker::vbusPresent);
-  if (input.linkBusy) mask |= powerBlockerBit(PowerBlocker::linkBusy);
-  if (input.storageBusy) mask |= powerBlockerBit(PowerBlocker::storageBusy);
+  if (input.charging) mask |= powerBlockerBit(PowerBlocker::charging);
+  if (inputLinkLeaseActive(input)) {
+    mask |= powerBlockerBit(PowerBlocker::linkBusy);
+  }
+  if (inputStorageMutationActive(input)) {
+    mask |= powerBlockerBit(PowerBlocker::storageBusy);
+  }
   if (input.networkBusy) mask |= powerBlockerBit(PowerBlocker::networkBusy);
   if (input.provisioning) mask |= powerBlockerBit(PowerBlocker::provisioning);
   if (input.uiAnimating) mask |= powerBlockerBit(PowerBlocker::uiAnimating);
-  if (input.automaticWakeEnabled) {
+  if (automaticWakeUnavailable(input)) {
     mask |= powerBlockerBit(PowerBlocker::raiseToWake);
   }
   if (input.criticalBattery) {
@@ -166,6 +225,7 @@ inline PowerBlockerMask deepSleepBlockers(const PowerInputs &input) {
       powerBlockerBit(PowerBlocker::wifiRadio) |
       powerBlockerBit(PowerBlocker::usbHost) |
       powerBlockerBit(PowerBlocker::vbusPresent) |
+      powerBlockerBit(PowerBlocker::charging) |
       powerBlockerBit(PowerBlocker::linkBusy) |
       powerBlockerBit(PowerBlocker::storageBusy) |
       powerBlockerBit(PowerBlocker::networkBusy) |
@@ -181,9 +241,9 @@ inline PowerBlockerMask currentSleepBlockers(const PowerInputs &input) {
 }
 
 inline bool powerForegroundBusy(const PowerInputs &input) {
-  return input.audioActive || input.bleStreaming || input.linkBusy ||
-      input.storageBusy || input.networkBusy || input.provisioning ||
-      input.uiAnimating;
+  return input.audioActive || input.bleStreaming ||
+      inputLinkLeaseActive(input) || inputStorageMutationActive(input) ||
+      input.networkBusy || input.provisioning || input.uiAnimating;
 }
 
 inline PowerDecision decidePower(const PowerInputs &input) {
@@ -199,22 +259,41 @@ inline PowerDecision decidePower(const PowerInputs &input) {
   if (input.screenOn) {
     return {PowerMode::balanced, 80, 10, 500};
   }
-  if (input.idleMs >= kDeepSleepTimeoutMs && !input.vbusPresent &&
-      !input.usbHostConnected) {
-    PowerDecision result{PowerMode::deepSleepPending, 80, 100, 500};
+  if (input.idleMs >= kDeepSleepTimeoutMs) {
+    PowerDecision result{PowerMode::screenOffIdle, 80, 100, 500};
     result.requestIdleRadioPause = true;
-    result.requestDeepSleep = true;
+    const PowerBlockerMask deepBlockers = deepSleepBlockers(input);
+    const PowerBlockerMask radioBlockers =
+        powerBlockerBit(PowerBlocker::bleRadio) |
+        powerBlockerBit(PowerBlocker::wifiRadio);
+    const bool directPowerFactsPermitDeepSleep =
+        !input.vbusPresent && !input.charging;
+    if ((deepBlockers & ~radioBlockers) == 0 &&
+        directPowerFactsPermitDeepSleep) {
+      result.mode = PowerMode::deepSleepPending;
+      result.requestDeepSleep = true;
+    } else if (lightSleepBlockers(input) == 0) {
+      // Charging/VBUS intentionally prevents deep sleep. Keep checking in
+      // bounded light-sleep slices instead of remaining fully awake forever.
+      result.mode = PowerMode::lightSleep;
+      result.allowLightSleep = true;
+      result.lightSleepTimerUs =
+          static_cast<uint64_t>(kChargingLightSleepCheckMs) * 1000ULL;
+    }
     return result;
   }
   if (input.idleMs >= kLightSleepTimeoutMs) {
     PowerDecision result{PowerMode::screenOffIdle, 80, 100, 500};
     result.requestIdleRadioPause = true;
-    const bool sleepSafe = !input.bleConnected && !input.wifiRadioOn &&
-        !input.usbHostConnected && !input.automaticWakeEnabled;
-    if (sleepSafe) {
+    const bool directSessionFactsPermitLightSleep =
+        !input.bleConnected && !input.wifiRadioOn &&
+        !input.usbHostConnected &&
+        (!input.automaticWakeEnabled || input.wakeSourcesReady);
+    if (lightSleepBlockers(input) == 0 &&
+        directSessionFactsPermitLightSleep) {
       result.mode = PowerMode::lightSleep;
       result.allowLightSleep = true;
-      const uint32_t remainingMs = input.vbusPresent
+      const uint32_t remainingMs = (input.vbusPresent || input.charging)
           ? kChargingLightSleepCheckMs
           : (kDeepSleepTimeoutMs - input.idleMs);
       result.lightSleepTimerUs = static_cast<uint64_t>(remainingMs) * 1000ULL;

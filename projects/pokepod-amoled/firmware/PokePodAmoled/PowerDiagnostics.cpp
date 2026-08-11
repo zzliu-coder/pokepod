@@ -64,8 +64,13 @@ uint16_t PowerDiagnostics::flagsFor(const PowerInputs *inputs) const {
   if (inputs == nullptr) return flags;
   if (inputs->screenOn) flags |= kPowerFlagScreenOn;
   if (inputs->automaticWakeEnabled) flags |= kPowerFlagAutomaticWake;
-  if (inputs->usbHostConnected) flags |= kPowerFlagUsbHost;
+  if (inputCdcSessionActive(*inputs)) flags |= kPowerFlagUsbHost;
   if (inputs->vbusPresent) flags |= kPowerFlagVbus;
+  if (inputs->usbMounted) flags |= kPowerFlagUsbMounted;
+  if (inputs->cdcSessionActive) flags |= kPowerFlagCdcSession;
+  if (inputs->charging) flags |= kPowerFlagCharging;
+  if (inputLinkLeaseActive(*inputs)) flags |= kPowerFlagLinkLease;
+  if (inputs->wakeSourcesReady) flags |= kPowerFlagWakeSourcesReady;
   return flags;
 }
 

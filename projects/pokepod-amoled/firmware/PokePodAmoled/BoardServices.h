@@ -52,9 +52,14 @@ class BoardServices {
   void setScreenOn(bool enabled);
   void setScreenBrightness(uint8_t brightness);
   void prepareForDeepSleep(bool keepTouchPowered, Print &log);
-  void safeShutdown();
+  [[noreturn]] void safeShutdown();
+  [[noreturn]] void safeShutdown(Print &log);
   String utcNow();
   bool setUtcEpoch(time_t epoch);
+
+  // GPIO21 from the touch controller is the direct low-power wake source.
+  // IMU motion is routed through the I/O expander and is polled separately.
+  bool lowPowerWakeSourcesReady() const { return status_.touch; }
 
   Arduino_GFX *display() const { return display_; }
   const BoardStatus &status() const { return status_; }
@@ -69,6 +74,7 @@ class BoardServices {
   void beginSensors(Print &log);
   void ensureRtcTime(Print &log);
   bool probe(uint8_t address);
+  [[noreturn]] void enterShutdownDeepSleepFallback(Print &log);
 
   BoardStatus status_;
   Adafruit_XCA9554 expander_;

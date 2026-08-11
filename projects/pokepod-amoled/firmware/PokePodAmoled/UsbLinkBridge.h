@@ -16,10 +16,13 @@ class UsbLinkBridge {
   Print &log() { return Serial; }
   Stream &stream() { return cdc_; }
   bool ready() const { return started_; }
-  // Physical USB mount drives the persistent Mac/cable icon.
+  // Compatibility alias for TinyUSB's mounted state. Do not use it as a CDC
+  // session or sleep blocker.
   bool hostConnected() const;
+  bool tinyUsbMounted() const { return hostConnected(); }
   // DTR tracks whether a desktop process currently owns the CDC session.
   bool hostSessionActive() const { return cdcSession_.active(); }
+  bool cdcSessionActive() const { return hostSessionActive(); }
   bool takeHostSessionClosed() { return cdcSession_.takeClosed(); }
   // Drop bytes owned by a closed CDC session before Link v2 can poll again.
   void discardHostSessionBuffers();

@@ -94,7 +94,8 @@ bool RuntimePowerManager::enterLightSleep(
     error = gpio_wakeup_enable(static_cast<gpio_num_t>(kBootButtonPin),
                                GPIO_INTR_LOW_LEVEL);
   }
-  if (error == ESP_OK && verifiedInputs.automaticWakeEnabled) {
+  if (error == ESP_OK && verifiedInputs.automaticWakeEnabled &&
+      verifiedInputs.wakeSourcesReady) {
     error = gpio_wakeup_enable(static_cast<gpio_num_t>(kTouchInterruptPin),
                                GPIO_INTR_LOW_LEVEL);
   }
@@ -126,6 +127,11 @@ bool RuntimePowerManager::enterLightSleep(
 
 bool RuntimePowerManager::armDeepSleepWakeSources(bool touchWakeEnabled,
                                                    Print &log) {
+  return armDeepSleepWakeSources(touchWakeEnabled, touchWakeEnabled, log);
+}
+
+bool RuntimePowerManager::armDeepSleepWakeSources(
+    bool automaticWakeEnabled, bool wakeSourcesReady, Print &log) {
   ++snapshot_.deepSleepArmAttempts;
   snapshot_.lastError = 0;
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -142,7 +148,7 @@ bool RuntimePowerManager::armDeepSleepWakeSources(bool touchWakeEnabled,
         static_cast<long>(snapshot_.lastError));
     return false;
   }
-  if (touchWakeEnabled) {
+  if (automaticWakeEnabled && wakeSourcesReady) {
     pinMode(kTouchInterruptPin, INPUT_PULLUP);
     // A held-low touch IRQ would immediately reboot the device. Consume the
     // interrupt and only arm the optional source once the line is released.

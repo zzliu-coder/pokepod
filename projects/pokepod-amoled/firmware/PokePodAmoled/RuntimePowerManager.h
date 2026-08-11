@@ -39,6 +39,8 @@ class RuntimePowerManager {
   bool enterLightSleep(const PowerInputs &verifiedInputs,
                        const PowerDecision &verifiedDecision, Print &log);
   bool armDeepSleepWakeSources(bool touchWakeEnabled, Print &log);
+  bool armDeepSleepWakeSources(bool automaticWakeEnabled,
+                               bool wakeSourcesReady, Print &log);
   [[noreturn]] void startDeepSleep(Print &log);
   const RuntimePowerSnapshot &snapshot() const { return snapshot_; }
 

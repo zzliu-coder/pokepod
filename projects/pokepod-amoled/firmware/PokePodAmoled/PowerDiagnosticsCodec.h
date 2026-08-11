@@ -30,6 +30,11 @@ enum PowerLogFlag : uint16_t {
   kPowerFlagVbus = 1U << 3,
   kPowerFlagAutomaticPm = 1U << 4,
   kPowerFlagBleModemSleep = 1U << 5,
+  kPowerFlagUsbMounted = 1U << 6,
+  kPowerFlagCdcSession = 1U << 7,
+  kPowerFlagCharging = 1U << 8,
+  kPowerFlagLinkLease = 1U << 9,
+  kPowerFlagWakeSourcesReady = 1U << 10,
 };
 
 #pragma pack(push, 1)
