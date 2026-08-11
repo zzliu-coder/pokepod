@@ -44,7 +44,9 @@ assert "kLightSleepTimeoutMs = 60000" in policy
 assert "kDeepSleepTimeoutMs = 180000" in policy
 assert "prepareForDeepSleep" in board
 assert "LowBatteryShutdownPolicy" in policy
-assert "performSafeShutdown" in main
+assert "requestSafeShutdown" in main
+assert "advanceSafeShutdown" in main
+assert main.index("tencentWorker.quiesce") < main.index("SD_MMC.end()")
 assert "setCpuFrequencyMhz" in power
 assert "CONFIG_PM_ENABLE" in power
 assert "CONFIG_BT_CTRL_MODEM_SLEEP" in power

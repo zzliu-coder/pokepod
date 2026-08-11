@@ -27,11 +27,15 @@ int main() {
   std::vector<uint8_t> nonce17(17, 0x33);
   std::vector<uint8_t> nonce32(32, 0x44);
   std::vector<uint8_t> nonce33(33, 0x55);
+  std::vector<uint8_t> nonce64(64, 0x66);
+  std::vector<uint8_t> nonce65(65, 0x77);
   assert(!validWirelessNonce(base64UrlEncode(nonce15.data(), nonce15.size())));
   assert(validWirelessNonce(base64UrlEncode(nonce16.data(), nonce16.size())));
-  assert(!validWirelessNonce(base64UrlEncode(nonce17.data(), nonce17.size())));
+  assert(validWirelessNonce(base64UrlEncode(nonce17.data(), nonce17.size())));
   assert(validWirelessNonce(base64UrlEncode(nonce32.data(), nonce32.size())));
-  assert(!validWirelessNonce(base64UrlEncode(nonce33.data(), nonce33.size())));
+  assert(validWirelessNonce(base64UrlEncode(nonce33.data(), nonce33.size())));
+  assert(validWirelessNonce(base64UrlEncode(nonce64.data(), nonce64.size())));
+  assert(!validWirelessNonce(base64UrlEncode(nonce65.data(), nonce65.size())));
 
   WirelessReplayGuard replay;
   WirelessAuthPolicy auth;

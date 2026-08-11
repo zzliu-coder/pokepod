@@ -35,7 +35,9 @@ assert "input = powerInputsWithFacts(input, facts)" in main
 assert "wirelessSync.openWindow()" in main
 assert "pauseIdleRadios" in main
 assert "enterDeepSleep" in main
-assert "performSafeShutdown" in main
+assert "requestSafeShutdown" in main
+assert "advanceSafeShutdown" in main
+assert main.index("tencentWorker.quiesce") < main.index("SD_MMC.end()")
 assert "SD_MMC.end()" in main
 assert "lowBatteryShutdown.critical()" in main
 
