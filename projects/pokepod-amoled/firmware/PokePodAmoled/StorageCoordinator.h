@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <stdint.h>
 
 #ifdef ARDUINO
@@ -49,11 +50,13 @@ class StorageIoLease {
 
  private:
   friend class StorageCoordinator;
-  StorageIoLease(StorageCoordinator *coordinator, uint64_t acquiredUs)
-      : coordinator_(coordinator), acquiredUs_(acquiredUs) {}
+  StorageIoLease(StorageCoordinator *coordinator, uint64_t acquiredUs,
+                 StorageAccess access)
+      : coordinator_(coordinator), acquiredUs_(acquiredUs), access_(access) {}
 
   StorageCoordinator *coordinator_ = nullptr;
   uint64_t acquiredUs_ = 0;
+  StorageAccess access_ = StorageAccess::read;
 };
 
 class StorageReservation {
@@ -105,7 +108,7 @@ class StorageCoordinator {
   bool lock(uint32_t timeoutMs, uint64_t &acquiredUs);
   void lockUntilAcquired();
   void unlock();
-  void releaseIo(uint64_t acquiredUs);
+  void releaseIo(uint64_t acquiredUs, StorageAccess access);
   void releaseReservation(StorageOwner owner, StorageAccess access,
                           uintptr_t context);
   bool reservationAllows(StorageOwner owner, StorageAccess access,
@@ -125,6 +128,8 @@ class StorageCoordinator {
   uintptr_t readContext_ = 0;
   uint16_t mutationDepth_ = 0;
   uint16_t readDepth_ = 0;
+  std::atomic<uint16_t> mutationReservationDepth_{0};
+  std::atomic<uint16_t> mutationIoDepth_{0};
   StorageCoordinatorMetrics metrics_{};
 };
 

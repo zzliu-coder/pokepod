@@ -139,6 +139,41 @@ int main() {
   assert(!entered.load());
   readHeld.release();
   assert(coordinator.readOwner() == StorageOwner::none);
+
+  // The power fact is exact across tasks. A long read holds the physical
+  // storage mutex but never appears as a mutation; a write lease does.
+  std::atomic<bool> leaseReady{false};
+  std::atomic<bool> releaseLease{false};
+  std::thread readIoHolder([&]() {
+    StorageIoLease lease = coordinator.acquireIo(
+        StorageOwner::fontRead, StorageAccess::read, 5);
+    assert(lease);
+    leaseReady.store(true);
+    while (!releaseLease.load()) std::this_thread::yield();
+  });
+  while (!leaseReady.load()) std::this_thread::yield();
+  assert(!coordinator.mutationActive());
+  assert(powerDecisionFor(coordinator).requestDeepSleep);
+  releaseLease.store(true);
+  readIoHolder.join();
+
+  leaseReady.store(false);
+  releaseLease.store(false);
+  std::thread mutationIoHolder([&]() {
+    StorageIoLease lease = coordinator.acquireIo(
+        StorageOwner::recovery, StorageAccess::mutation, 5);
+    assert(lease);
+    leaseReady.store(true);
+    while (!releaseLease.load()) std::this_thread::yield();
+  });
+  while (!leaseReady.load()) std::this_thread::yield();
+  assert(coordinator.mutationActive());
+  assert(!powerDecisionFor(coordinator).requestDeepSleep);
+  releaseLease.store(true);
+  mutationIoHolder.join();
+  assert(!coordinator.mutationActive());
+  assert(powerDecisionFor(coordinator).requestDeepSleep);
+
   assert(coordinator.metrics().rejected >= 3);
   return 0;
 }
