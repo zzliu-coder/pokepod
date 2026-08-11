@@ -426,19 +426,14 @@ bool CapsuleOperationService::startRecovery(const String &transactionId) {
   if (result == CapsuleBatchJournalStore::LoadResult::wouldBlock) return false;
   if (result == CapsuleBatchJournalStore::LoadResult::invalid) {
     if (++startupFailures_ < kMaximumPermanentFailures) return false;
-    char suffix[24];
-    snprintf(suffix, sizeof(suffix), ".blocked-local");
-    const bool quarantined = journalStore_.quarantine(
-        transactionId, suffix, StorageOwner::capsuleTransaction);
+    // Keep the discoverable marker and both state slots exactly where the
+    // recovery owner found them. A damaged authority cannot prove whether an
+    // item moved before power loss, so local mutation must remain fail-closed
+    // until a Mac-side repair can inspect the original bytes. This terminal
+    // releases the live reservation and therefore cannot wedge sleep.
     reservation_.release();
-    if (!quarantined) {
-      enterBlocked("invalid local operation authority could not be quarantined");
-      return false;
-    }
-    startupFailures_ = 0;
-    startupCandidate_ = "";
-    lifecycle_ = Lifecycle::scanOpen;
-    return true;
+    enterBlocked("invalid local operation authority preserved");
+    return false;
   }
   startupFailures_ = 0;
   prepareCapsuleBatchRecovery(loaded);

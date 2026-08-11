@@ -280,7 +280,16 @@ void recoverLocalTwice(const std::shared_ptr<fakefs::State> &state,
   for (size_t reboot = 0; reboot < 2; ++reboot) {
     fs::FS storage(state);
     CapsuleOperationService recovery;
-    bootToReady(recovery, storage, log, &catalog);
+    assert(recovery.begin(storage, log));
+    recovery.attachCatalog(catalog);
+    size_t polls = 0;
+    while (!recovery.readyForMutation() &&
+           !recovery.mutationCapabilityBlocked() && polls++ < 20000) {
+      recovery.poll(static_cast<uint32_t>(polls));
+    }
+    assert(polls < 20000);
+    assert(recovery.readyForMutation() ||
+           recovery.mutationCapabilityBlocked());
     assert(!recovery.sleepBlocker());
     assert(recovery.maximumPollBytes() <= 4096);
   }
@@ -368,6 +377,34 @@ void runPermanentCheckpointFailureTerminal() {
   assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
 }
 
+void runInvalidBootAuthorityTerminal() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  FakeCatalog catalog;
+  const std::string marker =
+      std::string(CapsuleOperationService::kJournalDirectory) + "/" +
+      kFirst + ".cbj";
+  state->directories.insert(CapsuleOperationService::kJournalDirectory);
+  state->addParents(CapsuleOperationService::kJournalDirectory);
+  state->seed(marker, "damaged recovery authority");
+
+  CapsuleOperationService service;
+  assert(service.begin(storage, log));
+  service.attachCatalog(catalog);
+  size_t polls = 0;
+  while (!service.mutationCapabilityBlocked() && polls++ < 20000) {
+    service.poll(static_cast<uint32_t>(polls));
+  }
+  assert(polls < 20000);
+  assert(service.mutationCapabilityBlocked());
+  assert(!service.recoveryActive());
+  assert(!service.sleepBlocker());
+  assert(state->files.count(marker) == 1);
+  assert(state->text(marker) == "damaged recovery authority");
+  assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
+}
+
 }  // namespace
 
 int main() {
@@ -377,5 +414,6 @@ int main() {
   runSubmissionLimit();
   runEveryLocalCutpoint();
   runPermanentCheckpointFailureTerminal();
+  runInvalidBootAuthorityTerminal();
   return 0;
 }
