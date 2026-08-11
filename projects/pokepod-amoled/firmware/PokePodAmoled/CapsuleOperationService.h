@@ -41,6 +41,10 @@ class CapsuleOperationCatalog {
   // filesystem from this callback because it runs inside one service poll.
   virtual bool operationSnapshot(const char *id,
                                  CapsuleOperationSnapshot &snapshot) const = 0;
+  // Called once per committed item, on separate poll turns, before the batch
+  // terminal is published. This callback must update only the in-memory index.
+  virtual bool operationCommitted(const char *id, const char *target,
+                                  bool removed) = 0;
   // The durable transaction is terminal before this notification. A catalog
   // may incrementally refresh the listed records or queue a bounded scan.
   virtual void operationFinished(const char *packedIds, size_t stride,
@@ -210,6 +214,7 @@ class CapsuleOperationService {
   uint8_t pendingStep_ = 0;
   uint8_t cleanupStep_ = 0;
   size_t cleanupIndex_ = 0;
+  size_t notificationIndex_ = 0;
   bool requestPending_ = false;
   bool outcomePending_ = false;
   bool recoveryMode_ = false;

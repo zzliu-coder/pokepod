@@ -96,13 +96,15 @@ bool CapsuleLibrary::allocateIndex() {
   return true;
 }
 
-bool CapsuleLibrary::begin(fs::FS &fs, Print &log) {
+bool CapsuleLibrary::begin(fs::FS &fs, Print &log,
+                           bool requeueInterruptedTranscription) {
   fs_ = &fs;
   log_ = &log;
   if (!transaction_.begin(fs, log) || !transaction_.recoverAll()) return false;
   if (!allocateIndex()) return false;
   if (!scan()) return false;
 
+  if (!requeueInterruptedTranscription) return true;
   std::vector<String> interrupted;
   for (size_t index = 0; index < locatorCount_; ++index) {
     const CapsuleLocator &locator = locators_[index];
@@ -1078,9 +1080,10 @@ bool CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
   } else {
     locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::custom);
   }
-  if (static_cast<CapsuleStorageArea>(locator.storageArea) ==
-          CapsuleStorageArea::custom &&
-      !storeCustomPath(record.directory, locator, pathPool, pathPoolUsed)) {
+  // Keep every exact directory in the PSRAM path pool. Standard storage-area
+  // flags still drive filtering, while local mutations can now resolve nested
+  // Inbox/Archive paths without synchronously traversing the card.
+  if (!storeCustomPath(record.directory, locator, pathPool, pathPoolUsed)) {
     locator = CapsuleLocator();
     return false;
   }
@@ -1109,8 +1112,7 @@ bool CapsuleLibrary::copyIndexedLocator(const CapsuleLocator &source,
                                         char *pathPool,
                                         size_t &pathPoolUsed) const {
   destination = source;
-  if (static_cast<CapsuleStorageArea>(source.storageArea) !=
-      CapsuleStorageArea::custom) {
+  if (source.customPathOffset == kCapsuleCustomPathMissing) {
     destination.customPathOffset = kCapsuleCustomPathMissing;
     destination.customPathLength = 0;
     return true;
@@ -1159,6 +1161,130 @@ bool CapsuleLibrary::rebuildPublishedIndex(const CapsuleSummary *replacement,
   locatorCount_ = stagedCount;
   pathPoolUsed_ = stagedPathBytes;
   return true;
+}
+
+bool CapsuleLibrary::rebuildPublishedLocator(
+    size_t replaceIndex, const CapsuleLocator &replacement,
+    const String &replacementPath) {
+  if (replaceIndex >= locatorCount_ || scanStepper_.active() ||
+      scanLocators_ == nullptr || scanPathPool_ == nullptr) return false;
+  size_t stagedCount = 0;
+  size_t stagedPathBytes = 0;
+  for (size_t index = 0; index < locatorCount_; ++index) {
+    CapsuleLocator &destination = scanLocators_[stagedCount];
+    if (index == replaceIndex) {
+      destination = replacement;
+      destination.customPathOffset = kCapsuleCustomPathMissing;
+      destination.customPathLength = 0;
+      if (!storeCustomPath(replacementPath, destination, scanPathPool_,
+                           stagedPathBytes)) return false;
+    } else if (!copyIndexedLocator(locators_[index], destination,
+                                   scanPathPool_, stagedPathBytes)) {
+      return false;
+    }
+    ++stagedCount;
+  }
+  std::swap(locators_, scanLocators_);
+  std::swap(pathPool_, scanPathPool_);
+  pathPoolUsed_ = stagedPathBytes;
+  invalidateRecordCache(replacement.id);
+  requestPublish();
+  return true;
+}
+
+bool CapsuleLibrary::operationSnapshot(
+    const char *id, CapsuleOperationSnapshot &snapshot) const {
+  if (id == nullptr || !isUuid(id)) return false;
+  const size_t index = recordIndex(id);
+  if (index >= locatorCount_) return false;
+  const CapsuleLocator &locator = locators_[index];
+  String directory;
+  if (!customPath(locator, directory)) {
+    const CapsuleStorageArea area =
+        static_cast<CapsuleStorageArea>(locator.storageArea);
+    const char *root = area == CapsuleStorageArea::inbox ? kCapsuleInbox :
+        (area == CapsuleStorageArea::archive ? kCapsuleArchive :
+         (area == CapsuleStorageArea::trash ? kCapsuleTrash : nullptr));
+    if (root == nullptr) return false;
+    directory = String(root) + "/" + locator.id;
+    if (capsuleDirectoryHash(directory.c_str()) != locator.directoryHash) {
+      return false;
+    }
+  }
+  const String rootPrefix = String(kCapsuleRoot) + "/";
+  const int slash = directory.lastIndexOf('/');
+  if (!directory.startsWith(rootPrefix.c_str()) ||
+      slash <= static_cast<int>(rootPrefix.length()) ||
+      directory.substring(static_cast<size_t>(slash + 1)) != locator.id) {
+    return false;
+  }
+  const String folder = directory.substring(
+      rootPrefix.length(), static_cast<size_t>(slash));
+  if (folder != ".trash" && !capsuleBatchFolderPath(folder.c_str())) {
+    return false;
+  }
+
+  snapshot = {};
+  strlcpy(snapshot.id, locator.id, sizeof(snapshot.id));
+  strlcpy(snapshot.directory, directory.c_str(), sizeof(snapshot.directory));
+  strlcpy(snapshot.folder, folder.c_str(), sizeof(snapshot.folder));
+  snapshot.revision = -1;
+  snapshot.archived = capsuleLocatorHasFlag(locator, locatorArchived);
+  snapshot.trashed = capsuleLocatorHasFlag(locator, locatorTrashed);
+  snapshot.readOnly = capsuleLocatorHasFlag(locator, locatorReadOnly);
+  snapshot.transcribing =
+      static_cast<CapsuleStatus>(locator.status) == CapsuleStatus::transcribing;
+  return true;
+}
+
+bool CapsuleLibrary::operationCommitted(const char *id, const char *target,
+                                        bool removed) {
+  if (id == nullptr || !isUuid(id)) return false;
+  if (removed) {
+    const size_t before = locatorCount_;
+    removeIndexedRecord(id);
+    return locatorCount_ + 1 == before;
+  }
+  if (target == nullptr || !capsuleBatchCapsulePath(target, true)) {
+    (void)requestScan();
+    return false;
+  }
+  const size_t index = recordIndex(id);
+  if (index >= locatorCount_) {
+    (void)requestScan();
+    return false;
+  }
+  CapsuleLocator replacement = locators_[index];
+  replacement.directoryHash = capsuleDirectoryHash(target);
+  replacement.flags &= static_cast<uint16_t>(
+      ~(static_cast<uint16_t>(locatorArchived) |
+        static_cast<uint16_t>(locatorTrashed)));
+  const String inboxPrefix = String(kCapsuleInbox) + "/";
+  const String archivePrefix = String(kCapsuleArchive) + "/";
+  const String trashPrefix = String(kCapsuleTrash) + "/";
+  const String path(target);
+  if (path.startsWith(inboxPrefix.c_str())) {
+    replacement.storageArea = static_cast<uint8_t>(CapsuleStorageArea::inbox);
+  } else if (path.startsWith(archivePrefix.c_str())) {
+    replacement.storageArea = static_cast<uint8_t>(CapsuleStorageArea::archive);
+    replacement.flags |= locatorArchived;
+  } else if (path.startsWith(trashPrefix.c_str())) {
+    replacement.storageArea = static_cast<uint8_t>(CapsuleStorageArea::trash);
+    replacement.flags |= locatorTrashed;
+  } else {
+    replacement.storageArea = static_cast<uint8_t>(CapsuleStorageArea::custom);
+  }
+  if (!rebuildPublishedLocator(index, replacement, path)) {
+    (void)requestScan();
+    return false;
+  }
+  ++incrementalRefreshCount_;
+  return true;
+}
+
+void CapsuleLibrary::operationFinished(const char *, size_t, size_t,
+                                       bool committed, bool) {
+  if (!committed) invalidateRecordCache();
 }
 
 bool CapsuleLibrary::customPath(const CapsuleLocator &locator,

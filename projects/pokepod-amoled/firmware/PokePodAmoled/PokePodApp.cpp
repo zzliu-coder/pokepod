@@ -13,6 +13,7 @@
 #include "BoardServices.h"
 #include "ButtonDebouncer.h"
 #include "CapsuleLibrary.h"
+#include "CapsuleOperationService.h"
 #include "CapsulePolicy.h"
 #include "CapsuleUndoState.h"
 #include "CapabilityRegistry.h"
@@ -51,6 +52,7 @@ UsbLinkBridge usb;
 BleVoiceService bleVoice;
 WavRecorder recorder;
 CapsuleLibrary capsuleLibrary;
+CapsuleOperationService capsuleOperations;
 Dashboard dashboard;
 ButtonDebouncer bootButton;
 DeviceConfig deviceConfig;
@@ -97,6 +99,7 @@ String transientMessage;
 uint32_t transientUntilMs = 0;
 CapsuleUndoState trashUndo;
 std::vector<String> pendingPurgeIds;
+std::vector<String> pendingLocalOperationIds;
 PowerDecision currentPowerDecision;
 bool idleRadiosPaused = false;
 uint32_t nextSafeShutdownAttemptMs = 0;
@@ -115,6 +118,41 @@ bool pendingRecorderResultNotify = false;
 bool pendingRecorderFinalize = false;
 bool recorderHardwareReady = false;
 bool recorderRecoveryFailureReported = false;
+
+enum class StorageBootPhase : uint8_t {
+  localRecovery,
+  recorder,
+  library,
+  transcription,
+  usbLink,
+  wirelessLink,
+  ready,
+};
+
+enum class LocalOperationPresentation : uint8_t {
+  none,
+  archive,
+  unarchive,
+  trash,
+  restore,
+  undoTrash,
+  purge,
+  bulk,
+};
+
+StorageBootPhase storageBootPhase = StorageBootPhase::localRecovery;
+LocalOperationPresentation localOperationPresentation =
+    LocalOperationPresentation::none;
+bool storageBootAvailable = false;
+bool bootUsbStarted = false;
+bool bootCaptureTaskStarted = false;
+bool bootSyncIdentityStarted = false;
+bool bootRecorderStarted = false;
+bool bootCapsuleLibraryStarted = false;
+bool bootTencentWorkerStarted = false;
+bool bootWifiStarted = false;
+bool bootUsbLinkStarted = false;
+bool bootWifiSyncStarted = false;
 
 ServiceQuiescenceFacts serviceQuiescenceFacts(bool asrQuiesced) {
   return {
@@ -171,7 +209,7 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
   const bool linkLeaseActive = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy() ||
       wirelessSync.openWindow() || capsuleLibrary.scanActive() ||
-      capsuleLibrary.scanRequested();
+      capsuleLibrary.scanRequested() || capsuleOperations.sleepBlocker();
   const PowerFacts facts = {
       usb.tinyUsbMounted(),
       usb.cdcSessionActive(),
@@ -310,23 +348,65 @@ void armTrashUndo(const std::vector<String> &ids) {
   showMessage("已删除 · 点此撤销", CapsuleUndoState::kDurationMs);
 }
 
-void restoreRecentTrash() {
-  const uint32_t now = millis();
-  std::vector<std::string> failedIds;
-  const std::vector<std::string> pending = trashUndo.pendingIds();
-  for (const std::string &id : pending) {
-    if (!capsuleLibrary.restore(id.c_str())) failedIds.push_back(id);
+bool submitLocalCapsuleOperation(
+    CapsuleOperationAction action, const std::vector<String> &ids,
+    LocalOperationPresentation presentation,
+    const String &changedAt = String()) {
+  if (!capsuleOperations.submit(action, ids, changedAt)) {
+    showMessage(capsuleOperations.mutationCapabilityBlocked()
+                    ? "本地操作恢复失败，请连接 Mac"
+                    : "本地操作忙，请稍后再试");
+    return false;
   }
-  const CapsuleUndoResult result = trashUndo.finishAttempt(failedIds);
+  pendingLocalOperationIds = ids;
+  localOperationPresentation = presentation;
+  showMessage("正在安全处理…", 3000);
   dashboard.invalidate();
-  if (result.failed() == 0) {
-    showMessage(String("已恢复 ") + result.restored + " 条");
+  return true;
+}
+
+void restoreRecentTrash() {
+  const std::vector<std::string> pending = trashUndo.pendingIds();
+  std::vector<String> ids;
+  ids.reserve(pending.size());
+  for (const std::string &id : pending) ids.emplace_back(id.c_str());
+  (void)submitLocalCapsuleOperation(
+      CapsuleOperationAction::restore, ids,
+      LocalOperationPresentation::undoTrash);
+}
+
+void consumeLocalOperationOutcome() {
+  CapsuleOperationOutcome outcome;
+  if (!capsuleOperations.takeOutcome(outcome)) return;
+  const LocalOperationPresentation presentation = localOperationPresentation;
+  localOperationPresentation = LocalOperationPresentation::none;
+  if (outcome.committed) {
+    if (presentation == LocalOperationPresentation::undoTrash) {
+      const std::vector<std::string> noFailures;
+      const CapsuleUndoResult restored = trashUndo.finishAttempt(noFailures);
+      showMessage(String("已恢复 ") + restored.restored + " 条");
+    } else if (presentation == LocalOperationPresentation::purge) {
+      showMessage(String("已永久删除 ") + outcome.changed + " 条");
+    } else if (presentation == LocalOperationPresentation::trash) {
+      armTrashUndo(pendingLocalOperationIds);
+    } else if (presentation == LocalOperationPresentation::archive) {
+      showMessage("已归档");
+    } else if (presentation == LocalOperationPresentation::unarchive) {
+      showMessage("已移回原目录");
+    } else if (presentation == LocalOperationPresentation::restore) {
+      showMessage("已恢复");
+    } else {
+      showMessage(String("已处理 ") + outcome.changed + " 条");
+    }
+  } else if (outcome.rollbackFailed || outcome.authorityPreserved) {
+    showMessage("操作中断，已保留恢复记录，请连接 Mac", 5000);
   } else {
-    const String message = String("已恢复 ") + result.restored +
-        " 条，失败 " + result.failed() + " 条 · 再试";
-    const uint32_t remaining = trashUndo.remainingMs(now);
-    showMessage(message, remaining == 0 ? 1800 : remaining);
+    showMessage("操作失败，原数据已恢复");
   }
+  pendingLocalOperationIds.clear();
+  dashboard.closeOverlays();
+  dashboard.clearCapsuleSelection();
+  dashboard.invalidate();
 }
 
 void drawDashboard() {
@@ -1004,26 +1084,16 @@ void pollTouch() {
       }
       drawDashboard();
     } else if (action == UiAction::confirmPurge) {
-      const CapsuleBatchResult result = capsuleLibrary.purge(pendingPurgeIds);
-      const size_t requested = pendingPurgeIds.size();
-      pendingPurgeIds.clear();
-      dashboard.closeOverlays();
-      dashboard.clearCapsuleSelection();
-      if (result.ok) {
+      if (submitLocalCapsuleOperation(
+              CapsuleOperationAction::purge, pendingPurgeIds,
+              LocalOperationPresentation::purge)) {
+        pendingPurgeIds.clear();
+        dashboard.closeOverlays();
+        dashboard.clearCapsuleSelection();
         if (dashboard.state().screen() == UiScreen::capsuleDetail) {
           dashboard.back();
         }
-        showMessage(String("已永久删除 ") + result.changed + " 条");
-      } else if (result.rolledBackFully) {
-        showMessage("永久删除失败，已完整回滚");
-      } else if (result.rollbackFailed > 0) {
-        showMessage(String("删除回滚失败 ") + result.rollbackFailed +
-                    " 条，请到 Mac 处理");
-      } else {
-        showMessage(requested == 0 ? "没有可删除的胶囊"
-                                   : "永久删除未完成");
       }
-      dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::closeOverlay) {
       pendingPurgeIds.clear();
@@ -1035,29 +1105,34 @@ void pollTouch() {
       const std::vector<String> ids =
           dashboard.selectedCapsuleIds(capsuleLibrary);
       const CapsuleScope scope = capsuleLibrary.scope();
-      const CapsuleBatchAction batchAction =
-          action == UiAction::bulkFavorite
-              ? CapsuleBatchAction::favorite
-              : (action == UiAction::bulkArchive
-                     ? CapsuleBatchAction::archiveOrRestore
-                     : CapsuleBatchAction::trashOrRestore);
-      const CapsuleBatchResult result = capsuleLibrary.batch(
-          ids, batchAction, board.utcNow());
-      dashboard.clearCapsuleSelection();
-      if (!result.ok) {
-        if (result.rolledBackFully) {
-          showMessage("批量失败，已完整回滚");
-        } else if (result.rollbackFailed > 0) {
-          showMessage(String("回滚失败 ") + result.rollbackFailed +
-                      " 条，请到 Mac 处理");
-        } else {
-          showMessage("批量操作未完成");
-        }
-      } else if (action == UiAction::bulkTrash &&
-                 scope != CapsuleScope::trash) {
-        armTrashUndo(ids);
+      if (action == UiAction::bulkFavorite) {
+        const CapsuleBatchResult result = capsuleLibrary.batch(
+            ids, CapsuleBatchAction::favorite, board.utcNow());
+        dashboard.clearCapsuleSelection();
+        showMessage(result.ok ? String("已处理 ") + result.changed + " 条"
+                              : "批量收藏未完成");
       } else {
-        showMessage(String("已处理 ") + result.changed + " 条");
+        CapsuleOperationAction operation = CapsuleOperationAction::archive;
+        LocalOperationPresentation presentation =
+            LocalOperationPresentation::bulk;
+        if (action == UiAction::bulkArchive) {
+          operation = scope == CapsuleScope::trash
+              ? CapsuleOperationAction::restore
+              : (scope == CapsuleScope::archive
+                     ? CapsuleOperationAction::unarchive
+                     : CapsuleOperationAction::archive);
+        } else {
+          operation = scope == CapsuleScope::trash
+              ? CapsuleOperationAction::restore
+              : CapsuleOperationAction::trash;
+          presentation = scope == CapsuleScope::trash
+              ? LocalOperationPresentation::bulk
+              : LocalOperationPresentation::trash;
+        }
+        if (submitLocalCapsuleOperation(
+                operation, ids, presentation, board.utcNow())) {
+          dashboard.clearCapsuleSelection();
+        }
       }
       drawDashboard();
     } else {
@@ -1078,26 +1153,26 @@ void pollTouch() {
       } else if (action == UiAction::archive) {
         const bool wasTrashed = selected->trashed;
         const bool wasArchived = selected->archived;
-        const bool ok = wasTrashed
-            ? capsuleLibrary.restore(id)
-            : (wasArchived ? capsuleLibrary.unarchive(id)
-                           : capsuleLibrary.archive(id));
-        if (ok) {
+        std::vector<String> ids{id};
+        const CapsuleOperationAction operation = wasTrashed
+            ? CapsuleOperationAction::restore
+            : (wasArchived ? CapsuleOperationAction::unarchive
+                           : CapsuleOperationAction::archive);
+        const LocalOperationPresentation presentation = wasTrashed
+            ? LocalOperationPresentation::restore
+            : (wasArchived ? LocalOperationPresentation::unarchive
+                           : LocalOperationPresentation::archive);
+        if (submitLocalCapsuleOperation(operation, ids, presentation,
+                                        board.utcNow())) {
           dashboard.back();
-          showMessage(wasTrashed ? "已恢复" :
-                      (wasArchived ? "已移回收件箱" : "已归档"));
-        } else {
-          showMessage("操作失败");
         }
       } else if (action == UiAction::trash) {
-        if (capsuleLibrary.trash(id, board.utcNow())) {
+        std::vector<String> ids{id};
+        if (submitLocalCapsuleOperation(
+                CapsuleOperationAction::trash, ids,
+                LocalOperationPresentation::trash, board.utcNow())) {
           dashboard.closeOverlays();
           dashboard.back();
-          std::vector<String> ids;
-          ids.push_back(id);
-          armTrashUndo(ids);
-        } else {
-          showMessage("删除失败");
         }
       } else if (action == UiAction::retry) {
         if (!capabilities.allows(kTranscriptionCapabilities)) {
@@ -1139,6 +1214,85 @@ void pollTouch() {
   }
 }
 
+bool advanceStorageBoot(uint32_t nowMs) {
+  switch (storageBootPhase) {
+    case StorageBootPhase::localRecovery:
+      capsuleOperations.poll(nowMs);
+      if (capsuleOperations.recoveryActive()) return false;
+      storageBootPhase = StorageBootPhase::recorder;
+      return false;
+    case StorageBootPhase::recorder:
+      bootRecorderStarted = board.sdReady() &&
+          recorder.begin(SD_MMC, usb.log());
+      recorderHardwareReady =
+          bootRecorderStarted && bootCaptureTaskStarted;
+      storageBootPhase = StorageBootPhase::library;
+      return false;
+    case StorageBootPhase::library:
+      bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary.begin(
+          SD_MMC, usb.log(),
+          !capsuleOperations.mutationCapabilityBlocked());
+      capabilities.record(DeviceCapability::capsuleLibrary,
+                          bootCapsuleLibraryStarted);
+      lastCapsuleLibraryRevision = capsuleLibrary.revision();
+      storageBootPhase = StorageBootPhase::transcription;
+      return false;
+    case StorageBootPhase::transcription:
+      bootTencentWorkerStarted = bootCapsuleLibraryStarted &&
+          tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
+      capabilities.record(DeviceCapability::transcription,
+                          bootTencentWorkerStarted);
+      storageBootPhase = StorageBootPhase::usbLink;
+      return false;
+    case StorageBootPhase::usbLink:
+      bootUsbLinkStarted = linkService.begin(
+          usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
+          dashboard, capsuleLibrary, recorder, deviceConfig, wifi,
+          tencentWorker, provisioningDiagnostics, powerDiagnostics,
+          runtimePower, usb.log(), &linkCoordinator, LinkTransport::usb,
+          &wirelessSync, nullptr, &provisioningCoordinator, nullptr,
+          &captureRuntime, &capabilities);
+      storageBootPhase = StorageBootPhase::wirelessLink;
+      return false;
+    case StorageBootPhase::wirelessLink:
+      bootWifiSyncStarted = wirelessSync.begin(
+          SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
+          capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
+          provisioningDiagnostics, powerDiagnostics, runtimePower,
+          wirelessSyncIdentity, linkCoordinator, usb.log(), &captureRuntime,
+          &capabilities);
+      capabilities.record(
+          DeviceCapability::link,
+          bootUsbStarted && bootUsbLinkStarted && bootSyncIdentityStarted &&
+              bootWifiSyncStarted);
+      storageBootPhase = StorageBootPhase::ready;
+      break;
+    case StorageBootPhase::ready:
+      return true;
+  }
+  const StartupCapabilityPresentation startup =
+      startupCapabilityPresentation(capabilities);
+  usb.log().printf(
+      "{\"event\":\"boot_capabilities\",\"observed_mask\":%u,"
+      "\"ready_mask\":%u,\"missing_mask\":%u,\"all_ready\":%s,"
+      "\"capsule_library\":%s,\"recording\":%s,"
+      "\"transcription\":%s,\"local_operation_phase\":\"%s\","
+      "\"startup_mode\":\"%s\"}\n",
+      static_cast<unsigned>(capabilities.observedMask()),
+      static_cast<unsigned>(capabilities.readyMask()),
+      static_cast<unsigned>(capabilities.missingMask()),
+      capabilities.allReady() ? "true" : "false",
+      bootCapsuleLibraryStarted ? "true" : "false",
+      capabilities.ready(DeviceCapability::recording) ? "true" : "false",
+      bootTencentWorkerStarted ? "true" : "false",
+      capsuleOperations.phaseName(), startupCapabilityModeName(startup.mode));
+  showMessage(startup.message, 4000);
+  dashboard.invalidate();
+  drawDashboard();
+  emitStatus();
+  return true;
+}
+
 }  // namespace
 
 void setup() {
@@ -1159,9 +1313,9 @@ void setup() {
       Serial, static_cast<uint16_t>(esp_reset_reason()));
   const bool audioStarted = audio.begin(board.status().variant, Serial);
   capabilities.record(DeviceCapability::audio, audioStarted);
-  const bool captureTaskStarted = audioStarted &&
+  bootCaptureTaskStarted = audioStarted &&
       captureRuntime.begin(board.status().variant, Serial);
-  const bool usbStarted = usb.begin(board.status().variant);
+  bootUsbStarted = usb.begin(board.status().variant);
   runtimePower.begin(usb.log());
   const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();
   powerDiagnostics.begin(
@@ -1171,69 +1325,31 @@ void setup() {
       bootPower.bleModemSleepSupported, board.status().batteryPercent);
   const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
   capabilities.record(DeviceCapability::bleVoice,
-                      bleStarted && captureTaskStarted);
+                      bleStarted && bootCaptureTaskStarted);
   deviceConfig.begin(usb.log());
-  const bool syncIdentityStarted =
+  bootSyncIdentityStarted =
       wirelessSyncIdentity.begin(ESP.getEfuseMac(), usb.log());
-  bool recorderStarted = false;
-  bool capsuleLibraryStarted = false;
-  bool tencentWorkerStarted = false;
-  if (board.sdReady()) {
-    recorderStarted = recorder.begin(SD_MMC, usb.log());
-    capsuleLibraryStarted = capsuleLibrary.begin(SD_MMC, usb.log());
-    if (capsuleLibraryStarted) {
-      tencentWorkerStarted = tencentWorker.begin(
-          SD_MMC, capsuleLibrary, deviceConfig, usb.log());
-    }
-  }
-  capabilities.record(DeviceCapability::capsuleLibrary,
-                      capsuleLibraryStarted);
-  lastCapsuleLibraryRevision = capsuleLibrary.revision();
-  recorderHardwareReady = recorderStarted && captureTaskStarted;
+  storageBootAvailable = board.sdReady() &&
+      capsuleOperations.begin(SD_MMC, usb.log());
+  if (storageBootAvailable) capsuleOperations.attachCatalog(capsuleLibrary);
+  storageBootPhase = storageBootAvailable
+      ? StorageBootPhase::localRecovery : StorageBootPhase::recorder;
+  capabilities.record(DeviceCapability::capsuleLibrary, false);
+  recorderHardwareReady = false;
   capabilities.record(DeviceCapability::recording, false);
-  capabilities.record(DeviceCapability::transcription,
-                      tencentWorkerStarted);
-  const bool wifiStarted = wifi.begin(deviceConfig, usb.log());
-  capabilities.record(DeviceCapability::wifi, wifiStarted);
+  capabilities.record(DeviceCapability::transcription, false);
+  bootWifiStarted = wifi.begin(deviceConfig, usb.log());
+  capabilities.record(DeviceCapability::wifi, bootWifiStarted);
   provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
                                 provisioningDiagnostics, usb.log());
-  const bool usbLinkStarted = linkService.begin(
-                    usb.stream(), SD_MMC, board, audio, captureRouter,
-                    usb, bleVoice,
-                    dashboard,
-                    capsuleLibrary, recorder,
-                    deviceConfig, wifi, tencentWorker,
-                    provisioningDiagnostics, powerDiagnostics,
-                    runtimePower, usb.log(),
-                    &linkCoordinator, LinkTransport::usb, &wirelessSync,
-                    nullptr, &provisioningCoordinator,
-                    nullptr, &captureRuntime, &capabilities);
-  const bool wifiSyncStarted = wirelessSync.begin(
-      SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
-      capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
-      provisioningDiagnostics, powerDiagnostics, runtimePower,
-      wirelessSyncIdentity,
-      linkCoordinator, usb.log(), &captureRuntime, &capabilities);
-  capabilities.record(DeviceCapability::link,
-                      usbStarted && usbLinkStarted && syncIdentityStarted &&
-                          wifiSyncStarted);
   const StartupCapabilityPresentation startup =
       startupCapabilityPresentation(capabilities);
-  usb.log().printf(
-      "{\"event\":\"boot_capabilities\",\"observed_mask\":%u,\"ready_mask\":%u,\"missing_mask\":%u,\"all_ready\":%s,\"capsule_library\":%s,\"recording\":%s,\"transcription\":%s,\"startup_mode\":\"%s\"}\n",
-      static_cast<unsigned>(capabilities.observedMask()),
-      static_cast<unsigned>(capabilities.readyMask()),
-      static_cast<unsigned>(capabilities.missingMask()),
-      capabilities.allReady() ? "true" : "false",
-      capsuleLibraryStarted ? "true" : "false",
-      capabilities.ready(DeviceCapability::recording) ? "true" : "false",
-      tencentWorkerStarted ? "true" : "false",
-      startupCapabilityModeName(startup.mode));
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
   if (provisioningDiagnostics.recoveredInterruptedSession()) {
     showMessage("上次配网被重启中断 · 见诊断", 5000);
   } else {
-    showMessage(startup.message, 4000);
+    showMessage(storageBootAvailable ? "正在恢复本地胶囊…" : startup.message,
+                4000);
   }
   drawDashboard();
   autoScreenOff.begin(millis());
@@ -1244,6 +1360,18 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  // Storage boot is a real application phase. One cooperative recovery step
+  // runs per turn; the initial library scan, ASR queue, Link and every local
+  // mutation remain unopened until this phase reaches a terminal boundary.
+  if (!advanceStorageBoot(now)) {
+    if (now - lastDashboardMs >= 1000) {
+      lastDashboardMs = now;
+      drawDashboard();
+    }
+    return;
+  }
+  capsuleOperations.poll(now);
+  consumeLocalOperationOutcome();
   // These polls precede every transport/UI early return. Physical File close
   // and late capture finalization therefore always make bounded progress.
   pollDeferredServiceCleanup();
@@ -1400,7 +1528,8 @@ void loop() {
                      transcriptionDispatchBusy(recorder.operationActive(),
                                                linkService.maintenanceActive() ||
                                                    wirelessSync.linkBusy() ||
-                                                   capsuleLibrary.scanActive()) ||
+                                                   capsuleLibrary.scanActive() ||
+                                                   capsuleOperations.busy()) ||
                          lowBatteryShutdown.critical(),
                      board.status().charging);
   PowerInputs finalPowerInputs = currentPowerInputs(now);
@@ -1486,6 +1615,7 @@ void loop() {
   }
   const bool keepScreenAwake = recorder.operationActive() || wirelessUiActive ||
       audio.playing() || provisioningCoordinator.visible() ||
+      capsuleOperations.busy() ||
       touchVerticalScrolling || dashboard.scrollActive() ||
       dashboard.pageTransitionActive();
   if (!screenDimmed &&

@@ -14,9 +14,9 @@ def require(source: str, needle: str, message: str) -> None:
         raise SystemExit(f"FAIL capability_wiring: {message}")
 
 
-require(APP, "capsuleLibraryStarted = capsuleLibrary.begin(",
+require(APP, "bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary.begin(",
         "CapsuleLibrary::begin result is not captured")
-require(APP, "tencentWorkerStarted = tencentWorker.begin(",
+require(APP, "bootTencentWorkerStarted = bootCapsuleLibraryStarted &&",
         "TencentWorker::begin result is not captured")
 require(APP, "capabilities.record(DeviceCapability::capsuleLibrary,",
         "capsule-library capability fact is not recorded")
@@ -37,10 +37,9 @@ require(LINK, "requiredCapabilitiesForLinkOperation(operation)",
 require(DASHBOARD, "view.localCapsulesReady",
         "home recording entry ignores the startup capability facts")
 
-library_gate = APP.index("if (capsuleLibraryStarted) {")
-worker_start = APP.index("tencentWorkerStarted = tencentWorker.begin(")
-gate_end = APP.index("\n    }", worker_start)
-if not (library_gate < worker_start < gate_end):
+library_gate = APP.index("bootTencentWorkerStarted = bootCapsuleLibraryStarted &&")
+worker_start = APP.index("tencentWorker.begin(", library_gate)
+if not library_gate < worker_start:
     raise SystemExit(
         "FAIL capability_wiring: ASR worker can start without a recovered library")
 

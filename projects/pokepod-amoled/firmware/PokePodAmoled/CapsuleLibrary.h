@@ -8,6 +8,7 @@
 #include "CapsuleBrowserState.h"
 #include "CapsuleTransaction.h"
 #include "CapsuleIndexPolicy.h"
+#include "CapsuleOperationService.h"
 #include "CapsuleScanStepper.h"
 #include "DeferredPublish.h"
 #include "StorageCoordinator.h"
@@ -68,14 +69,15 @@ struct CapsuleBatchResult {
   bool rolledBackFully = false;
 };
 
-class CapsuleLibrary {
+class CapsuleLibrary : public CapsuleOperationCatalog {
  public:
   ~CapsuleLibrary();
   CapsuleLibrary() = default;
   CapsuleLibrary(const CapsuleLibrary &) = delete;
   CapsuleLibrary &operator=(const CapsuleLibrary &) = delete;
 
-  bool begin(fs::FS &fs, Print &log);
+  bool begin(fs::FS &fs, Print &log,
+             bool requeueInterruptedTranscription = true);
   bool scan();
   // Queue a full rebuild without doing filesystem work in the caller. The
   // request is sticky: if a scan is running, or a mutation currently prevents
@@ -135,6 +137,13 @@ class CapsuleLibrary {
   void setScope(CapsuleScope scope);
   CapsuleScope scope() const { return scope_; }
   String readBestText(const CapsuleSummary &record, size_t maxBytes = 16384) const;
+
+  bool operationSnapshot(const char *id,
+                         CapsuleOperationSnapshot &snapshot) const override;
+  bool operationCommitted(const char *id, const char *target,
+                          bool removed) override;
+  void operationFinished(const char *packedIds, size_t stride, size_t count,
+                         bool committed, bool removed) override;
 
   static const char *statusName(CapsuleStatus status);
 
@@ -209,6 +218,9 @@ class CapsuleLibrary {
   bool rebuildPublishedIndex(const CapsuleSummary *replacement,
                              size_t replaceIndex, bool append,
                              size_t removeIndex);
+  bool rebuildPublishedLocator(size_t replaceIndex,
+                               const CapsuleLocator &replacement,
+                               const String &replacementPath);
   bool storeCustomPath(const String &directory, CapsuleLocator &locator,
                        char *pathPool, size_t &pathPoolUsed) const;
   bool customPath(const CapsuleLocator &locator, String &directory) const;

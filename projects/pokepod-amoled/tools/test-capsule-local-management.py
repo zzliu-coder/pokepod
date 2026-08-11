@@ -11,6 +11,8 @@ dashboard = (FIRMWARE / "Dashboard.cpp").read_text()
 app = (FIRMWARE / "PokePodApp.cpp").read_text()
 link = (FIRMWARE / "PokePodLinkService.cpp").read_text()
 codec = (FIRMWARE / "CapsuleMetadataCodec.cpp").read_text()
+service_h = (FIRMWARE / "CapsuleOperationService.h").read_text()
+service_cpp = (FIRMWARE / "CapsuleOperationService.cpp").read_text()
 
 assert "bool readOnly = false" in library_h
 assert "CapsuleBatchResult purge(const std::vector<String> &ids)" in library_h
@@ -30,7 +32,24 @@ assert "rolledBackFully" in purge
 assert "requestPurge" in ui_policy and "confirmPurge" in ui_policy
 assert '"永久删除"' in dashboard
 assert '"录音和文字将无法恢复"' in dashboard
-assert "capsuleLibrary.purge(pendingPurgeIds)" in app
+assert "CapsuleOperationService capsuleOperations" in app
+assert "capsuleOperations.poll(now)" in app
+assert "submitLocalCapsuleOperation(" in app
+for synchronous in (
+    "capsuleLibrary.archive(", "capsuleLibrary.unarchive(",
+    "capsuleLibrary.trash(", "capsuleLibrary.restore(",
+    "capsuleLibrary.purge(",
+):
+    assert synchronous not in app
+assert "CapsuleBatchExecutor executor_" in service_h
+assert "CapsuleBatchJournalStore journalStore_" in service_h
+assert "CapsuleTransactionRunner transactionRunner_" in service_h
+assert "LinkTreeStepper treeStepper_" in service_h
+assert "kPoolCapacity = 512" in service_h
+assert "kTransactionLimit = 500" in service_h
+assert "permittedPurgeLeaf" in service_cpp
+assert "prepareCapsuleBatchRecovery" in service_cpp
+assert "operationCommitted(" in library_cpp
 assert '"版本过新，请在 Mac 处理"' in app
 assert 'strcmp(operation, "purgeCapsules") == 0' in link
 assert "library_->purge(ids)" not in link

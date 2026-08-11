@@ -198,6 +198,7 @@ void CapsuleOperationService::resetRequest() {
   pendingStep_ = 0;
   cleanupStep_ = 0;
   cleanupIndex_ = 0;
+  notificationIndex_ = 0;
   planReady_ = false;
   purgeEntryUnknown_ = false;
   observedSourceExists_ = false;
@@ -568,13 +569,25 @@ void CapsuleOperationService::beginWork(
     case CapsuleBatchExecutor::Action::cleanup:
       pending_ = Pending::cleanup;
       cleanupIndex_ = 0;
+      notificationIndex_ = 0;
       cleanupStep_ = 0;
       return;
     case CapsuleBatchExecutor::Action::finish:
+      {
+      const bool authorityPreserved = executor_.preserveJournal();
       publishOutcome();
       executor_.completeStep(true);
       reservation_.release();
       pending_ = Pending::none;
+      if (authorityPreserved) {
+        lifecycle_ = Lifecycle::blocked;
+        diagnostic_ = "local operation authority preserved";
+        if (log_ != nullptr) {
+          log_->println(
+              "{\"event\":\"local_capsule_operation_authority_preserved\"}");
+        }
+        return;
+      }
       if (recoveryMode_) {
         recoveryMode_ = false;
         startupCandidate_ = "";
@@ -586,6 +599,7 @@ void CapsuleOperationService::beginWork(
         diagnostic_ = "ready";
       }
       return;
+      }
     default:
       finishWork(false);
       return;
@@ -929,6 +943,21 @@ bool CapsuleOperationService::advancePathMutation(bool rollback) {
 
 bool CapsuleOperationService::advanceCleanup() {
   if (executor_.preserveJournal()) return true;
+  if (executor_.success() && catalog_ != nullptr &&
+      notificationIndex_ < executor_.total()) {
+    StoredCapsuleBatchPlan committedPlan;
+    if (!journalStore_.readPlan(
+            journalState_, static_cast<uint16_t>(notificationIndex_),
+            committedPlan, StorageOwner::capsuleTransaction)) return false;
+    const bool removed =
+        strcmp(journalState_.operation, "purgeCapsules") == 0;
+    if (!catalog_->operationCommitted(
+            committedPlan.id, committedPlan.target, removed)) {
+      diagnostic_ = "durable operation committed; index refresh queued";
+    }
+    ++notificationIndex_;
+    return false;
+  }
   if (executor_.success() &&
       (strcmp(journalState_.operation, "moveCapsules") == 0 ||
        strcmp(journalState_.operation, "restoreCapsules") == 0)) {

@@ -35,6 +35,10 @@ struct FakeCatalog final : public CapsuleOperationCatalog {
     return true;
   }
 
+  bool operationCommitted(const char *, const char *, bool) override {
+    return true;
+  }
+
   void operationFinished(const char *, size_t, size_t count,
                          bool committed, bool removed) override {
     finished += count;
@@ -332,6 +336,38 @@ void runEveryLocalCutpoint() {
   }
 }
 
+void runPermanentCheckpointFailureTerminal() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  FakeCatalog catalog;
+  const std::string inbox = std::string(kCapsuleInbox) + "/" + kFirst;
+  const std::string archive = std::string(kCapsuleArchive) + "/" + kFirst;
+  seedCapsule(state, inbox);
+  catalog.records[kFirst] = snapshot(kFirst, inbox.c_str(), "Inbox", false,
+                                     false);
+  CapsuleOperationService service;
+  bootToReady(service, storage, log, &catalog);
+  assert(service.submit(CapsuleOperationAction::archive, {String(kFirst)}));
+  size_t polls = 0;
+  while (state->directories.count(archive) == 0 && polls++ < 20000) {
+    service.poll(static_cast<uint32_t>(polls + 100));
+  }
+  assert(state->directories.count(archive) == 1);
+  state->failAlways(fakefs::Operation::write,
+                    fakefs::FaultAction::returnFailure);
+  CapsuleOperationOutcome outcome;
+  while (!service.takeOutcome(outcome) && polls++ < 40000) {
+    service.poll(static_cast<uint32_t>(polls + 100));
+  }
+  state->clearFault();
+  assert(polls < 40000);
+  assert(outcome.authorityPreserved);
+  assert(service.mutationCapabilityBlocked());
+  assert(!service.sleepBlocker());
+  assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
+}
+
 }  // namespace
 
 int main() {
@@ -340,5 +376,6 @@ int main() {
   runBatchRollback();
   runSubmissionLimit();
   runEveryLocalCutpoint();
+  runPermanentCheckpointFailureTerminal();
   return 0;
 }
