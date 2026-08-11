@@ -7,6 +7,7 @@
 #include "BoardConfig.h"
 #include "PeakWindow.h"
 #include "PlaybackBufferPolicy.h"
+#include "StorageCoordinator.h"
 
 namespace pokepod {
 
@@ -59,6 +60,7 @@ class AudioPipeline {
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;
   File playbackFile_;
+  StorageReservation playbackReservation_;
   uint32_t playbackFileRemaining_ = 0;
   size_t playbackBufferedBytes_ = 0;
   size_t playbackBufferOffset_ = 0;

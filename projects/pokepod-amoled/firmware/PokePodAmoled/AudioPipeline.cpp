@@ -4,6 +4,7 @@
 #include <esp_check.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <utility>
 #include <es8311.h>
 
 #include "AudioI2sRoute.h"
@@ -153,6 +154,14 @@ void AudioPipeline::observeCapturedMono(const int16_t *samples, size_t count) {
 bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
   if (!available_ || playing_) return false;
   lastPlaybackError_ = "none";
+  StorageReservation storage = StorageCoordinator::instance().reserve(
+      StorageOwner::audioPlayback, StorageAccess::read, 50);
+  if (!storage) {
+    lastPlaybackError_ = "storage_busy";
+    ++playbackStartFailures_;
+    log.println("{\"event\":\"playback_error\",\"stage\":\"storage_busy\"}");
+    return false;
+  }
   playbackHeapLargestBeforeStart_ = heap_caps_get_largest_free_block(
       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   // A completed capture may leave the shared clock alive until the end of the
@@ -160,6 +169,13 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
   // so close that idle capture mode before switching the codec to playback.
   if (hardwareActive_) stopHardware(log);
   if (hardwareActive_) return false;
+  StorageIoLease openIo = StorageCoordinator::instance().acquireIo(
+      StorageOwner::audioPlayback, StorageAccess::read, 50);
+  if (!openIo) {
+    lastPlaybackError_ = "storage_busy";
+    ++playbackStartFailures_;
+    return false;
+  }
   File file = fs.open(path, FILE_READ);
   uint8_t header[kWavHeaderBytes];
   uint32_t dataBytes = 0;
@@ -172,7 +188,10 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
     log.println("{\"event\":\"playback_error\",\"stage\":\"wav_header\"}");
     return false;
   }
+  openIo.release();
   if (!startHardware(HardwareMode::playback, kCapsuleSampleRate, log)) {
+    StorageIoLease closeIo = StorageCoordinator::instance().acquireIo(
+        StorageOwner::audioPlayback, StorageAccess::read, 50);
     file.close();
     lastPlaybackError_ = lastHardwareError_;
     ++playbackStartFailures_;
@@ -180,6 +199,7 @@ bool AudioPipeline::startPlayback(fs::FS &fs, const String &path, Print &log) {
     return false;
   }
   playbackFile_ = file;
+  playbackReservation_ = std::move(storage);
   playbackFileRemaining_ = dataBytes;
   playbackBufferedBytes_ = 0;
   playbackBufferOffset_ = 0;
@@ -206,6 +226,9 @@ void AudioPipeline::pumpPlayback(Print &log) {
     }
     const size_t wanted = playbackReadSize(playbackFileRemaining_);
     const int64_t startedUs = esp_timer_get_time();
+    StorageIoLease readIo = StorageCoordinator::instance().acquireIo(
+        StorageOwner::audioPlayback, StorageAccess::read, 5);
+    if (!readIo) return;
     const size_t count = playbackFile_.read(playbackInput_, wanted);
     const uint32_t elapsedUs = static_cast<uint32_t>(
         esp_timer_get_time() - startedUs);
@@ -250,11 +273,15 @@ void AudioPipeline::pumpPlayback(Print &log) {
 
 void AudioPipeline::stopPlayback(Print &log) {
   if (!playing_) return;
+  StorageIoLease closeIo = StorageCoordinator::instance().acquireIo(
+      StorageOwner::audioPlayback, StorageAccess::read, 50);
   playbackFile_.close();
   playbackFileRemaining_ = 0;
   playbackBufferedBytes_ = 0;
   playbackBufferOffset_ = 0;
   playing_ = false;
+  closeIo.release();
+  playbackReservation_.release();
   digitalWrite(kSpeakerAmpPin, LOW);
   log.println("{\"event\":\"playback_stopped\"}");
   stopHardware(log);

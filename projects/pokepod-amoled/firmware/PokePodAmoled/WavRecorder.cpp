@@ -334,6 +334,12 @@ uint32_t WavRecorder::durationMs() const {
   return audioDurationMs(dataBytes_);
 }
 
+bool WavRecorder::abortCapture(Print &log) {
+  if (!recording_) return false;
+  return finishFailure(log, RecorderTerminal::captureFailure,
+                       RecorderFailureStage::captureIncomplete);
+}
+
 void WavRecorder::resetSessionState() {
   if (file_) file_.close();
   recording_ = false;

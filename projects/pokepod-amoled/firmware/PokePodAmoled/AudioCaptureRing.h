@@ -1,11 +1,63 @@
 #pragma once
 
-#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
+#ifndef ARDUINO
+#include <atomic>
+#endif
+
 namespace pokepod {
+
+// The ESP32-S3 has naturally atomic aligned 32-bit loads/stores.  This ring is
+// single-producer/single-consumer, so every counter has exactly one writer and
+// only needs an explicit memory barrier when ownership crosses cores.  Using
+// std::atomic here would fall back to a non-lock-free implementation in the
+// Xtensa toolchain and would make the realtime capture path wait on a hidden
+// runtime lock.
+class AudioSpscCounter {
+ public:
+  uint32_t loadRelaxed() const {
+#ifdef ARDUINO
+    return value_;
+#else
+    return value_.load(std::memory_order_relaxed);
+#endif
+  }
+  uint32_t loadAcquire() const {
+#ifdef ARDUINO
+    const uint32_t value = value_;
+    __asm__ __volatile__("memw" ::: "memory");
+    return value;
+#else
+    return value_.load(std::memory_order_acquire);
+#endif
+  }
+  void storeRelaxed(uint32_t value) {
+#ifdef ARDUINO
+    value_ = value;
+#else
+    value_.store(value, std::memory_order_relaxed);
+#endif
+  }
+  void storeRelease(uint32_t value) {
+#ifdef ARDUINO
+    __asm__ __volatile__("memw" ::: "memory");
+    value_ = value;
+#else
+    value_.store(value, std::memory_order_release);
+#endif
+  }
+  void incrementWriter() { storeRelaxed(loadRelaxed() + 1); }
+
+ private:
+#ifdef ARDUINO
+  alignas(4) volatile uint32_t value_ = 0;
+#else
+  std::atomic<uint32_t> value_{0};
+#endif
+};
 
 constexpr uint32_t kAudioCaptureSampleRate = 16000;
 constexpr uint16_t kAudioCaptureFrameDurationMs = 20;
@@ -42,17 +94,15 @@ template <size_t Capacity>
 class AudioCaptureRing {
  public:
   static_assert(Capacity > 0, "audio capture ring must be bounded");
-  static_assert(std::atomic<uint32_t>::is_always_lock_free,
-                "realtime ring counters must be lock-free");
 
   void resetSession(uint32_t sessionId) {
-    readCount_.store(0, std::memory_order_relaxed);
-    writeCount_.store(0, std::memory_order_relaxed);
+    readCount_.storeRelaxed(0);
+    writeCount_.storeRelaxed(0);
     sessionId_ = sessionId;
-    highWaterFrames_.store(0, std::memory_order_relaxed);
-    pushedFrames_.store(0, std::memory_order_relaxed);
-    poppedFrames_.store(0, std::memory_order_relaxed);
-    droppedFrames_.store(0, std::memory_order_relaxed);
+    highWaterFrames_.storeRelaxed(0);
+    pushedFrames_.storeRelaxed(0);
+    poppedFrames_.storeRelaxed(0);
+    droppedFrames_.storeRelaxed(0);
   }
 
   bool push(uint32_t sequence, uint32_t capturedAtMs,
@@ -60,10 +110,10 @@ class AudioCaptureRing {
     if (samples == nullptr || sampleCount != kAudioCaptureSamplesPerFrame) {
       return false;
     }
-    const uint32_t write = writeCount_.load(std::memory_order_relaxed);
-    const uint32_t read = readCount_.load(std::memory_order_acquire);
+    const uint32_t write = writeCount_.loadRelaxed();
+    const uint32_t read = readCount_.loadAcquire();
     if (write - read >= Capacity) {
-      droppedFrames_.fetch_add(1, std::memory_order_relaxed);
+      droppedFrames_.incrementWriter();
       return false;
     }
     AudioCaptureFrame &frame = frames_[write % Capacity];
@@ -71,24 +121,23 @@ class AudioCaptureRing {
     frame.sequence = sequence;
     frame.capturedAtMs = capturedAtMs;
     memcpy(frame.samples, samples, sizeof(frame.samples));
-    writeCount_.store(write + 1, std::memory_order_release);
-    pushedFrames_.fetch_add(1, std::memory_order_relaxed);
+    writeCount_.storeRelease(write + 1);
+    pushedFrames_.incrementWriter();
     updateHighWater(write + 1 - read);
     return true;
   }
 
   bool pop(AudioCaptureFrame &frame) {
-    const uint32_t read = readCount_.load(std::memory_order_relaxed);
-    if (read == writeCount_.load(std::memory_order_acquire)) return false;
+    const uint32_t read = readCount_.loadRelaxed();
+    if (read == writeCount_.loadAcquire()) return false;
     frame = frames_[read % Capacity];
-    readCount_.store(read + 1, std::memory_order_release);
-    poppedFrames_.fetch_add(1, std::memory_order_relaxed);
+    readCount_.storeRelease(read + 1);
+    poppedFrames_.incrementWriter();
     return true;
   }
 
   size_t size() const {
-    return writeCount_.load(std::memory_order_acquire) -
-        readCount_.load(std::memory_order_acquire);
+    return writeCount_.loadAcquire() - readCount_.loadAcquire();
   }
 
   constexpr size_t capacity() const { return Capacity; }
@@ -97,32 +146,29 @@ class AudioCaptureRing {
     AudioCaptureRingMetrics value;
     value.sessionId = sessionId_;
     value.currentFrames = static_cast<uint32_t>(size());
-    value.highWaterFrames = highWaterFrames_.load(std::memory_order_relaxed);
-    value.pushedFrames = pushedFrames_.load(std::memory_order_relaxed);
-    value.poppedFrames = poppedFrames_.load(std::memory_order_relaxed);
-    value.droppedFrames = droppedFrames_.load(std::memory_order_relaxed);
+    value.highWaterFrames = highWaterFrames_.loadAcquire();
+    value.pushedFrames = pushedFrames_.loadAcquire();
+    value.poppedFrames = poppedFrames_.loadAcquire();
+    value.droppedFrames = droppedFrames_.loadAcquire();
     value.droppedSamples = value.droppedFrames * kAudioCaptureSamplesPerFrame;
     return value;
   }
 
  private:
   void updateHighWater(size_t depth) {
-    uint32_t current = highWaterFrames_.load(std::memory_order_relaxed);
+    const uint32_t current = highWaterFrames_.loadRelaxed();
     const uint32_t requested = static_cast<uint32_t>(depth);
-    while (requested > current &&
-           !highWaterFrames_.compare_exchange_weak(
-               current, requested, std::memory_order_relaxed,
-               std::memory_order_relaxed)) {}
+    if (requested > current) highWaterFrames_.storeRelaxed(requested);
   }
 
   AudioCaptureFrame frames_[Capacity] = {};
-  std::atomic<uint32_t> readCount_{0};
-  std::atomic<uint32_t> writeCount_{0};
+  AudioSpscCounter readCount_;
+  AudioSpscCounter writeCount_;
   uint32_t sessionId_ = 0;
-  std::atomic<uint32_t> highWaterFrames_{0};
-  std::atomic<uint32_t> pushedFrames_{0};
-  std::atomic<uint32_t> poppedFrames_{0};
-  std::atomic<uint32_t> droppedFrames_{0};
+  AudioSpscCounter highWaterFrames_;
+  AudioSpscCounter pushedFrames_;
+  AudioSpscCounter poppedFrames_;
+  AudioSpscCounter droppedFrames_;
 };
 
 }  // namespace pokepod

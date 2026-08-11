@@ -13,6 +13,7 @@ enum class RecorderTerminal : uint8_t {
   commitFailure,
   tooShort,
   admissionFailure,
+  captureFailure,
 };
 
 enum class RecorderStopReason : uint8_t {
@@ -42,6 +43,7 @@ enum class RecorderFailureStage : uint8_t {
   commitDirectory,
   recoveryCheckpoint,
   storageBusy,
+  captureIncomplete,
 };
 
 struct RecorderOutcome {
@@ -111,6 +113,7 @@ inline const char *recorderFailureStageName(RecorderFailureStage stage) {
     case RecorderFailureStage::commitDirectory: return "directory_commit";
     case RecorderFailureStage::recoveryCheckpoint: return "recovery_checkpoint";
     case RecorderFailureStage::storageBusy: return "storage_busy";
+    case RecorderFailureStage::captureIncomplete: return "capture_incomplete";
     default: return "none";
   }
 }

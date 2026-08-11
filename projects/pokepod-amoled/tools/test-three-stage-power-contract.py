@@ -28,8 +28,10 @@ assert "wakeMask |= 1ULL << kTouchInterruptPin" in runtime
 assert "ESP_EXT1_WAKEUP_ANY_LOW" in runtime
 assert "esp_deep_sleep_start" in runtime
 
-assert "input.usbHostConnected = usb.hostConnected()" in main
-assert "input.vbusPresent = board.status().vbusPresent" in main
+assert "usb.tinyUsbMounted()," in main
+assert "usb.cdcSessionActive()," in main
+assert "board.status().vbusPresent," in main
+assert "input = powerInputsWithFacts(input, facts)" in main
 assert "wirelessSync.openWindow()" in main
 assert "pauseIdleRadios" in main
 assert "enterDeepSleep" in main

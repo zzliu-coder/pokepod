@@ -7,6 +7,7 @@
 #include "CapsulePolicy.h"
 #include "FixedChineseFont.h"
 #include "FontPolicy.h"
+#include "StorageCoordinator.h"
 #include "Utf8Policy.h"
 
 namespace pokepod {
@@ -93,6 +94,9 @@ void ChineseRenderer::begin(Arduino_GFX *display, fs::FS *fs) {
     std::memset(sdCache_, 0,
                 kSdGlyphCacheEntries * sizeof(SdGlyphCacheEntry));
   }
+  StorageIoLease fontIo = StorageCoordinator::instance().acquireIo(
+      StorageOwner::fontRead, StorageAccess::read, 100);
+  if (!fontIo) return;
   if (fontFile_) fontFile_.close();
   if (fs == nullptr) return;
   const String path = String(kCapsuleSystem) + "/fonts/cjk20.a4";
@@ -256,6 +260,11 @@ bool ChineseRenderer::loadSd(uint32_t codepoint, UiTextSize size,
                              GlyphData &glyph) {
   if (size != UiTextSize::body || !sdFontReady_ || !fontFile_) return false;
   if (loadSdCache(codepoint, glyph)) return true;
+  // A busy storage transaction falls back to the fixed Flash font for this
+  // frame.  Rendering never waits behind recording, sync or metadata commit.
+  StorageIoLease fontIo = StorageCoordinator::instance().acquireIo(
+      StorageOwner::fontRead, StorageAccess::read, 0);
+  if (!fontIo) return false;
   uint32_t low = 0;
   uint32_t high = sdGlyphCount_;
   uint8_t prefix[8];

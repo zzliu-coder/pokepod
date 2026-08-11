@@ -568,13 +568,9 @@ bool BleVoiceService::appendAudio(const uint8_t *stereo48, size_t bytes,
 
 bool BleVoiceService::appendMono16(const int16_t *samples, size_t count,
                                    uint32_t nowMs) {
-  const bool ok = controller_.appendMono16(samples, count, nowMs);
-  if (!ok && controller_.error() == VoiceSessionError::queueOverflow) {
-    portENTER_CRITICAL(&qualityMux_);
-    quality_.noteQueueOverflow();
-    portEXIT_CRITICAL(&qualityMux_);
-  }
-  return ok;
+  // poll() records a terminal controller error exactly once.  Counting the
+  // overflow here as well would duplicate the same failed session.
+  return controller_.appendMono16(samples, count, nowMs);
 }
 
 void BleVoiceService::abortSession(VoiceSessionError error) {

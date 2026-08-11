@@ -16,6 +16,8 @@ enum class StorageOwner : uint8_t {
   recorder,
   capsuleTransaction,
   tencentRead,
+  audioPlayback,
+  fontRead,
   usbLink,
   wifiLink,
   recovery,

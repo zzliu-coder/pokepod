@@ -6,6 +6,7 @@
 #include <esp_system.h>
 
 #include "AudioPipeline.h"
+#include "AudioCaptureRuntime.h"
 #include "AudioCaptureRouter.h"
 #include "BleVoiceService.h"
 #include "BoardConfig.h"
@@ -43,6 +44,7 @@ namespace {
 BoardServices board;
 AudioPipeline audio;
 AudioCaptureRouter captureRouter;
+AudioCaptureRuntime captureRuntime;
 UsbLinkBridge usb;
 BleVoiceService bleVoice;
 WavRecorder recorder;
@@ -66,7 +68,6 @@ AutoScreenOffPolicy autoScreenOff;
 LowBatteryShutdownPolicy lowBatteryShutdown;
 CapabilityRegistry capabilities;
 
-uint8_t audioBuffer[kAudioBytesPerChunk];
 TouchGestureTracker touchGesture;
 bool touchWirelessHolding = false;
 bool touchWirelessAttempted = false;
@@ -323,15 +324,22 @@ bool startWirelessHold() {
     return false;
   }
   if (audio.playing()) audio.stopPlayback(usb.log());
-  if (!captureRouter.available() || !audio.startCapture(usb.log())) {
+  if (!captureRouter.acquire(AudioCaptureOwner::wirelessVoice)) {
     showMessage("无线麦克风暂时不可用");
     drawDashboard();
     return false;
   }
   uint32_t sessionId = esp_random();
   if (sessionId == 0) sessionId = 1;
+  if (!captureRuntime.start(audio, sessionId, usb.log())) {
+    captureRouter.release(AudioCaptureOwner::wirelessVoice);
+    showMessage("无线麦克风暂时不可用");
+    drawDashboard();
+    return false;
+  }
   if (!bleVoice.startSession(sessionId, millis(), captureRouter)) {
-    audio.stopHardware(usb.log());
+    captureRuntime.stop(usb.log());
+    captureRouter.release(AudioCaptureOwner::wirelessVoice);
     showMessage("无线麦克风暂时不可用");
     drawDashboard();
     return false;
@@ -344,8 +352,35 @@ bool startWirelessHold() {
   return true;
 }
 
+bool drainCapturedAudio(uint32_t nowMs) {
+  bool ok = true;
+  AudioCaptureFrame frame;
+  while (captureRuntime.pop(frame)) {
+    audio.observeCapturedMono(frame.samples, kAudioCaptureSamplesPerFrame);
+    if (captureRouter.localRecording() && recorder.recording()) {
+      if (!recorder.appendMono16(frame.samples, kAudioCaptureSamplesPerFrame,
+                                 usb.log())) {
+        ok = false;
+      }
+    } else if (captureRouter.wirelessStreaming() &&
+               bleVoice.acceptingAudio()) {
+      if (!bleVoice.appendMono16(frame.samples, kAudioCaptureSamplesPerFrame,
+                                 nowMs)) {
+        ok = false;
+      }
+    }
+  }
+  return ok;
+}
+
 bool stopWirelessHold() {
-  bleVoice.endSession();
+  const bool captureStopped = captureRuntime.stop(usb.log());
+  const bool drained = drainCapturedAudio(millis());
+  if (!captureStopped || !drained || captureRuntime.incomplete()) {
+    bleVoice.abortSession(VoiceSessionError::notifyFailed);
+  } else {
+    bleVoice.endSession();
+  }
   wirelessUiActive = false;
   noteUserActivity();
   transientMessage = "";
@@ -354,9 +389,17 @@ bool stopWirelessHold() {
   return true;
 }
 
-void releaseLocalCapture() {
+bool stopLocalCapture(RecorderStopReason reason) {
+  const bool captureStopped = captureRuntime.stop(usb.log());
+  const bool drained = drainCapturedAudio(millis());
+  const bool complete = captureStopped && drained &&
+      !captureRuntime.incomplete();
+  if (recorder.recording()) {
+    if (complete) recorder.stop(usb.log(), reason);
+    else recorder.abortCapture(usb.log());
+  }
   captureRouter.release(AudioCaptureOwner::localCapsule);
-  audio.stopHardware(usb.log());
+  return complete;
 }
 
 bool consumeRecorderTerminal(bool notifyUser) {
@@ -391,8 +434,7 @@ bool consumeRecorderTerminal(bool notifyUser) {
 
 void toggleRecording() {
   if (recorder.recording()) {
-    recorder.stop(usb.log());
-    releaseLocalCapture();
+    stopLocalCapture(RecorderStopReason::user);
     consumeRecorderTerminal(true);
   } else if (tencentWorker.working()) {
     showMessage("当前胶囊正在转写");
@@ -408,15 +450,20 @@ void toggleRecording() {
     const bool acquired = captureRouter.acquire(AudioCaptureOwner::localCapsule);
     const RecordingSpaceSnapshot space = {
         SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
-    const bool ok = acquired && audio.startCapture(usb.log()) &&
+    uint32_t captureSessionId = esp_random();
+    if (captureSessionId == 0) captureSessionId = 1;
+    const bool recorderOk = acquired &&
         recorder.start(usb.log(), recordingId(), board.utcNow(), space);
+    const bool ok = recorderOk &&
+        captureRuntime.start(audio, captureSessionId, usb.log());
     if (ok) {
       audio.resetPeakWindow();
       transientMessage = "";
       transientUntilMs = 0;
     } else {
+      if (recorder.recording()) recorder.abortCapture(usb.log());
+      captureRuntime.stop(usb.log());
       captureRouter.release(AudioCaptureOwner::localCapsule);
-      audio.stopHardware(usb.log());
       if (!consumeRecorderTerminal(true)) showMessage("录音启动失败");
     }
   }
@@ -909,6 +956,7 @@ void setup() {
       Serial, static_cast<uint16_t>(esp_reset_reason()));
   const bool audioStarted = audio.begin(Serial);
   capabilities.record(DeviceCapability::audio, audioStarted);
+  const bool captureTaskStarted = audioStarted && captureRuntime.begin(Serial);
   const bool usbStarted = usb.begin(board.status().variant);
   runtimePower.begin(usb.log());
   const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();
@@ -918,7 +966,8 @@ void setup() {
       bootPower.ext1WakeMask, bootPower.automaticPmSupported,
       bootPower.bleModemSleepSupported, board.status().batteryPercent);
   const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
-  capabilities.record(DeviceCapability::bleVoice, bleStarted);
+  capabilities.record(DeviceCapability::bleVoice,
+                      bleStarted && captureTaskStarted);
   deviceConfig.begin(usb.log());
   const bool syncIdentityStarted =
       wirelessSyncIdentity.begin(ESP.getEfuseMac(), usb.log());
@@ -928,7 +977,8 @@ void setup() {
     capsuleLibrary.begin(SD_MMC, usb.log());
     tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
   }
-  capabilities.record(DeviceCapability::recording, recorderStarted);
+  capabilities.record(DeviceCapability::recording,
+                      recorderStarted && captureTaskStarted);
   const bool wifiStarted = wifi.begin(deviceConfig, usb.log());
   capabilities.record(DeviceCapability::wifi, wifiStarted);
   provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
@@ -1049,31 +1099,31 @@ void loop() {
 
   if (audio.playing()) {
     audio.pumpPlayback(usb.log());
-  } else if (audio.active()) {
-    size_t bytes = audio.read(audioBuffer, sizeof(audioBuffer));
-    if (bytes > 0) {
-      if (bleVoice.acceptingAudio() &&
-          !bleVoice.appendAudio(audioBuffer, bytes, now)) {
-        wirelessUiActive = false;
-        showMessage("无线语音已中断");
-      }
-      if (recorder.recording()) {
-        const bool wasRecording = recorder.recording();
-        recorder.append(audioBuffer, bytes, usb.log());
-        if (wasRecording && !recorder.recording()) {
-          releaseLocalCapture();
-          consumeRecorderTerminal(true);
-          drawDashboard();
-        }
-      }
+  } else if (captureRuntime.running()) {
+    const bool wasRecording = recorder.recording();
+    if (!drainCapturedAudio(now) && captureRouter.wirelessStreaming()) {
+      captureRuntime.stop(usb.log());
+      bleVoice.abortSession(VoiceSessionError::queueOverflow);
+      wirelessUiActive = false;
+      showMessage("无线语音已中断");
+    }
+    if (wasRecording && !recorder.recording()) {
+      captureRuntime.stop(usb.log());
+      drainCapturedAudio(now);
+      captureRouter.release(AudioCaptureOwner::localCapsule);
+      consumeRecorderTerminal(true);
+      drawDashboard();
     }
   }
   bleVoice.poll(now);
   if (wirelessUiActive && !bleVoice.streaming()) {
+    captureRuntime.stop(usb.log());
+    captureRouter.release(AudioCaptureOwner::wirelessVoice);
     wirelessUiActive = false;
     dashboard.invalidate();
   }
-  if (captureRouter.available() && !audio.playing() && audio.active()) {
+  if (captureRouter.available() && !captureRuntime.running() &&
+      !audio.playing() && audio.active()) {
     audio.stopHardware(usb.log());
   }
 
@@ -1181,8 +1231,7 @@ void loop() {
       setScreenState(!board.status().screenOn);
     } else if (powerKey == PowerKeyEvent::longPress) {
       if (recorder.recording()) {
-        recorder.stop(usb.log());
-        releaseLocalCapture();
+        stopLocalCapture(RecorderStopReason::user);
         consumeRecorderTerminal(false);
       }
       if (bleVoice.streaming()) stopWirelessHold();

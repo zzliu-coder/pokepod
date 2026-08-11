@@ -39,7 +39,8 @@ assert '"触摸或抬起"' in dashboard
 assert "kDimScreenBrightness" in main
 assert "BleConnectionPowerMode::voice" in ble
 assert "BleConnectionPowerMode::idle" in ble
-assert "input.usbHostConnected = usb.hostConnected()" in main
-assert "input.usbHostConnected = usbCableConnected()" not in main
+assert "usb.tinyUsbMounted()," in main
+assert "usb.cdcSessionActive()," in main
+assert "input = powerInputsWithFacts(input, facts)" in main
 
 print("PASS test_runtime_power_time_usb_contract")

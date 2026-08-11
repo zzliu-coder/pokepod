@@ -23,6 +23,7 @@ class WavRecorder {
   bool appendMono16(const int16_t *samples, size_t sampleCount, Print &log);
   bool stop(Print &log,
             RecorderStopReason reason = RecorderStopReason::user);
+  bool abortCapture(Print &log);
   bool recoverInterrupted(Print &log, const String &recoveredAt);
 
   bool recording() const { return recording_; }

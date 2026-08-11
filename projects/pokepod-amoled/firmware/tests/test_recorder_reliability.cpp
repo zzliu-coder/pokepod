@@ -35,6 +35,15 @@ int main() {
   terminal.fail(RecorderTerminal::completed,
                 RecorderFailureStage::shortWrite, 1);
   assert(!terminal.peek().pending());
+  terminal.fail(RecorderTerminal::captureFailure,
+                RecorderFailureStage::captureIncomplete, 6400);
+  assert(terminal.peek().terminal == RecorderTerminal::captureFailure);
+  assert(terminal.peek().failureStage ==
+         RecorderFailureStage::captureIncomplete);
+  assert(std::strcmp(recorderFailureStageName(
+                         RecorderFailureStage::captureIncomplete),
+                     "capture_incomplete") == 0);
+  terminal.reset();
   assert(std::strcmp(recorderFailureStageName(
                          RecorderFailureStage::insufficientSpace),
                      "insufficient_space") == 0);

@@ -67,6 +67,18 @@ require(audio, "playbackReadSize(playbackFileRemaining_)",
         "playback does not use read-ahead")
 require(audio, "playbackFeedSize(",
         "playback read-ahead is not split into bounded I2S feeds")
+require(app, "AudioCaptureRuntime captureRuntime;",
+        "realtime capture runtime is not wired into the product")
+require(app, "captureRuntime.start(audio, captureSessionId, usb.log())",
+        "local recording bypasses the capture task")
+require(app, "captureRuntime.start(audio, sessionId, usb.log())",
+        "BLE voice bypasses the capture task")
+require(app, "recorder.appendMono16(frame.samples",
+        "capture frames are not delivered to the recorder")
+require(app, "bleVoice.appendMono16(frame.samples",
+        "capture frames are not delivered to BLE voice")
+if "audio.read(audioBuffer" in app:
+    raise SystemExit("FAIL performance_architecture: main loop still reads I2S")
 require(renderer, "sdCacheLookup_[slot]",
         "SD glyph cache lacks direct hot lookup")
 
