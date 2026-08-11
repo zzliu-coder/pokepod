@@ -31,9 +31,13 @@ assert "AutoScreenOffPolicy" in main
 assert "runtimePower.enterLightSleep" in main
 assert "automaticWakeEnabled()" in main
 assert "kDimScreenBrightness" in main
-assert "input.vbusPresent" in main
-assert "input.usbHostConnected" in main
-assert "input.linkBusy" in main
+assert "const PowerFacts facts" in main
+assert "usb.tinyUsbMounted()" in main
+assert "usb.cdcSessionActive()" in main
+assert "board.status().vbusPresent" in main
+assert "board.status().charging" in main
+assert "linkLeaseActive" in main
+assert "powerInputsWithFacts(input, facts)" in main
 assert "esp_light_sleep_start" in power
 assert "esp_deep_sleep_start" in power
 assert "kLightSleepTimeoutMs = 60000" in policy
