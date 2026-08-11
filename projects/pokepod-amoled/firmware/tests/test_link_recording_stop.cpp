@@ -1,6 +1,7 @@
 #include <assert.h>
 
 #include "../PokePodAmoled/LinkRecordingStop.h"
+#include "../PokePodAmoled/LinkRecordingStart.h"
 
 using namespace pokepod;
 
@@ -28,6 +29,17 @@ struct SessionHarness {
 }  // namespace
 
 int main() {
+  LinkRecordingStart start;
+  assert(start.begin(40, 400));
+  assert(start.active());
+  assert(start.ownsRequest(40));
+  assert(!start.ownsRequest(41));
+  assert(!start.begin(41, 401));
+  start.finish();
+  assert(!start.active());
+  assert(start.begin(41, 401));
+  start.finish();
+
   LinkRecordingStop stop;
   assert(stop.begin(41, true, true));
   assert(stop.active());

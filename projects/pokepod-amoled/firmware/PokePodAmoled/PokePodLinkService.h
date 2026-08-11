@@ -10,6 +10,7 @@
 #include "LinkFrame.h"
 #include "LinkCapsuleTransactionGate.h"
 #include "LinkRecordingStop.h"
+#include "LinkRecordingStart.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
@@ -399,9 +400,7 @@ class PokePodLinkService {
   StringByteSource batchByteSource_;
   StringByteSource batchSecondByteSource_;
   bool linkOwnedRecording_ = false;
-  bool linkRecordingStartPending_ = false;
-  uint32_t linkRecordingStartRequestId_ = 0;
-  uint32_t linkRecordingCaptureSessionId_ = 0;
+  LinkRecordingStart linkRecordingStart_;
   String linkRecordingCapsuleId_;
   LinkRecordingStop linkRecordingStop_;
 

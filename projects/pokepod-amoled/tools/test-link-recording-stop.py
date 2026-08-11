@@ -56,6 +56,17 @@ assert start_advance.index("RecorderStartPollResult::started") < start_advance.i
     "captureRuntime_->start")
 assert start_advance.index("captureRuntime_->start") < start_advance.index(
     "sendOk(requestId")
+assert start_advance.index("sendOk(requestId") < start_advance.index(
+    "rememberCompleted(requestId)")
+assert "releaseRequestLease()" in start_advance
+
+process = CPP[CPP.index("void PokePodLinkService::processRequest("):
+              CPP.index("bool PokePodLinkService::beginIncoming(")]
+assert "linkRecordingStart_.ownsRequest(requestId)" in process
+assert process.index("linkRecordingStart_.ownsRequest(requestId)") < process.index(
+    "completed_.contains(requestId)")
+assert process.index("handleImmediate(requestId, root)") < process.rindex(
+    "linkRecordingStart_.ownsRequest(requestId)")
 
 poll = CPP[CPP.index("void PokePodLinkService::pollDeferredCleanup()"):
            CPP.index("void PokePodLinkService::poll(uint32_t nowMs)")]

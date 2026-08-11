@@ -498,6 +498,12 @@ void PokePodLinkService::processFrame() {
 
 void PokePodLinkService::processRequest(uint32_t requestId,
                                         const uint8_t *payload, size_t size) {
+  // A retransmission of an in-flight recording request shares the original
+  // terminal response. Sending a second response here would race the storage
+  // ACK and could let the client release the session before admission ended.
+  if (requestId != 0 &&
+      (linkRecordingStart_.ownsRequest(requestId) ||
+       linkRecordingStop_.ownsRequest(requestId))) return;
   if (requestId == 0 || completed_.contains(requestId) ||
       incomingKind_ != IncomingKind::none) {
     sendError(requestId, requestId == 0 ? "requestId must be non-zero" :
@@ -623,6 +629,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   if (acquireRequestLease(requestId)) handleImmediate(requestId, root);
   cJSON_Delete(root);
   if (manifestRequestId_ == requestId && manifestStepper_.active()) return;
+  if (linkRecordingStart_.ownsRequest(requestId)) return;
   if (linkRecordingStop_.ownsRequest(requestId)) return;
   rememberCompleted(requestId);
   if (activeMaintenance_.isEmpty()) releaseRequestLease();
@@ -1371,10 +1378,11 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         if (!acquired) sendBusy(requestId);
       } else {
         linkOwnedRecording_ = true;
-        linkRecordingStartPending_ = true;
-        linkRecordingStartRequestId_ = requestId;
-        linkRecordingCaptureSessionId_ = sessionId;
-        linkRecordingCapsuleId_ = id;
+        if (!linkRecordingStart_.begin(requestId, sessionId)) {
+          (void)requestLinkRecordingStop(requestId, false, true);
+        } else {
+          linkRecordingCapsuleId_ = id;
+        }
       }
     }
   } else if (strcmp(operation, "stop") == 0) {
@@ -4142,7 +4150,7 @@ bool PokePodLinkService::requestLinkRecordingStop(uint32_t requestId,
 }
 
 void PokePodLinkService::advanceLinkRecordingStart() {
-  if (!linkRecordingStartPending_ || !linkOwnedRecording_ ||
+  if (!linkRecordingStart_.active() || !linkOwnedRecording_ ||
       recorder_ == nullptr || captureRuntime_ == nullptr ||
       captureRouter_ == nullptr || audio_ == nullptr) return;
   CapsuleTransactionGate *gate =
@@ -4153,12 +4161,10 @@ void PokePodLinkService::advanceLinkRecordingStart() {
       *log_, millis(), gate);
   if (result == RecorderStartPollResult::pending) return;
 
-  const uint32_t requestId = linkRecordingStartRequestId_;
-  const uint32_t captureSessionId = linkRecordingCaptureSessionId_;
+  const uint32_t requestId = linkRecordingStart_.requestId();
+  const uint32_t captureSessionId = linkRecordingStart_.captureSessionId();
   const String capsuleId = linkRecordingCapsuleId_;
-  linkRecordingStartPending_ = false;
-  linkRecordingStartRequestId_ = 0;
-  linkRecordingCaptureSessionId_ = 0;
+  linkRecordingStart_.finish();
   linkRecordingCapsuleId_ = "";
 
   const bool transportAlive = sessionActive_ && !quiesceRequested_ &&
@@ -4168,6 +4174,8 @@ void PokePodLinkService::advanceLinkRecordingStart() {
     const String extra = "\"recording\":true,\"capsuleId\":\"" +
         capsuleId + "\"";
     sendOk(requestId, extra.c_str());
+    rememberCompleted(requestId);
+    if (activeMaintenance_.isEmpty()) releaseRequestLease();
     return;
   }
 
@@ -4195,7 +4203,7 @@ void PokePodLinkService::advanceLinkRecordingStop() {
   // every turn also lets the storage task advance periodic checkpoints while
   // capture is still active; the App only polls localApp-owned sessions.
   (void)recorder_->pollFinalize(*log_, millis(), recordingGate);
-  if (linkRecordingStartPending_) return;
+  if (linkRecordingStart_.active()) return;
   if (!linkRecordingStop_.active() && !recorder_->operationActive() &&
       recorder_->terminalResult().pending()) {
     (void)requestLinkRecordingStop(0, false, false);
