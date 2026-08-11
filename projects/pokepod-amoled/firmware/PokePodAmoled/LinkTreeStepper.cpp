@@ -42,6 +42,25 @@ bool LinkTreeStepper::beginRemove(fs::FS &fs, const String &path,
   return true;
 }
 
+bool LinkTreeStepper::beginVerifyAbsent(
+    fs::FS &fs, const String &path, const String &forbiddenLeaf,
+    StorageOwner owner, Permit permit, void *permitContext) {
+  if (active() || path.isEmpty() || forbiddenLeaf.isEmpty() ||
+      forbiddenLeaf.indexOf('/') >= 0 || owner == StorageOwner::none) {
+    return false;
+  }
+  fs_ = &fs;
+  owner_ = owner;
+  permit_ = permit;
+  permitContext_ = permitContext;
+  mode_ = Mode::verifyAbsent;
+  forbiddenLeaf_ = forbiddenLeaf;
+  result_ = Result::progress;
+  failedPath_ = "";
+  stack_.push_back({path, String(), File(), EntryPhase::inspect});
+  return true;
+}
+
 LinkTreeStepper::Result LinkTreeStepper::poll() {
   if (!active()) return result_;
   if (!permitted()) {
@@ -51,7 +70,9 @@ LinkTreeStepper::Result LinkTreeStepper::poll() {
     permitContext_ = nullptr;
   }
   if (abortPending_) return pollAbort();
-  return mode_ == Mode::copy ? pollCopy() : pollRemove();
+  if (mode_ == Mode::copy) return pollCopy();
+  if (mode_ == Mode::verifyAbsent) return pollVerifyAbsent();
+  return pollRemove();
 }
 
 LinkTreeStepper::Result LinkTreeStepper::pollAbort() {
@@ -96,6 +117,9 @@ LinkTreeStepper::Result LinkTreeStepper::pollCopy() {
       fileSource_ = entry.source;
       fileTarget_ = entry.target;
       fileCopyActive_ = true;
+      fileCopyPhase_ = FileCopyPhase::copy;
+      sourceCrcState_ = targetCrcState_ = 0xffffffffU;
+      sourceLength_ = targetLength_ = 0;
       stack_.pop_back();
       return Result::progress;
     }
@@ -133,13 +157,72 @@ LinkTreeStepper::Result LinkTreeStepper::pollFileCopy() {
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       owner_, StorageAccess::mutation, 0);
   if (!lease) return Result::wouldBlock;
-  if (!input_ || !output_) return closeFileCopy(false);
-  if (!input_.available()) return closeFileCopy(true);
-  const size_t count = input_.read(buffer_, sizeof(buffer_));
-  if (count == 0 || output_.write(buffer_, count) != count) {
-    return closeFileCopy(false);
+  switch (fileCopyPhase_) {
+    case FileCopyPhase::copy: {
+      if (!input_ || !output_) return closeFileCopy(false);
+      if (!input_.available()) {
+        fileCopyPhase_ = FileCopyPhase::flushOutput;
+        return Result::progress;
+      }
+      const int received = input_.read(buffer_, sizeof(buffer_));
+      if (received <= 0) return closeFileCopy(false);
+      const size_t count = static_cast<size_t>(received);
+      sourceCrcState_ = capsuleTransactionCrc32Update(
+          sourceCrcState_, buffer_, count);
+      sourceLength_ += static_cast<uint32_t>(count);
+      if (output_.write(buffer_, count) != count) {
+        return closeFileCopy(false);
+      }
+      return Result::progress;
+    }
+    case FileCopyPhase::flushOutput:
+      if (!output_) return closeFileCopy(false);
+      output_.flush();
+      if (output_.getWriteError() != 0) return closeFileCopy(false);
+      fileCopyPhase_ = FileCopyPhase::closeOutput;
+      return Result::progress;
+    case FileCopyPhase::closeOutput:
+      if (!output_) return closeFileCopy(false);
+      output_.close();
+      if (output_.getWriteError() != 0) return closeFileCopy(false);
+      fileCopyPhase_ = FileCopyPhase::closeInput;
+      return Result::progress;
+    case FileCopyPhase::closeInput:
+      if (input_) input_.close();
+      fileCopyPhase_ = FileCopyPhase::openVerify;
+      return Result::progress;
+    case FileCopyPhase::openVerify:
+      input_ = fs_->open(fileTarget_, FILE_READ);
+      if (!input_) return closeFileCopy(false);
+      targetCrcState_ = 0xffffffffU;
+      targetLength_ = 0;
+      fileCopyPhase_ = FileCopyPhase::verify;
+      return Result::progress;
+    case FileCopyPhase::verify: {
+      if (!input_) return closeFileCopy(false);
+      if (!input_.available()) {
+        fileCopyPhase_ = FileCopyPhase::closeVerify;
+        return Result::progress;
+      }
+      const int received = input_.read(buffer_, sizeof(buffer_));
+      if (received <= 0) return closeFileCopy(false);
+      const size_t count = static_cast<size_t>(received);
+      targetCrcState_ = capsuleTransactionCrc32Update(
+          targetCrcState_, buffer_, count);
+      targetLength_ += static_cast<uint32_t>(count);
+      return Result::progress;
+    }
+    case FileCopyPhase::closeVerify: {
+      if (input_) input_.close();
+      const bool verified = sourceLength_ == targetLength_ &&
+          ~sourceCrcState_ == ~targetCrcState_;
+      fileCopyActive_ = false;
+      if (!verified) return fail(fileTarget_);
+      fileSource_ = fileTarget_ = "";
+      return Result::progress;
+    }
   }
-  return Result::progress;
+  return closeFileCopy(false);
 }
 
 LinkTreeStepper::Result LinkTreeStepper::closeFileCopy(bool successful) {
@@ -151,6 +234,7 @@ LinkTreeStepper::Result LinkTreeStepper::closeFileCopy(bool successful) {
   }
   if (input_) input_.close();
   fileCopyActive_ = false;
+  fileCopyPhase_ = FileCopyPhase::copy;
   if (!successful) return fail(fileTarget_);
   fileSource_ = fileTarget_ = "";
   return Result::progress;
@@ -203,6 +287,48 @@ LinkTreeStepper::Result LinkTreeStepper::pollRemove() {
   return Result::progress;
 }
 
+LinkTreeStepper::Result LinkTreeStepper::pollVerifyAbsent() {
+  if (stack_.empty()) {
+    finish();
+    return result_;
+  }
+  Entry &entry = stack_.back();
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      owner_, StorageAccess::read, 0);
+  if (!lease) return Result::wouldBlock;
+  if (entry.phase == EntryPhase::inspect) {
+    File current = fs_->open(entry.source, FILE_READ);
+    if (!current) return fail(entry.source);
+    if (!current.isDirectory()) {
+      current.close();
+      const String leaf = leafName(entry.source);
+      stack_.pop_back();
+      return forbiddenLeaf_ == "*" || leaf == forbiddenLeaf_
+          ? fail(entry.source) : Result::progress;
+    }
+    entry.directory = current;
+    entry.phase = EntryPhase::enumerate;
+    return Result::progress;
+  }
+  if (entry.phase == EntryPhase::enumerate) {
+    File child = entry.directory.openNextFile();
+    if (!child) {
+      entry.phase = EntryPhase::finish;
+      return Result::progress;
+    }
+    const String full = child.name();
+    child.close();
+    if (forbiddenLeaf_ == "*") return fail(full);
+    if (stack_.size() >= kMaximumDepth + 1) return fail(full);
+    stack_.push_back({entry.source + "/" + leafName(full), String(), File(),
+                      EntryPhase::inspect});
+    return Result::progress;
+  }
+  if (entry.directory) entry.directory.close();
+  stack_.pop_back();
+  return Result::progress;
+}
+
 LinkTreeStepper::Result LinkTreeStepper::fail(const String &path,
                                               Result result) {
   failedPath_ = path;
@@ -216,6 +342,7 @@ LinkTreeStepper::Result LinkTreeStepper::fail(const String &path,
   }
   stack_.clear();
   fileCopyActive_ = false;
+  fileCopyPhase_ = FileCopyPhase::copy;
   abortPending_ = false;
   mode_ = Mode::none;
   result_ = result;
@@ -230,6 +357,7 @@ void LinkTreeStepper::finish() {
   permit_ = nullptr;
   permitContext_ = nullptr;
   failedPath_ = "";
+  forbiddenLeaf_ = "";
 }
 
 }  // namespace pokepod

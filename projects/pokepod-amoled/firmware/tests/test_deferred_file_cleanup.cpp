@@ -101,10 +101,40 @@ void testIncomingTemporaryRemovalRetainsMutationReservationUntilComplete() {
   assert(next);
 }
 
+void testPermanentRemoveFaultReleasesReservationButKeepsEvidence() {
+  StorageCoordinator &coordinator = StorageCoordinator::instance();
+  fs::FS fs;
+  const String path = "/PokeCapsule/.system/commands/upload.part";
+  fs.state()->seed(path.c_str(), "partial");
+  File file = fs.open(path, FILE_READ);
+  StorageReservation reservation = coordinator.reserve(
+      StorageOwner::usbLink, StorageAccess::mutation);
+  assert(file && reservation);
+
+  DeferredFileCleanup cleanup;
+  assert(cleanup.begin(file, &fs, path, reservation,
+                       StorageOwner::usbLink, StorageAccess::mutation));
+  fs.state()->failAlways(fakefs::Operation::remove,
+                         fakefs::FaultAction::returnFailure);
+  assert(!cleanup.poll());
+  assert(!cleanup.poll());
+  assert(cleanup.poll());
+  assert(!cleanup.pending());
+  assert(cleanup.blocked());
+  assert(!file);
+  assert(!reservation);
+  assert(fs.exists(path));
+
+  StorageReservation unrelated = coordinator.reserve(
+      StorageOwner::wifiLink, StorageAccess::mutation);
+  assert(unrelated);
+}
+
 }  // namespace
 
 int main() {
   testOutgoingDisconnectWaitsForPhysicalIoAndPreservesCompletionOrder();
   testIncomingTemporaryRemovalRetainsMutationReservationUntilComplete();
+  testPermanentRemoveFaultReleasesReservationButKeepsEvidence();
   return 0;
 }

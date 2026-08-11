@@ -23,6 +23,8 @@ class DeferredFileCleanup {
     reservation_ = &reservation;
     owner_ = owner;
     access_ = access;
+    removeFailures_ = 0;
+    blocked_ = false;
     pending_ = true;
     return true;
   }
@@ -36,7 +38,12 @@ class DeferredFileCleanup {
     if (file_ != nullptr && *file_) file_->close();
     if (fs_ != nullptr && !removePath_.isEmpty() && fs_->exists(removePath_) &&
         !fs_->remove(removePath_)) {
-      return false;
+      if (++removeFailures_ < kMaximumRemoveFailures) return false;
+      // A permanent media fault must not retain the global mutation
+      // reservation forever.  The temporary path remains as diagnostic and
+      // boot-time recovery evidence; callers can fail closed for new uploads
+      // while unrelated storage owners continue to make progress.
+      blocked_ = true;
     }
 
     lease.release();
@@ -52,14 +59,18 @@ class DeferredFileCleanup {
   }
 
   bool pending() const { return pending_; }
+  bool blocked() const { return blocked_; }
 
  private:
+  static constexpr uint8_t kMaximumRemoveFailures = 3;
   File *file_ = nullptr;
   fs::FS *fs_ = nullptr;
   String removePath_;
   StorageReservation *reservation_ = nullptr;
   StorageOwner owner_ = StorageOwner::none;
   StorageAccess access_ = StorageAccess::read;
+  uint8_t removeFailures_ = 0;
+  bool blocked_ = false;
   bool pending_ = false;
 };
 

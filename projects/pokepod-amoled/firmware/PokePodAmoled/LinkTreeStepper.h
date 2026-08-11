@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "StorageCoordinator.h"
+#include "CapsuleTransactionPolicy.h"
 
 namespace pokepod {
 
@@ -14,7 +15,7 @@ namespace pokepod {
 // IO is busy; no File destructor is allowed to close outside an owner lease.
 class LinkTreeStepper {
  public:
-  enum class Mode : uint8_t { none, copy, remove };
+  enum class Mode : uint8_t { none, copy, remove, verifyAbsent };
   enum class Result : uint8_t {
     idle,
     progress,
@@ -31,6 +32,10 @@ class LinkTreeStepper {
                  void *permitContext = nullptr);
   bool beginRemove(fs::FS &fs, const String &path, StorageOwner owner,
                    Permit permit = nullptr, void *permitContext = nullptr);
+  bool beginVerifyAbsent(fs::FS &fs, const String &path,
+                         const String &forbiddenLeaf, StorageOwner owner,
+                         Permit permit = nullptr,
+                         void *permitContext = nullptr);
   Result poll();
   bool active() const { return mode_ != Mode::none; }
   Result result() const { return result_; }
@@ -41,6 +46,9 @@ class LinkTreeStepper {
 
  private:
   enum class EntryPhase : uint8_t { inspect, enumerate, finish };
+  enum class FileCopyPhase : uint8_t {
+    copy, flushOutput, closeOutput, closeInput, openVerify, verify, closeVerify
+  };
   struct Entry {
     String source;
     String target;
@@ -54,6 +62,7 @@ class LinkTreeStepper {
   Result fail(const String &path, Result result = Result::failed);
   Result pollCopy();
   Result pollRemove();
+  Result pollVerifyAbsent();
   Result pollFileCopy();
   Result closeFileCopy(bool successful);
   Result pollAbort();
@@ -71,8 +80,14 @@ class LinkTreeStepper {
   String fileSource_;
   String fileTarget_;
   bool fileCopyActive_ = false;
+  FileCopyPhase fileCopyPhase_ = FileCopyPhase::copy;
+  uint32_t sourceCrcState_ = 0xffffffffU;
+  uint32_t targetCrcState_ = 0xffffffffU;
+  uint32_t sourceLength_ = 0;
+  uint32_t targetLength_ = 0;
   bool abortPending_ = false;
   String failedPath_;
+  String forbiddenLeaf_;
   uint8_t buffer_[kBytesPerPoll] = {};
 };
 

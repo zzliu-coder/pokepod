@@ -37,7 +37,8 @@ namespace pokepod {
 namespace {
 
 constexpr uint32_t kMaxIncomingCommandBytes = 1024 * 1024;
-constexpr size_t kMaxCommandJsonBytes = kMaxIncomingCommandBytes;
+constexpr size_t kMaxCommandJsonBytes = 64U * 1024U;
+constexpr size_t kCommandReadBytesPerPoll = 4096U;
 constexpr size_t kReadPageFiles = 12;
 constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
 constexpr size_t kLinkPendingControlBytes =
@@ -49,6 +50,14 @@ constexpr const char *kLinkStagedUploadPart =
     "/PokeCapsule/.staging/link-upload.part";
 constexpr const char *kLinkFontUploadPart =
     "/PokeCapsule/.system/fonts/cjk20.a4.part";
+constexpr uint8_t kBatchPlanNoOp = 1U << 0;
+constexpr uint8_t kBatchPlanCapsuleBackup = 1U << 1;
+constexpr uint8_t kBatchPlanTrashBackup = 1U << 2;
+constexpr uint8_t kBatchPlanProcessingBackup = 1U << 3;
+
+bool batchOperation(const char *operation) {
+  return capsuleBatchOperation(operation);
+}
 
 cJSON *asJson(void *value) { return static_cast<cJSON *>(value); }
 
@@ -92,6 +101,33 @@ String jsonEscaped(const String &value) {
     }
   }
   return escaped;
+}
+
+void appendJsonKey(String &json, const char *key) {
+  if (!json.isEmpty()) json += ',';
+  json += '"';
+  json += key;
+  json += "\":";
+}
+
+void appendJsonBool(String &json, const char *key, bool value) {
+  appendJsonKey(json, key);
+  json += value ? "true" : "false";
+}
+
+void appendJsonNumber(String &json, const char *key, int64_t value) {
+  appendJsonKey(json, key);
+  char encoded[24];
+  snprintf(encoded, sizeof(encoded), "%lld",
+           static_cast<long long>(value));
+  json += encoded;
+}
+
+void appendJsonString(String &json, const char *key, const String &value) {
+  appendJsonKey(json, key);
+  json += '"';
+  json += jsonEscaped(value);
+  json += '"';
 }
 
 void replaceStringOrNull(cJSON *root, const char *name, const char *value) {
@@ -188,13 +224,18 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   writeChannel_ = writeChannel;
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
+  quiesceRequested_ = false;
   if (!transaction_.begin(fs, log)) return false;
   if (!transactionRunner_.begin(fs, log)) return false;
+  if (!batchJournalStore_.begin(fs)) return false;
   startupPartCleanupIndex_ = 0;
   startupPartCleanupFailures_ = 0;
   startupPartCleanupPending_ = false;
   startupReady_ = false;
   startupRecoveryFailed_ = false;
+  startupBatchCandidateInvalid_ = false;
+  mutationRecoveryBlocked_ = false;
+  startupPurgePending_ = true;
   if (payload_ == nullptr) {
     payload_ = static_cast<uint8_t *>(heap_caps_calloc(
         kLinkMaxDataBytes, sizeof(uint8_t),
@@ -222,22 +263,23 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
       static_cast<unsigned>(kLinkMaxDataBytes + kLinkTxFrameBytes +
                             kLinkPendingControlBytes));
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
-      !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming")) {
+      !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming") ||
+      !ensureDirectoryTree(CapsuleBatchJournalStore::kDirectory)) {
     return false;
   }
   // Recover durable transactions before sweeping the three fixed Link upload
   // parts. A cut after journal publication but before publishPrepared must let
   // the durable journal choose old/new state before the borrowed part is
   // removed. No transport frames are accepted until both phases finish.
-  if (!transactionRunner_.startRecovery(storageOwner())) return false;
-  transactionPurpose_ = TransactionPurpose::startupRecovery;
-  if (!cleanupPurgeStaging()) {
-    log_->println("{\"event\":\"purge_cleanup_deferred\"}");
+  if (!transactionRunner_.startRecovery(StorageOwner::capsuleTransaction)) {
+    return false;
   }
+  transactionPurpose_ = TransactionPurpose::startupRecovery;
   return true;
 }
 
 void PokePodLinkService::disconnect() {
+  if (batchExecutor_.active()) abandonBatchCommand();
   manifestResponseRequestId_ = 0;
   manifestResponseJson_ = "";
   manifestFailureRequestId_ = 0;
@@ -247,9 +289,15 @@ void PokePodLinkService::disconnect() {
   } else if (linkOwnedRecording_) {
     (void)requestLinkRecordingStop(0, false, false);
   }
-  if (transactionPurpose_ == TransactionPurpose::incoming) {
+  if (transactionPurpose_ == TransactionPurpose::incoming ||
+      transactionPurpose_ == TransactionPurpose::commandText) {
     if (transactionRunner_.active()) transactionGate_.cancel();
     transactionRespond_ = false;
+    commandTextRespond_ = false;
+  } else if (transactionPurpose_ == TransactionPurpose::commandTextResult ||
+             transactionPurpose_ ==
+                 TransactionPurpose::commandFailureResult) {
+    commandTextRespond_ = false;
   }
   abortManifest();
   abortOutgoing();
@@ -261,26 +309,61 @@ void PokePodLinkService::disconnect() {
   activeMaintenance_ = "";
   maintenanceCompletion_.disconnect();
   completed_.clear();
+  commandLoadRespond_ = false;
   resetFrame();
   releaseRequestLeaseNow();
 }
 
+void PokePodLinkService::requestQuiesce() {
+  if (quiesceRequested_) return;
+  quiesceRequested_ = true;
+  disconnect();
+}
+
+bool PokePodLinkService::quiesced() const {
+  return quiesceRequested_ && !sessionActive_ &&
+      commandLoadState_ == CommandLoadState::none &&
+      incomingKind_ == IncomingKind::none && !incomingCleanupPending_ &&
+      outgoingPhase_ == OutgoingPhase::none && !outgoingCleanupPending_ &&
+      !manifestStepper_.active() && !manifestCleanupPending_ &&
+      !transactionRunner_.active() &&
+      transactionPurpose_ == TransactionPurpose::none &&
+      !batchExecutor_.active() && batchPending_ == BatchPending::none &&
+      deferredCommandFiles_.empty() && deferredTreeCleanupStack_.empty() &&
+      !commandCleanupPending_ && !commandStorageActive_ &&
+      !linkOwnedRecording_ && !linkRecordingStop_.active() &&
+      !requestLeaseHeld_;
+}
+
 void PokePodLinkService::pollDeferredCleanup() {
+  advanceCommandLoad();
+  advanceBatchCommand();
   advanceTransactionRunner();
+  advanceBatchStartupRecovery();
   advanceStartupPartCleanup();
+  cleanupPurgeStaging();
   advanceLinkRecordingStop();
   if (incomingCleanupPending_) cleanupIncomingStorage();
   if (outgoingCleanupPending_) cleanupOutgoingStorage();
   if (manifestCleanupPending_) cleanupManifestStorage();
   stepDeferredFileCleanup();
-  if (deferredCommandFiles_.empty()) stepDeferredTreeCleanup();
+  if (!startupPurgePending_ && deferredCommandFiles_.empty()) {
+    stepDeferredTreeCleanup();
+  }
   finishCommandStorageCleanup();
+  if (!startupReady_ && !startupRecoveryFailed_ &&
+      !startupBatchRecoveryPending_ && !startupPartCleanupPending_ &&
+      !startupPurgePending_ && deferredTreeCleanupStack_.empty()) {
+    startupReady_ = true;
+  }
 }
 
 void PokePodLinkService::poll(uint32_t nowMs) {
   pollDeferredCleanup();
+  if (quiesceRequested_) return;
   if (!startupReady_) return;
-  if (transactionRunner_.active() ||
+  if (commandLoadState_ != CommandLoadState::none ||
+      batchExecutor_.active() || transactionRunner_.active() ||
       transactionPurpose_ != TransactionPurpose::none) return;
   if (incomingCleanupPending_ || outgoingCleanupPending_ ||
       manifestCleanupPending_ || !deferredCommandFiles_.empty() ||
@@ -510,7 +593,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       }
       return;
     }
-    if (binaryLength > static_cast<int64_t>(kMaxIncomingCommandBytes)) {
+    if (binaryLength > static_cast<int64_t>(kMaxCommandJsonBytes)) {
       cJSON_Delete(root);
       sendError(requestId, "command is too large");
       rememberCompleted(requestId);
@@ -554,7 +637,10 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
     incomingStorageReservation_.release();
     return false;
   }
-  if (fs_->exists(temporaryPath)) fs_->remove(temporaryPath);
+  if (fs_->exists(temporaryPath) && !fs_->remove(temporaryPath)) {
+    incomingStorageReservation_.release();
+    return false;
+  }
   File output = fs_->open(temporaryPath, FILE_WRITE);
   if (!output) {
     incomingStorageReservation_.release();
@@ -649,9 +735,12 @@ void PokePodLinkService::finishIncoming() {
 }
 
 void PokePodLinkService::advanceTransactionRunner() {
-  if (!transactionRunner_.active()) return;
-  CapsuleTransactionGate *gate = transactionPurpose_ ==
-      TransactionPurpose::incoming ? &transactionGate_ : nullptr;
+  if (!transactionRunner_.active() ||
+      transactionPurpose_ == TransactionPurpose::none) return;
+  CapsuleTransactionGate *gate =
+      (transactionPurpose_ == TransactionPurpose::incoming ||
+       transactionPurpose_ == TransactionPurpose::commandText)
+          ? &transactionGate_ : nullptr;
   const CapsuleTransactionPollResult result = transactionRunner_.poll(
       millis(), gate);
   if (result == CapsuleTransactionPollResult::progress ||
@@ -662,6 +751,14 @@ void PokePodLinkService::advanceTransactionRunner() {
   } else if (transactionPurpose_ == TransactionPurpose::incoming) {
     finishIncomingTransaction(result ==
                               CapsuleTransactionPollResult::committed);
+  } else if (transactionPurpose_ == TransactionPurpose::commandText) {
+    finishTextCommand(result == CapsuleTransactionPollResult::committed);
+  } else if (transactionPurpose_ == TransactionPurpose::commandTextResult) {
+    finishTextResult(result == CapsuleTransactionPollResult::committed);
+  } else if (transactionPurpose_ ==
+             TransactionPurpose::commandFailureResult) {
+    finishCommandFailureResult(
+        result == CapsuleTransactionPollResult::committed);
   }
 }
 
@@ -674,7 +771,152 @@ void PokePodLinkService::finishStartupRecovery(bool recovered) {
     return;
   }
   transactionPurpose_ = TransactionPurpose::none;
-  startupPartCleanupPending_ = true;
+  startupBatchRecoveryPending_ = true;
+}
+
+bool PokePodLinkService::startBatchStartupRecovery(
+    const String &transactionId) {
+  constexpr StorageOwner owner = StorageOwner::capsuleTransaction;
+  commandStorageReservation_ = StorageCoordinator::instance().reserve(
+      owner, StorageAccess::mutation, 0);
+  if (!commandStorageReservation_) return false;
+  StoredCapsuleBatchState state;
+  const CapsuleBatchJournalStore::LoadResult loaded =
+      batchJournalStore_.loadStatus(transactionId, owner, state);
+  startupBatchCandidateInvalid_ =
+      loaded == CapsuleBatchJournalStore::LoadResult::invalid;
+  if (loaded != CapsuleBatchJournalStore::LoadResult::loaded) {
+    commandStorageReservation_.release();
+    return false;
+  }
+  prepareCapsuleBatchRecovery(state);
+  state.flags &= ~capsuleBatchResponseAllowed;
+  if (state.phase == CapsuleBatchPhase::preflight) {
+    state.flags &= ~capsuleBatchSuccess;
+    state.cursor = state.applied = 0;
+    state.phase = CapsuleBatchPhase::result;
+  } else if (state.phase == CapsuleBatchPhase::apply) {
+    state.flags &= ~capsuleBatchSuccess;
+    state.cursor = state.applied;
+    state.phase = state.cursor == 0 &&
+        (state.flags & capsuleBatchFinalizeApplied) == 0
+        ? CapsuleBatchPhase::result : CapsuleBatchPhase::rollback;
+  }
+  sealCapsuleBatchState(state);
+  if (!batchJournalStore_.checkpoint(state, owner)) {
+    commandStorageReservation_.release();
+    return false;
+  }
+
+  LinkCommandExecutor::Phase phase = LinkCommandExecutor::Phase::cleanup;
+  if (state.phase == CapsuleBatchPhase::rollback) {
+    phase = LinkCommandExecutor::Phase::rollback;
+  } else if (state.phase == CapsuleBatchPhase::result) {
+    phase = LinkCommandExecutor::Phase::result;
+  }
+  const bool folderFinalize =
+      strcmp(state.operation, "deleteFolderToInbox") == 0;
+  if (!batchExecutor_.resume(
+          state.total, phase, state.cursor, state.applied,
+          (state.flags & capsuleBatchSuccess) != 0,
+          (state.flags & capsuleBatchRollbackFailed) != 0,
+          folderFinalize,
+          (state.flags & capsuleBatchFinalizeApplied) != 0)) {
+    commandStorageReservation_.release();
+    return false;
+  }
+  commandStorageActive_ = true;
+  batchJournalState_ = state;
+  batchTransactionId_ = transactionId;
+  batchCommandPath_ = String(kCapsuleSystem) + "/commands/incoming/" +
+      transactionId + ".json";
+  batchRequestId_ = 0;
+  batchJsonRoot_ = nullptr;
+  batchMessage_ = (state.flags & capsuleBatchSuccess) != 0
+      ? "committed" : "interrupted batch rolled back";
+  batchPending_ = BatchPending::none;
+  transactionGate_.reset();
+  return true;
+}
+
+void PokePodLinkService::quarantineBatchJournal(
+    const String &transactionId) {
+  char suffix[24];
+  snprintf(suffix, sizeof(suffix), ".blocked-%08lx",
+           static_cast<unsigned long>(esp_random()));
+  (void)batchJournalStore_.quarantine(
+      transactionId, suffix, storageOwner());
+  if (log_ != nullptr) {
+    log_->println("{\"event\":\"link_batch_journal_blocked\"}");
+  }
+}
+
+void PokePodLinkService::advanceBatchStartupRecovery() {
+  if (!startupBatchRecoveryPending_ || startupRecoveryFailed_ ||
+      batchExecutor_.active()) return;
+  if (!startupBatchCandidate_.isEmpty()) {
+    if (startBatchStartupRecovery(startupBatchCandidate_)) {
+      startupBatchCandidate_ = "";
+      startupBatchCandidateFailures_ = 0;
+    } else if (startupBatchCandidateInvalid_) {
+      quarantineBatchJournal(startupBatchCandidate_);
+      startupBatchCandidate_ = "";
+      startupBatchCandidateFailures_ = 0;
+      startupBatchCandidateInvalid_ = false;
+    } else if (++startupBatchCandidateFailures_ >= 3) {
+      // An IO/checkpoint failure is still authoritative.  Keep the original
+      // journal and fail closed; quarantining it would permit later mutation
+      // to be overwritten by a delayed rollback on the next boot.
+      startupRecoveryFailed_ = true;
+    }
+    return;
+  }
+  if (!startupBatchReservation_) {
+    startupBatchReservation_ = StorageCoordinator::instance().reserve(
+        storageOwner(), StorageAccess::mutation, 0);
+    if (!startupBatchReservation_) return;
+  }
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::mutation, 0);
+  if (!lease) return;
+  if (!startupBatchDirectory_) {
+    startupBatchDirectory_ = fs_->open(CapsuleBatchJournalStore::kDirectory);
+    if (!startupBatchDirectory_ || !startupBatchDirectory_.isDirectory()) {
+      if (startupBatchDirectory_) startupBatchDirectory_.close();
+      startupBatchReservation_.release();
+      startupBatchRecoveryPending_ = false;
+      startupPartCleanupPending_ = true;
+      return;
+    }
+  }
+  File entry = startupBatchDirectory_.openNextFile();
+  if (!entry) {
+    startupBatchDirectory_.close();
+    startupBatchReservation_.release();
+    startupBatchRecoveryPending_ = false;
+    startupPartCleanupPending_ = true;
+    return;
+  }
+  const String full = entry.name();
+  entry.close();
+  const int slash = full.lastIndexOf('/');
+  const String name = slash < 0 ? full : full.substring(slash + 1);
+  if (!name.endsWith(".cbj")) return;
+  const String transactionId = name.substring(0, name.length() - 4);
+  startupBatchDirectory_.close();
+  startupBatchReservation_.release();
+  lease.release();
+  if (capsuleBatchUuid(transactionId.c_str())) {
+    startupBatchCandidate_ = transactionId;
+    startupBatchCandidateFailures_ = 0;
+  } else {
+    const String source = String(CapsuleBatchJournalStore::kDirectory) +
+        "/" + name;
+    char suffix[24];
+    snprintf(suffix, sizeof(suffix), ".blocked-%08lx",
+             static_cast<unsigned long>(esp_random()));
+    (void)storageRename(source, source + suffix);
+  }
 }
 
 void PokePodLinkService::advanceStartupPartCleanup() {
@@ -690,7 +932,6 @@ void PokePodLinkService::advanceStartupPartCleanup() {
   if (startupPartCleanupIndex_ >= sizeof(parts) / sizeof(parts[0])) {
     startupPartCleanupReservation_.release();
     startupPartCleanupPending_ = false;
-    startupReady_ = true;
     return;
   }
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
@@ -806,212 +1047,186 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
     const BoardStatus &status = board_->status();
-    String extra = "\"recording\":";
-    extra += recorder_->recording() ? "true" : "false";
-    extra += ",\"transcribing\":";
-    extra += tencent_->working() ? "true" : "false";
-    extra += ",\"batteryPercent\":" + String(status.batteryPercent);
-    extra += ",\"charging\":";
-    extra += status.charging ? "true" : "false";
-    extra += ",\"wifi\":\"" + String(wifi_->phaseName()) + "\"";
-    extra += ",\"wifiDisconnectReason\":" +
-        String(wifi_->lastDisconnectReason());
-    extra += ",\"wifiDisconnectKind\":\"" +
-        String(wifiFailureKey(wifi_->lastDisconnectReason())) + "\"";
-    extra += ",\"wifiRadioOn\":" +
-        String(wifi_->radioOn() ? "true" : "false");
-    extra += ",\"wifiPowerSave\":" +
-        String(wifi_->powerSaveEnabled() ? "true" : "false");
-    extra += ",\"wifiPowerSaveError\":" +
-        String(wifi_->powerSaveError());
-    extra += ",\"pendingCapsules\":" + String(library_->pendingCount());
-    extra += ",\"asr_hash_ms\":" + String(tencent_->lastHashElapsedMs());
-    extra += ",\"asr_connect_ms\":" + String(tencent_->lastConnectElapsedMs());
-    extra += ",\"asr_upload_ms\":" + String(tencent_->lastUploadElapsedMs());
-    extra += ",\"asr_total_ms\":" + String(tencent_->lastTotalElapsedMs());
-    extra += ",\"asr_last_code\":\"" + jsonEscaped(tencent_->lastCode()) + "\"";
-    extra += ",\"asr_tls_error\":" + String(tencent_->lastNetworkError());
-    extra += ",\"asr_tls_detail\":\"" +
-        jsonEscaped(tencent_->lastNetworkErrorDetail()) + "\"";
-    extra += ",\"asr_heap_free_before_tls\":" +
-        String(tencent_->lastInternalHeapFreeBeforeTls());
-    extra += ",\"asr_heap_largest_before_tls\":" +
-        String(tencent_->lastInternalHeapLargestBeforeTls());
-    extra += ",\"asr_psram_free_before_tls\":" +
-        String(tencent_->lastPsramFreeBeforeTls());
-    extra += ",\"sdReady\":";
-    extra += status.sdCard ? "true" : "false";
+    String extra;
+    extra.reserve(3072);
+    appendJsonBool(extra, "recording", recorder_->recording());
+    appendJsonBool(extra, "transcribing", tencent_->working());
+    appendJsonNumber(extra, "batteryPercent", status.batteryPercent);
+    appendJsonBool(extra, "charging", status.charging);
+    appendJsonString(extra, "wifi", wifi_->phaseName());
+    appendJsonNumber(extra, "wifiDisconnectReason",
+                     wifi_->lastDisconnectReason());
+    appendJsonString(extra, "wifiDisconnectKind",
+                     wifiFailureKey(wifi_->lastDisconnectReason()));
+    appendJsonBool(extra, "wifiRadioOn", wifi_->radioOn());
+    appendJsonBool(extra, "wifiPowerSave", wifi_->powerSaveEnabled());
+    appendJsonNumber(extra, "wifiPowerSaveError", wifi_->powerSaveError());
+    appendJsonNumber(extra, "pendingCapsules", library_->pendingCount());
+    appendJsonNumber(extra, "asr_hash_ms", tencent_->lastHashElapsedMs());
+    appendJsonNumber(extra, "asr_connect_ms",
+                     tencent_->lastConnectElapsedMs());
+    appendJsonNumber(extra, "asr_upload_ms",
+                     tencent_->lastUploadElapsedMs());
+    appendJsonNumber(extra, "asr_total_ms", tencent_->lastTotalElapsedMs());
+    appendJsonString(extra, "asr_last_code", tencent_->lastCode());
+    appendJsonNumber(extra, "asr_tls_error", tencent_->lastNetworkError());
+    appendJsonString(extra, "asr_tls_detail",
+                     tencent_->lastNetworkErrorDetail());
+    appendJsonNumber(extra, "asr_heap_free_before_tls",
+                     tencent_->lastInternalHeapFreeBeforeTls());
+    appendJsonNumber(extra, "asr_heap_largest_before_tls",
+                     tencent_->lastInternalHeapLargestBeforeTls());
+    appendJsonNumber(extra, "asr_psram_free_before_tls",
+                     tencent_->lastPsramFreeBeforeTls());
+    appendJsonBool(extra, "sdReady", status.sdCard);
     if (capabilities_ != nullptr) {
-      extra += ",\"capabilityObservedMask\":" +
-          String(capabilities_->observedMask());
-      extra += ",\"capabilityReadyMask\":" +
-          String(capabilities_->readyMask());
-      extra += ",\"capsuleLibraryReady\":" +
-          String(capabilities_->ready(DeviceCapability::capsuleLibrary)
-                     ? "true" : "false");
-      extra += ",\"recorderReady\":" +
-          String(capabilities_->ready(DeviceCapability::recording)
-                     ? "true" : "false");
-      extra += ",\"asrWorkerReady\":" +
-          String(capabilities_->ready(DeviceCapability::transcription)
-                     ? "true" : "false");
+      appendJsonNumber(extra, "capabilityObservedMask",
+                       capabilities_->observedMask());
+      appendJsonNumber(extra, "capabilityReadyMask",
+                       capabilities_->readyMask());
+      appendJsonBool(extra, "capsuleLibraryReady",
+                     capabilities_->ready(DeviceCapability::capsuleLibrary));
+      appendJsonBool(extra, "recorderReady",
+                     capabilities_->ready(DeviceCapability::recording));
+      appendJsonBool(extra, "asrWorkerReady",
+                     capabilities_->ready(DeviceCapability::transcription));
     }
-    extra += ",\"variant\":\"" + String(variantName(status.variant)) + "\"";
-    extra += ",\"ioExpander\":" + String(status.ioExpander ? "true" : "false");
-    extra += ",\"display\":" + String(status.display ? "true" : "false");
-    extra += ",\"touch\":" + String(status.touch ? "true" : "false");
-    extra += ",\"rtc\":" + String(status.rtc ? "true" : "false");
-    extra += ",\"imu\":" + String(status.imu ? "true" : "false");
-    extra += ",\"pmu\":" + String(status.pmu ? "true" : "false");
-    extra += ",\"vbusPresent\":" + String(status.vbusPresent ? "true" : "false");
-    extra += ",\"screenOn\":" + String(status.screenOn ? "true" : "false");
-    extra += ",\"audio\":" + String(audio_ != nullptr && audio_->ready() ? "true" : "false");
-    extra += ",\"usb\":" + String(usb_->ready() ? "true" : "false");
-    extra += ",\"host_connected\":" + String(usb_->hostConnected() ? "true" : "false");
-    extra += ",\"bleVoiceConnected\":" +
-        String(bleVoice_ != nullptr && bleVoice_->connected() ? "true" : "false");
-    extra += ",\"bleVoiceReady\":" +
-        String(bleVoice_ != nullptr && bleVoice_->appReady() ? "true" : "false");
-    extra += ",\"bleVoiceMtu\":" +
-        String(bleVoice_ == nullptr ? 0 : bleVoice_->mtu());
+    appendJsonString(extra, "variant", variantName(status.variant));
+    appendJsonBool(extra, "ioExpander", status.ioExpander);
+    appendJsonBool(extra, "display", status.display);
+    appendJsonBool(extra, "touch", status.touch);
+    appendJsonBool(extra, "rtc", status.rtc);
+    appendJsonBool(extra, "imu", status.imu);
+    appendJsonBool(extra, "pmu", status.pmu);
+    appendJsonBool(extra, "vbusPresent", status.vbusPresent);
+    appendJsonBool(extra, "screenOn", status.screenOn);
+    appendJsonBool(extra, "audio", audio_ != nullptr && audio_->ready());
+    appendJsonBool(extra, "usb", usb_->ready());
+    appendJsonBool(extra, "host_connected", usb_->hostConnected());
+    appendJsonBool(extra, "bleVoiceConnected",
+                   bleVoice_ != nullptr && bleVoice_->connected());
+    appendJsonBool(extra, "bleVoiceReady",
+                   bleVoice_ != nullptr && bleVoice_->appReady());
+    appendJsonNumber(extra, "bleVoiceMtu",
+                     bleVoice_ == nullptr ? 0 : bleVoice_->mtu());
     const BleVoiceQualitySnapshot bleQuality = bleVoice_ == nullptr
         ? BleVoiceQualitySnapshot() : bleVoice_->quality();
-    extra += ",\"bleVoiceNotifyAttempts\":" +
-        String(bleQuality.notifyAttempts);
-    extra += ",\"bleVoiceNotifyAccepted\":" +
-        String(bleQuality.notifyAccepted);
-    extra += ",\"bleVoiceNotifyFailures\":" +
-        String(bleQuality.notifyFailures);
-    extra += ",\"bleVoiceQueueOverflows\":" +
-        String(bleQuality.queueOverflows);
-    extra += ",\"bleVoiceSessionFailures\":" +
-        String(bleQuality.sessionFailures);
-    extra += ",\"bleVoiceReadyTimeouts\":" +
-        String(bleQuality.readyTimeouts);
-    extra += ",\"bleVoiceStopAckTimeouts\":" +
-        String(bleQuality.stopAckTimeouts);
-    extra += ",\"bleVoiceStreamTimeouts\":" +
-        String(bleQuality.streamTimeouts);
-    extra += ",\"bleVoiceLastErrorCode\":" +
-        String(bleQuality.lastErrorCode);
-    extra += ",\"audio_read_bytes\":" + String(static_cast<unsigned long>(audio_->bytesRead()));
-    extra += ",\"audio_read_failures\":" + String(audio_->readFailures());
-    extra += ",\"audio_peak\":" + String(audio_->peakSample());
-    extra += ",\"playback_last_error\":\"" +
-        String(audio_->lastPlaybackError()) + "\"";
-    extra += ",\"playback_start_failures\":" +
-        String(audio_->playbackStartFailures());
-    extra += ",\"playback_heap_largest_before_start\":" +
-        String(audio_->playbackHeapLargestBeforeStart());
-    extra += ",\"playback_file_reads\":" +
-        String(audio_->playbackFileReadCount());
-    extra += ",\"playback_pump_count\":" +
-        String(audio_->playbackPumpCount());
-    extra += ",\"playback_max_file_read_us\":" +
-        String(audio_->playbackMaxFileReadUs());
+    appendJsonNumber(extra, "bleVoiceNotifyAttempts",
+                     bleQuality.notifyAttempts);
+    appendJsonNumber(extra, "bleVoiceNotifyAccepted",
+                     bleQuality.notifyAccepted);
+    appendJsonNumber(extra, "bleVoiceNotifyFailures",
+                     bleQuality.notifyFailures);
+    appendJsonNumber(extra, "bleVoiceQueueOverflows",
+                     bleQuality.queueOverflows);
+    appendJsonNumber(extra, "bleVoiceSessionFailures",
+                     bleQuality.sessionFailures);
+    appendJsonNumber(extra, "bleVoiceReadyTimeouts", bleQuality.readyTimeouts);
+    appendJsonNumber(extra, "bleVoiceStopAckTimeouts",
+                     bleQuality.stopAckTimeouts);
+    appendJsonNumber(extra, "bleVoiceStreamTimeouts",
+                     bleQuality.streamTimeouts);
+    appendJsonNumber(extra, "bleVoiceLastErrorCode",
+                     bleQuality.lastErrorCode);
+    appendJsonNumber(extra, "audio_read_bytes", audio_->bytesRead());
+    appendJsonNumber(extra, "audio_read_failures", audio_->readFailures());
+    appendJsonNumber(extra, "audio_peak", audio_->peakSample());
+    appendJsonString(extra, "playback_last_error", audio_->lastPlaybackError());
+    appendJsonNumber(extra, "playback_start_failures",
+                     audio_->playbackStartFailures());
+    appendJsonNumber(extra, "playback_heap_largest_before_start",
+                     audio_->playbackHeapLargestBeforeStart());
+    appendJsonNumber(extra, "playback_file_reads",
+                     audio_->playbackFileReadCount());
+    appendJsonNumber(extra, "playback_pump_count",
+                     audio_->playbackPumpCount());
+    appendJsonNumber(extra, "playback_max_file_read_us",
+                     audio_->playbackMaxFileReadUs());
     const AudioFrontEndMetrics &frontEnd = recorder_->audioMetrics();
-    extra += ",\"audio_frontend_channel\":\"" +
-        String(audioInputChannelName(frontEnd.selectedChannel)) + "\"";
-    extra += ",\"audio_frontend_left_peak\":" + String(frontEnd.leftPeak);
-    extra += ",\"audio_frontend_right_peak\":" + String(frontEnd.rightPeak);
-    extra += ",\"audio_frontend_output_peak\":" + String(frontEnd.outputPeak);
-    extra += ",\"audio_frontend_noise_floor\":" +
-        String(frontEnd.estimatedNoiseFloor);
-    extra += ",\"audio_frontend_suppressed_samples\":" +
-        String(frontEnd.suppressedSamples);
-    extra += ",\"audio_frontend_limited_samples\":" +
-        String(frontEnd.limitedSamples);
-    extra += ",\"audio_frontend_max_gain_q12\":" +
-        String(frontEnd.maximumGainQ12);
-    extra += ",\"tencentConfigured\":" +
-        String(config_->hasTencent() ? "true" : "false");
-    extra += ",\"wifiNetworkCount\":" +
-        String(static_cast<unsigned>(config_->wifiNetworks().size()));
-    extra += ",\"ui_full_redraws\":" + String(dashboard_->fullRedrawCount());
-    extra += ",\"ui_body_redraws\":" + String(dashboard_->bodyRedrawCount());
-    extra += ",\"ui_partial_redraws\":" + String(dashboard_->partialRedrawCount());
-    extra += ",\"ui_scroll_frame_last_us\":" +
-        String(dashboard_->scrollFrameLastUs());
-    extra += ",\"ui_scroll_frame_max_us\":" +
-        String(dashboard_->scrollFrameMaxUs());
-    extra += ",\"ui_scroll_compose_max_us\":" +
-        String(dashboard_->scrollComposeMaxUs());
-    extra += ",\"ui_scroll_transfer_max_us\":" +
-        String(dashboard_->scrollTransferMaxUs());
-    extra += ",\"ui_scroll_frames_over_budget\":" +
-        String(dashboard_->scrollFramesOverBudget());
-    extra += ",\"capsule_full_scans\":" +
-        String(library_->fullScanCount());
-    extra += ",\"capsule_incremental_refreshes\":" +
-        String(library_->incrementalRefreshCount());
-    extra += ",\"capsule_refresh_fallbacks\":" +
-        String(library_->refreshFallbackCount());
-    extra += ",\"capsule_last_scan_us\":" +
-        String(library_->lastScanUs());
-    extra += ",\"capsule_max_scan_us\":" +
-        String(library_->maxScanUs());
-    extra += ",\"ui_frame_buffer\":" +
-        String(dashboard_->frameBufferReady() ? "true" : "false");
-    extra += ",\"ui_animation_buffer\":" +
-        String(dashboard_->animationBufferReady() ? "true" : "false");
+    appendJsonString(extra, "audio_frontend_channel",
+                     audioInputChannelName(frontEnd.selectedChannel));
+    appendJsonNumber(extra, "audio_frontend_left_peak", frontEnd.leftPeak);
+    appendJsonNumber(extra, "audio_frontend_right_peak", frontEnd.rightPeak);
+    appendJsonNumber(extra, "audio_frontend_output_peak", frontEnd.outputPeak);
+    appendJsonNumber(extra, "audio_frontend_noise_floor",
+                     frontEnd.estimatedNoiseFloor);
+    appendJsonNumber(extra, "audio_frontend_suppressed_samples",
+                     frontEnd.suppressedSamples);
+    appendJsonNumber(extra, "audio_frontend_limited_samples",
+                     frontEnd.limitedSamples);
+    appendJsonNumber(extra, "audio_frontend_max_gain_q12",
+                     frontEnd.maximumGainQ12);
+    appendJsonBool(extra, "tencentConfigured", config_->hasTencent());
+    appendJsonNumber(extra, "wifiNetworkCount", config_->wifiNetworks().size());
+    appendJsonNumber(extra, "ui_full_redraws", dashboard_->fullRedrawCount());
+    appendJsonNumber(extra, "ui_body_redraws", dashboard_->bodyRedrawCount());
+    appendJsonNumber(extra, "ui_partial_redraws",
+                     dashboard_->partialRedrawCount());
+    appendJsonNumber(extra, "ui_scroll_frame_last_us",
+                     dashboard_->scrollFrameLastUs());
+    appendJsonNumber(extra, "ui_scroll_frame_max_us",
+                     dashboard_->scrollFrameMaxUs());
+    appendJsonNumber(extra, "ui_scroll_compose_max_us",
+                     dashboard_->scrollComposeMaxUs());
+    appendJsonNumber(extra, "ui_scroll_transfer_max_us",
+                     dashboard_->scrollTransferMaxUs());
+    appendJsonNumber(extra, "ui_scroll_frames_over_budget",
+                     dashboard_->scrollFramesOverBudget());
+    appendJsonNumber(extra, "capsule_full_scans", library_->fullScanCount());
+    appendJsonNumber(extra, "capsule_incremental_refreshes",
+                     library_->incrementalRefreshCount());
+    appendJsonNumber(extra, "capsule_refresh_fallbacks",
+                     library_->refreshFallbackCount());
+    appendJsonNumber(extra, "capsule_last_scan_us", library_->lastScanUs());
+    appendJsonNumber(extra, "capsule_max_scan_us", library_->maxScanUs());
+    appendJsonBool(extra, "ui_frame_buffer", dashboard_->frameBufferReady());
+    appendJsonBool(extra, "ui_animation_buffer",
+                   dashboard_->animationBufferReady());
     const RuntimePowerSnapshot &power = power_->snapshot();
-    extra += ",\"powerMode\":\"" + String(powerModeName(power.mode)) + "\"";
-    extra += ",\"cpuMhz\":" + String(power.cpuMhz);
-    extra += ",\"powerTransitions\":" + String(power.transitions);
-    extra += ",\"lightSleepAttempts\":" +
-        String(power.lightSleepAttempts);
-    extra += ",\"lightSleepCount\":" + String(power.lightSleepCount);
-    extra += ",\"lightSleepFailures\":" +
-        String(power.lightSleepFailures);
-    extra += ",\"lightSleepMs\":" +
-        String(static_cast<unsigned long>(power.lightSleepUs / 1000ULL));
-    extra += ",\"deepSleepWakeCount\":" +
-        String(power.deepSleepWakeCount);
-    extra += ",\"deepSleepArmAttempts\":" +
-        String(power.deepSleepArmAttempts);
-    extra += ",\"deepSleepArmFailures\":" +
-        String(power.deepSleepArmFailures);
-    extra += ",\"wokeFromDeepSleep\":" +
-        String(power.wokeFromDeepSleep ? "true" : "false");
-    extra += ",\"deepSleepTouchWakeArmed\":" +
-        String(power.deepSleepTouchWakeArmed ? "true" : "false");
-    extra += ",\"lastWakeCause\":" + String(power.lastWakeCause);
-    extra += ",\"wakeCauses\":" + String(power.wakeCauses);
+    appendJsonString(extra, "powerMode", powerModeName(power.mode));
+    appendJsonNumber(extra, "cpuMhz", power.cpuMhz);
+    appendJsonNumber(extra, "powerTransitions", power.transitions);
+    appendJsonNumber(extra, "lightSleepAttempts", power.lightSleepAttempts);
+    appendJsonNumber(extra, "lightSleepCount", power.lightSleepCount);
+    appendJsonNumber(extra, "lightSleepFailures", power.lightSleepFailures);
+    appendJsonNumber(extra, "lightSleepMs", power.lightSleepUs / 1000ULL);
+    appendJsonNumber(extra, "deepSleepWakeCount", power.deepSleepWakeCount);
+    appendJsonNumber(extra, "deepSleepArmAttempts", power.deepSleepArmAttempts);
+    appendJsonNumber(extra, "deepSleepArmFailures", power.deepSleepArmFailures);
+    appendJsonBool(extra, "wokeFromDeepSleep", power.wokeFromDeepSleep);
+    appendJsonBool(extra, "deepSleepTouchWakeArmed",
+                   power.deepSleepTouchWakeArmed);
+    appendJsonNumber(extra, "lastWakeCause", power.lastWakeCause);
+    appendJsonNumber(extra, "wakeCauses", power.wakeCauses);
     const PowerDiagnosticsSnapshot &powerDiagnostic =
         powerDiagnostics_->snapshot();
-    extra += ",\"powerActiveFacts\":" +
-        String(powerDiagnostic.activeFacts);
-    extra += ",\"powerLightBlockers\":" +
-        String(powerDiagnostic.lightBlockers);
-    extra += ",\"powerDeepBlockers\":" +
-        String(powerDiagnostic.deepBlockers);
-    extra += ",\"powerCurrentBlockers\":" +
-        String(powerDiagnostic.currentBlockers);
-    extra += ",\"powerIdleMs\":" + String(powerDiagnostic.idleMs);
-    extra += ",\"powerDiagnosticCount\":" +
-        String(static_cast<unsigned>(powerDiagnostics_->count()));
-    extra += ",\"powerDiagnosticPersistFailures\":" +
-        String(powerDiagnostic.persistFailures);
-    extra += ",\"powerAutomaticScreenWakes\":" +
-        String(powerDiagnostic.automaticScreenWakes);
-    extra += ",\"resetReason\":" +
-        String(static_cast<unsigned>(esp_reset_reason()));
-    extra += ",\"internalHeapFree\":" + String(static_cast<unsigned>(
-        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-    extra += ",\"internalHeapLargest\":" + String(static_cast<unsigned>(
-        heap_caps_get_largest_free_block(
-            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-    extra += ",\"psramFree\":" +
-        String(static_cast<unsigned>(ESP.getFreePsram()));
-    extra += ",\"automaticPmSupported\":" +
-        String(power.automaticPmSupported ? "true" : "false");
-    extra += ",\"bleModemSleepSupported\":" +
-        String(power.bleModemSleepSupported ? "true" : "false");
-    extra += ",\"provisioningDiagnosticCount\":" +
-        String(static_cast<unsigned>(provisioningDiagnostics_->count()));
-    extra += ",\"provisioningStartupPhase\":\"" +
-        String(provisioningCoordinator_ == nullptr ? "unavailable" :
-               provisioningCoordinator_->phaseName()) + "\"";
+    appendJsonNumber(extra, "powerActiveFacts", powerDiagnostic.activeFacts);
+    appendJsonNumber(extra, "powerLightBlockers", powerDiagnostic.lightBlockers);
+    appendJsonNumber(extra, "powerDeepBlockers", powerDiagnostic.deepBlockers);
+    appendJsonNumber(extra, "powerCurrentBlockers",
+                     powerDiagnostic.currentBlockers);
+    appendJsonNumber(extra, "powerIdleMs", powerDiagnostic.idleMs);
+    appendJsonNumber(extra, "powerDiagnosticCount", powerDiagnostics_->count());
+    appendJsonNumber(extra, "powerDiagnosticPersistFailures",
+                     powerDiagnostic.persistFailures);
+    appendJsonNumber(extra, "powerAutomaticScreenWakes",
+                     powerDiagnostic.automaticScreenWakes);
+    appendJsonNumber(extra, "resetReason", esp_reset_reason());
+    appendJsonNumber(extra, "internalHeapFree",
+                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                             MALLOC_CAP_8BIT));
+    appendJsonNumber(extra, "internalHeapLargest",
+                     heap_caps_get_largest_free_block(
+                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    appendJsonNumber(extra, "psramFree", ESP.getFreePsram());
+    appendJsonBool(extra, "automaticPmSupported", power.automaticPmSupported);
+    appendJsonBool(extra, "bleModemSleepSupported",
+                   power.bleModemSleepSupported);
+    appendJsonNumber(extra, "provisioningDiagnosticCount",
+                     provisioningDiagnostics_->count());
+    appendJsonString(extra, "provisioningStartupPhase",
+                     provisioningCoordinator_ == nullptr
+                         ? "unavailable" : provisioningCoordinator_->phaseName());
     sendOk(requestId, extra.c_str());
   } else if (strcmp(operation, "provisioning-start") == 0) {
     if (transport_ != LinkTransport::usb ||
@@ -1614,25 +1829,1727 @@ void PokePodLinkService::handleCommandFile(uint32_t requestId,
     return;
   }
   commandStorageActive_ = true;
-  String message;
   const String resultPath = String(kCapsuleSystem) + "/commands/results/" +
       transactionId + ".json";
-  const bool accepted = storageExists(resultPath, StorageAccess::read) ||
-      executeCommand(path, transactionId, message);
-  storageRemove(path);
-  if (!accepted) {
-    log_->printf("{\"event\":\"link_command_failed\",\"transaction\":\"%s\",\"message\":\"%s\"}\n",
-                 transactionId.c_str(), message.c_str());
-  }
-  if (!deferredCommandFiles_.empty() ||
-      !deferredTreeCleanupStack_.empty()) {
-    commandCleanupPending_ = true;
-    commandCleanupRequestId_ = requestId;
+  const bool alreadyComplete = storageExists(resultPath, StorageAccess::read);
+  if (mutationRecoveryBlocked_ && !alreadyComplete) {
+    commandStorageActive_ = false;
+    commandStorageReservation_.release();
+    sendBusy(requestId, 1000);
     return;
   }
+  if (beginCommandLoad(requestId, path, transactionId, alreadyComplete)) return;
   commandStorageActive_ = false;
   commandStorageReservation_.release();
-  sendOk(requestId, "\"accepted\":true");
+  sendError(requestId, "command load failed");
+  rememberCompleted(requestId);
+  if (activeMaintenance_.isEmpty()) releaseRequestLease();
+}
+
+bool PokePodLinkService::beginCommandLoad(
+    uint32_t requestId, const String &path, const String &transactionId,
+    bool alreadyComplete) {
+  if (fs_ == nullptr || commandLoadState_ != CommandLoadState::none) {
+    return false;
+  }
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, storageIoTimeout());
+  if (!lease) return false;
+  File file = fs_->open(path, FILE_READ);
+  const size_t bytes = file ? file.size() : 0;
+  if (!file || file.isDirectory() || bytes == 0 ||
+      bytes > kMaxCommandJsonBytes ||
+      !commandLoadValue_.reserve(bytes + 1)) {
+    if (file) file.close();
+    return false;
+  }
+  commandLoadFile_ = file;
+  commandLoadPath_ = path;
+  commandLoadTransactionId_ = transactionId;
+  commandLoadRequestId_ = requestId;
+  commandLoadExpected_ = static_cast<uint32_t>(bytes);
+  commandLoadRespond_ = sessionActive_ && transferPermitted();
+  commandLoadAlreadyComplete_ = alreadyComplete;
+  commandLoadState_ = CommandLoadState::reading;
+  return true;
+}
+
+void PokePodLinkService::advanceCommandLoad() {
+  if (commandLoadState_ == CommandLoadState::none) return;
+  if (commandLoadState_ == CommandLoadState::dispatch) {
+    dispatchLoadedCommand();
+    return;
+  }
+  const bool permitted = commandLoadRespond_ && sessionActive_ &&
+      transferPermitted();
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, 0);
+  if (!lease) return;
+  if (!permitted || !commandLoadFile_) {
+    if (commandLoadFile_) commandLoadFile_.close();
+    lease.release();
+    finishCommandLoad(true);
+    return;
+  }
+  if (payload_ == nullptr) {
+    commandLoadFile_.close();
+    lease.release();
+    finishCommandLoad(true);
+    return;
+  }
+  const int available = commandLoadFile_.available();
+  if (available <= 0) {
+    commandLoadFile_.close();
+    if (commandLoadValue_.length() != commandLoadExpected_ ||
+        !transferPermitted()) {
+      lease.release();
+      finishCommandLoad(true);
+      return;
+    }
+    commandLoadState_ = CommandLoadState::dispatch;
+    return;
+  }
+  const size_t wanted = std::min<size_t>(
+      kCommandReadBytesPerPoll, static_cast<size_t>(available));
+  const int received = commandLoadFile_.read(payload_, wanted);
+  if (received <= 0 || !commandLoadValue_.concat(
+          reinterpret_cast<const char *>(payload_),
+          static_cast<unsigned int>(received))) {
+    commandLoadFile_.close();
+    lease.release();
+    finishCommandLoad(true);
+    return;
+  }
+  if (!transferPermitted()) commandLoadRespond_ = false;
+}
+
+void PokePodLinkService::finishCommandLoad(bool keepCommand) {
+  if (!keepCommand && !commandLoadPath_.isEmpty()) {
+    queueDeferredTreeCleanup(commandLoadPath_);
+  }
+  commandLoadFile_ = File();
+  commandLoadValue_ = "";
+  commandLoadPath_ = "";
+  commandLoadTransactionId_ = "";
+  commandLoadRequestId_ = 0;
+  commandLoadExpected_ = 0;
+  commandLoadRespond_ = false;
+  commandLoadAlreadyComplete_ = false;
+  commandLoadState_ = CommandLoadState::none;
+  commandStorageActive_ = false;
+  commandStorageReservation_.release();
+}
+
+void PokePodLinkService::dispatchLoadedCommand() {
+  if (!commandLoadRespond_ || !sessionActive_ || !transferPermitted()) {
+    finishCommandLoad(true);
+    return;
+  }
+  cJSON *root = cJSON_ParseWithLength(
+      commandLoadValue_.c_str(), commandLoadValue_.length());
+  if (!transferPermitted()) {
+    cJSON_Delete(root);
+    finishCommandLoad(true);
+    return;
+  }
+  const uint32_t requestId = commandLoadRequestId_;
+  const String path = commandLoadPath_;
+  const String transactionId = commandLoadTransactionId_;
+  if (commandLoadAlreadyComplete_) {
+    applyCompletedCommandSideEffects(root);
+    cJSON_Delete(root);
+    const uint32_t cleanupRequest = commandLoadRespond_ && sessionActive_ &&
+        transferPermitted() ? requestId : 0;
+    queueDeferredTreeCleanup(path);
+    commandCleanupPending_ = true;
+    commandCleanupRequestId_ = cleanupRequest;
+    commandLoadFile_ = File();
+    commandLoadValue_ = "";
+    commandLoadPath_ = "";
+    commandLoadTransactionId_ = "";
+    commandLoadRequestId_ = 0;
+    commandLoadExpected_ = 0;
+    commandLoadRespond_ = false;
+    commandLoadAlreadyComplete_ = false;
+    commandLoadState_ = CommandLoadState::none;
+    return;
+  }
+  const BatchStart batch = tryStartBatchCommand(
+      requestId, root, path, transactionId);
+  if (batch == BatchStart::started) {
+    commandLoadFile_ = File();
+    commandLoadValue_ = "";
+    commandLoadPath_ = "";
+    commandLoadTransactionId_ = "";
+    commandLoadRequestId_ = 0;
+    commandLoadExpected_ = 0;
+    commandLoadRespond_ = false;
+    commandLoadAlreadyComplete_ = false;
+    commandLoadState_ = CommandLoadState::none;
+    return;
+  }
+  if (batch == BatchStart::rejected) {
+    cJSON_Delete(root);
+    finishCommandLoad(true);
+    return;
+  }
+  if (tryStartTextCommand(requestId, root, path, transactionId)) {
+    cJSON_Delete(root);
+    commandLoadFile_ = File();
+    commandLoadValue_ = "";
+    commandLoadPath_ = "";
+    commandLoadTransactionId_ = "";
+    commandLoadRequestId_ = 0;
+    commandLoadExpected_ = 0;
+    commandLoadRespond_ = false;
+    commandLoadAlreadyComplete_ = false;
+    commandLoadState_ = CommandLoadState::none;
+    return;
+  }
+  const bool validEnvelope = root != nullptr && cJSON_IsObject(root) &&
+      jsonInt64(root, "schemaVersion") == 2 &&
+      sameUuid(jsonString(root, "transactionId"), transactionId.c_str());
+  const char *message = validEnvelope
+      ? "command operation is not supported by this firmware"
+      : "command JSON is malformed";
+  const bool accepted = startCommandFailureResult(
+      requestId, path, transactionId, message);
+  cJSON_Delete(root);
+  if (!accepted && log_ != nullptr) {
+    log_->printf(
+        "{\"event\":\"link_command_failed\",\"transaction\":\"%s\","
+        "\"message\":\"%s\"}\n",
+        transactionId.c_str(), message);
+  }
+  commandLoadFile_ = File();
+  commandLoadValue_ = "";
+  commandLoadPath_ = "";
+  commandLoadTransactionId_ = "";
+  commandLoadRequestId_ = 0;
+  commandLoadExpected_ = 0;
+  commandLoadRespond_ = false;
+  commandLoadAlreadyComplete_ = false;
+  commandLoadState_ = CommandLoadState::none;
+  if (!accepted) {
+    commandStorageActive_ = false;
+    commandStorageReservation_.release();
+  }
+}
+
+bool PokePodLinkService::tryStartTextCommand(
+    uint32_t requestId, void *jsonRoot, const String &path,
+    const String &transactionId) {
+  cJSON *root = asJson(jsonRoot);
+  const char *operation = root == nullptr ? nullptr :
+      jsonString(root, "operation");
+  const bool correction = operation != nullptr &&
+      strcmp(operation, "commitCorrection") == 0;
+  const bool finalText = operation != nullptr &&
+      strcmp(operation, "commitFinalText") == 0;
+  if (!correction && !finalText) {
+    return false;
+  }
+  cJSON *ids = cJSON_GetObjectItemCaseSensitive(root, "capsuleIds");
+  const char *id = cJSON_IsArray(ids) && cJSON_GetArraySize(ids) == 1
+      ? cJSON_GetStringValue(cJSON_GetArrayItem(ids, 0)) : nullptr;
+  const char *maintenanceId = jsonString(root, "maintenanceId");
+  const char *stagedPath = jsonString(root, "stagedPath");
+  const CapsuleSummary *record = isUuid(id) ? library_->find(id) : nullptr;
+  const String expectedStaged = ".staging/" + transactionId + "/" +
+      (id == nullptr ? "" : id);
+  const String stagedDirectory = String(kCapsuleRoot) + "/" + expectedStaged;
+  const String prepared = stagedDirectory +
+      (correction ? "/polished.md" : "/final.md");
+  if (jsonInt64(root, "schemaVersion") != 2 ||
+      !sameUuid(jsonString(root, "transactionId"), transactionId.c_str()) ||
+      record == nullptr || activeMaintenance_.isEmpty() ||
+      !isUuid(maintenanceId) ||
+      !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
+    return false;
+  }
+
+  const int expectedRevision = static_cast<int>(
+      jsonInt64(root, "expectedRevision"));
+  String metadataTarget;
+  cJSON *metadata = nullptr;
+  if (correction) {
+    if (stagedPath == nullptr || String(stagedPath) != expectedStaged ||
+        !storageExists(prepared, StorageAccess::read)) {
+      return false;
+    }
+    metadataTarget = record->directory + "/processing.json";
+    metadata = cJSON_Parse(readText(metadataTarget, 8192).c_str());
+  } else {
+    metadataTarget = record->directory + "/capsule.json";
+    metadata = cJSON_Parse(readText(metadataTarget, 8192).c_str());
+  }
+  cJSON *revision = metadata == nullptr ? nullptr :
+      cJSON_GetObjectItemCaseSensitive(metadata, "revision");
+  if (!cJSON_IsNumber(revision) || revision->valueint != expectedRevision) {
+    cJSON_Delete(metadata);
+    return false;
+  }
+  cJSON_SetNumberValue(revision, expectedRevision + 1);
+  if (correction) {
+    cJSON_ReplaceItemInObjectCaseSensitive(
+        metadata, "status", cJSON_CreateString("ready"));
+    replaceStringOrNull(metadata, "polishedTextFile", "polished.md");
+    replaceStringOrNull(metadata, "errorStage", nullptr);
+    replaceStringOrNull(metadata, "error", nullptr);
+  } else {
+    replaceStringOrNull(metadata, "updatedAt", board_->utcNow().c_str());
+  }
+  commandTextMetadataValue_ = printed(metadata) + "\n";
+  cJSON_Delete(metadata);
+
+  CapsuleTransactionInput inputs[2];
+  const String textTarget = record->directory +
+      (correction ? "/polished.md" : "/final.md");
+  if (stagedPath != nullptr && String(stagedPath) == expectedStaged &&
+      storageExists(prepared, StorageAccess::read)) {
+    inputs[0] = {textTarget, nullptr, prepared};
+  } else if (finalText && jsonString(root, "finalText") != nullptr &&
+             strlen(jsonString(root, "finalText")) <= 8192U) {
+    commandTextValue_ = jsonString(root, "finalText");
+    commandTextSource_.bind(commandTextValue_);
+    inputs[0] = {textTarget, &commandTextSource_, String()};
+  } else {
+    return false;
+  }
+  commandTextMetadataSource_.bind(commandTextMetadataValue_);
+  inputs[1] = {metadataTarget, &commandTextMetadataSource_, String()};
+  const bool hadStagedText = stagedPath != nullptr &&
+      String(stagedPath) == expectedStaged;
+  const bool started = transactionRunner_.startCommit(
+      transactionId.c_str(), inputs, 2, storageOwner());
+  if (!started) return false;
+  transactionGate_.beginOperation(transferGate_);
+  transactionPurpose_ = TransactionPurpose::commandText;
+  commandTextRequestId_ = requestId;
+  commandTextPath_ = path;
+  commandTextTransactionId_ = transactionId;
+  commandTextStagingDirectory_ = hadStagedText ? stagedDirectory : String();
+  commandTextRespond_ = sessionActive_ && transferPermitted();
+  return true;
+}
+
+void PokePodLinkService::finishTextCommand(bool committed) {
+  cJSON *result = cJSON_CreateObject();
+  cJSON_AddNumberToObject(result, "schemaVersion", 1);
+  cJSON_AddStringToObject(result, "commandId",
+                          commandTextTransactionId_.c_str());
+  cJSON_AddStringToObject(result, "transactionId",
+                          commandTextTransactionId_.c_str());
+  cJSON_AddBoolToObject(result, "ok", committed);
+  cJSON_AddBoolToObject(result, "success", committed);
+  cJSON_AddStringToObject(result, "message",
+                          committed ? "committed" : "text commit failed");
+  cJSON_AddStringToObject(result, "completedAt", board_->utcNow().c_str());
+  const String resultPath = String(kCapsuleSystem) + "/commands/results/" +
+      commandTextTransactionId_ + ".json";
+  commandTextMetadataValue_ = printed(result) + "\n";
+  cJSON_Delete(result);
+  transactionPurpose_ = TransactionPurpose::none;
+  transactionGate_.reset();
+  commandTextMetadataSource_.bind(commandTextMetadataValue_);
+  const CapsuleTransactionInput input{
+      resultPath, &commandTextMetadataSource_, String()};
+  const String key = commandTextTransactionId_ + "-result";
+  if (!transactionRunner_.startCommit(key.c_str(), &input, 1,
+                                      storageOwner())) {
+    finishTextResult(false);
+    return;
+  }
+  // Result durability is local recovery work.  A Wi-Fi deadline or USB
+  // disconnect suppresses the response, but it must not leave a published
+  // text mutation without its idempotency result.
+  transactionPurpose_ = TransactionPurpose::commandTextResult;
+}
+
+void PokePodLinkService::finishTextResult(bool persisted) {
+  const uint32_t requestId = commandTextRequestId_;
+  const bool respond = persisted && commandTextRespond_ && sessionActive_ &&
+      transferPermitted();
+  transactionPurpose_ = TransactionPurpose::none;
+  if (persisted) {
+    if (!commandTextStagingDirectory_.isEmpty()) {
+      queueDeferredTreeCleanup(commandTextStagingDirectory_);
+    }
+    queueDeferredTreeCleanup(commandTextPath_);
+    commandCleanupPending_ = true;
+    commandCleanupRequestId_ = respond ? requestId : 0;
+  } else {
+    // Keep the command and staged input as replay evidence.  No product
+    // mutation is acknowledged without the durable result file.
+    commandStorageActive_ = false;
+    commandStorageReservation_.release();
+  }
+  commandTextRequestId_ = 0;
+  commandTextPath_ = "";
+  commandTextTransactionId_ = "";
+  commandTextStagingDirectory_ = "";
+  commandTextValue_ = "";
+  commandTextMetadataValue_ = "";
+  commandTextRespond_ = false;
+  (void)library_->requestScan();
+}
+
+bool PokePodLinkService::startCommandFailureResult(
+    uint32_t requestId, const String &path, const String &transactionId,
+    const char *message) {
+  cJSON *result = cJSON_CreateObject();
+  cJSON_AddNumberToObject(result, "schemaVersion", 1);
+  cJSON_AddStringToObject(result, "commandId", transactionId.c_str());
+  cJSON_AddStringToObject(result, "transactionId", transactionId.c_str());
+  cJSON_AddBoolToObject(result, "ok", false);
+  cJSON_AddBoolToObject(result, "success", false);
+  cJSON_AddStringToObject(result, "message",
+                          message == nullptr ? "command failed" : message);
+  cJSON_AddStringToObject(result, "completedAt", board_->utcNow().c_str());
+  commandTextMetadataValue_ = printed(result) + "\n";
+  cJSON_Delete(result);
+  const String resultPath = String(kCapsuleSystem) + "/commands/results/" +
+      transactionId + ".json";
+  commandTextMetadataSource_.bind(commandTextMetadataValue_);
+  const CapsuleTransactionInput input{
+      resultPath, &commandTextMetadataSource_, String()};
+  const String key = transactionId + "-result";
+  if (!transactionRunner_.startCommit(key.c_str(), &input, 1,
+                                      storageOwner())) return false;
+  transactionPurpose_ = TransactionPurpose::commandFailureResult;
+  commandTextRequestId_ = requestId;
+  commandTextPath_ = path;
+  commandTextTransactionId_ = transactionId;
+  commandTextRespond_ = sessionActive_ && transferPermitted();
+  return true;
+}
+
+void PokePodLinkService::finishCommandFailureResult(bool persisted) {
+  const uint32_t requestId = commandTextRequestId_;
+  const bool respond = persisted && commandTextRespond_ && sessionActive_ &&
+      transferPermitted();
+  transactionPurpose_ = TransactionPurpose::none;
+  if (persisted) {
+    queueDeferredTreeCleanup(commandTextPath_);
+    commandCleanupPending_ = true;
+    commandCleanupRequestId_ = respond ? requestId : 0;
+  } else {
+    commandStorageActive_ = false;
+    commandStorageReservation_.release();
+  }
+  commandTextRequestId_ = 0;
+  commandTextPath_ = "";
+  commandTextTransactionId_ = "";
+  commandTextMetadataValue_ = "";
+  commandTextRespond_ = false;
+}
+
+PokePodLinkService::BatchStart PokePodLinkService::tryStartBatchCommand(
+    uint32_t requestId, void *jsonRoot, const String &path,
+    const String &transactionId) {
+  cJSON *root = asJson(jsonRoot);
+  const char *operation = root == nullptr ? nullptr :
+      jsonString(root, "operation");
+  if (root == nullptr || !cJSON_IsObject(root) ||
+      operation == nullptr || !batchOperation(operation)) {
+    return BatchStart::notApplicable;
+  }
+  cJSON *ids = cJSON_GetObjectItemCaseSensitive(root, "capsuleIds");
+  const bool simple = capsuleBatchSimpleOperation(operation);
+  const int count = simple ? 1 :
+      (cJSON_IsArray(ids) ? cJSON_GetArraySize(ids) : -1);
+  const char *maintenanceId = jsonString(root, "maintenanceId");
+  const bool deleteFolder = strcmp(operation, "deleteFolderToInbox") == 0;
+  const char *finalizeFolder = deleteFolder
+      ? jsonString(root, "folderPath") : nullptr;
+  const char *rejection = nullptr;
+  if (jsonInt64(root, "schemaVersion") != 2 ||
+      !sameUuid(jsonString(root, "transactionId"), transactionId.c_str())) {
+    rejection = "invalid batch command";
+  } else if (count < 0 ||
+             count > static_cast<int>(LinkCommandExecutor::kMaximumItems)) {
+    rejection = "invalid batch size";
+  } else if (strcmp(operation, "beginMaintenance") == 0 &&
+             (!isUuid(maintenanceId) ||
+              (!activeMaintenance_.isEmpty() &&
+               !activeMaintenance_.equalsIgnoreCase(maintenanceId)))) {
+    rejection = "another maintenance session is active";
+  } else if (strcmp(operation, "beginMaintenance") != 0 &&
+             strcmp(operation, "rescan") != 0 &&
+             (activeMaintenance_.isEmpty() || !isUuid(maintenanceId) ||
+              !activeMaintenance_.equalsIgnoreCase(maintenanceId))) {
+    rejection = "maintenance session does not own the device";
+  } else if (deleteFolder && !safeFolder(finalizeFolder, false)) {
+    rejection = "invalid folder delete";
+  } else if (!simple && batchSeenIds_ == nullptr &&
+             (batchSeenIds_ = static_cast<uint8_t *>(heap_caps_calloc(
+                  1024, 17, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))) == nullptr) {
+    rejection = "batch identity table unavailable";
+  } else if (!batchJournalStore_.create(
+                 transactionId, operation, static_cast<uint16_t>(count),
+                 storageOwner(), batchJournalState_, finalizeFolder)) {
+    rejection = "batch journal unavailable";
+  }
+  // A recognized command never falls through to the synchronous legacy path.
+  // Validation/journal failures are represented as an empty failed executor;
+  // it persists the normal durable command result before acknowledging upload.
+  const bool executorStarted = rejection == nullptr
+      ? batchExecutor_.begin(static_cast<size_t>(count), deleteFolder)
+      : batchExecutor_.beginRejected();
+  if (!executorStarted) {
+    return BatchStart::rejected;
+  }
+  batchJsonRoot_ = root;
+  batchRequestId_ = requestId;
+  batchCommandPath_ = path;
+  batchTransactionId_ = transactionId;
+  batchMessage_ = rejection == nullptr ? "committed" : rejection;
+  batchPending_ = BatchPending::none;
+  batchPendingStep_ = 0;
+  batchNextIdItem_ = cJSON_IsArray(ids) ? ids->child : nullptr;
+  batchNextIdIndex_ = 0;
+  if (!simple && batchSeenIds_ != nullptr) memset(batchSeenIds_, 0, 1024 * 17);
+  transactionGate_.beginOperation(transferGate_);
+  log_->printf(
+      "{\"event\":\"link_batch_begin\",\"transaction\":\"%s\","
+      "\"operation\":\"%s\",\"count\":%u}\n",
+      transactionId.c_str(), operation, static_cast<unsigned>(count));
+  return BatchStart::started;
+}
+
+void PokePodLinkService::updateBatchJournalState(bool itemInFlight) {
+  switch (batchExecutor_.phase()) {
+    case LinkCommandExecutor::Phase::preflight:
+      batchJournalState_.phase = CapsuleBatchPhase::preflight;
+      break;
+    case LinkCommandExecutor::Phase::apply:
+    case LinkCommandExecutor::Phase::finalize:
+      batchJournalState_.phase = CapsuleBatchPhase::apply;
+      break;
+    case LinkCommandExecutor::Phase::rollback:
+      batchJournalState_.phase = CapsuleBatchPhase::rollback;
+      break;
+    case LinkCommandExecutor::Phase::result:
+      batchJournalState_.phase = CapsuleBatchPhase::result;
+      break;
+    case LinkCommandExecutor::Phase::cleanup:
+    case LinkCommandExecutor::Phase::finished:
+    case LinkCommandExecutor::Phase::idle:
+      batchJournalState_.phase = CapsuleBatchPhase::cleanup;
+      break;
+  }
+  batchJournalState_.cursor = static_cast<uint16_t>(batchExecutor_.cursor());
+  batchJournalState_.applied = static_cast<uint16_t>(batchExecutor_.applied());
+  batchJournalState_.flags = 0;
+  if (batchExecutor_.success()) {
+    batchJournalState_.flags |= capsuleBatchSuccess;
+  }
+  if (batchExecutor_.responseAllowed()) {
+    batchJournalState_.flags |= capsuleBatchResponseAllowed;
+  }
+  if (batchExecutor_.rollbackFailed()) {
+    batchJournalState_.flags |= capsuleBatchRollbackFailed;
+  }
+  if (batchExecutor_.finalizeApplied()) {
+    batchJournalState_.flags |= capsuleBatchFinalizeApplied;
+  }
+  if (itemInFlight) batchJournalState_.flags |= capsuleBatchItemInFlight;
+  sealCapsuleBatchState(batchJournalState_);
+}
+
+String PokePodLinkService::batchArtifactPath(size_t index,
+                                              const char *suffix) const {
+  return String(CapsuleBatchJournalStore::kDirectory) + "/" +
+      batchTransactionId_ + "-" + String(static_cast<unsigned>(index)) +
+      (suffix == nullptr ? "" : suffix);
+}
+
+String PokePodLinkService::batchPurgePath(
+    const StoredCapsuleBatchPlan &plan) const {
+  return String(kCapsuleStaging) + "/purge-batch-" +
+      batchTransactionId_ + "-" + plan.id;
+}
+
+String PokePodLinkService::batchFolderStagingPath() const {
+  return String(kCapsuleStaging) + "/folder-batch-" + batchTransactionId_;
+}
+
+void PokePodLinkService::advanceBatchCommand() {
+  if (!batchExecutor_.active()) return;
+  if (batchPending_ != BatchPending::none) {
+    advanceBatchPending();
+    return;
+  }
+  const LinkCommandExecutor::Work work =
+      batchExecutor_.poll(batchForegroundPermitted());
+  if (work.action == LinkCommandExecutor::Action::none) return;
+  batchWork_ = work;
+  if (!startBatchWork(work)) finishBatchWork(false);
+}
+
+bool PokePodLinkService::startBatchWork(
+    const LinkCommandExecutor::Work &work) {
+  switch (work.action) {
+    case LinkCommandExecutor::Action::checkpoint:
+      updateBatchJournalState(batchExecutor_.checkpointMarksItemInFlight());
+      finishBatchWork(batchJournalStore_.checkpoint(
+          batchJournalState_, storageOwner()));
+      return true;
+    case LinkCommandExecutor::Action::preflightItem:
+      return startBatchPreflight(work.index);
+    case LinkCommandExecutor::Action::applyItem:
+      return startBatchApply(work.index);
+    case LinkCommandExecutor::Action::finalizeApply:
+      return startBatchFinalize();
+    case LinkCommandExecutor::Action::rollbackFinalize:
+      return startBatchRollbackFinalize();
+    case LinkCommandExecutor::Action::rollbackItem:
+      return startBatchRollback(work.index);
+    case LinkCommandExecutor::Action::persistResult:
+      return startBatchResultPersistence();
+    case LinkCommandExecutor::Action::cleanup:
+      if (!cleanupBatchArtifacts()) {
+        finishBatchWork(false);
+      } else if (batchPending_ == BatchPending::none) {
+        finishBatchWork(true);
+      }
+      return true;
+    case LinkCommandExecutor::Action::finish:
+      finishBatchCommand();
+      finishBatchWork(true);
+      return true;
+    case LinkCommandExecutor::Action::none:
+      return true;
+  }
+  return false;
+}
+
+void PokePodLinkService::finishBatchWork(bool ok) {
+  batchPending_ = BatchPending::none;
+  batchPendingStep_ = 0;
+  batchExecutor_.completeStep(ok);
+}
+
+bool PokePodLinkService::rememberBatchId(const char *uuid) {
+  if (batchSeenIds_ == nullptr || !isUuid(uuid)) return false;
+  uint8_t value[16] = {};
+  size_t byte = 0;
+  uint8_t high = 0;
+  bool haveHigh = false;
+  for (const char *cursor = uuid; *cursor != '\0'; ++cursor) {
+    if (*cursor == '-') continue;
+    const char c = *cursor;
+    const uint8_t nibble = c >= '0' && c <= '9' ? c - '0' :
+        c >= 'a' && c <= 'f' ? c - 'a' + 10 : c - 'A' + 10;
+    if (!haveHigh) {
+      high = static_cast<uint8_t>(nibble << 4);
+      haveHigh = true;
+    } else {
+      if (byte >= sizeof(value)) return false;
+      value[byte++] = static_cast<uint8_t>(high | nibble);
+      haveHigh = false;
+    }
+  }
+  if (byte != sizeof(value) || haveHigh) return false;
+  uint32_t hash = 2166136261U;
+  for (const uint8_t octet : value) hash = (hash ^ octet) * 16777619U;
+  for (size_t probe = 0; probe < 1024; ++probe) {
+    uint8_t *slot = batchSeenIds_ + (((hash + probe) & 1023U) * 17U);
+    if (slot[0] == 0) {
+      slot[0] = 1;
+      memcpy(slot + 1, value, sizeof(value));
+      return true;
+    }
+    if (memcmp(slot + 1, value, sizeof(value)) == 0) return false;
+  }
+  return false;
+}
+
+bool PokePodLinkService::buildBatchPlan(
+    size_t index, StoredCapsuleBatchPlan &plan, String &message) {
+  cJSON *root = asJson(batchJsonRoot_);
+  const char *operation = root == nullptr ? nullptr :
+      jsonString(root, "operation");
+  if (capsuleBatchSimpleOperation(operation)) {
+    return index == 0 && buildSimpleBatchPlan(root, plan, message);
+  }
+  cJSON *item = index == batchNextIdIndex_ ?
+      asJson(batchNextIdItem_) : nullptr;
+  const char *rawId = cJSON_GetStringValue(item);
+  if (!isUuid(rawId)) {
+    message = "invalid capsule id";
+    return false;
+  }
+  if (!rememberBatchId(rawId)) {
+    message = "duplicate capsule id";
+    return false;
+  }
+  batchNextIdItem_ = item->next;
+  ++batchNextIdIndex_;
+  String id(rawId);
+  id.toLowerCase();
+
+  operation = batchJournalState_.operation;
+  const bool restore = strcmp(operation, "restoreCapsules") == 0;
+  const bool purge = strcmp(operation, "purgeCapsules") == 0;
+  const bool remove = strcmp(operation, "deleteCapsules") == 0;
+  const bool copy = strcmp(operation, "copyCapsules") == 0;
+  const bool move = strcmp(operation, "moveCapsules") == 0;
+  const bool evacuate = strcmp(operation, "deleteFolderToInbox") == 0;
+  const bool metadata = strcmp(operation, "setFavorite") == 0 ||
+      strcmp(operation, "addTags") == 0 ||
+      strcmp(operation, "removeTags") == 0 ||
+      strcmp(operation, "renameTag") == 0 ||
+      strcmp(operation, "mergeTag") == 0 ||
+      strcmp(operation, "deleteTag") == 0;
+
+  String source;
+  String target;
+  String targetId = id;
+  if (restore || purge) {
+    source = String(kCapsuleTrash) + "/" + id;
+  } else if (evacuate) {
+    const char *folder = jsonString(root, "folderPath");
+    if (!safeFolder(folder, false)) {
+      message = "invalid user folder";
+      return false;
+    }
+    const String folderRoot = String(kCapsuleRoot) + "/" + folder + "/";
+    source = activeCapsuleDirectory(id);
+    if (!source.startsWith(folderRoot)) {
+      message = "folder contents changed during preflight";
+      return false;
+    }
+  } else {
+    source = activeCapsuleDirectory(id);
+  }
+  if (source.isEmpty() || !storageExists(source, StorageAccess::read)) {
+    message = "capsule is missing";
+    return false;
+  }
+
+  if (move || copy) {
+    const String folder = folderDirectory(jsonString(root, "destination"));
+    if (folder.isEmpty() || !storageExists(folder, StorageAccess::read)) {
+      message = "invalid move destination";
+      return false;
+    }
+    if (copy) targetId = newUuid();
+    target = folder + "/" + targetId;
+  } else if (remove) {
+    target = String(kCapsuleTrash) + "/" + id;
+  } else if (restore) {
+    cJSON *trash = cJSON_Parse(readText(source + "/trash.json", 8192).c_str());
+    const char *folderName = trash == nullptr ? nullptr :
+        jsonString(trash, "originalFolder");
+    String folder = folderDirectory(folderName);
+    cJSON_Delete(trash);
+    if (folder.isEmpty() || !storageExists(folder, StorageAccess::read)) {
+      folder = kCapsuleInbox;
+    }
+    target = folder + "/" + id;
+  } else if (evacuate) {
+    target = String(kCapsuleInbox) + "/" + id;
+  }
+  const bool noOp = move && source == target;
+  if (!target.isEmpty() && !noOp &&
+      storageExists(target, StorageAccess::read)) {
+    message = "capsule target already exists";
+    return false;
+  }
+
+  cJSON *expected = cJSON_GetObjectItemCaseSensitive(
+      root, "expectedRevisions");
+  cJSON *wanted = cJSON_IsObject(expected) ?
+      cJSON_GetObjectItemCaseSensitive(expected, id.c_str()) : nullptr;
+  const String revisionPath = source +
+      (restore || purge ? "/trash.json" : "/capsule.json");
+  cJSON *revisionRoot = cJSON_Parse(readText(revisionPath, 8192).c_str());
+  cJSON *revision = revisionRoot == nullptr ? nullptr :
+      cJSON_GetObjectItemCaseSensitive(revisionRoot, "revision");
+  const bool revisionMatches = cJSON_IsNumber(wanted) &&
+      cJSON_IsNumber(revision) && wanted->valueint == revision->valueint;
+  const int revisionValue = cJSON_IsNumber(revision) ? revision->valueint : -1;
+  cJSON_Delete(revisionRoot);
+  if (!revisionMatches) {
+    message = "revision conflict for " + id;
+    return false;
+  }
+
+  memset(&plan, 0, sizeof(plan));
+  strlcpy(plan.id, id.c_str(), sizeof(plan.id));
+  strlcpy(plan.targetId, targetId.c_str(), sizeof(plan.targetId));
+  strlcpy(plan.source, source.c_str(), sizeof(plan.source));
+  if (!target.isEmpty()) strlcpy(plan.target, target.c_str(), sizeof(plan.target));
+  plan.expectedRevision = revisionValue;
+  if (noOp) plan.flags |= kBatchPlanNoOp;
+  if ((move || restore || evacuate || metadata) && !noOp) {
+    plan.flags |= kBatchPlanCapsuleBackup;
+  }
+  if (restore) plan.flags |= kBatchPlanTrashBackup;
+  sealCapsuleBatchPlan(plan);
+  if (!validCapsuleBatchPlan(plan, operation)) {
+    message = "batch plan is invalid";
+    return false;
+  }
+  return true;
+}
+
+bool PokePodLinkService::buildSimpleBatchPlan(
+    void *jsonRoot, StoredCapsuleBatchPlan &plan, String &message) {
+  cJSON *root = asJson(jsonRoot);
+  const char *operation = root == nullptr ? nullptr :
+      jsonString(root, "operation");
+  if (!capsuleBatchSimpleOperation(operation)) return false;
+  memset(&plan, 0, sizeof(plan));
+  strlcpy(plan.id, batchTransactionId_.c_str(), sizeof(plan.id));
+
+  const char *maintenanceId = jsonString(root, "maintenanceId");
+  if (strcmp(operation, "rescan") == 0) {
+    strlcpy(plan.targetId, batchTransactionId_.c_str(),
+            sizeof(plan.targetId));
+  } else if (strcmp(operation, "beginMaintenance") == 0 ||
+      strcmp(operation, "endMaintenance") == 0) {
+    const bool begin = operation[0] == 'b';
+    if (!isUuid(maintenanceId) ||
+        (begin && !activeMaintenance_.isEmpty() &&
+         !activeMaintenance_.equalsIgnoreCase(maintenanceId)) ||
+        (!begin && (activeMaintenance_.isEmpty() ||
+         !activeMaintenance_.equalsIgnoreCase(maintenanceId)))) {
+      message = begin ? "another maintenance session is active" :
+                        "maintenance session does not own the device";
+      return false;
+    }
+    if (!activeMaintenance_.isEmpty()) {
+      strlcpy(plan.source, activeMaintenance_.c_str(), sizeof(plan.source));
+    }
+    strlcpy(plan.targetId, maintenanceId, sizeof(plan.targetId));
+  } else if (strcmp(operation, "createFolder") == 0 ||
+             strcmp(operation, "renameFolder") == 0) {
+    const char *folder = jsonString(root, "folderPath");
+    if (!safeFolder(folder, false)) {
+      message = "invalid user folder";
+      return false;
+    }
+    const String source = String(kCapsuleRoot) + "/" + folder;
+    const bool rename = operation[0] == 'r';
+    if ((!rename && storageExists(source, StorageAccess::read)) ||
+        (rename && !storageExists(source, StorageAccess::read))) {
+      message = rename ? "invalid folder rename" : "folder already exists";
+      return false;
+    }
+    strlcpy(plan.source, source.c_str(), sizeof(plan.source));
+    if (rename) {
+      const char *newFolder = jsonString(root, "newFolderPath");
+      if (!safeFolder(newFolder, false)) {
+        message = "invalid folder rename";
+        return false;
+      }
+      const String target = String(kCapsuleRoot) + "/" + newFolder;
+      if (storageExists(target, StorageAccess::read) ||
+          !storageExists(parentPath(target), StorageAccess::read)) {
+        message = "folder rename target is invalid";
+        return false;
+      }
+      strlcpy(plan.target, target.c_str(), sizeof(plan.target));
+    } else if (!storageExists(parentPath(source), StorageAccess::read)) {
+      message = "folder parent is missing";
+      return false;
+    }
+  } else {
+    cJSON *ids = cJSON_GetObjectItemCaseSensitive(root, "capsuleIds");
+    const char *id = cJSON_IsArray(ids) && cJSON_GetArraySize(ids) == 1
+        ? cJSON_GetStringValue(cJSON_GetArrayItem(ids, 0)) : nullptr;
+    if (!isUuid(id)) {
+      message = "single capsule id is required";
+      return false;
+    }
+    strlcpy(plan.id, id, sizeof(plan.id));
+    strlcpy(plan.targetId, id, sizeof(plan.targetId));
+    if (strcmp(operation, "requeueTranscription") == 0) {
+      const CapsuleSummary *record = library_->find(id);
+      cJSON *expected = cJSON_GetObjectItemCaseSensitive(
+          root, "expectedRevisions");
+      cJSON *wanted = cJSON_IsObject(expected) ?
+          cJSON_GetObjectItemCaseSensitive(expected, id) : nullptr;
+      if (record == nullptr || record->readOnly || !cJSON_IsNumber(wanted) ||
+          wanted->valueint != record->processingRevision ||
+          record->status != CapsuleStatus::failed) {
+        message = "processing revision conflict";
+        return false;
+      }
+      strlcpy(plan.source, record->directory.c_str(), sizeof(plan.source));
+      plan.expectedRevision = record->processingRevision;
+      plan.flags |= kBatchPlanProcessingBackup;
+    } else {
+      const char *stagedPath = jsonString(root, "stagedPath");
+      const char *destination = jsonString(root, "destination");
+      const String expected = ".staging/" + batchTransactionId_ + "/" + id;
+      const String source = String(kCapsuleRoot) + "/" +
+          (stagedPath == nullptr ? "" : stagedPath);
+      const String targetFolder = folderDirectory(destination);
+      const String target = targetFolder + "/" + id;
+      const String capsuleText = readText(source + "/capsule.json", 8192);
+      const String processingText = readText(
+          source + "/processing.json", 8192);
+      cJSON *capsule = cJSON_Parse(capsuleText.c_str());
+      cJSON *processing = cJSON_Parse(processingText.c_str());
+      const char *metadataId = capsule == nullptr ? nullptr :
+          jsonString(capsule, "id");
+      const char *processingId = processing == nullptr ? nullptr :
+          jsonString(processing, "capsuleId");
+      const char *audioFile = processing == nullptr ? nullptr :
+          jsonString(processing, "audioFile");
+      const int64_t schema = processing == nullptr ? -1 :
+          jsonInt64(processing, "schemaVersion");
+      const bool valid = stagedPath != nullptr &&
+          String(stagedPath) == expected && !targetFolder.isEmpty() &&
+          sameUuid(id, metadataId) && sameUuid(id, processingId) &&
+          (schema == 1 || schema == 2) && safeCapsuleFileName(audioFile) &&
+          storageExists(source + "/" + audioFile, StorageAccess::read) &&
+          storageExists(targetFolder, StorageAccess::read) &&
+          !storageExists(target, StorageAccess::read);
+      cJSON_Delete(capsule);
+      cJSON_Delete(processing);
+      if (!valid) {
+        message = "invalid staged import";
+        return false;
+      }
+      strlcpy(plan.source, source.c_str(), sizeof(plan.source));
+      strlcpy(plan.target, target.c_str(), sizeof(plan.target));
+    }
+  }
+  sealCapsuleBatchPlan(plan);
+  if (!validCapsuleBatchPlan(plan, operation)) {
+    message = "command plan is invalid";
+    return false;
+  }
+  return true;
+}
+
+bool PokePodLinkService::startBatchPreflight(size_t index) {
+  String message;
+  if (!buildBatchPlan(index, batchPlan_, message) ||
+      !batchJournalStore_.writePlan(batchJournalState_,
+                                    static_cast<uint16_t>(index), batchPlan_,
+                                    storageOwner())) {
+    batchMessage_ = message.isEmpty() ? "batch preflight failed" : message;
+    return false;
+  }
+  if ((batchPlan_.flags & kBatchPlanCapsuleBackup) != 0) {
+    const bool started = batchTreeStepper_.beginCopy(
+        *fs_, String(batchPlan_.source) + "/capsule.json",
+        batchArtifactPath(index, ".capsule.bak"), storageOwner(),
+        [](void *context) {
+          return static_cast<PokePodLinkService *>(context)
+              ->batchForegroundPermitted();
+        }, this);
+    if (!started) return false;
+    batchPending_ = BatchPending::backupCapsule;
+    return true;
+  }
+  if ((batchPlan_.flags & kBatchPlanTrashBackup) != 0) {
+    if (!batchTreeStepper_.beginCopy(
+            *fs_, String(batchPlan_.source) + "/trash.json",
+            batchArtifactPath(index, ".trash.bak"), storageOwner(),
+            [](void *context) {
+              return static_cast<PokePodLinkService *>(context)
+                  ->batchForegroundPermitted();
+            }, this)) return false;
+    batchPending_ = BatchPending::backupTrash;
+    return true;
+  }
+  if ((batchPlan_.flags & kBatchPlanProcessingBackup) != 0) {
+    if (!batchTreeStepper_.beginCopy(
+            *fs_, String(batchPlan_.source) + "/processing.json",
+            batchArtifactPath(index, ".processing.bak"), storageOwner(),
+            [](void *context) {
+              return static_cast<PokePodLinkService *>(context)
+                  ->batchForegroundPermitted();
+            }, this)) return false;
+    batchPending_ = BatchPending::backupProcessing;
+    return true;
+  }
+  finishBatchWork(true);
+  return true;
+}
+
+bool PokePodLinkService::buildBatchMetadata(
+    const StoredCapsuleBatchPlan &plan, String &value, String &message) {
+  cJSON *command = asJson(batchJsonRoot_);
+  const char *operation = batchJournalState_.operation;
+  batchMetadataSecondValue_ = "";
+  if (strcmp(operation, "deleteCapsules") == 0) {
+    const String source(plan.source);
+    const int slash = source.lastIndexOf('/');
+    const int folderStart = strlen(kCapsuleRoot) + 1;
+    String folder = slash <= folderStart ? "Inbox" :
+        source.substring(folderStart, slash);
+    cJSON *trash = cJSON_CreateObject();
+    cJSON_AddNumberToObject(trash, "schemaVersion", 1);
+    cJSON_AddStringToObject(trash, "capsuleId", plan.id);
+    cJSON_AddStringToObject(trash, "trashedAt", board_->utcNow().c_str());
+    cJSON_AddStringToObject(trash, "originalFolder", folder.c_str());
+    cJSON_AddNumberToObject(trash, "revision", plan.expectedRevision + 1);
+    value = printed(trash) + "\n";
+    cJSON_Delete(trash);
+    return !value.isEmpty();
+  }
+
+  const bool copy = strcmp(operation, "copyCapsules") == 0;
+  const String directory = copy ? String(plan.target) :
+      ((strcmp(operation, "moveCapsules") == 0 ||
+        strcmp(operation, "restoreCapsules") == 0 ||
+        strcmp(operation, "deleteFolderToInbox") == 0)
+           ? String(plan.target) : String(plan.source));
+  cJSON *capsule = cJSON_Parse(
+      readText(directory + "/capsule.json", 8192).c_str());
+  cJSON *revision = capsule == nullptr ? nullptr :
+      cJSON_GetObjectItemCaseSensitive(capsule, "revision");
+  if (capsule == nullptr || !cJSON_IsNumber(revision)) {
+    cJSON_Delete(capsule);
+    message = "capsule metadata is malformed";
+    return false;
+  }
+  if (copy) {
+    replaceStringOrNull(capsule, "id", plan.targetId);
+    replaceStringOrNull(capsule, "createdAt", board_->utcNow().c_str());
+    cJSON_SetNumberValue(revision, 1);
+  } else if (strcmp(operation, "setFavorite") == 0) {
+    cJSON *favorite = cJSON_GetObjectItemCaseSensitive(command, "favorite");
+    if (!cJSON_IsBool(favorite)) {
+      cJSON_Delete(capsule);
+      message = "favorite value is required";
+      return false;
+    }
+    cJSON *replacement = cJSON_CreateBool(cJSON_IsTrue(favorite));
+    if (cJSON_HasObjectItem(capsule, "favorite")) {
+      cJSON_ReplaceItemInObjectCaseSensitive(capsule, "favorite", replacement);
+    } else {
+      cJSON_AddItemToObject(capsule, "favorite", replacement);
+    }
+    cJSON_SetNumberValue(revision, revision->valueint + 1);
+  } else if (strcmp(operation, "addTags") == 0 ||
+             strcmp(operation, "removeTags") == 0 ||
+             strcmp(operation, "renameTag") == 0 ||
+             strcmp(operation, "mergeTag") == 0 ||
+             strcmp(operation, "deleteTag") == 0) {
+    cJSON *requested = cJSON_GetObjectItemCaseSensitive(command, "tags");
+    if (!cJSON_IsArray(requested) || cJSON_GetArraySize(requested) > 32) {
+      cJSON_Delete(capsule);
+      message = "invalid tags";
+      return false;
+    }
+    std::vector<String> tags;
+    std::vector<String> values;
+    cJSON *tag = nullptr;
+    cJSON_ArrayForEach(tag, requested) {
+      const char *text = cJSON_GetStringValue(tag);
+      if (text == nullptr || strlen(text) > 64) {
+        cJSON_Delete(capsule);
+        message = "invalid tags";
+        return false;
+      }
+      tags.emplace_back(text);
+    }
+    cJSON *old = cJSON_GetObjectItemCaseSensitive(capsule, "tags");
+    cJSON_ArrayForEach(tag, old) {
+      const char *text = cJSON_GetStringValue(tag);
+      if (text != nullptr) values.emplace_back(text);
+    }
+    if (strcmp(operation, "addTags") == 0) {
+      for (const String &requestedTag : tags) {
+        bool found = false;
+        for (const String &existing : values) {
+          if (existing.equalsIgnoreCase(requestedTag)) found = true;
+        }
+        if (!found) values.push_back(requestedTag);
+      }
+    } else if (strcmp(operation, "removeTags") == 0 ||
+               strcmp(operation, "deleteTag") == 0) {
+      values.erase(std::remove_if(values.begin(), values.end(),
+          [&](const String &existing) {
+            for (const String &requestedTag : tags) {
+              if (existing.equalsIgnoreCase(requestedTag)) return true;
+            }
+            return false;
+          }), values.end());
+    } else {
+      if (tags.size() != 2) {
+        cJSON_Delete(capsule);
+        message = "tag rename needs old and new names";
+        return false;
+      }
+      for (String &existing : values) {
+        if (existing.equalsIgnoreCase(tags[0])) existing = tags[1];
+      }
+      for (size_t left = 0; left < values.size(); ++left) {
+        values.erase(std::remove_if(values.begin() + left + 1, values.end(),
+            [&](const String &other) {
+              return other.equalsIgnoreCase(values[left]);
+            }), values.end());
+      }
+    }
+    cJSON *replacement = cJSON_CreateArray();
+    for (const String &existing : values) {
+      cJSON_AddItemToArray(replacement,
+                          cJSON_CreateString(existing.c_str()));
+    }
+    if (cJSON_HasObjectItem(capsule, "tags")) {
+      cJSON_ReplaceItemInObjectCaseSensitive(capsule, "tags", replacement);
+    } else {
+      cJSON_AddItemToObject(capsule, "tags", replacement);
+    }
+    cJSON_SetNumberValue(revision, revision->valueint + 1);
+  } else {
+    cJSON_SetNumberValue(revision, revision->valueint + 1);
+  }
+  replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
+  value = printed(capsule) + "\n";
+  cJSON_Delete(capsule);
+  if (!copy) return !value.isEmpty();
+
+  cJSON *processing = cJSON_Parse(
+      readText(directory + "/processing.json", 8192).c_str());
+  cJSON *processingRevision = processing == nullptr ? nullptr :
+      cJSON_GetObjectItemCaseSensitive(processing, "revision");
+  if (processing == nullptr || !cJSON_IsNumber(processingRevision)) {
+    cJSON_Delete(processing);
+    message = "processing metadata is malformed";
+    return false;
+  }
+  replaceStringOrNull(processing, "capsuleId", plan.targetId);
+  cJSON_SetNumberValue(processingRevision,
+                       processingRevision->valueint + 1);
+  batchMetadataSecondValue_ = printed(processing) + "\n";
+  cJSON_Delete(processing);
+  return !value.isEmpty() && !batchMetadataSecondValue_.isEmpty();
+}
+
+bool PokePodLinkService::startBatchMetadataCommit(
+    const StoredCapsuleBatchPlan &plan, bool rollback) {
+  const String key = batchTransactionId_ + "-" +
+      String(static_cast<unsigned>(batchWork_.index)) +
+      (rollback ? "-rollback" : "-apply");
+  if (rollback) {
+    CapsuleTransactionInput inputs[2];
+    uint8_t count = 0;
+    const String capsuleBackup = batchArtifactPath(
+        batchWork_.index, ".capsule.bak");
+    const String trashBackup = batchArtifactPath(
+        batchWork_.index, ".trash.bak");
+    if ((plan.flags & kBatchPlanCapsuleBackup) != 0 &&
+        storageExists(capsuleBackup, StorageAccess::read)) {
+      inputs[count++] = {String(plan.source) + "/capsule.json", nullptr,
+                         capsuleBackup};
+    }
+    if ((plan.flags & kBatchPlanTrashBackup) != 0 &&
+        storageExists(trashBackup, StorageAccess::read)) {
+      inputs[count++] = {String(plan.source) + "/trash.json", nullptr,
+                         trashBackup};
+    }
+    const String processingBackup = batchArtifactPath(
+        batchWork_.index, ".processing.bak");
+    if ((plan.flags & kBatchPlanProcessingBackup) != 0 &&
+        storageExists(processingBackup, StorageAccess::read)) {
+      inputs[count++] = {String(plan.source) + "/processing.json", nullptr,
+                         processingBackup};
+    }
+    if (count == 0) return true;
+    if (!transactionRunner_.startCommit(key.c_str(), inputs, count,
+                                        storageOwner())) return false;
+    batchPending_ = BatchPending::rollbackMetadata;
+    return true;
+  }
+  String message;
+  if (!buildBatchMetadata(plan, batchMetadataValue_, message)) {
+    batchMessage_ = message;
+    return false;
+  }
+  batchByteSource_.bind(batchMetadataValue_);
+  CapsuleTransactionInput inputs[2];
+  uint8_t count = 1;
+  String firstTarget;
+  if (strcmp(batchJournalState_.operation, "deleteCapsules") == 0) {
+    firstTarget = String(plan.source) + "/trash.json";
+  } else {
+    const bool copied = strcmp(batchJournalState_.operation,
+                               "copyCapsules") == 0;
+    firstTarget = String(copied ? plan.target :
+        ((strcmp(batchJournalState_.operation, "moveCapsules") == 0 ||
+          strcmp(batchJournalState_.operation, "restoreCapsules") == 0 ||
+          strcmp(batchJournalState_.operation, "deleteFolderToInbox") == 0)
+             ? plan.target : plan.source)) + "/capsule.json";
+  }
+  inputs[0] = {firstTarget, &batchByteSource_, String()};
+  if (strcmp(batchJournalState_.operation, "copyCapsules") == 0) {
+    batchSecondByteSource_.bind(batchMetadataSecondValue_);
+    inputs[1] = {String(plan.target) + "/processing.json",
+                 &batchSecondByteSource_, String()};
+    count = 2;
+  }
+  if (!transactionRunner_.startCommit(key.c_str(), inputs, count,
+                                      storageOwner())) return false;
+  batchPending_ = BatchPending::applyMetadata;
+  return true;
+}
+
+bool PokePodLinkService::startBatchApply(size_t index) {
+  if (!batchJournalStore_.readPlan(batchJournalState_,
+                                   static_cast<uint16_t>(index), batchPlan_,
+                                   storageOwner())) {
+    batchMessage_ = "cannot read durable batch plan";
+    return false;
+  }
+  if ((batchPlan_.flags & kBatchPlanNoOp) != 0) {
+    finishBatchWork(true);
+    return true;
+  }
+  const char *operation = batchJournalState_.operation;
+  if (strcmp(operation, "beginMaintenance") == 0 ||
+      strcmp(operation, "endMaintenance") == 0 ||
+      strcmp(operation, "rescan") == 0) {
+    finishBatchWork(true);
+    return true;
+  }
+  if (strcmp(operation, "createFolder") == 0) {
+    finishBatchWork(storageMkdir(batchPlan_.source));
+    return true;
+  }
+  if (strcmp(operation, "renameFolder") == 0 ||
+      strcmp(operation, "commitImport") == 0) {
+    finishBatchWork(storageRename(batchPlan_.source, batchPlan_.target));
+    return true;
+  }
+  if (strcmp(operation, "requeueTranscription") == 0) {
+    finishBatchWork(library_->requeue(batchPlan_.id));
+    return true;
+  }
+  if (strcmp(operation, "copyCapsules") == 0) {
+    if (!batchTreeStepper_.beginCopy(
+            *fs_, batchPlan_.source, batchPlan_.target, storageOwner(),
+            [](void *context) {
+              return static_cast<PokePodLinkService *>(context)
+                  ->batchForegroundPermitted();
+            }, this)) return false;
+    batchPending_ = BatchPending::applyTree;
+    batchPendingStep_ = 0;
+    return true;
+  }
+  if (strcmp(operation, "purgeCapsules") == 0) {
+    const String staging = batchPurgePath(batchPlan_);
+    if (storageExists(staging, StorageAccess::read) ||
+        !storageRename(batchPlan_.source, staging)) {
+      batchMessage_ = "purge staging failed";
+      return false;
+    }
+    finishBatchWork(true);
+    return true;
+  }
+  if (strcmp(operation, "deleteCapsules") == 0) {
+    batchPendingStep_ = 0;
+    return startBatchMetadataCommit(batchPlan_, false);
+  }
+  if (strcmp(operation, "setFavorite") == 0 ||
+      strcmp(operation, "addTags") == 0 ||
+      strcmp(operation, "removeTags") == 0 ||
+      strcmp(operation, "renameTag") == 0 ||
+      strcmp(operation, "mergeTag") == 0 ||
+      strcmp(operation, "deleteTag") == 0) {
+    batchPendingStep_ = 2;
+    return startBatchMetadataCommit(batchPlan_, false);
+  }
+  if (!storageRename(batchPlan_.source, batchPlan_.target)) {
+    batchMessage_ = "capsule move failed";
+    return false;
+  }
+  // Directory rename is one atomic primitive. Metadata publication starts on
+  // a later poll so the current poll never combines two storage mutations.
+  batchPending_ = BatchPending::applyPath;
+  batchPendingStep_ = strcmp(operation, "restoreCapsules") == 0 ? 0 : 1;
+  return true;
+}
+
+bool PokePodLinkService::startBatchRollback(size_t index) {
+  if (!batchJournalStore_.readPlan(batchJournalState_,
+                                   static_cast<uint16_t>(index), batchPlan_,
+                                   storageOwner())) {
+    batchMessage_ = "cannot read rollback plan";
+    return false;
+  }
+  if ((batchPlan_.flags & kBatchPlanNoOp) != 0) {
+    finishBatchWork(true);
+    return true;
+  }
+  const char *operation = batchJournalState_.operation;
+  if (strcmp(operation, "beginMaintenance") == 0 ||
+      strcmp(operation, "endMaintenance") == 0 ||
+      strcmp(operation, "rescan") == 0) {
+    finishBatchWork(true);
+    return true;
+  }
+  if (strcmp(operation, "createFolder") == 0) {
+    const bool ok = !storageExists(batchPlan_.source, StorageAccess::read) ||
+        storageRmdir(batchPlan_.source);
+    finishBatchWork(ok);
+    return true;
+  }
+  if (strcmp(operation, "renameFolder") == 0 ||
+      strcmp(operation, "commitImport") == 0) {
+    const bool sourceExists = storageExists(
+        batchPlan_.source, StorageAccess::read);
+    const bool targetExists = storageExists(
+        batchPlan_.target, StorageAccess::read);
+    const bool ok = (sourceExists && !targetExists) ||
+        (!sourceExists && targetExists &&
+         storageRename(batchPlan_.target, batchPlan_.source));
+    finishBatchWork(ok);
+    return true;
+  }
+  if (strcmp(operation, "requeueTranscription") == 0) {
+    return startBatchMetadataCommit(batchPlan_, true);
+  }
+  if (strcmp(operation, "deleteFolderToInbox") == 0 &&
+      !ensureDirectoryTree(parentPath(batchPlan_.source))) {
+    batchMessage_ = "folder rollback path failed";
+    return false;
+  }
+  if (strcmp(operation, "copyCapsules") == 0) {
+    if (!storageExists(batchPlan_.target, StorageAccess::read)) {
+      finishBatchWork(true);
+      return true;
+    }
+    if (!batchTreeStepper_.beginRemove(*fs_, batchPlan_.target,
+                                       storageOwner())) return false;
+    batchPending_ = BatchPending::rollbackTree;
+    return true;
+  }
+  if (strcmp(operation, "purgeCapsules") == 0) {
+    const String staging = batchPurgePath(batchPlan_);
+    const bool ok = !storageExists(staging, StorageAccess::read) ||
+        storageRename(staging, batchPlan_.source);
+    finishBatchWork(ok);
+    return true;
+  }
+  if (strcmp(operation, "deleteCapsules") == 0) {
+    if (storageExists(batchPlan_.target, StorageAccess::read) &&
+        !storageExists(batchPlan_.source, StorageAccess::read) &&
+        !storageRename(batchPlan_.target, batchPlan_.source)) return false;
+    const bool ok = storageRemove(String(batchPlan_.source) + "/trash.json");
+    finishBatchWork(ok);
+    return true;
+  }
+  const bool metadata = strcmp(operation, "setFavorite") == 0 ||
+      strcmp(operation, "addTags") == 0 ||
+      strcmp(operation, "removeTags") == 0 ||
+      strcmp(operation, "renameTag") == 0 ||
+      strcmp(operation, "mergeTag") == 0 ||
+      strcmp(operation, "deleteTag") == 0;
+  if (!metadata && storageExists(batchPlan_.target, StorageAccess::read) &&
+      !storageExists(batchPlan_.source, StorageAccess::read) &&
+      !storageRename(batchPlan_.target, batchPlan_.source)) return false;
+  return startBatchMetadataCommit(batchPlan_, true);
+}
+
+bool PokePodLinkService::startBatchFinalize() {
+  if (strcmp(batchJournalState_.operation, "deleteFolderToInbox") != 0) {
+    finishBatchWork(true);
+    return true;
+  }
+  const char *folder = batchJournalState_.finalizeFolder;
+  if (!safeFolder(folder, false)) {
+    batchMessage_ = "invalid folder delete";
+    return false;
+  }
+  const String source = String(kCapsuleRoot) + "/" + folder;
+  if (!batchTreeStepper_.beginVerifyAbsent(
+          *fs_, source, "*", storageOwner(),
+          [](void *context) {
+            return static_cast<PokePodLinkService *>(context)
+                ->batchForegroundPermitted();
+          }, this)) return false;
+  batchPending_ = BatchPending::finalizeFolder;
+  batchPendingStep_ = 0;
+  return true;
+}
+
+bool PokePodLinkService::startBatchRollbackFinalize() {
+  if (strcmp(batchJournalState_.operation, "deleteFolderToInbox") != 0 ||
+      !safeFolder(batchJournalState_.finalizeFolder, false)) {
+    finishBatchWork(false);
+    return true;
+  }
+  const String source = String(kCapsuleRoot) + "/" +
+      batchJournalState_.finalizeFolder;
+  const String staging = batchFolderStagingPath();
+  const bool sourceExists = storageExists(source, StorageAccess::read);
+  const bool stagingExists = storageExists(staging, StorageAccess::read);
+  const bool ok = (sourceExists && !stagingExists) ||
+      (!sourceExists && stagingExists &&
+       ensureDirectoryTree(parentPath(source)) &&
+       storageRename(staging, source));
+  finishBatchWork(ok);
+  return true;
+}
+
+void PokePodLinkService::advanceBatchPending() {
+  if (batchPending_ == BatchPending::persistResult) {
+    const CapsuleTransactionPollResult result = transactionRunner_.poll(
+        millis(), nullptr);
+    if (result == CapsuleTransactionPollResult::progress ||
+        result == CapsuleTransactionPollResult::wouldBlock) return;
+    const bool persisted = result == CapsuleTransactionPollResult::committed;
+    if (persisted) applyBatchResultSideEffects();
+    finishBatchWork(persisted);
+    return;
+  }
+  if (batchPending_ == BatchPending::backupCapsule ||
+      batchPending_ == BatchPending::backupTrash ||
+      batchPending_ == BatchPending::backupProcessing ||
+      batchPending_ == BatchPending::applyTree ||
+      batchPending_ == BatchPending::rollbackTree ||
+      batchPending_ == BatchPending::finalizeFolder ||
+      batchPending_ == BatchPending::cleanupTree) {
+    const BatchPending pending = batchPending_;
+    const LinkTreeStepper::Result result = batchTreeStepper_.poll();
+    if (result == LinkTreeStepper::Result::progress ||
+        result == LinkTreeStepper::Result::wouldBlock) return;
+    if (result != LinkTreeStepper::Result::complete) {
+      if (pending == BatchPending::finalizeFolder) {
+        batchMessage_ = "folder contents changed during preflight";
+      }
+      finishBatchWork(false);
+      return;
+    }
+    if (pending == BatchPending::finalizeFolder) {
+      const String source = String(kCapsuleRoot) + "/" +
+          batchJournalState_.finalizeFolder;
+      const String staging = batchFolderStagingPath();
+      if (batchPendingStep_ != 0 ||
+          storageExists(staging, StorageAccess::read) ||
+          !storageRename(source, staging)) {
+        batchMessage_ = "folder staging failed";
+        finishBatchWork(false);
+      } else {
+        batchPendingStep_ = 1;
+        finishBatchWork(true);
+      }
+      return;
+    }
+    if (pending == BatchPending::backupCapsule &&
+        (batchPlan_.flags & kBatchPlanTrashBackup) != 0) {
+      if (!batchTreeStepper_.beginCopy(
+              *fs_, String(batchPlan_.source) + "/trash.json",
+              batchArtifactPath(batchWork_.index, ".trash.bak"),
+              storageOwner(),
+              [](void *context) {
+                return static_cast<PokePodLinkService *>(context)
+                    ->batchForegroundPermitted();
+              }, this)) {
+        finishBatchWork(false);
+        return;
+      }
+      batchPending_ = BatchPending::backupTrash;
+      return;
+    }
+    if ((pending == BatchPending::backupCapsule ||
+         pending == BatchPending::backupTrash) &&
+        (batchPlan_.flags & kBatchPlanProcessingBackup) != 0) {
+      if (!batchTreeStepper_.beginCopy(
+              *fs_, String(batchPlan_.source) + "/processing.json",
+              batchArtifactPath(batchWork_.index, ".processing.bak"),
+              storageOwner(),
+              [](void *context) {
+                return static_cast<PokePodLinkService *>(context)
+                    ->batchForegroundPermitted();
+              }, this)) {
+        finishBatchWork(false);
+        return;
+      }
+      batchPending_ = BatchPending::backupProcessing;
+      return;
+    }
+    if (pending == BatchPending::applyTree) {
+      batchPendingStep_ = 2;
+      if (!startBatchMetadataCommit(batchPlan_, false)) {
+        finishBatchWork(false);
+      }
+      return;
+    }
+    if (pending == BatchPending::cleanupTree) {
+      if (strcmp(batchJournalState_.operation,
+                 "deleteFolderToInbox") == 0 &&
+          batchPendingStep_ == 4) {
+        batchPending_ = BatchPending::cleanupArtifacts;
+        return;
+      }
+      ++batchCleanupIndex_;
+      batchPendingStep_ = 0;
+      batchPending_ = BatchPending::cleanupArtifacts;
+      return;
+    }
+    finishBatchWork(true);
+    return;
+  }
+
+  if (batchPending_ == BatchPending::applyPath) {
+    if (batchPendingStep_ == 0) {
+      if (!storageRemove(String(batchPlan_.target) + "/trash.json")) {
+        finishBatchWork(false);
+        return;
+      }
+      batchPendingStep_ = 1;
+      return;
+    }
+    batchPendingStep_ = 2;
+    if (!startBatchMetadataCommit(batchPlan_, false)) {
+      finishBatchWork(false);
+    }
+    return;
+  }
+
+  if (batchPending_ == BatchPending::applyMetadata ||
+      batchPending_ == BatchPending::rollbackMetadata) {
+    const bool rollback = batchPending_ == BatchPending::rollbackMetadata;
+    const CapsuleTransactionPollResult result = transactionRunner_.poll(
+        millis(), rollback ? nullptr : &transactionGate_);
+    if (result == CapsuleTransactionPollResult::progress ||
+        result == CapsuleTransactionPollResult::wouldBlock) return;
+    if ((!rollback && result != CapsuleTransactionPollResult::committed) ||
+        (rollback && result != CapsuleTransactionPollResult::committed)) {
+      finishBatchWork(false);
+      return;
+    }
+    if (!rollback &&
+        strcmp(batchJournalState_.operation, "deleteCapsules") == 0 &&
+        batchPendingStep_ == 0) {
+      batchPendingStep_ = 1;
+      if (!storageRename(batchPlan_.source, batchPlan_.target)) {
+        finishBatchWork(false);
+      } else {
+        finishBatchWork(true);
+      }
+      return;
+    }
+    finishBatchWork(true);
+    return;
+  }
+
+  if (batchPending_ == BatchPending::cleanupArtifacts) {
+    if (batchCleanupIndex_ >= batchExecutor_.total()) {
+      if (strcmp(batchJournalState_.operation,
+                 "deleteFolderToInbox") == 0 &&
+          batchExecutor_.success() && batchPendingStep_ != 4) {
+        const String staging = batchFolderStagingPath();
+        if (storageExists(staging, StorageAccess::read)) {
+          if (!batchTreeStepper_.beginRemove(*fs_, staging,
+                                              storageOwner())) {
+            finishBatchWork(false);
+            return;
+          }
+          batchPendingStep_ = 4;
+          batchPending_ = BatchPending::cleanupTree;
+          return;
+        }
+        batchPendingStep_ = 4;
+        return;
+      }
+      if (strcmp(batchJournalState_.operation, "commitImport") == 0 &&
+          batchExecutor_.success() && batchPendingStep_ != 5) {
+        const String stagingParent = parentPath(batchPlan_.source);
+        if (storageExists(stagingParent, StorageAccess::read) &&
+            !storageRmdir(stagingParent)) {
+          finishBatchWork(false);
+          return;
+        }
+        batchPendingStep_ = 5;
+        return;
+      }
+      const bool erased = batchExecutor_.preserveJournal() ||
+          batchJournalStore_.erase(batchTransactionId_, storageOwner());
+      finishBatchWork(erased);
+      return;
+    }
+    if (!batchJournalStore_.readPlan(
+            batchJournalState_, static_cast<uint16_t>(batchCleanupIndex_),
+            batchPlan_, storageOwner())) {
+      finishBatchWork(false);
+      return;
+    }
+    if (batchPendingStep_ == 0) {
+      if (!storageRemove(batchArtifactPath(
+              batchCleanupIndex_, ".capsule.bak"))) {
+        finishBatchWork(false);
+        return;
+      }
+      batchPendingStep_ = 1;
+      return;
+    }
+    if (batchPendingStep_ == 1) {
+      if (!storageRemove(batchArtifactPath(
+              batchCleanupIndex_, ".trash.bak"))) {
+        finishBatchWork(false);
+        return;
+      }
+      batchPendingStep_ = 2;
+      return;
+    }
+    if (batchPendingStep_ == 2) {
+      if (!storageRemove(batchArtifactPath(
+              batchCleanupIndex_, ".processing.bak"))) {
+        finishBatchWork(false);
+        return;
+      }
+      batchPendingStep_ = 3;
+      return;
+    }
+    if (strcmp(batchJournalState_.operation, "purgeCapsules") == 0 &&
+        batchExecutor_.success()) {
+      const String staging = batchPurgePath(batchPlan_);
+      if (storageExists(staging, StorageAccess::read)) {
+        if (!batchTreeStepper_.beginRemove(*fs_, staging, storageOwner())) {
+          finishBatchWork(false);
+          return;
+        }
+        batchPending_ = BatchPending::cleanupTree;
+        return;
+      }
+    }
+    ++batchCleanupIndex_;
+    batchPendingStep_ = 0;
+  }
+}
+
+bool PokePodLinkService::startBatchResultPersistence() {
+  cJSON *result = cJSON_CreateObject();
+  cJSON_AddNumberToObject(result, "schemaVersion", 1);
+  cJSON_AddStringToObject(result, "commandId", batchTransactionId_.c_str());
+  cJSON_AddStringToObject(result, "transactionId",
+                         batchTransactionId_.c_str());
+  cJSON_AddBoolToObject(result, "ok", batchExecutor_.success());
+  cJSON_AddBoolToObject(result, "success", batchExecutor_.success());
+  cJSON_AddStringToObject(result, "message",
+      batchExecutor_.success() ? "committed" :
+      (batchMessage_.isEmpty() ? "batch command failed" :
+                                 batchMessage_.c_str()));
+  cJSON_AddStringToObject(result, "completedAt", board_->utcNow().c_str());
+  batchResultValue_ = printed(result) + "\n";
+  cJSON_Delete(result);
+  const String path = String(kCapsuleSystem) + "/commands/results/" +
+      batchTransactionId_ + ".json";
+  batchByteSource_.bind(batchResultValue_);
+  const CapsuleTransactionInput input{path, &batchByteSource_, String()};
+  const String key = batchTransactionId_ + "-result";
+  if (!transactionRunner_.startCommit(key.c_str(), &input, 1,
+                                      storageOwner())) return false;
+  batchPending_ = BatchPending::persistResult;
+  return true;
+}
+
+void PokePodLinkService::applyBatchResultSideEffects() {
+  if (!batchExecutor_.success()) return;
+  if (batchPlan_.id[0] == '\0' && batchExecutor_.total() != 0) {
+    if (!batchJournalStore_.readPlan(batchJournalState_, 0, batchPlan_,
+                                     storageOwner())) return;
+  }
+  applyDurableCommandSideEffects(batchJournalState_.operation,
+                                 batchPlan_.targetId);
+}
+
+void PokePodLinkService::applyDurableCommandSideEffects(
+    const char *operation, const char *targetId) {
+  if (operation == nullptr) return;
+  if (strcmp(operation, "beginMaintenance") == 0 && isUuid(targetId)) {
+    const bool changed = activeMaintenance_.isEmpty();
+    if (changed || activeMaintenance_.equalsIgnoreCase(targetId)) {
+      activeMaintenance_ = targetId;
+      if (changed) maintenanceCompletion_.beginAccepted();
+    }
+  } else if (strcmp(operation, "endMaintenance") == 0 && isUuid(targetId)) {
+    if (activeMaintenance_.isEmpty() ||
+        activeMaintenance_.equalsIgnoreCase(targetId)) {
+      activeMaintenance_ = "";
+      maintenanceCompletion_.endResultPersisted(targetId);
+    }
+  } else if (strcmp(operation, "requeueTranscription") == 0) {
+    tencent_->wake();
+  } else if (strcmp(operation, "rescan") == 0) {
+    (void)library_->requestScan();
+  }
+}
+
+void PokePodLinkService::applyCompletedCommandSideEffects(void *jsonRoot) {
+  cJSON *root = asJson(jsonRoot);
+  if (root == nullptr || !cJSON_IsObject(root) ||
+      jsonInt64(root, "schemaVersion") != 2 ||
+      !sameUuid(jsonString(root, "transactionId"),
+                commandLoadTransactionId_.c_str())) return;
+  const char *operation = jsonString(root, "operation");
+  const char *targetId = jsonString(root, "maintenanceId");
+  applyDurableCommandSideEffects(operation, targetId);
+}
+
+bool PokePodLinkService::cleanupBatchArtifacts() {
+  // Preserve an authority whose durable rollback checkpoint could not be
+  // advanced. Boot recovery will retry it before accepting another mutation.
+  if (batchExecutor_.preserveJournal()) return true;
+  if (!storageRemove(batchCommandPath_)) return false;
+  batchCleanupIndex_ = 0;
+  batchPendingStep_ = 0;
+  batchPending_ = BatchPending::cleanupArtifacts;
+  return true;
+}
+
+void PokePodLinkService::finishBatchCommand() {
+  const uint32_t requestId = batchRequestId_;
+  const bool respond = batchExecutor_.responseAllowed() && sessionActive_ &&
+      transferPermitted();
+  if (batchExecutor_.preserveJournal() && batchRequestId_ == 0) {
+    // Runtime IO/checkpoint failures do not prove corruption. Keep the
+    // journal in place and fail closed so a later boot cannot replay an old
+    // rollback over newer user data.
+    startupRecoveryFailed_ = true;
+  }
+  if (batchExecutor_.preserveJournal() && batchRequestId_ != 0) {
+    mutationRecoveryBlocked_ = true;
+  }
+  cJSON_Delete(asJson(batchJsonRoot_));
+  batchJsonRoot_ = nullptr;
+  batchRequestId_ = 0;
+  batchCommandPath_ = "";
+  batchTransactionId_ = "";
+  batchMetadataValue_ = "";
+  batchMetadataSecondValue_ = "";
+  batchResultValue_ = "";
+  batchMessage_ = "";
+  batchPending_ = BatchPending::none;
+  batchPlan_ = {};
+  batchNextIdItem_ = nullptr;
+  batchNextIdIndex_ = 0;
+  batchJournalState_ = {};
+  transactionGate_.reset();
+  commandStorageActive_ = false;
+  commandStorageReservation_.release();
+  (void)library_->requestScan();
+  if (respond) {
+    sendOk(requestId, "\"accepted\":true");
+    rememberCompleted(requestId);
+    if (activeMaintenance_.isEmpty()) releaseRequestLease();
+  }
+}
+
+void PokePodLinkService::abandonBatchCommand() {
+  batchExecutor_.disconnect();
+  transactionGate_.cancel();
+}
+
+bool PokePodLinkService::batchForegroundPermitted() const {
+  if (batchExecutor_.phase() == LinkCommandExecutor::Phase::preflight ||
+      batchExecutor_.phase() == LinkCommandExecutor::Phase::apply ||
+      batchExecutor_.phase() == LinkCommandExecutor::Phase::finalize) {
+    return sessionActive_ && transferPermitted();
+  }
+  return true;
 }
 
 void PokePodLinkService::finishCommandStorageCleanup() {
@@ -1647,7 +3564,7 @@ void PokePodLinkService::finishCommandStorageCleanup() {
   commandCleanupRequestId_ = 0;
   commandStorageActive_ = false;
   commandStorageReservation_.release();
-  if (sessionActive_ && transferPermitted()) {
+  if (requestId != 0 && sessionActive_ && transferPermitted()) {
     sendOk(requestId, "\"accepted\":true");
     rememberCompleted(requestId);
     if (activeMaintenance_.isEmpty()) releaseRequestLease();
@@ -1689,647 +3606,42 @@ String PokePodLinkService::activeCapsuleDirectory(const String &id) const {
   return record == nullptr || record->readOnly ? String() : record->directory;
 }
 
-bool PokePodLinkService::collectCommandIds(void *jsonRoot,
-                                           std::vector<String> &ids) const {
-  cJSON *array = cJSON_GetObjectItemCaseSensitive(asJson(jsonRoot), "capsuleIds");
-  if (!cJSON_IsArray(array) || cJSON_GetArraySize(array) > 500) return false;
-  cJSON *item = nullptr;
-  cJSON_ArrayForEach(item, array) {
-    const char *value = cJSON_GetStringValue(item);
-    if (!isUuid(value)) return false;
-    String normalized(value);
-    normalized.toLowerCase();
-    if (std::find(ids.begin(), ids.end(), normalized) != ids.end()) return false;
-    ids.push_back(normalized);
-  }
-  return true;
-}
-
-bool PokePodLinkService::validateExpectedRevisions(
-    void *jsonRoot, const std::vector<String> &ids, bool processing,
-    bool trash, String &message) const {
-  cJSON *expected = cJSON_GetObjectItemCaseSensitive(
-      asJson(jsonRoot), "expectedRevisions");
-  if (!cJSON_IsObject(expected) || cJSON_GetArraySize(expected) != ids.size()) {
-    message = "complete expectedRevisions are required";
-    return false;
-  }
-  for (const String &id : ids) {
-    const String directory = trash ? String(kCapsuleTrash) + "/" + id
-                                   : activeCapsuleDirectory(id);
-    const String metadata = directory +
-        (trash ? "/trash.json" : (processing ? "/processing.json" : "/capsule.json"));
-    cJSON *root = cJSON_Parse(readText(metadata, 8192).c_str());
-    cJSON *revision = root == nullptr ? nullptr :
-        cJSON_GetObjectItemCaseSensitive(root, "revision");
-    cJSON *wanted = cJSON_GetObjectItemCaseSensitive(expected, id.c_str());
-    const bool matches = !directory.isEmpty() && cJSON_IsNumber(revision) &&
-        cJSON_IsNumber(wanted) && revision->valueint == wanted->valueint;
-    cJSON_Delete(root);
-    if (!matches) {
-      message = "revision conflict for " + id;
-      return false;
-    }
-  }
-  return true;
-}
-
-bool PokePodLinkService::touchCapsule(const String &directory) {
-  const String path = directory + "/capsule.json";
-  cJSON *root = cJSON_Parse(readText(path, 8192).c_str());
-  if (root == nullptr) return false;
-  cJSON *revision = cJSON_GetObjectItemCaseSensitive(root, "revision");
-  const int next = cJSON_IsNumber(revision) ? revision->valueint + 1 : 1;
-  if (revision != nullptr) cJSON_SetNumberValue(revision, next);
-  else cJSON_AddNumberToObject(root, "revision", next);
-  replaceStringOrNull(root, "updatedAt", board_->utcNow().c_str());
-  const bool ok = writeTextAtomic(path, printed(root) + "\n");
-  cJSON_Delete(root);
-  return ok;
-}
-
-bool PokePodLinkService::mutateFavoriteOrTags(
-    void *jsonRoot, const char *operation, const std::vector<String> &ids,
-    String &message) {
-  if (ids.empty() || !validateExpectedRevisions(
-          jsonRoot, ids, false, false, message)) return false;
-  cJSON *root = asJson(jsonRoot);
-  cJSON *requestedTags = cJSON_GetObjectItemCaseSensitive(root, "tags");
-  cJSON *requestedFavorite = cJSON_GetObjectItemCaseSensitive(root, "favorite");
-  std::vector<String> tags;
-  if (strcmp(operation, "setFavorite") == 0) {
-    if (!cJSON_IsBool(requestedFavorite)) {
-      message = "favorite is required";
-      return false;
-    }
-  } else {
-    if (!cJSON_IsArray(requestedTags) || cJSON_GetArraySize(requestedTags) == 0) {
-      message = "tags are required";
-      return false;
-    }
-    cJSON *item = nullptr;
-    cJSON_ArrayForEach(item, requestedTags) {
-      const char *value = cJSON_GetStringValue(item);
-      if (value == nullptr || value[0] == '#' || strlen(value) == 0 ||
-          strlen(value) > 50) {
-        message = "invalid tag";
-        return false;
-      }
-      tags.emplace_back(value);
-    }
-  }
-  struct Update { String path; String original; String value; };
-  std::vector<Update> updates;
-  for (const String &id : ids) {
-    const String path = activeCapsuleDirectory(id) + "/capsule.json";
-    const String original = readText(path, 8192);
-    cJSON *capsule = cJSON_Parse(original.c_str());
-    if (capsule == nullptr) {
-      message = "capsule metadata is malformed";
-      return false;
-    }
-    if (strcmp(operation, "setFavorite") == 0) {
-      cJSON_ReplaceItemInObjectCaseSensitive(
-          capsule, "favorite", cJSON_CreateBool(cJSON_IsTrue(requestedFavorite)));
-    } else {
-      cJSON *old = cJSON_GetObjectItemCaseSensitive(capsule, "tags");
-      cJSON *replacement = cJSON_CreateArray();
-      std::vector<String> values;
-      cJSON *item = nullptr;
-      cJSON_ArrayForEach(item, old) {
-        const char *value = cJSON_GetStringValue(item);
-        if (value != nullptr) values.emplace_back(value);
-      }
-      if (strcmp(operation, "addTags") == 0) {
-        for (const String &tag : tags) {
-          bool found = false;
-          for (const String &value : values) {
-            if (value.equalsIgnoreCase(tag)) found = true;
-          }
-          if (!found) values.push_back(tag);
-        }
-      } else if (strcmp(operation, "removeTags") == 0 ||
-                 strcmp(operation, "deleteTag") == 0) {
-        values.erase(std::remove_if(values.begin(), values.end(),
-            [&](const String &value) {
-              for (const String &tag : tags) if (value.equalsIgnoreCase(tag)) return true;
-              return false;
-            }), values.end());
-      } else if (strcmp(operation, "renameTag") == 0 ||
-                 strcmp(operation, "mergeTag") == 0) {
-        if (tags.size() != 2) {
-          cJSON_Delete(replacement);
-          cJSON_Delete(capsule);
-          message = "tag rename needs old and new names";
-          return false;
-        }
-        for (String &value : values) {
-          if (value.equalsIgnoreCase(tags[0])) value = tags[1];
-        }
-        for (size_t left = 0; left < values.size(); ++left) {
-          values.erase(std::remove_if(values.begin() + left + 1, values.end(),
-              [&](const String &value) { return value.equalsIgnoreCase(values[left]); }),
-              values.end());
-        }
-      }
-      for (const String &value : values) cJSON_AddItemToArray(replacement, cJSON_CreateString(value.c_str()));
-      if (cJSON_HasObjectItem(capsule, "tags")) {
-        cJSON_ReplaceItemInObjectCaseSensitive(capsule, "tags", replacement);
-      } else {
-        cJSON_AddItemToObject(capsule, "tags", replacement);
-      }
-    }
-    cJSON *revision = cJSON_GetObjectItemCaseSensitive(capsule, "revision");
-    if (!cJSON_IsNumber(revision)) {
-      cJSON_Delete(capsule);
-      message = "capsule revision is missing";
-      return false;
-    }
-    cJSON_SetNumberValue(revision, revision->valueint + 1);
-    replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
-    updates.push_back({path, original, printed(capsule) + "\n"});
-    cJSON_Delete(capsule);
-  }
-  size_t committed = 0;
-  for (; committed < updates.size(); ++committed) {
-    if (!transferPermitted() ||
-        !writeTextAtomic(updates[committed].path, updates[committed].value)) {
-      const LinkBatchRollbackResult rollback = rollbackLinkBatch(
-          committed, [&](size_t index) {
-            (void)transferPermitted();
-            const bool ok = writeTextAtomic(updates[index].path,
-                                            updates[index].original);
-            (void)transferPermitted();
-            return ok;
-          });
-      message = rollback.ok() ? "capsule metadata commit failed"
-                              : "capsule metadata rollback failed";
-      return false;
-    }
-  }
-  if (!transferPermitted()) {
-    const LinkBatchRollbackResult rollback = rollbackLinkBatch(
-        committed, [&](size_t index) {
-          (void)transferPermitted();
-          const bool ok = writeTextAtomic(updates[index].path,
-                                          updates[index].original);
-          (void)transferPermitted();
-          return ok;
-        });
-    message = rollback.ok() ? "transfer deadline expired"
-                            : "capsule metadata rollback failed";
-    return false;
-  }
-  message = "committed";
-  return true;
-}
-
-bool PokePodLinkService::moveOrCopy(void *jsonRoot, bool copy,
-                                    const std::vector<String> &ids,
-                                    String &message) {
-  cJSON *root = asJson(jsonRoot);
-  const char *destination = jsonString(root, "destination");
-  const String targetFolder = folderDirectory(destination);
-  if (ids.empty() || targetFolder.isEmpty() ||
-      !storageExists(targetFolder, StorageAccess::read) ||
-      !validateExpectedRevisions(root, ids, false, false, message)) {
-    if (message.isEmpty()) message = "invalid move destination";
-    return false;
-  }
-  struct PlannedTransfer {
-    String id;
-    String source;
-    String target;
-    String originalCapsule;
-    bool noOp = false;
-  };
-  std::vector<PlannedTransfer> plans;
-  for (const String &id : ids) {
-    const String source = activeCapsuleDirectory(id);
-    if (source.isEmpty()) {
-      message = "capsule is missing";
-      return false;
-    }
-    const String targetId = copy ? newUuid() : id;
-    const String target = targetFolder + "/" + targetId;
-    const bool noOp = !copy && source == target;
-    for (const PlannedTransfer &plan : plans) {
-      if (!noOp && plan.target == target) {
-        message = "duplicate capsule target";
-        return false;
-      }
-    }
-    if (!noOp && storageExists(target, StorageAccess::read)) {
-      message = "capsule target already exists";
-      return false;
-    }
-    const String original = copy ? String()
-        : readText(source + "/capsule.json", 8192);
-    if (!copy && original.isEmpty()) {
-      message = "capsule metadata is malformed";
-      return false;
-    }
-    plans.push_back({targetId, source, target, original, noOp});
-  }
-
-  size_t applied = 0;
-  bool failed = false;
-  for (; applied < plans.size(); ++applied) {
-    PlannedTransfer &plan = plans[applied];
-    if (plan.noOp) continue;
-    if (!transferPermitted()) {
-      failed = true;
-      break;
-    }
-    if (copy) {
-      if (!copyTree(plan.source, plan.target) ||
-          !transferPermitted() ||
-          !rewriteCopiedMetadata(plan.target, plan.id)) {
-        failed = true;
-        break;
-      }
-    } else {
-      if (!storageRename(plan.source, plan.target)) {
-        failed = true;
-        break;
-      }
-      if (!touchCapsule(plan.target)) {
-        ++applied;
-        failed = true;
-        break;
-      }
-    }
-  }
-  if (!transferPermitted()) failed = true;
-  if (failed || applied != plans.size()) {
-    const bool deadlineExpired = !transferPermitted();
-    const size_t rollbackCount = std::min(applied + (copy ? 1U : 0U),
-                                          plans.size());
-    const LinkBatchRollbackResult rollback = rollbackLinkBatch(
-        rollbackCount, [&](size_t index) {
-          (void)transferPermitted();
-          PlannedTransfer &plan = plans[index];
-          if (plan.noOp) {
-            (void)transferPermitted();
-            return true;
-          }
-          if (copy) {
-            if (!storageExists(plan.target, StorageAccess::read)) {
-              (void)transferPermitted();
-              return true;
-            }
-            if (deadlineExpired || !deferredCommandFiles_.empty()) {
-              const String staging = String(kCapsuleStaging) +
-                  "/purge-copy-" + newUuid();
-              if (storageRename(plan.target, staging)) {
-                queueDeferredTreeCleanup(staging);
-              } else {
-                queueDeferredTreeCleanup(plan.target);
-              }
-              (void)transferPermitted();
-              return true;
-            }
-            if (!removeTree(plan.target)) {
-              queueDeferredTreeCleanup(plan.target);
-            }
-            (void)transferPermitted();
-            return true;
-          }
-          if (!storageExists(plan.target, StorageAccess::read)) {
-            (void)transferPermitted();
-            return true;
-          }
-          const bool ok = storageRename(plan.target, plan.source) &&
-              writeTextAtomic(plan.source + "/capsule.json",
-                              plan.originalCapsule);
-          (void)transferPermitted();
-          return ok;
-        });
-    message = rollback.ok()
-        ? (copy ? "capsule copy failed" : "capsule move failed")
-        : (copy ? "capsule copy rollback failed"
-                : "capsule move rollback failed");
-    return false;
-  }
-  message = "committed";
-  return true;
-}
-
-bool PokePodLinkService::trashOperation(void *jsonRoot, const char *operation,
-                                        const std::vector<String> &ids,
-                                        String &message) {
-  cJSON *root = asJson(jsonRoot);
-  const bool trash = strcmp(operation, "deleteCapsules") != 0;
-  for (const String &id : ids) {
-    const CapsuleSummary *record = library_->find(id);
-    if (record != nullptr && record->readOnly) {
-      message = "future schema capsule is read-only";
-      return false;
-    }
-  }
-  if (ids.empty() || !validateExpectedRevisions(
-          root, ids, false, trash, message)) return false;
-  if (strcmp(operation, "purgeCapsules") == 0) {
-    if (!transferPermitted()) {
-      message = "transfer deadline expired";
-      return false;
-    }
-    const CapsuleBatchResult result = library_->purge(ids);
-    if (!result.ok) {
-      message = result.rollbackFailed > 0
-          ? "purge rollback failed for " + result.rollbackFailedId
-          : "purge failed for " + result.failedId;
-      return false;
-    }
-    message = "committed";
-    return true;
-  }
-
-  struct PlannedTrashMutation {
-    String id;
-    String source;
-    String target;
-    String originalCapsule;
-    String originalTrash;
-    String trashValue;
-    bool metadataWritten = false;
-    bool moved = false;
-  };
-  std::vector<PlannedTrashMutation> plans;
-  for (const String &id : ids) {
-    if (strcmp(operation, "deleteCapsules") == 0) {
-      const String source = activeCapsuleDirectory(id);
-      const String target = String(kCapsuleTrash) + "/" + id;
-      const String originalCapsule = readText(source + "/capsule.json", 8192);
-      if (source.isEmpty() || originalCapsule.isEmpty() ||
-          storageExists(target, StorageAccess::read)) {
-        message = "move to trash preflight failed";
-        return false;
-      }
-      const int slash = source.lastIndexOf('/');
-      String original = slash < 0 ? "Inbox" : source.substring(strlen(kCapsuleRoot) + 1, slash);
-      if (original.isEmpty()) original = "Inbox";
-      cJSON *capsule = cJSON_Parse(originalCapsule.c_str());
-      cJSON *revision = capsule == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(capsule, "revision");
-      if (capsule == nullptr || !cJSON_IsNumber(revision)) {
-        cJSON_Delete(capsule);
-        message = "capsule metadata is malformed";
-        return false;
-      }
-      const int nextRevision = cJSON_IsNumber(revision) ? revision->valueint + 1 : 2;
-      cJSON_Delete(capsule);
-      cJSON *metadata = cJSON_CreateObject();
-      cJSON_AddNumberToObject(metadata, "schemaVersion", 1);
-      cJSON_AddStringToObject(metadata, "capsuleId", id.c_str());
-      cJSON_AddStringToObject(metadata, "trashedAt", board_->utcNow().c_str());
-      cJSON_AddStringToObject(metadata, "originalFolder", original.c_str());
-      cJSON_AddNumberToObject(metadata, "revision", nextRevision);
-      const String trashValue = printed(metadata) + "\n";
-      cJSON_Delete(metadata);
-      plans.push_back({id, source, target, originalCapsule, String(),
-                       trashValue, false, false});
-    } else if (strcmp(operation, "restoreCapsules") == 0) {
-      const String source = String(kCapsuleTrash) + "/" + id;
-      const String originalTrash = readText(source + "/trash.json", 8192);
-      const String originalCapsule = readText(source + "/capsule.json", 8192);
-      cJSON *metadata = cJSON_Parse(originalTrash.c_str());
-      const char *original = metadata == nullptr ? nullptr : jsonString(metadata, "originalFolder");
-      String targetFolder = folderDirectory(original);
-      if (targetFolder.isEmpty() ||
-          !storageExists(targetFolder, StorageAccess::read)) {
-        targetFolder = kCapsuleInbox;
-      }
-      const String target = targetFolder + "/" + id;
-      cJSON_Delete(metadata);
-      if (originalTrash.isEmpty() || originalCapsule.isEmpty() ||
-          storageExists(target, StorageAccess::read)) {
-        message = "trash restore preflight failed";
-        return false;
-      }
-      plans.push_back({id, source, target, originalCapsule, originalTrash,
-                       String(), false, false});
-    }
-  }
-
-  bool failed = false;
-  for (PlannedTrashMutation &plan : plans) {
-    if (!transferPermitted()) {
-      failed = true;
-      break;
-    }
-    if (strcmp(operation, "deleteCapsules") == 0) {
-      if (!writeTextAtomic(plan.source + "/trash.json", plan.trashValue)) {
-        failed = true;
-        break;
-      }
-      plan.metadataWritten = true;
-      if (!storageRename(plan.source, plan.target)) {
-        failed = true;
-        break;
-      }
-      plan.moved = true;
-    } else {
-      if (!storageRename(plan.source, plan.target)) {
-        failed = true;
-        break;
-      }
-      plan.moved = true;
-      if (!storageRemove(plan.target + "/trash.json") ||
-          !touchCapsule(plan.target)) {
-        failed = true;
-        break;
-      }
-    }
-  }
-  if (!transferPermitted()) failed = true;
-  if (failed) {
-    const LinkBatchRollbackResult rollback = rollbackLinkBatch(
-        plans.size(), [&](size_t index) {
-      (void)transferPermitted();
-      PlannedTrashMutation &item = plans[index];
-      if (strcmp(operation, "deleteCapsules") == 0) {
-        bool ok = true;
-        if (item.moved && !storageRename(item.target, item.source)) ok = false;
-        if (item.metadataWritten &&
-            !storageRemove(item.source + "/trash.json")) ok = false;
-        if (item.moved && !writeTextAtomic(
-                item.source + "/capsule.json", item.originalCapsule)) {
-          ok = false;
-        }
-        (void)transferPermitted();
-        return ok;
-      }
-      if (!item.moved) {
-        (void)transferPermitted();
-        return true;
-      }
-      const bool ok = storageRename(item.target, item.source) &&
-          writeTextAtomic(item.source + "/trash.json", item.originalTrash) &&
-          writeTextAtomic(item.source + "/capsule.json",
-                          item.originalCapsule);
-      (void)transferPermitted();
-      return ok;
-    });
-    message = rollback.ok()
-        ? (strcmp(operation, "deleteCapsules") == 0
-               ? "move to trash failed" : "trash restore failed")
-        : "trash rollback failed";
-    return false;
-  }
-  message = "committed";
-  return true;
-}
-
-bool PokePodLinkService::folderOperation(void *jsonRoot,
-                                         const char *operation,
-                                         String &message) {
-  cJSON *root = asJson(jsonRoot);
-  const char *folder = jsonString(root, "folderPath");
-  if (!safeFolder(folder, false)) {
-    message = "invalid user folder";
-    return false;
-  }
-  const String source = String(kCapsuleRoot) + "/" + folder;
-  if (strcmp(operation, "createFolder") == 0) {
-    if (storageExists(source, StorageAccess::read) ||
-        !ensureDirectoryTree(source)) {
-      message = "folder create failed";
-      return false;
-    }
-  } else if (strcmp(operation, "renameFolder") == 0) {
-    const char *newFolder = jsonString(root, "newFolderPath");
-    if (!safeFolder(newFolder, false) ||
-        !storageExists(source, StorageAccess::read)) {
-      message = "invalid folder rename";
-      return false;
-    }
-    const String target = String(kCapsuleRoot) + "/" + newFolder;
-    if (storageExists(target, StorageAccess::read) ||
-        !ensureDirectoryTree(parentPath(target)) ||
-        !storageRename(source, target)) {
-      message = "folder rename failed";
-      return false;
-    }
-  } else if (strcmp(operation, "deleteFolderToInbox") == 0) {
-    std::vector<String> files;
-    if (!collectFiles(source, "", 0, files)) {
-      message = transferPermitted() ? "folder enumeration failed"
-                                    : "transfer deadline expired";
-      return false;
-    }
-    struct PlannedEvacuation {
-      String id;
-      String source;
-      String target;
-      String originalCapsule;
-      bool moved = false;
-    };
-    std::vector<PlannedEvacuation> plans;
-    for (const String &file : files) {
-      if (!file.endsWith("/capsule.json") && file != "capsule.json") continue;
-      const String relativeDirectory = file.substring(0, file.length() - strlen("/capsule.json"));
-      const int slash = relativeDirectory.lastIndexOf('/');
-      const String id = slash < 0 ? relativeDirectory : relativeDirectory.substring(slash + 1);
-      if (!isUuid(id.c_str())) {
-        message = "folder contains malformed capsule directory";
-        return false;
-      }
-      const String capsuleSource = source + "/" + relativeDirectory;
-      const String target = String(kCapsuleInbox) + "/" + id;
-      const String originalCapsule = readText(
-          capsuleSource + "/capsule.json", 8192);
-      if (originalCapsule.isEmpty() ||
-          storageExists(target, StorageAccess::read)) {
-        message = "folder evacuation preflight failed";
-        return false;
-      }
-      plans.push_back({id, capsuleSource, target, originalCapsule, false});
-    }
-
-    std::vector<String> expectedIds;
-    if (!collectCommandIds(root, expectedIds) ||
-        expectedIds.size() != plans.size()) {
-      message = "folder contents changed during preflight";
-      return false;
-    }
-    for (const String &expected : expectedIds) {
-      bool found = false;
-      for (const PlannedEvacuation &plan : plans) {
-        if (plan.id.equalsIgnoreCase(expected)) found = true;
-      }
-      if (!found) {
-        message = "folder contents changed during preflight";
-        return false;
-      }
-    }
-
-    bool failed = false;
-    for (PlannedEvacuation &plan : plans) {
-      if (!transferPermitted() ||
-          !storageRename(plan.source, plan.target)) {
-        failed = true;
-        break;
-      }
-      plan.moved = true;
-      if (!touchCapsule(plan.target)) {
-        failed = true;
-        break;
-      }
-    }
-    const String staging = String(kCapsuleStaging) + "/purge-folder-" +
-        newUuid();
-    if (!failed && (!transferPermitted() ||
-                    !storageRename(source, staging))) {
-      failed = true;
-    }
-    if (failed) {
-      const LinkBatchRollbackResult rollback = rollbackLinkBatch(
-          plans.size(), [&](size_t index) {
-            (void)transferPermitted();
-            PlannedEvacuation &item = plans[index];
-            const bool ok = !item.moved ||
-                (storageRename(item.target, item.source) &&
-                 writeTextAtomic(item.source + "/capsule.json",
-                                 item.originalCapsule));
-            (void)transferPermitted();
-            return ok;
-          });
-      message = rollback.ok() ? "folder evacuation failed"
-                              : "folder evacuation rollback failed";
-      return false;
-    }
-    queueDeferredTreeCleanup(staging);
-    log_->printf("{\"event\":\"folder_cleanup_deferred\",\"path\":\"%s\"}\n",
-                 staging.c_str());
-  }
-  message = "committed";
-  return true;
-}
-
 bool PokePodLinkService::cleanupPurgeStaging() {
+  if (!startupPurgePending_) return true;
   if (fs_ == nullptr) return false;
+  if (!startupPurgeReservation_) {
+    startupPurgeReservation_ = StorageCoordinator::instance().reserve(
+        storageOwner(), StorageAccess::mutation, 0);
+    if (!startupPurgeReservation_) return false;
+  }
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       storageOwner(), StorageAccess::read, storageIoTimeout());
   if (!lease) return false;
-  File root = fs_->open(kCapsuleStaging);
-  if (!root || !root.isDirectory()) {
-    if (root) root.close();
+  if (!startupPurgeDirectory_) {
+    startupPurgeDirectory_ = fs_->open(kCapsuleStaging);
+  }
+  if (!startupPurgeDirectory_ || !startupPurgeDirectory_.isDirectory()) {
+    if (startupPurgeDirectory_) startupPurgeDirectory_.close();
+    startupPurgeReservation_.release();
+    startupPurgePending_ = false;
     return true;
   }
-  while (true) {
-    File entry = root.openNextFile();
-    if (!entry) break;
-    const String full = entry.name();
-    const bool isDirectory = entry.isDirectory();
-    entry.close();
-    const int slash = full.lastIndexOf('/');
-    const String name = slash >= 0 ? full.substring(slash + 1) : full;
-    if (isDirectory && purgeStagingDirectoryName(name.c_str())) {
-      queueDeferredTreeCleanup(String(kCapsuleStaging) + "/" + name);
-    }
+  File entry = startupPurgeDirectory_.openNextFile();
+  if (!entry) {
+    startupPurgeDirectory_.close();
+    startupPurgeReservation_.release();
+    startupPurgePending_ = false;
+    return true;
   }
-  root.close();
-  return true;
+  const String full = entry.name();
+  const bool isDirectory = entry.isDirectory();
+  entry.close();
+  const int slash = full.lastIndexOf('/');
+  const String name = slash >= 0 ? full.substring(slash + 1) : full;
+  if (isDirectory && purgeStagingDirectoryName(name.c_str())) {
+    queueDeferredTreeCleanup(String(kCapsuleStaging) + "/" + name);
+  }
+  return false;
 }
 
 void PokePodLinkService::queueDeferredTreeCleanup(const String &path) {
@@ -2337,6 +3649,7 @@ void PokePodLinkService::queueDeferredTreeCleanup(const String &path) {
   for (const String &queued : deferredTreeCleanupStack_) {
     if (queued == path) return;
   }
+  if (deferredTreeCleanupStack_.empty()) deferredTreeCleanupFailures_ = 0;
   deferredTreeCleanupStack_.push_back(path);
 }
 
@@ -2355,13 +3668,31 @@ bool PokePodLinkService::stepDeferredTreeCleanup() {
   }
   if (!root.isDirectory()) {
     root.close();
-    if (fs_->remove(path)) deferredTreeCleanupStack_.pop_back();
+    if (fs_->remove(path)) {
+      deferredTreeCleanupFailures_ = 0;
+      deferredTreeCleanupStack_.pop_back();
+    } else if (++deferredTreeCleanupFailures_ >= 3) {
+      deferredTreeCleanupBlocked_ = true;
+      deferredTreeCleanupStack_.clear();
+      if (log_ != nullptr) {
+        log_->println("{\"event\":\"link_tree_cleanup_blocked\"}");
+      }
+    }
     return deferredTreeCleanupStack_.empty();
   }
   File entry = root.openNextFile();
   if (!entry) {
     root.close();
-    if (fs_->rmdir(path)) deferredTreeCleanupStack_.pop_back();
+    if (fs_->rmdir(path)) {
+      deferredTreeCleanupFailures_ = 0;
+      deferredTreeCleanupStack_.pop_back();
+    } else if (++deferredTreeCleanupFailures_ >= 3) {
+      deferredTreeCleanupBlocked_ = true;
+      deferredTreeCleanupStack_.clear();
+      if (log_ != nullptr) {
+        log_->println("{\"event\":\"link_tree_cleanup_blocked\"}");
+      }
+    }
     return deferredTreeCleanupStack_.empty();
   }
   const String full = entry.name();
@@ -2371,172 +3702,6 @@ bool PokePodLinkService::stepDeferredTreeCleanup() {
   const String name = slash >= 0 ? full.substring(slash + 1) : full;
   deferredTreeCleanupStack_.push_back(path + "/" + name);
   return false;
-}
-
-bool PokePodLinkService::removeTree(const String &path) {
-  File root;
-  bool directory = false;
-  {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        storageOwner(), StorageAccess::mutation, storageIoTimeout());
-    if (!lease) return false;
-    root = fs_->open(path);
-    if (!root) return true;
-    directory = root.isDirectory();
-    if (!directory) root.close();
-  }
-  if (!directory) return storageRemove(path);
-  std::vector<String> children;
-  while (true) {
-    String full;
-    {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::mutation, storageIoTimeout());
-      if (!lease) {
-        closeStorageFile(root, StorageAccess::mutation);
-        return false;
-      }
-      File entry = root.openNextFile();
-      if (!entry) break;
-      full = entry.name();
-      entry.close();
-    }
-    const int slash = full.lastIndexOf('/');
-    const String name = slash >= 0 ? full.substring(slash + 1) : full;
-    children.push_back(path + "/" + name);
-  }
-  closeStorageFile(root, StorageAccess::mutation);
-  for (const String &child : children) {
-    if (!removeTree(child)) return false;
-  }
-  return storageRmdir(path);
-}
-
-bool PokePodLinkService::copyTree(const String &source, const String &target,
-                                  uint8_t depth) {
-  if (!transferPermitted() || depth > 6) return false;
-  File input;
-  bool directory = false;
-  {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        storageOwner(), StorageAccess::read, storageIoTimeout());
-    if (!lease) return false;
-    input = fs_->open(source, FILE_READ);
-    if (!input) return false;
-    directory = input.isDirectory();
-  }
-  if (!directory) {
-    File output;
-    {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::mutation, storageIoTimeout());
-      if (!lease) {
-        closeStorageFile(input, StorageAccess::read);
-        return false;
-      }
-      output = fs_->open(target, FILE_WRITE);
-      if (!output) {
-        input.close();
-        return false;
-      }
-    }
-    uint8_t buffer[4096];
-    bool ok = true;
-    while (transferPermitted()) {
-      size_t count = 0;
-      bool available = false;
-      {
-        StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-            storageOwner(), StorageAccess::mutation, storageIoTimeout());
-        if (!lease) {
-          ok = false;
-          break;
-        }
-        available = input.available();
-        if (!available) break;
-        count = input.read(buffer, sizeof(buffer));
-        if (count == 0 || output.write(buffer, count) != count) ok = false;
-      }
-      if (!ok) {
-        ok = false;
-        break;
-      }
-    }
-    if (!transferPermitted()) ok = false;
-    const bool filesFinalized = finishCopiedFiles(input, output);
-    return ok && filesFinalized && transferPermitted();
-  }
-  closeStorageFile(input, StorageAccess::read);
-  if (!storageExists(target, StorageAccess::read) && !storageMkdir(target)) {
-    return false;
-  }
-  File sourceDirectory;
-  {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        storageOwner(), StorageAccess::read, storageIoTimeout());
-    if (!lease) return false;
-    sourceDirectory = fs_->open(source);
-    if (!sourceDirectory || !sourceDirectory.isDirectory()) {
-      if (sourceDirectory) sourceDirectory.close();
-      return false;
-    }
-  }
-  while (transferPermitted()) {
-    String full;
-    {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::read, storageIoTimeout());
-      if (!lease) {
-        closeStorageFile(sourceDirectory, StorageAccess::read);
-        return false;
-      }
-      File entry = sourceDirectory.openNextFile();
-      if (!entry) break;
-      full = entry.name();
-      entry.close();
-    }
-    const int slash = full.lastIndexOf('/');
-    const String name = slash < 0 ? full : full.substring(slash + 1);
-    if (!copyTree(source + "/" + name, target + "/" + name, depth + 1)) {
-      closeStorageFile(sourceDirectory, StorageAccess::read);
-      return false;
-    }
-  }
-  closeStorageFile(sourceDirectory, StorageAccess::read);
-  return transferPermitted();
-}
-
-bool PokePodLinkService::rewriteCopiedMetadata(const String &directory,
-                                               const String &id) {
-  const String capsulePath = directory + "/capsule.json";
-  const String processingPath = directory + "/processing.json";
-  cJSON *capsule = cJSON_Parse(readText(capsulePath, 8192).c_str());
-  cJSON *processing = cJSON_Parse(readText(processingPath, 8192).c_str());
-  if (capsule == nullptr || processing == nullptr) {
-    cJSON_Delete(capsule);
-    cJSON_Delete(processing);
-    return false;
-  }
-  replaceStringOrNull(capsule, "id", id.c_str());
-  replaceStringOrNull(capsule, "createdAt", board_->utcNow().c_str());
-  replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
-  cJSON_ReplaceItemInObjectCaseSensitive(capsule, "revision", cJSON_CreateNumber(1));
-  replaceStringOrNull(processing, "capsuleId", id.c_str());
-  cJSON *processingRevision = cJSON_GetObjectItemCaseSensitive(processing, "revision");
-  if (!cJSON_IsNumber(processingRevision)) {
-    cJSON_Delete(capsule);
-    cJSON_Delete(processing);
-    return false;
-  }
-  cJSON_SetNumberValue(processingRevision, processingRevision->valueint + 1);
-  const String capsuleValue = printed(capsule) + "\n";
-  const String processingValue = printed(processing) + "\n";
-  const bool ok = transaction_.commitTextPair(
-      id.c_str(), capsulePath, capsuleValue, processingPath, processingValue,
-      storageOwner());
-  cJSON_Delete(capsule);
-  cJSON_Delete(processing);
-  return ok;
 }
 
 String PokePodLinkService::newUuid() const {
@@ -2625,249 +3790,6 @@ String PokePodLinkService::powerDiagnosticsJson() const {
   const String result = printed(root);
   cJSON_Delete(root);
   return result;
-}
-
-bool PokePodLinkService::executeCommand(const String &path,
-                                        const String &transactionId,
-                                        String &message) {
-  const String source = readText(path, kMaxCommandJsonBytes);
-  cJSON *root = cJSON_ParseWithLength(source.c_str(), source.length());
-  bool success = false;
-  bool completedMaintenance = false;
-  if (root == nullptr || !cJSON_IsObject(root)) {
-    message = "command JSON is malformed";
-  } else if (jsonInt64(root, "schemaVersion") != 2 ||
-             !sameUuid(jsonString(root, "transactionId"), transactionId.c_str())) {
-    message = "command schema or transactionId is invalid";
-  } else {
-    const char *operation = jsonString(root, "operation");
-    if (operation == nullptr) {
-      message = "command operation is missing";
-    } else if (strcmp(operation, "rescan") == 0) {
-      success = library_->requestScan();
-      message = success ? "queued" : "rescan request failed";
-    } else {
-      // The maintenance lifecycle is persisted in the command result directory.
-      // Mutating commands are implemented by the shared capsule library below;
-      // unsupported high-level organization commands fail explicitly and never
-      // partially mutate the SD card.
-      const char *maintenanceId = jsonString(root, "maintenanceId");
-      if (strcmp(operation, "beginMaintenance") == 0) {
-        if (!isUuid(maintenanceId)) message = "invalid maintenanceId";
-        else if (!activeMaintenance_.isEmpty() && !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
-          message = "another maintenance session is active";
-        } else {
-          activeMaintenance_ = maintenanceId;
-          // A newly accepted transaction immediately invalidates the prior
-          // session's completed presentation, even if persisting this command
-          // result later fails.
-          maintenanceCompletion_.beginAccepted();
-          success = true;
-          message = "committed";
-        }
-      } else if (strcmp(operation, "endMaintenance") == 0) {
-        if (activeMaintenance_.isEmpty() || !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
-          message = "maintenance session does not own the device";
-        } else {
-          activeMaintenance_ = "";
-          success = true;
-          completedMaintenance = true;
-          message = "committed";
-        }
-      } else if (activeMaintenance_.isEmpty() ||
-                 !activeMaintenance_.equalsIgnoreCase(maintenanceId)) {
-        message = "maintenance session does not own the device";
-      } else {
-        std::vector<String> commandIds;
-        const bool hasIds = collectCommandIds(root, commandIds);
-        const char *id = hasIds && commandIds.size() == 1
-            ? commandIds[0].c_str() : nullptr;
-        if (strcmp(operation, "createFolder") == 0 ||
-            strcmp(operation, "renameFolder") == 0) {
-          success = folderOperation(root, operation, message);
-        } else if (strcmp(operation, "deleteFolderToInbox") == 0) {
-          if (!hasIds || !validateExpectedRevisions(
-                  root, commandIds, false, false, message)) {
-            success = false;
-          } else success = folderOperation(root, operation, message);
-        } else if ((strcmp(operation, "moveCapsules") == 0 ||
-                    strcmp(operation, "copyCapsules") == 0) && hasIds) {
-          success = moveOrCopy(root, strcmp(operation, "copyCapsules") == 0,
-                               commandIds, message);
-        } else if ((strcmp(operation, "deleteCapsules") == 0 ||
-                    strcmp(operation, "restoreCapsules") == 0 ||
-                    strcmp(operation, "purgeCapsules") == 0) && hasIds) {
-          success = trashOperation(root, operation, commandIds, message);
-        } else if ((strcmp(operation, "setFavorite") == 0 ||
-                    strcmp(operation, "addTags") == 0 ||
-                    strcmp(operation, "removeTags") == 0 ||
-                    strcmp(operation, "renameTag") == 0 ||
-                    strcmp(operation, "mergeTag") == 0 ||
-                    strcmp(operation, "deleteTag") == 0) && hasIds) {
-          if (commandIds.empty() && (strcmp(operation, "renameTag") == 0 ||
-                                     strcmp(operation, "mergeTag") == 0 ||
-                                     strcmp(operation, "deleteTag") == 0)) {
-            success = true;
-            message = "committed";
-          } else {
-            success = mutateFavoriteOrTags(root, operation, commandIds, message);
-          }
-        } else if (strcmp(operation, "requeueTranscription") == 0 && isUuid(id)) {
-          if (!validateExpectedRevisions(root, commandIds, true, false, message)) {
-            success = false;
-          } else {
-            const CapsuleSummary *record = library_->find(id);
-            if (record == nullptr || record->status != CapsuleStatus::failed) {
-              message = "only failed capsules can be requeued";
-            } else {
-              success = library_->requeue(id);
-              if (success) tencent_->wake();
-              message = success ? "committed" : "requeue failed";
-            }
-          }
-        } else if (strcmp(operation, "commitCorrection") == 0 && isUuid(id)) {
-          const CapsuleSummary *record = library_->find(id);
-          const char *stagedPath = jsonString(root, "stagedPath");
-          const String expectedStaged = ".staging/" + transactionId + "/" + id;
-          const String staged = String(kCapsuleRoot) + "/" +
-              (stagedPath == nullptr ? "" : stagedPath) + "/polished.md";
-          const String text = readText(staged, 1024 * 1024);
-          if (record == nullptr || stagedPath == nullptr ||
-              String(stagedPath) != expectedStaged || text.isEmpty()) {
-            message = "invalid staged correction";
-          } else {
-            const String processingPath = record->directory + "/processing.json";
-            const String polishedPath = record->directory + "/polished.md";
-            const String processingText = readText(processingPath, 8192);
-            cJSON *processing = cJSON_Parse(processingText.c_str());
-            if (processing == nullptr) message = "processing metadata is malformed";
-            else {
-              cJSON *revision = cJSON_GetObjectItemCaseSensitive(processing, "revision");
-              const int expected = static_cast<int>(jsonInt64(root, "expectedRevision"));
-              if (!cJSON_IsNumber(revision) || revision->valueint != expected) {
-                message = "processing revision conflict";
-              } else {
-                cJSON_SetNumberValue(revision, expected + 1);
-                cJSON_ReplaceItemInObjectCaseSensitive(processing, "status", cJSON_CreateString("ready"));
-                replaceStringOrNull(processing, "polishedTextFile", "polished.md");
-                replaceStringOrNull(processing, "errorStage", nullptr);
-                replaceStringOrNull(processing, "error", nullptr);
-                const String processingValue = printed(processing) + "\n";
-                success = transaction_.commitTextPair(
-                    transactionId.c_str(), polishedPath, text,
-                    processingPath, processingValue, storageOwner());
-                message = success ? "committed" : "correction commit failed";
-                if (success) {
-                  const String stagedDirectory = String(kCapsuleRoot) + "/" + expectedStaged;
-                  queueDeferredTreeCleanup(stagedDirectory);
-                }
-              }
-              cJSON_Delete(processing);
-            }
-          }
-        } else if (strcmp(operation, "commitFinalText") == 0 && isUuid(id)) {
-          const CapsuleSummary *record = library_->find(id);
-          const char *inlineText = jsonString(root, "finalText");
-          String text = inlineText == nullptr ? String() : String(inlineText);
-          const char *stagedPath = jsonString(root, "stagedPath");
-          const String expectedStaged = ".staging/" + transactionId + "/" + id;
-          const String stagedFinal = String(kCapsuleRoot) + "/" +
-              expectedStaged + "/final.md";
-          const bool stagedFinalExists = storageExists(
-              stagedFinal, StorageAccess::read);
-          if (inlineText == nullptr && stagedPath != nullptr &&
-              String(stagedPath) == expectedStaged) {
-            text = readText(stagedFinal, 1024 * 1024);
-          }
-          if (record == nullptr || (inlineText == nullptr && !stagedFinalExists)) {
-            message = "invalid final text command";
-          } else {
-            const String capsulePath = record->directory + "/capsule.json";
-            const String finalPath = record->directory + "/final.md";
-            cJSON *capsule = cJSON_Parse(readText(capsulePath, 8192).c_str());
-            cJSON *revision = capsule == nullptr ? nullptr :
-                cJSON_GetObjectItemCaseSensitive(capsule, "revision");
-            const int expected = static_cast<int>(jsonInt64(root, "expectedRevision"));
-            if (!cJSON_IsNumber(revision) || revision->valueint != expected) {
-              message = "capsule revision conflict";
-            } else {
-              cJSON_SetNumberValue(revision, expected + 1);
-              replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
-              const String capsuleValue = printed(capsule) + "\n";
-              success = transaction_.commitTextPair(
-                  transactionId.c_str(), finalPath, text,
-                  capsulePath, capsuleValue, storageOwner());
-              message = success ? "committed" : "final text commit failed";
-              if (success && stagedPath != nullptr) {
-                const String stagedDirectory = String(kCapsuleRoot) + "/" + expectedStaged;
-                queueDeferredTreeCleanup(stagedDirectory);
-              }
-            }
-            cJSON_Delete(capsule);
-          }
-        } else if (strcmp(operation, "commitImport") == 0 && isUuid(id)) {
-          const char *stagedPath = jsonString(root, "stagedPath");
-          const char *destination = jsonString(root, "destination");
-          const String staged = String(kCapsuleRoot) + "/" +
-              (stagedPath == nullptr ? "" : stagedPath);
-          const String targetFolder = folderDirectory(destination);
-          const String target = targetFolder + "/" + id;
-          const String capsuleText = readText(staged + "/capsule.json", 8192);
-          const String processingText = readText(staged + "/processing.json", 8192);
-          cJSON *capsule = cJSON_Parse(capsuleText.c_str());
-          cJSON *processing = cJSON_Parse(processingText.c_str());
-          const char *metadataId = capsule == nullptr ? nullptr : jsonString(capsule, "id");
-          const char *processingId = processing == nullptr ? nullptr :
-              jsonString(processing, "capsuleId");
-          const char *audioFile = processing == nullptr ? nullptr :
-              jsonString(processing, "audioFile");
-          const int64_t processingSchema = processing == nullptr ? -1 :
-              jsonInt64(processing, "schemaVersion");
-          const String expectedStaged = ".staging/" + transactionId + "/" + id;
-          if (stagedPath == nullptr || String(stagedPath) != expectedStaged ||
-              targetFolder.isEmpty() || !sameUuid(id, metadataId) ||
-              !sameUuid(id, processingId) ||
-              (processingSchema != 1 && processingSchema != 2) ||
-              !safeCapsuleFileName(audioFile) ||
-              !storageExists(staged + "/" + audioFile, StorageAccess::read) ||
-              !storageExists(targetFolder, StorageAccess::read) ||
-              storageExists(target, StorageAccess::read)) {
-            message = "invalid staged import";
-          } else {
-            success = storageRename(staged, target);
-            message = success ? "committed" : "import commit failed";
-            if (success) storageRmdir(parentPath(staged));
-          }
-          cJSON_Delete(capsule);
-          cJSON_Delete(processing);
-        } else {
-          message = "command operation is not supported by this firmware";
-        }
-      }
-    }
-  }
-
-  cJSON *result = cJSON_CreateObject();
-  cJSON_AddNumberToObject(result, "schemaVersion", 1);
-  cJSON_AddStringToObject(result, "commandId", transactionId.c_str());
-  cJSON_AddStringToObject(result, "transactionId", transactionId.c_str());
-  cJSON_AddBoolToObject(result, "ok", success);
-  cJSON_AddBoolToObject(result, "success", success);
-  cJSON_AddStringToObject(result, "message", message.c_str());
-  cJSON_AddStringToObject(result, "completedAt", board_->utcNow().c_str());
-  const String resultPath = String(kCapsuleSystem) + "/commands/results/" +
-      transactionId + ".json";
-  const bool persisted = writeTextAtomic(resultPath, printed(result) + "\n");
-  cJSON_Delete(result);
-  cJSON_Delete(root);
-  // executeCommand() runs under the Link mutation reservation. Queueing is
-  // intentionally accepted here; pollScan() starts only after that owner has
-  // released the reservation.
-  (void)library_->requestScan();
-  if (persisted && completedMaintenance) {
-    maintenanceCompletion_.endResultPersisted(transactionId.c_str());
-  }
-  return persisted;
 }
 
 bool PokePodLinkService::sendOk(uint32_t requestId, const char *extraJson) {
@@ -3287,12 +4209,19 @@ bool PokePodLinkService::ensureDirectoryTree(const String &path) {
 
 bool PokePodLinkService::storageExists(const String &path,
                                        StorageAccess access) const {
-  if (fs_ == nullptr || !transferPermitted()) return false;
+  if (fs_ == nullptr) return false;
+  const LinkCommandExecutor::Phase phase = batchExecutor_.phase();
+  const bool foreground = commandLoadState_ != CommandLoadState::none ||
+      phase == LinkCommandExecutor::Phase::preflight ||
+      phase == LinkCommandExecutor::Phase::apply ||
+      phase == LinkCommandExecutor::Phase::finalize;
+  if (foreground && !transferPermitted()) return false;
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       storageOwner(), access, storageIoTimeout());
   if (!lease) return false;
   const bool exists = fs_->exists(path);
-  return transferPermitted() && exists;
+  lease.release();
+  return (!foreground || transferPermitted()) && exists;
 }
 
 bool PokePodLinkService::storageRename(const String &source,
@@ -3427,64 +4356,6 @@ String PokePodLinkService::readText(const String &path, size_t limit) const {
   while (file.available()) value += static_cast<char>(file.read());
   file.close();
   return value;
-}
-
-bool PokePodLinkService::collectFiles(const String &directory,
-                                      const String &relative, uint8_t depth,
-                                      std::vector<String> &files) const {
-  if (!transferPermitted() || depth > 5 || files.size() >= 2048) return false;
-  File root;
-  {
-    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        storageOwner(), StorageAccess::read, storageIoTimeout());
-    if (!lease) return false;
-    root = fs_->open(directory);
-    if (!root || !root.isDirectory()) {
-      if (root) root.close();
-      return false;
-    }
-  }
-  while (transferPermitted()) {
-    String full;
-    bool isDirectory = false;
-    bool hasEntry = false;
-    {
-      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-          storageOwner(), StorageAccess::read, storageIoTimeout());
-      if (!lease) {
-        closeStorageFile(root, StorageAccess::read);
-        return false;
-      }
-      File entry = root.openNextFile();
-      hasEntry = static_cast<bool>(entry);
-      if (hasEntry) {
-        full = entry.name();
-        isDirectory = entry.isDirectory();
-        entry.close();
-      }
-    }
-    if (!hasEntry) break;
-    if (!transferPermitted()) {
-      closeStorageFile(root, StorageAccess::read);
-      return false;
-    }
-    const int slash = full.lastIndexOf('/');
-    const String name = slash >= 0 ? full.substring(slash + 1) : full;
-    const String childRelative = relative.isEmpty() ? name : relative + "/" + name;
-    if (isDirectory) {
-      if (!hiddenReadDenied(childRelative)) {
-        if (!collectFiles(directory + "/" + name, childRelative,
-                          depth + 1, files)) {
-          closeStorageFile(root, StorageAccess::read);
-          return false;
-        }
-      }
-    } else if (!hiddenReadDenied(childRelative)) {
-      files.push_back(childRelative);
-    }
-  }
-  closeStorageFile(root, StorageAccess::read);
-  return transferPermitted();
 }
 
 String PokePodLinkService::deviceId() const {

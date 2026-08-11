@@ -84,7 +84,7 @@ for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in record_body
 export_body = link[
     link.index("String PokePodLinkService::provisioningDiagnosticsJson") :
-    link.index("bool PokePodLinkService::executeCommand")
+    link.index("String PokePodLinkService::powerDiagnosticsJson")
 ]
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in export_body
@@ -111,7 +111,7 @@ for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in power_diagnostics
 power_export = link[
     link.index("String PokePodLinkService::powerDiagnosticsJson") :
-    link.index("bool PokePodLinkService::executeCommand")
+    link.index("bool PokePodLinkService::sendOk")
 ]
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in power_export

@@ -14,7 +14,6 @@ dashboard_source = (source / "Dashboard.cpp").read_text()
 
 assert "maintenanceCompletionRevision() const" in link_header
 assert 'strcmp(operation, "endMaintenance") == 0' in link_source
-assert "completedMaintenance = true;" in link_source
 assert "maintenanceCompletion_.endResultPersisted" in link_source
 assert "maintenanceCompletion_.resultFetched(transactionId, fullySent)" not in link_source
 assert (
@@ -32,12 +31,22 @@ assert file_final < finish_after_final
 assert finish_function < result_fetched < abort_function
 assert "maintenanceCompletion_.beginAccepted();" in link_source
 assert "beginResultPersisted" not in link_source
-begin_assignment = link_source.index("activeMaintenance_ = maintenanceId;")
+batch_result = link_source.index(
+    "void PokePodLinkService::applyBatchResultSideEffects()"
+)
+durable_side_effect = link_source.index(
+    "void PokePodLinkService::applyDurableCommandSideEffects("
+)
+begin_assignment = link_source.index("activeMaintenance_ = targetId;",
+                                     durable_side_effect)
 begin_revision = link_source.index(
     "maintenanceCompletion_.beginAccepted();", begin_assignment
 )
-begin_success = link_source.index("success = true;", begin_assignment)
-assert begin_assignment < begin_revision < begin_success
+assert batch_result < durable_side_effect < begin_assignment < begin_revision
+assert "if (!batchExecutor_.success()) return;" in link_source
+assert "!batchExecutor_.responseAllowed()) return" not in link_source
+assert "applyCompletedCommandSideEffects(root);" in link_source
+assert "if (persisted) applyBatchResultSideEffects();" in link_source
 assert "persisted && beganMaintenance" not in link_source
 assert "maintenanceCompletion_.disconnect();" in link_source
 assert "++maintenanceCompletionRevision_" not in link_source

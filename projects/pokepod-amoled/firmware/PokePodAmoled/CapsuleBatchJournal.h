@@ -11,6 +11,7 @@ namespace pokepod {
 constexpr uint32_t kCapsuleBatchJournalMagic = 0x324a4243U;  // CBJ2
 constexpr uint16_t kCapsuleBatchJournalVersion = 1;
 constexpr size_t kCapsuleBatchPathBytes = 224;
+constexpr size_t kCapsuleBatchFolderBytes = 162;
 
 enum class CapsuleBatchPhase : uint8_t {
   preflight = 1,
@@ -25,10 +26,12 @@ enum CapsuleBatchFlags : uint8_t {
   capsuleBatchResponseAllowed = 1U << 1,
   capsuleBatchRollbackFailed = 1U << 2,
   capsuleBatchItemInFlight = 1U << 3,
+  capsuleBatchFinalizeApplied = 1U << 4,
 };
 constexpr uint8_t kCapsuleBatchKnownFlags = capsuleBatchSuccess |
     capsuleBatchResponseAllowed | capsuleBatchRollbackFailed |
-    capsuleBatchItemInFlight;
+    capsuleBatchItemInFlight | capsuleBatchFinalizeApplied;
+constexpr uint8_t kCapsuleBatchKnownPlanFlags = 0x0fU;
 
 #pragma pack(push, 1)
 struct StoredCapsuleBatchState {
@@ -43,7 +46,8 @@ struct StoredCapsuleBatchState {
   uint16_t applied = 0;
   CapsuleBatchPhase phase = CapsuleBatchPhase::preflight;
   uint8_t flags = capsuleBatchResponseAllowed;
-  uint8_t reserved[13] = {};
+  char finalizeFolder[kCapsuleBatchFolderBytes] = {};
+  uint8_t reserved[3] = {};
   uint32_t crc32 = 0;
 };
 
@@ -76,6 +80,7 @@ inline bool capsuleBatchBoundedString(const char *value, size_t capacity);
 inline bool capsuleBatchUuid(const char *value);
 inline bool capsuleBatchOperation(const char *value);
 inline bool capsuleBatchCapsulePath(const char *value, bool allowTrash);
+inline bool capsuleBatchFolderPath(const char *value);
 
 inline bool validCapsuleBatchState(const StoredCapsuleBatchState &state) {
   const uint8_t phase = static_cast<uint8_t>(state.phase);
@@ -96,6 +101,10 @@ inline bool validCapsuleBatchState(const StoredCapsuleBatchState &state) {
       cursorInvariant && (state.flags & ~kCapsuleBatchKnownFlags) == 0 &&
       capsuleBatchUuid(state.transactionId) &&
       capsuleBatchOperation(state.operation) &&
+      ((strcmp(state.operation, "deleteFolderToInbox") == 0 &&
+        capsuleBatchFolderPath(state.finalizeFolder)) ||
+       (strcmp(state.operation, "deleteFolderToInbox") != 0 &&
+        state.finalizeFolder[0] == '\0')) &&
       state.crc32 == capsuleBatchJournalCrc(
           &state, offsetof(StoredCapsuleBatchState, crc32));
 }
@@ -133,11 +142,70 @@ inline bool capsuleBatchOperation(const char *value) {
       "setFavorite", "addTags", "removeTags", "renameTag", "mergeTag",
       "deleteTag", "moveCapsules", "copyCapsules", "deleteCapsules",
       "restoreCapsules", "purgeCapsules", "deleteFolderToInbox",
+      "beginMaintenance", "endMaintenance", "createFolder",
+      "renameFolder", "requeueTranscription", "commitImport", "rescan",
   };
   for (const char *operation : allowed) {
     if (strcmp(value, operation) == 0) return true;
   }
   return false;
+}
+
+inline bool capsuleBatchSimpleOperation(const char *value) {
+  return value != nullptr &&
+      (strcmp(value, "beginMaintenance") == 0 ||
+       strcmp(value, "endMaintenance") == 0 ||
+       strcmp(value, "createFolder") == 0 ||
+       strcmp(value, "renameFolder") == 0 ||
+       strcmp(value, "requeueTranscription") == 0 ||
+       strcmp(value, "commitImport") == 0 ||
+       strcmp(value, "rescan") == 0);
+}
+
+inline bool capsuleBatchAbsoluteFolderPath(const char *value) {
+  if (value == nullptr || strncmp(value, "/PokeCapsule/", 13) != 0) {
+    return false;
+  }
+  return capsuleBatchFolderPath(value + 13);
+}
+
+inline bool capsuleBatchStagedCapsulePath(const char *value) {
+  static constexpr const char *prefix = "/PokeCapsule/.staging/";
+  if (value == nullptr || strncmp(value, prefix, strlen(prefix)) != 0) {
+    return false;
+  }
+  const char *transaction = value + strlen(prefix);
+  const char *slash = strchr(transaction, '/');
+  if (slash == nullptr || slash - transaction != 36 ||
+      strchr(slash + 1, '/') != nullptr || !capsuleBatchUuid(slash + 1)) {
+    return false;
+  }
+  char transactionId[37];
+  memcpy(transactionId, transaction, 36);
+  transactionId[36] = '\0';
+  return capsuleBatchUuid(transactionId);
+}
+
+inline bool capsuleBatchFolderPath(const char *value) {
+  if (!capsuleBatchBoundedString(value, kCapsuleBatchFolderBytes) ||
+      value[0] == '.' || value[0] == '/' ||
+      value[strlen(value) - 1] == '/') return false;
+  uint8_t segments = 1;
+  size_t segmentBytes = 0;
+  for (const unsigned char *cursor =
+           reinterpret_cast<const unsigned char *>(value); ; ++cursor) {
+    const unsigned char c = *cursor;
+    if (c == '\0') return segmentBytes > 0;
+    if (c == '\\' || c < 0x20) return false;
+    if (c == '/') {
+      if (segmentBytes == 0 || ++segments > 2 || cursor[1] == '.') {
+        return false;
+      }
+      segmentBytes = 0;
+    } else {
+      ++segmentBytes;
+    }
+  }
 }
 
 inline bool capsuleBatchCapsulePath(const char *value, bool allowTrash) {
@@ -186,6 +254,7 @@ inline bool validCapsuleBatchPlan(const StoredCapsuleBatchPlan &plan,
                                   const char *operation = nullptr) {
   if (!capsuleBatchUuid(plan.id) ||
       (plan.targetId[0] != '\0' && !capsuleBatchUuid(plan.targetId)) ||
+      (plan.flags & ~kCapsuleBatchKnownPlanFlags) != 0 ||
       (operation != nullptr && !capsuleBatchOperation(operation)) ||
       plan.crc32 != capsuleBatchJournalCrc(
           &plan, offsetof(StoredCapsuleBatchPlan, crc32))) return false;
@@ -193,6 +262,32 @@ inline bool validCapsuleBatchPlan(const StoredCapsuleBatchPlan &plan,
     return capsuleBatchCapsulePath(plan.source, true) &&
         (plan.target[0] == '\0' ||
          capsuleBatchCapsulePath(plan.target, true));
+  }
+  if (strcmp(operation, "beginMaintenance") == 0 ||
+      strcmp(operation, "endMaintenance") == 0) {
+    return (plan.source[0] == '\0' || capsuleBatchUuid(plan.source)) &&
+        capsuleBatchUuid(plan.targetId) && plan.target[0] == '\0' &&
+        plan.flags == 0;
+  }
+  if (strcmp(operation, "rescan") == 0) {
+    return plan.source[0] == '\0' && plan.target[0] == '\0' &&
+        capsuleBatchUuid(plan.targetId) && plan.flags == 0;
+  }
+  if (strcmp(operation, "createFolder") == 0) {
+    return capsuleBatchAbsoluteFolderPath(plan.source) &&
+        plan.target[0] == '\0' && plan.flags == 0;
+  }
+  if (strcmp(operation, "renameFolder") == 0) {
+    return capsuleBatchAbsoluteFolderPath(plan.source) &&
+        capsuleBatchAbsoluteFolderPath(plan.target) && plan.flags == 0;
+  }
+  if (strcmp(operation, "requeueTranscription") == 0) {
+    return capsuleBatchActivePath(plan.source) && plan.target[0] == '\0' &&
+        (plan.flags & ~0x08U) == 0;
+  }
+  if (strcmp(operation, "commitImport") == 0) {
+    return capsuleBatchStagedCapsulePath(plan.source) &&
+        capsuleBatchActivePath(plan.target) && plan.flags == 0;
   }
   const bool metadata = strcmp(operation, "setFavorite") == 0 ||
       strcmp(operation, "addTags") == 0 ||
@@ -258,6 +353,13 @@ inline void prepareCapsuleBatchRecovery(StoredCapsuleBatchState &state) {
   state.flags &= ~capsuleBatchItemInFlight;
   state.flags &= ~capsuleBatchSuccess;
   if (state.phase == CapsuleBatchPhase::apply) {
+    // A finalize checkpoint is distinguishable from an ordinary apply: all
+    // items are already durable and the cursor is at total.  The atomic folder
+    // rename may therefore have happened even when its post-checkpoint did
+    // not.  Recovery must conservatively restore it before item rollback.
+    if (state.cursor == state.total && state.applied == state.total) {
+      state.flags |= capsuleBatchFinalizeApplied;
+    }
     const uint16_t uncertain = state.cursor < state.total
         ? static_cast<uint16_t>(state.cursor + 1) : state.total;
     if (state.applied < uncertain) state.applied = uncertain;

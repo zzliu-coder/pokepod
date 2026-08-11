@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <mbedtls/sha256.h>
+#include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "LinkFrame.h"
@@ -11,10 +13,13 @@
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
+#include "LinkCommandExecutor.h"
+#include "LinkTreeStepper.h"
 #include "LinkTransferGate.h"
 #include "LinkTransferStepper.h"
 #include "MaintenanceCompletionTracker.h"
 #include "CapsuleTransaction.h"
+#include "CapsuleBatchJournalStore.h"
 #include "CapabilityRegistry.h"
 #include "DeferredFileCleanup.h"
 #include "StorageCoordinator.h"
@@ -66,6 +71,11 @@ class PokePodLinkService {
   // it before authentication and while its five-minute window is closed.
   void pollDeferredCleanup();
   void disconnect();
+  // Safe shutdown closes the transport immediately, then lets durable
+  // rollback and owner-scoped handle cleanup advance cooperatively.  No new
+  // frame is accepted after this point.
+  void requestQuiesce();
+  bool quiesced() const;
   bool active() const { return sessionActive_; }
   bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
@@ -89,7 +99,46 @@ class PokePodLinkService {
     fileData,
     fileFinal,
   };
-  enum class TransactionPurpose : uint8_t { none, startupRecovery, incoming };
+  enum class TransactionPurpose : uint8_t {
+    none, startupRecovery, incoming, commandText, commandTextResult,
+    commandFailureResult
+  };
+  enum class BatchPending : uint8_t {
+    none,
+    backupCapsule,
+    backupTrash,
+    backupProcessing,
+    applyTree,
+    applyMetadata,
+    applyPath,
+    rollbackTree,
+    rollbackMetadata,
+    finalizeFolder,
+    persistResult,
+    cleanupTree,
+    cleanupArtifacts,
+  };
+  enum class BatchStart : uint8_t { notApplicable, started, rejected };
+  enum class CommandLoadState : uint8_t { none, reading, dispatch };
+
+  class StringByteSource final : public CapsuleTransactionByteSource {
+   public:
+    void bind(const String &value) { value_ = &value; }
+    uint32_t length() const override {
+      return value_ == nullptr ? 0 : value_->length();
+    }
+    size_t readAt(uint32_t offset, uint8_t *destination,
+                  size_t maximumBytes) override {
+      if (value_ == nullptr || destination == nullptr ||
+          offset >= value_->length()) return 0;
+      const size_t count = std::min(
+          maximumBytes, static_cast<size_t>(value_->length() - offset));
+      memcpy(destination, value_->c_str() + offset, count);
+      return count;
+    }
+   private:
+    const String *value_ = nullptr;
+  };
 
   struct ManifestDirectoryCursor {
     File directory;
@@ -106,6 +155,9 @@ class PokePodLinkService {
                    const uint8_t *payload, size_t size);
   void finishIncoming();
   void advanceTransactionRunner();
+  void advanceBatchStartupRecovery();
+  bool startBatchStartupRecovery(const String &transactionId);
+  void quarantineBatchJournal(const String &transactionId);
   void advanceStartupPartCleanup();
   void finishStartupRecovery(bool recovered);
   void finishIncomingTransaction(bool committed);
@@ -130,8 +182,55 @@ class PokePodLinkService {
   void handleConfigure(uint32_t requestId, void *jsonRoot);
   void handleCommandFile(uint32_t requestId, const String &path,
                          const String &transactionId);
-  bool executeCommand(const String &path, const String &transactionId,
+  bool beginCommandLoad(uint32_t requestId, const String &path,
+                        const String &transactionId,
+                        bool alreadyComplete = false);
+  void advanceCommandLoad();
+  void finishCommandLoad(bool keepCommand);
+  void dispatchLoadedCommand();
+  BatchStart tryStartBatchCommand(uint32_t requestId, void *jsonRoot,
+                                  const String &path,
+                                  const String &transactionId);
+  bool tryStartTextCommand(uint32_t requestId, void *jsonRoot,
+                           const String &path,
+                           const String &transactionId);
+  void finishTextCommand(bool committed);
+  void finishTextResult(bool persisted);
+  bool startCommandFailureResult(uint32_t requestId, const String &path,
+                                 const String &transactionId,
+                                 const char *message);
+  void finishCommandFailureResult(bool persisted);
+  void applyCompletedCommandSideEffects(void *jsonRoot);
+  void applyDurableCommandSideEffects(const char *operation,
+                                      const char *targetId);
+  void advanceBatchCommand();
+  void advanceBatchPending();
+  bool startBatchWork(const LinkCommandExecutor::Work &work);
+  bool startBatchPreflight(size_t index);
+  bool startBatchApply(size_t index);
+  bool startBatchRollback(size_t index);
+  bool startBatchFinalize();
+  bool startBatchRollbackFinalize();
+  void finishBatchWork(bool ok);
+  bool buildBatchPlan(size_t index, StoredCapsuleBatchPlan &plan,
                       String &message);
+  bool rememberBatchId(const char *uuid);
+  bool buildSimpleBatchPlan(void *jsonRoot, StoredCapsuleBatchPlan &plan,
+                            String &message);
+  bool startBatchMetadataCommit(const StoredCapsuleBatchPlan &plan,
+                                bool rollback);
+  bool buildBatchMetadata(const StoredCapsuleBatchPlan &plan,
+                          String &value, String &message);
+  bool startBatchResultPersistence();
+  void applyBatchResultSideEffects();
+  bool cleanupBatchArtifacts();
+  void finishBatchCommand();
+  void abandonBatchCommand();
+  bool batchForegroundPermitted() const;
+  String batchArtifactPath(size_t index, const char *suffix) const;
+  String batchPurgePath(const StoredCapsuleBatchPlan &plan) const;
+  String batchFolderStagingPath() const;
+  void updateBatchJournalState(bool itemInFlight);
 
   bool sendOk(uint32_t requestId, const char *extraJson = nullptr);
   void sendBusy(uint32_t requestId, uint32_t retryAfterMs = 150);
@@ -167,8 +266,6 @@ class PokePodLinkService {
   bool writeTextAtomic(const String &path, const String &text);
   bool validFontFile(const String &path) const;
   String readText(const String &path, size_t limit) const;
-  bool collectFiles(const String &directory, const String &relative,
-                    uint8_t depth, std::vector<String> &files) const;
   String deviceId() const;
   bool foregroundBusy() const;
   bool acquireRequestLease(uint32_t requestId);
@@ -176,25 +273,9 @@ class PokePodLinkService {
   bool safeFolder(const char *value, bool allowBuiltIn = true) const;
   String folderDirectory(const char *value) const;
   String activeCapsuleDirectory(const String &id) const;
-  bool collectCommandIds(void *jsonRoot, std::vector<String> &ids) const;
-  bool validateExpectedRevisions(void *jsonRoot,
-                                 const std::vector<String> &ids,
-                                 bool processing, bool trash,
-                                 String &message) const;
-  bool touchCapsule(const String &directory);
-  bool mutateFavoriteOrTags(void *jsonRoot, const char *operation,
-                            const std::vector<String> &ids, String &message);
-  bool moveOrCopy(void *jsonRoot, bool copy,
-                  const std::vector<String> &ids, String &message);
-  bool trashOperation(void *jsonRoot, const char *operation,
-                      const std::vector<String> &ids, String &message);
-  bool folderOperation(void *jsonRoot, const char *operation,
-                       String &message);
   bool cleanupPurgeStaging();
   void queueDeferredTreeCleanup(const String &path);
   bool stepDeferredTreeCleanup();
-  bool removeTree(const String &path);
-  bool copyTree(const String &source, const String &target, uint8_t depth = 0);
   bool storageExists(const String &path, StorageAccess access) const;
   bool storageRename(const String &source, const String &target);
   bool storageRemove(const String &path);
@@ -206,7 +287,6 @@ class PokePodLinkService {
                         bool flushBeforeClose = false) const;
   bool stepDeferredFileCleanup();
   void finishCommandStorageCleanup();
-  bool rewriteCopiedMetadata(const String &directory, const String &id);
   String newUuid() const;
   String provisioningDiagnosticsJson() const;
   String powerDiagnosticsJson() const;
@@ -251,12 +331,31 @@ class PokePodLinkService {
   String transactionFinalPath_;
   String transactionId_;
   bool transactionRespond_ = false;
+  String commandTextPath_;
+  String commandTextTransactionId_;
+  String commandTextStagingDirectory_;
+  String commandTextValue_;
+  String commandTextMetadataValue_;
+  StringByteSource commandTextSource_;
+  StringByteSource commandTextMetadataSource_;
+  uint32_t commandTextRequestId_ = 0;
+  bool commandTextRespond_ = false;
   StorageReservation startupPartCleanupReservation_;
   uint8_t startupPartCleanupIndex_ = 0;
   uint8_t startupPartCleanupFailures_ = 0;
   bool startupPartCleanupPending_ = false;
+  File startupPurgeDirectory_;
+  StorageReservation startupPurgeReservation_;
+  bool startupPurgePending_ = false;
+  bool startupBatchRecoveryPending_ = false;
+  File startupBatchDirectory_;
+  StorageReservation startupBatchReservation_;
+  String startupBatchCandidate_;
+  uint8_t startupBatchCandidateFailures_ = 0;
   bool startupReady_ = false;
   bool startupRecoveryFailed_ = false;
+  bool startupBatchCandidateInvalid_ = false;
+  bool mutationRecoveryBlocked_ = false;
   StorageReservation incomingStorageReservation_;
   DeferredFileCleanup incomingCleanup_;
   bool incomingCleanupPending_ = false;
@@ -265,8 +364,39 @@ class PokePodLinkService {
   String incomingCleanupMessage_;
   bool commandStorageActive_ = false;
   StorageReservation commandStorageReservation_;
+  CommandLoadState commandLoadState_ = CommandLoadState::none;
+  File commandLoadFile_;
+  String commandLoadValue_;
+  String commandLoadPath_;
+  String commandLoadTransactionId_;
+  uint32_t commandLoadRequestId_ = 0;
+  uint32_t commandLoadExpected_ = 0;
+  bool commandLoadRespond_ = false;
+  bool commandLoadAlreadyComplete_ = false;
   bool commandCleanupPending_ = false;
   uint32_t commandCleanupRequestId_ = 0;
+  LinkCommandExecutor batchExecutor_;
+  CapsuleBatchJournalStore batchJournalStore_;
+  LinkTreeStepper batchTreeStepper_;
+  StoredCapsuleBatchState batchJournalState_{};
+  StoredCapsuleBatchPlan batchPlan_{};
+  void *batchJsonRoot_ = nullptr;
+  LinkCommandExecutor::Work batchWork_{};
+  BatchPending batchPending_ = BatchPending::none;
+  uint8_t batchPendingStep_ = 0;
+  size_t batchCleanupIndex_ = 0;
+  uint32_t batchRequestId_ = 0;
+  String batchCommandPath_;
+  String batchTransactionId_;
+  String batchMetadataValue_;
+  String batchMetadataSecondValue_;
+  String batchResultValue_;
+  String batchMessage_;
+  void *batchNextIdItem_ = nullptr;
+  size_t batchNextIdIndex_ = 0;
+  uint8_t *batchSeenIds_ = nullptr;
+  StringByteSource batchByteSource_;
+  StringByteSource batchSecondByteSource_;
   bool linkOwnedRecording_ = false;
   LinkRecordingStop linkRecordingStop_;
 
@@ -285,6 +415,7 @@ class PokePodLinkService {
   uint8_t magicMatched_ = 0;
   bool frameProcessedThisPoll_ = false;
   bool sessionActive_ = false;
+  bool quiesceRequested_ = false;
   LinkRequestHistory completed_;
 
   IncomingKind incomingKind_ = IncomingKind::none;
@@ -340,6 +471,8 @@ class PokePodLinkService {
   mutable std::vector<DeferredCommandFile> deferredCommandFiles_;
   bool deferredCommandFileFailed_ = false;
   std::vector<String> deferredTreeCleanupStack_;
+  uint8_t deferredTreeCleanupFailures_ = 0;
+  bool deferredTreeCleanupBlocked_ = false;
 };
 
 }  // namespace pokepod

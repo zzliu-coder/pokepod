@@ -18,13 +18,14 @@ def methods(source: str):
 
 direct_fs_allowed = {
     "beginIncoming",
+    "beginCommandLoad",
+    "advanceCommandLoad",
+    "advanceBatchStartupRecovery",
     "advanceStartupPartCleanup",
     "advanceManifestScan",
     "advanceManifestFile",
     "cleanupPurgeStaging",
     "stepDeferredTreeCleanup",
-    "removeTree",
-    "copyTree",
     "sendFile",
     "storageExists",
     "storageRename",
@@ -33,7 +34,6 @@ direct_fs_allowed = {
     "storageRmdir",
     "validFontFile",
     "readText",
-    "collectFiles",
 }
 
 for name, text in methods(CPP):
@@ -50,14 +50,15 @@ assert "storageIoTimeout()" in exists
 assert "1000" not in exists
 assert exists.count("transferPermitted()") >= 2
 
-for name in ("handleImmediate", "folderOperation", "executeCommand"):
+for name in ("handleImmediate",):
     text = dict(methods(CPP))[name]
     assert "fs_->" not in text, f"command path bypasses storage helper: {name}"
+assert "PokePodLinkService::executeCommand" not in CPP
 
-copy = dict(methods(CPP))["copyTree"]
-assert "finishCopiedFiles(input, output)" in copy
-assert "filesFinalized" in copy
-assert "return ok && filesFinalized" in copy
+loader = dict(methods(CPP))["advanceCommandLoad"]
+assert "kCommandReadBytesPerPoll" in loader
+assert "StorageAccess::read, 0" in loader
+assert "transferPermitted()" in loader
 
 deferred = dict(methods(CPP))["deferStorageFile"]
 assert "storageOwner()" in deferred
