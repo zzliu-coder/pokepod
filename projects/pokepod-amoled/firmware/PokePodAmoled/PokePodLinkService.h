@@ -14,6 +14,7 @@
 #include "MaintenanceCompletionTracker.h"
 #include "CapsuleTransaction.h"
 #include "CapabilityRegistry.h"
+#include "DeferredFileCleanup.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
@@ -102,6 +103,8 @@ class PokePodLinkService {
                    const uint8_t *payload, size_t size);
   void finishIncoming();
   void failIncoming(const char *message);
+  bool cleanupIncomingStorage();
+  void finishIncomingCleanup();
 
   void handleImmediate(uint32_t requestId, void *jsonRoot);
   void handleRead(uint32_t requestId, void *jsonRoot);
@@ -138,6 +141,8 @@ class PokePodLinkService {
   void advanceTransmit(uint32_t nowMs);
   void queueNextFileChunk();
   void finishOutgoingFile(bool success);
+  bool cleanupOutgoingStorage();
+  void finishOutgoingCleanup();
   void abortOutgoing();
   void onFrameSent(TxCompletion completion);
   void releaseRequestLeaseNow();
@@ -215,6 +220,11 @@ class PokePodLinkService {
   bool releaseRequestLeaseWhenTxDrained_ = false;
   CapsuleTransaction transaction_;
   StorageReservation incomingStorageReservation_;
+  DeferredFileCleanup incomingCleanup_;
+  bool incomingCleanupPending_ = false;
+  bool incomingCleanupRespond_ = false;
+  uint32_t incomingCleanupRequestId_ = 0;
+  String incomingCleanupMessage_;
   bool commandStorageActive_ = false;
   bool linkOwnedRecording_ = false;
 
@@ -261,6 +271,9 @@ class PokePodLinkService {
   File outgoingFile_;
   String outgoingResultTransactionId_;
   StorageReservation outgoingStorageReservation_;
+  DeferredFileCleanup outgoingCleanup_;
+  bool outgoingCleanupPending_ = false;
+  bool outgoingCleanupSuccess_ = false;
 
   LinkManifestStepper manifestStepper_;
   std::vector<ManifestDirectoryCursor> manifestDirectories_;
