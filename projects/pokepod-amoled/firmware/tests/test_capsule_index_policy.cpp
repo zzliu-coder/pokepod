@@ -32,7 +32,8 @@ CapsuleLocator makeLocator(size_t ordinal) {
 
 int main() {
   static_assert(kCapsuleLocatorCapacity >= 320);
-  static_assert(sizeof(CapsuleLocator) < 1280);
+  static_assert(sizeof(CapsuleLocator) <= 160);
+  static_assert(sizeof(CapsuleLocator) * kCapsuleLocatorCapacity <= 80 * 1024);
 
   std::vector<CapsuleLocator> locators;
   locators.reserve(320);
@@ -69,17 +70,26 @@ int main() {
 
   CapsuleLocator damaged = makeLocator(400);
   damaged.flags |= locatorDamaged | locatorReadOnly;
-  std::strcpy(damaged.audioFile, "audio.wav");
+  damaged.audioKind = static_cast<uint8_t>(CapsuleAudioKind::wav);
   assert(capsuleLocatorHasFlag(damaged, locatorDamaged));
   assert(capsuleLocatorHasFlag(damaged, locatorReadOnly));
-  assert(std::strcmp(damaged.audioFile, "audio.wav") == 0);
+  assert(static_cast<CapsuleAudioKind>(damaged.audioKind) ==
+         CapsuleAudioKind::wav);
   assert(capsuleLocatorVisible(damaged, CapsuleScope::inbox));
 
   CapsuleLocator future = makeLocator(401);
-  future.processingSchemaVersion = 99;
   future.flags |= locatorReadOnly;
   assert(capsuleLocatorHasFlag(future, locatorReadOnly));
   assert(capsuleLocatorVisible(future, CapsuleScope::inbox));
+
+  const char *path =
+      "/PokeCapsule/Projects/Notes/"
+      "00000000-0000-4000-8000-000000000401";
+  future.directoryHash = capsuleDirectoryHash(path);
+  future.storageArea = static_cast<uint8_t>(CapsuleStorageArea::custom);
+  assert(future.directoryHash == capsuleDirectoryHash(path));
+  assert(future.directoryHash != capsuleDirectoryHash(
+      "/PokeCapsule/Inbox/00000000-0000-4000-8000-000000000401"));
   std::printf("PASS capsule_index_policy (320 fixtures, locator=%zu bytes, "
               "index=%zu bytes)\n",
               sizeof(CapsuleLocator),

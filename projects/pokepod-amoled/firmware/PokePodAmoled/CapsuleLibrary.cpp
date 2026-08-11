@@ -718,8 +718,12 @@ bool CapsuleLibrary::refreshExisting(const String &id) {
     ++refreshFallbackCount_;
     return scan();
   }
-  const String directory = locators_[index].directory;
-  const String folder = locators_[index].folder;
+  String directory;
+  String folder;
+  if (!resolveLocator(locators_[index], directory, folder)) {
+    ++refreshFallbackCount_;
+    return scan() && find(id) != nullptr;
+  }
   return refreshRecord(id, directory, folder);
 }
 
@@ -756,24 +760,25 @@ void CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
                                    CapsuleLocator &locator) const {
   locator = CapsuleLocator();
   copyFixed(locator.id, record.id);
-  copyFixed(locator.directory, record.directory);
-  copyFixed(locator.folder, record.folder);
-  copyFixed(locator.title, record.title);
   copyFixed(locator.createdAt, record.createdAt);
-  copyFixed(locator.updatedAt, record.updatedAt);
-  copyFixed(locator.audioFile, record.audioFile);
-  copyFixed(locator.audioFormat, record.audioFormat);
-  copyFixed(locator.errorStage, record.errorStage);
-  copyFixed(locator.error, record.error);
-  locator.capsuleSchemaVersion = record.capsuleSchemaVersion;
-  locator.processingSchemaVersion = record.processingSchemaVersion;
-  locator.revision = record.revision;
-  locator.processingRevision = record.processingRevision;
-  locator.durationMs = record.durationMs;
-  locator.sampleRateHz = record.sampleRateHz;
-  locator.channels = record.channels;
-  locator.bitsPerSample = record.bitsPerSample;
+  locator.directoryHash = capsuleDirectoryHash(record.directory.c_str());
   locator.status = static_cast<uint8_t>(record.status);
+  if (record.folder == "Inbox" || record.folder.startsWith("Inbox/")) {
+    locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::inbox);
+  } else if (record.archived) {
+    locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::archive);
+  } else if (record.trashed) {
+    locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::trash);
+  } else {
+    locator.storageArea = static_cast<uint8_t>(CapsuleStorageArea::custom);
+  }
+  if (record.audioFile == "audio.wav") {
+    locator.audioKind = static_cast<uint8_t>(CapsuleAudioKind::wav);
+  } else if (record.audioFile == "audio.m4a") {
+    locator.audioKind = static_cast<uint8_t>(CapsuleAudioKind::m4a);
+  } else if (!record.audioFile.isEmpty()) {
+    locator.audioKind = static_cast<uint8_t>(CapsuleAudioKind::other);
+  }
   if (record.favorite) locator.flags |= locatorFavorite;
   if (record.archived) locator.flags |= locatorArchived;
   if (record.trashed) locator.flags |= locatorTrashed;
@@ -786,32 +791,98 @@ void CapsuleLibrary::copyToLocator(const CapsuleSummary &record,
   if (record.status == CapsuleStatus::damaged) locator.flags |= locatorDamaged;
 }
 
-void CapsuleLibrary::copyFromLocator(const CapsuleLocator &locator,
-                                     CapsuleSummary &record) const {
-  record.id = locator.id;
-  record.directory = locator.directory;
-  record.folder = locator.folder;
-  record.title = locator.title;
-  record.createdAt = locator.createdAt;
-  record.updatedAt = locator.updatedAt;
-  record.preview = "";
-  record.audioFile = locator.audioFile;
-  record.audioFormat = locator.audioFormat;
-  record.errorStage = locator.errorStage;
-  record.error = locator.error;
-  record.capsuleSchemaVersion = locator.capsuleSchemaVersion;
-  record.processingSchemaVersion = locator.processingSchemaVersion;
-  record.revision = locator.revision;
-  record.processingRevision = locator.processingRevision;
-  record.durationMs = locator.durationMs;
-  record.sampleRateHz = locator.sampleRateHz;
-  record.channels = locator.channels;
-  record.bitsPerSample = locator.bitsPerSample;
-  record.status = static_cast<CapsuleStatus>(locator.status);
-  record.favorite = capsuleLocatorHasFlag(locator, locatorFavorite);
-  record.archived = capsuleLocatorHasFlag(locator, locatorArchived);
-  record.trashed = capsuleLocatorHasFlag(locator, locatorTrashed);
-  record.readOnly = capsuleLocatorHasFlag(locator, locatorReadOnly);
+bool CapsuleLibrary::findLocatorInFolder(
+    const String &path, const String &folder, uint8_t depth,
+    const CapsuleLocator &locator, String &directory,
+    String &resolvedFolder) const {
+  const String direct = path + "/" + locator.id;
+  if (capsuleDirectoryHash(direct.c_str()) == locator.directoryHash) {
+    File candidate = fs_->open(direct);
+    const bool found = candidate && candidate.isDirectory();
+    if (candidate) candidate.close();
+    if (found) {
+      directory = direct;
+      resolvedFolder = folder;
+      return true;
+    }
+  }
+  File parent = fs_->open(path);
+  if (!parent || !parent.isDirectory()) return false;
+  File entry = parent.openNextFile();
+  while (entry) {
+    const String fullName = entry.name();
+    const bool isDirectory = entry.isDirectory();
+    entry.close();
+    const int slash = fullName.lastIndexOf('/');
+    const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
+    if (isDirectory && !isUuid(name.c_str()) && depth < 2 &&
+        !name.startsWith(".")) {
+      const String nestedFolder = folder.isEmpty() ? name : folder + "/" + name;
+      if (findLocatorInFolder(path + "/" + name, nestedFolder, depth + 1,
+                              locator, directory, resolvedFolder)) {
+        parent.close();
+        return true;
+      }
+    }
+    entry = parent.openNextFile();
+  }
+  parent.close();
+  return false;
+}
+
+bool CapsuleLibrary::resolveLocator(const CapsuleLocator &locator,
+                                    String &directory,
+                                    String &folder) const {
+  if (fs_ == nullptr || !isUuid(locator.id)) return false;
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      StorageOwner::capsuleTransaction, StorageAccess::read, 1000);
+  if (!lease) return false;
+
+  const CapsuleStorageArea area =
+      static_cast<CapsuleStorageArea>(locator.storageArea);
+  if (area == CapsuleStorageArea::inbox) {
+    return findLocatorInFolder(kCapsuleInbox, "Inbox", 0, locator,
+                               directory, folder);
+  }
+  if (area == CapsuleStorageArea::archive) {
+    return findLocatorInFolder(kCapsuleArchive, "Archive", 0, locator,
+                               directory, folder);
+  }
+  if (area == CapsuleStorageArea::trash) {
+    return findLocatorInFolder(kCapsuleTrash, ".trash", 0, locator,
+                               directory, folder);
+  }
+  if (area != CapsuleStorageArea::custom) return false;
+
+  File root = fs_->open(kCapsuleRoot);
+  if (!root || !root.isDirectory()) return false;
+  File entry = root.openNextFile();
+  while (entry) {
+    const String fullName = entry.name();
+    const bool isDirectory = entry.isDirectory();
+    entry.close();
+    const int slash = fullName.lastIndexOf('/');
+    const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
+    if (isDirectory && !name.startsWith(".") && name != "Inbox" &&
+        name != "Archive" &&
+        findLocatorInFolder(String(kCapsuleRoot) + "/" + name, name, 1,
+                            locator, directory, folder)) {
+      root.close();
+      return true;
+    }
+    entry = root.openNextFile();
+  }
+  root.close();
+  return false;
+}
+
+bool CapsuleLibrary::hydrateLocator(const CapsuleLocator &locator,
+                                    CapsuleSummary &record) const {
+  String directory;
+  String folder;
+  return resolveLocator(locator, directory, folder) &&
+      readRecord(directory, folder, record) &&
+      record.id.equalsIgnoreCase(locator.id);
 }
 
 const CapsuleSummary *CapsuleLibrary::cachedRecord(
@@ -835,7 +906,12 @@ const CapsuleSummary *CapsuleLibrary::cachedRecord(
     }
     if (!entry.valid || entry.age < victim->age) victim = &entry;
   }
-  copyFromLocator(locators_[locatorIndex], victim->summary);
+  if (!hydrateLocator(locators_[locatorIndex], victim->summary)) {
+    victim->valid = false;
+    victim->previewLoaded = false;
+    victim->age = 0;
+    return nullptr;
+  }
   victim->locatorIndex = locatorIndex;
   victim->age = detailCacheAge_;
   victim->valid = true;

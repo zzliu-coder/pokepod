@@ -51,6 +51,23 @@ require(library_header, "std::array<DetailCacheEntry, kCapsuleDetailCacheCapacit
         "capsule details do not use a bounded cache")
 require(index_policy, "kCapsuleLocatorCapacity = 512",
         "capsule locator capacity does not cover 320 fixtures")
+require(index_policy, "sizeof(CapsuleLocator) <= 160",
+        "capsule locator lacks a per-record PSRAM budget gate")
+require(index_policy,
+        "sizeof(CapsuleLocator) * kCapsuleLocatorCapacity <= 80 * 1024",
+        "capsule locator index lacks a total PSRAM budget gate")
+for eager_detail in (
+    "char directory[", "char folder[", "char title[", "char updatedAt[",
+    "char errorStage[", "char error[", "char audioFile[",
+    "char audioFormat[",
+):
+    if eager_detail in index_policy:
+        raise SystemExit(
+            "FAIL performance_architecture: capsule locator still embeds "
+            f"lazy detail {eager_detail}"
+        )
+require(library, "hydrateLocator(locators_[locatorIndex]",
+        "detail cache misses do not hydrate capsule metadata on demand")
 require(index_policy, "locatorDamaged",
         "damaged capsule locators are not represented")
 require(dashboard, "view.library->at(index, true)",

@@ -137,8 +137,13 @@ class CapsuleLibrary {
                              const String &directoryId,
                              CapsuleSummary &record) const;
   void copyToLocator(const CapsuleSummary &record, CapsuleLocator &locator) const;
-  void copyFromLocator(const CapsuleLocator &locator,
-                       CapsuleSummary &record) const;
+  bool hydrateLocator(const CapsuleLocator &locator,
+                      CapsuleSummary &record) const;
+  bool resolveLocator(const CapsuleLocator &locator, String &directory,
+                      String &folder) const;
+  bool findLocatorInFolder(const String &path, const String &folder,
+                           uint8_t depth, const CapsuleLocator &locator,
+                           String &directory, String &resolvedFolder) const;
   const CapsuleSummary *cachedRecord(size_t locatorIndex,
                                      bool loadPreview) const;
   void invalidateRecordCache(const String &id = String());
