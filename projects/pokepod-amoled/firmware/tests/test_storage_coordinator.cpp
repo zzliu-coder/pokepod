@@ -2,9 +2,24 @@
 #include <cassert>
 #include <thread>
 
+#include "../PokePodAmoled/PowerPolicy.h"
 #include "../PokePodAmoled/StorageCoordinator.cpp"
 
 using namespace pokepod;
+
+namespace {
+
+PowerDecision powerDecisionFor(const StorageCoordinator &coordinator) {
+  PowerInputs input;
+  input.screenOn = false;
+  input.automaticWakeEnabled = false;
+  input.idleMs = kDeepSleepTimeoutMs;
+  PowerFacts facts;
+  facts.storageMutationActive = coordinator.mutationActive();
+  return decidePower(powerInputsWithFacts(input, facts));
+}
+
+}  // namespace
 
 int main() {
   StorageCoordinator coordinator;
@@ -24,19 +39,55 @@ int main() {
   }
   assert(!coordinator.mutationActive());
 
-  StorageReservation asr = coordinator.reserve(
-      StorageOwner::tencentRead, StorageAccess::read);
-  assert(asr);
-  assert(coordinator.readOwner() == StorageOwner::tencentRead);
-  {
-    StorageIoLease read = coordinator.acquireIo(
-        StorageOwner::tencentRead, StorageAccess::read);
-    assert(read);
+  // Read reservations never become power-blocking storage mutations.  This
+  // covers cloud reads, playback, font glyph loading and Link downloads.
+  const StorageOwner readOwners[] = {
+      StorageOwner::tencentRead,
+      StorageOwner::audioPlayback,
+      StorageOwner::fontRead,
+      StorageOwner::usbLink,
+      StorageOwner::wifiLink,
+  };
+  for (const StorageOwner owner : readOwners) {
+    StorageReservation readReservation = coordinator.reserve(
+        owner, StorageAccess::read);
+    assert(readReservation);
+    assert(coordinator.readOwner() == owner);
+    assert(!coordinator.mutationActive());
+    assert(powerDecisionFor(coordinator).requestDeepSleep);
+    {
+      StorageIoLease read = coordinator.acquireIo(owner, StorageAccess::read);
+      assert(read);
+      assert(!coordinator.mutationActive());
+    }
+    assert(!coordinator.reserve(StorageOwner::capsuleTransaction,
+                                StorageAccess::mutation));
+    readReservation.release();
+    assert(coordinator.readOwner() == StorageOwner::none);
+    assert(!coordinator.mutationActive());
   }
-  assert(!coordinator.reserve(StorageOwner::capsuleTransaction,
-                              StorageAccess::mutation));
-  asr.release();
-  assert(coordinator.readOwner() == StorageOwner::none);
+
+  // Every logical write owner blocks sleep for its whole reservation, then
+  // releases the fact immediately when the transaction is finished.
+  const StorageOwner mutationOwners[] = {
+      StorageOwner::recorder,
+      StorageOwner::capsuleTransaction,
+      StorageOwner::usbLink,
+      StorageOwner::wifiLink,
+      StorageOwner::recovery,
+  };
+  for (const StorageOwner owner : mutationOwners) {
+    StorageReservation mutation = coordinator.reserve(
+        owner, StorageAccess::mutation);
+    assert(mutation);
+    assert(coordinator.mutationActive());
+    assert(coordinator.mutationOwner() == owner);
+    assert(!powerDecisionFor(coordinator).requestDeepSleep);
+    mutation.release();
+    assert(!coordinator.mutationActive());
+    assert(coordinator.mutationOwner() == StorageOwner::none);
+    assert(powerDecisionFor(coordinator).requestDeepSleep);
+  }
 
   StorageReservation outer = coordinator.reserve(
       StorageOwner::capsuleTransaction, StorageAccess::mutation);

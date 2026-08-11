@@ -41,6 +41,8 @@ assert "BleConnectionPowerMode::voice" in ble
 assert "BleConnectionPowerMode::idle" in ble
 assert "usb.tinyUsbMounted()," in main
 assert "usb.cdcSessionActive()," in main
+assert "StorageCoordinator::instance().mutationActive()," in main
+assert "board.lowPowerWakeSourcesReady(),\n      recorder.recording()," not in main
 assert "input = powerInputsWithFacts(input, facts)" in main
 
 print("PASS test_runtime_power_time_usb_contract")

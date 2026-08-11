@@ -27,6 +27,7 @@
 #include "PowerDiagnostics.h"
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
+#include "StorageCoordinator.h"
 #include "TencentWorker.h"
 #include "TlsExternalMemory.h"
 #include "UsbLinkBridge.h"
@@ -148,7 +149,7 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
       bleVoice.streaming(),
       wifi.radioOn() || provisioningCoordinator.ownsWifi(),
       board.lowPowerWakeSourcesReady(),
-      recorder.recording(),
+      StorageCoordinator::instance().mutationActive(),
   };
   input = powerInputsWithFacts(input, facts);
   input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy() ||
