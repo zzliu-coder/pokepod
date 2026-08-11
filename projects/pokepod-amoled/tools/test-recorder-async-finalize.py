@@ -10,6 +10,7 @@ wav_h = (firmware / "WavRecorder.h").read_text(encoding="utf-8")
 wav = (firmware / "WavRecorder.cpp").read_text(encoding="utf-8")
 app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 capture = (firmware / "AudioCaptureRuntime.h").read_text(encoding="utf-8")
+storage_queue = (firmware / "RecorderStorageQueue.h").read_text(encoding="utf-8")
 
 assert "CapsuleTransactionRunner transactionRunner_" in wav_h
 assert "RecorderOperationOwner operationOwner() const" in wav_h
@@ -19,7 +20,15 @@ assert "recording_finalize_pending" in wav
 assert "startAudioAndProcessing" in wav
 assert 'directory_ + "/recording.failed.chk"' in wav
 assert "transactionRunner_.poll(nowMs, gate)" in wav
-assert "static constexpr size_t kRingFrames = 64" in capture
+assert "static constexpr size_t kRingFrames = 6" in capture
+assert "kRecorderStorageQueueFrames = 128" in storage_queue
+assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in wav
+assert '"pokepod_recorder_storage"' in wav
+assert "storageQueue_.push(data, length)" in wav
+assert "pollPeriodicCheckpoint" in wav
+append_start = wav.index("bool WavRecorder::appendMonoBytes")
+append_end = wav.index("bool WavRecorder::storageAppendMonoBytes", append_start)
+assert "persistCheckpoint" not in wav[append_start:append_end]
 
 assert "RecorderOperationOwner::localApp" in app
 assert "recorder.ownedBy(RecorderOperationOwner::localApp)" in app

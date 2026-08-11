@@ -2,10 +2,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <vector>
 
 #include "AudioCaptureRing.h"
 #include "AudioCaptureService.h"
+#include "RecorderStorageQueue.h"
 
 using namespace pokepod;
 
@@ -80,18 +82,29 @@ int main() {
   static_assert(kAudioCaptureSamplesPerFrame == 320, "frame size changed");
   static_assert(AudioCaptureService<6>::kRawStereoBytesPerFrame == 3840,
                 "48 kHz stereo input block changed");
-  AudioCaptureRing<64> storageTailRing;
-  storageTailRing.resetSession(40);
-  int16_t storageTailSamples[kAudioCaptureSamplesPerFrame]{};
-  // A 1 s checkpoint/storage tail publishes 50 real-time frames while the
-  // loop is unavailable; the fixed production ring must retain all of them.
-  for (uint32_t frameIndex = 0; frameIndex < 50U; ++frameIndex) {
-    assert(storageTailRing.push(frameIndex, frameIndex * 20U,
-                                storageTailSamples,
-                                kAudioCaptureSamplesPerFrame));
+  std::array<RecorderStorageFrame, kRecorderStorageQueueSlots> storageFrames{};
+  RecorderStorageQueue storageQueue;
+  assert(storageQueue.bind(storageFrames.data(), storageFrames.size()));
+  uint8_t monoFrame[kRecorderStorageFrameBytes]{};
+  uint32_t uiTicks = 0;
+  // A 1 s SD write/flush/checkpoint stall does not block the producer/UI.
+  for (uint32_t stalledMs = 0; stalledMs < 1000U; stalledMs += 20U) {
+    assert(storageQueue.push(monoFrame, sizeof(monoFrame)));
+    ++uiTicks;
   }
-  assert(storageTailRing.metrics().droppedFrames == 0U);
-  assert(!storageTailRing.metrics().incomplete());
+  assert(uiTicks == 50U);
+  assert(storageQueue.size() == 50U);
+  RecorderStorageFrame storedFrame;
+  while (storageQueue.pop(storedFrame)) {
+    assert(storedFrame.length == sizeof(monoFrame));
+  }
+  assert(storageQueue.dropped() == 0U);
+  // A tail beyond the fixed 2.56 s admission budget fails observably.
+  for (size_t index = 0; index < kRecorderStorageQueueFrames; ++index) {
+    assert(storageQueue.push(monoFrame, sizeof(monoFrame)));
+  }
+  assert(!storageQueue.push(monoFrame, sizeof(monoFrame)));
+  assert(storageQueue.dropped() == 1U);
 
   AudioCaptureRing<2> ring;
   ring.resetSession(41);

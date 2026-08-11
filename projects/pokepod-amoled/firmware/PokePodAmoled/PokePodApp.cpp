@@ -530,6 +530,13 @@ void pollDeferredServiceCleanup() {
         "{\"event\":\"recording_capability_degraded\",\"reason\":\"recovery_failed\"}");
     dashboard.invalidate();
   }
+  // Local capture only enqueues PCM on the UI loop. The persistent recorder
+  // storage task owns WAV writes, flushes, checkpoints and finalize I/O; this
+  // poll publishes time/cancellation state and never performs physical I/O.
+  if (recorder.recording() &&
+      recorder.ownedBy(RecorderOperationOwner::localApp)) {
+    (void)recorder.pollFinalize(usb.log(), millis(), nullptr);
+  }
   const bool captureFinalized = captureRuntime.pollFinalize(usb.log());
   if (captureFinalized && pendingCaptureStop != PendingCaptureStop::none) {
     (void)finishPendingCaptureStop();

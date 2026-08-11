@@ -2,12 +2,18 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <atomic>
+#if defined(ARDUINO_ARCH_ESP32)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
 
 #include "AudioFrontEnd.h"
 #include "BoardConfig.h"
 #include "CapsuleTransaction.h"
 #include "RecorderCheckpoint.h"
 #include "RecorderOutcome.h"
+#include "RecorderStorageQueue.h"
 #include "RecordingAdmissionPolicy.h"
 #include "StorageCoordinator.h"
 
@@ -88,6 +94,7 @@ class WavRecorder {
   bool persistCheckpoint(bool failed, RecorderFailureStage stage,
                          Print &log);
   bool appendMonoBytes(const uint8_t *data, size_t length, Print &log);
+  bool storageAppendMonoBytes(const uint8_t *data, size_t length, Print &log);
   StorageOwner activeStorageOwner() const;
   bool pollFinalizeRunner(Print &log, uint32_t nowMs,
                           CapsuleTransactionGate *gate);
@@ -95,6 +102,16 @@ class WavRecorder {
                        RecorderFailureStage stage);
   void completeFinalize(Print &log);
   bool pollBootRecovery(Print &log, uint32_t nowMs);
+  bool pollStorage(Print &log, uint32_t nowMs,
+                   CapsuleTransactionGate *gate);
+
+#if defined(ARDUINO_ARCH_ESP32)
+  static void storageTaskThunk(void *context);
+  void storageTaskMain();
+  bool ensureStorageTask(Print &log);
+  bool pollPeriodicCheckpoint(Print &log, uint32_t nowMs,
+                              CapsuleTransactionGate *gate);
+#endif
 
   class StringByteSource final : public CapsuleTransactionByteSource {
    public:
@@ -215,6 +232,13 @@ class WavRecorder {
     failed,
   };
 
+  enum class PeriodicCheckpointPhase : uint8_t {
+    idle = 0,
+    flushAudio,
+    startTransaction,
+    pollTransaction,
+  };
+
   fs::FS *fs_ = nullptr;
   File file_;
   File recoveryRoot_;
@@ -225,8 +249,9 @@ class WavRecorder {
   String partialPath_;
   String finalPath_;
   uint32_t dataBytes_ = 0;
-  bool recording_ = false;
-  RecorderOperationOwner operationOwner_ = RecorderOperationOwner::none;
+  std::atomic<bool> recording_{false};
+  std::atomic<RecorderOperationOwner> operationOwner_{
+      RecorderOperationOwner::none};
   bool checkpointInitialized_ = false;
   uint32_t checkpointCrcState_ = recorderAudioCrc32Begin();
   uint32_t checkpointedBytes_ = 0;
@@ -250,12 +275,12 @@ class WavRecorder {
   RecorderOutcomeState terminalState_;
   AudioFrontEnd audioFrontEnd_;
   FinalizePhase finalizePhase_ = FinalizePhase::idle;
-  bool finalizePending_ = false;
+  std::atomic<bool> finalizePending_{false};
   RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;
   uint8_t finalizePrimitiveFailures_ = 0;
-  bool automaticStopRequested_ = false;
+  std::atomic<bool> automaticStopRequested_{false};
   RecorderStopReason automaticStopReason_ = RecorderStopReason::none;
-  bool cleanupPending_ = false;
+  std::atomic<bool> cleanupPending_{false};
   CleanupPhase cleanupPhase_ = CleanupPhase::idle;
   uint8_t cleanupPrimitiveFailures_ = 0;
   RecorderTerminal cleanupTerminal_ = RecorderTerminal::none;
@@ -278,6 +303,34 @@ class WavRecorder {
   StorageAccess recoveryFileAccess_ = StorageAccess::read;
   uint16_t recoveryQuarantineSuffix_ = 0;
   uint8_t recoveryBuffer_[512]{};
+
+#if defined(ARDUINO_ARCH_ESP32)
+  class StorageCancellationGate final : public CapsuleTransactionGate {
+   public:
+    void reset() { cancelled_.store(false, std::memory_order_release); }
+    void cancel() { cancelled_.store(true, std::memory_order_release); }
+    bool permits(uint32_t) override {
+      return !cancelled_.load(std::memory_order_acquire);
+    }
+   private:
+    std::atomic<bool> cancelled_{false};
+  };
+
+  RecorderStorageQueue storageQueue_;
+  RecorderStorageFrame *storageQueueSlots_ = nullptr;
+  RecorderStorageFrame storageFrame_{};
+  TaskHandle_t storageTask_ = nullptr;
+  Print *storageLog_ = nullptr;
+  std::atomic<bool> storageSessionActive_{false};
+  std::atomic<bool> storageGateObserved_{false};
+  std::atomic<uint32_t> storageNowMs_{0};
+  std::atomic<uint32_t> acceptedDataBytes_{0};
+  StorageCancellationGate storageCancellationGate_;
+  PeriodicCheckpointPhase periodicCheckpointPhase_ =
+      PeriodicCheckpointPhase::idle;
+  StoredRecorderCheckpoint periodicCheckpoint_{};
+  CheckpointByteSource periodicCheckpointSource_;
+#endif
 };
 
 }  // namespace pokepod

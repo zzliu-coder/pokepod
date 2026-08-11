@@ -4,6 +4,9 @@
 #include "WavFormat.h"
 
 #include <unistd.h>
+#if defined(ARDUINO_ARCH_ESP32)
+#include <esp_heap_caps.h>
+#endif
 
 namespace pokepod {
 namespace {
@@ -65,6 +68,9 @@ String capsuleJson(const String &id, const String &timestamp) {
 
 bool WavRecorder::begin(fs::FS &fs, Print &log) {
   fs_ = &fs;
+#if defined(ARDUINO_ARCH_ESP32)
+  if (!ensureStorageTask(log)) return false;
+#endif
   if (!transaction_.begin(fs, log) ||
       !transactionRunner_.begin(fs, log) ||
       !transactionRunner_.startRecovery(StorageOwner::recovery)) return false;
@@ -203,7 +209,19 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
     return finishFailure(log, RecorderTerminal::metadataFailure,
                          RecorderFailureStage::recoveryCheckpoint);
   }
+#if defined(ARDUINO_ARCH_ESP32)
+  storageQueue_.reset();
+  acceptedDataBytes_.store(0, std::memory_order_release);
+  storageGateObserved_.store(owner != RecorderOperationOwner::linkWifi,
+                             std::memory_order_release);
+  storageCancellationGate_.reset();
+  periodicCheckpointPhase_ = PeriodicCheckpointPhase::idle;
   recording_ = true;
+  storageSessionActive_.store(true, std::memory_order_release);
+  xTaskNotifyGive(storageTask_);
+#else
+  recording_ = true;
+#endif
   log.printf("{\"event\":\"recording_started\",\"id\":\"%s\",\"format\":\"16k_s16le_mono\"}\n",
              recordingId_.c_str());
   return true;
@@ -258,6 +276,31 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
       (length & 1U) != 0) {
     return false;
   }
+#if defined(ARDUINO_ARCH_ESP32)
+  const uint32_t accepted = acceptedDataBytes_.load(std::memory_order_acquire);
+  if (accepted >= kMaximumRecordingAudioBytes) return false;
+  const size_t remaining = static_cast<size_t>(
+      kMaximumRecordingAudioBytes - accepted);
+  if (length > remaining) length = remaining & ~static_cast<size_t>(1U);
+  if (length == 0 || !storageQueue_.push(data, length)) {
+    log.println(
+        "{\"event\":\"recording_error\",\"stage\":\"storage_queue_overflow\"}");
+    return false;
+  }
+  acceptedDataBytes_.fetch_add(static_cast<uint32_t>(length),
+                               std::memory_order_release);
+  xTaskNotifyGive(storageTask_);
+  return true;
+#else
+  return storageAppendMonoBytes(data, length, log);
+#endif
+}
+
+bool WavRecorder::storageAppendMonoBytes(const uint8_t *data, size_t length,
+                                         Print &log) {
+  if (!file_ || data == nullptr || length == 0 || (length & 1U) != 0) {
+    return false;
+  }
   if (dataBytes_ >= kMaximumRecordingAudioBytes) return false;
   const size_t remaining = static_cast<size_t>(
       kMaximumRecordingAudioBytes - dataBytes_);
@@ -280,11 +323,22 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
                          RecorderFailureStage::shortWrite);
   }
   writeIo.release();
+#if defined(ARDUINO_ARCH_ESP32)
+  if (periodicCheckpointPhase_ == PeriodicCheckpointPhase::idle &&
+      recorderCheckpointDue(checkpointedBytes_, dataBytes_)) {
+    periodicCheckpoint_ = checkpoint_;
+    updateRecorderCheckpoint(periodicCheckpoint_, dataBytes_,
+                             recorderAudioCrc32Finish(checkpointCrcState_));
+    periodicCheckpointSource_.bind(periodicCheckpoint_);
+    periodicCheckpointPhase_ = PeriodicCheckpointPhase::flushAudio;
+  }
+#else
   if (recorderCheckpointDue(checkpointedBytes_, dataBytes_) &&
       !persistCheckpoint(false, RecorderFailureStage::none, log)) {
     return finishFailure(log, RecorderTerminal::metadataFailure,
                          RecorderFailureStage::recoveryCheckpoint);
   }
+#endif
   return true;
 }
 
@@ -299,10 +353,19 @@ bool WavRecorder::stop(Print &log, RecorderStopReason reason) {
   finalizePending_ = true;
   log.printf("{\"event\":\"recording_finalize_pending\",\"bytes\":%lu}\n",
              static_cast<unsigned long>(dataBytes_));
+#if defined(ARDUINO_ARCH_ESP32)
+  xTaskNotifyGive(storageTask_);
+#endif
   return true;
 }
 
 uint32_t WavRecorder::durationMs() const {
+#if defined(ARDUINO_ARCH_ESP32)
+  if (recording_ || storageSessionActive_.load(std::memory_order_acquire)) {
+    return audioDurationMs(
+        acceptedDataBytes_.load(std::memory_order_acquire));
+  }
+#endif
   return audioDurationMs(dataBytes_);
 }
 
@@ -370,7 +433,6 @@ void WavRecorder::completeFinalize(Print &log) {
     dataBytes_ = 0;
     return;
   }
-  finalizePending_ = false;
   finalizePhase_ = FinalizePhase::idle;
   terminalState_.complete(finalizeStopReason_, dataBytes_);
   const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
@@ -382,9 +444,19 @@ void WavRecorder::completeFinalize(Print &log) {
              static_cast<unsigned long>(audio.suppressedSamples),
              static_cast<unsigned long>(audio.limitedSamples),
              static_cast<unsigned long>(audio.maximumGainQ12));
+#if defined(ARDUINO_ARCH_ESP32)
+  log.printf(
+      "{\"event\":\"recording_storage_queue\",\"high_water_frames\":%u,\"dropped_frames\":%lu,\"capacity_frames\":%u}\n",
+      static_cast<unsigned>(storageQueue_.highWater()),
+      static_cast<unsigned long>(storageQueue_.dropped()),
+      static_cast<unsigned>(kRecorderStorageQueueFrames));
+#endif
   finalizeStopReason_ = RecorderStopReason::none;
   storageReservation_.release();
   operationOwner_ = RecorderOperationOwner::none;
+  // This release-store is the cross-task publication boundary. The UI may
+  // consume terminalState_ only after operationActive() observes false.
+  finalizePending_.store(false, std::memory_order_release);
 }
 
 bool WavRecorder::pollBootRecovery(Print &log, uint32_t nowMs) {
@@ -848,8 +920,8 @@ bool WavRecorder::pollBootRecovery(Print &log, uint32_t nowMs) {
   return fail();
 }
 
-bool WavRecorder::pollFinalize(Print &log, uint32_t nowMs,
-                               CapsuleTransactionGate *gate) {
+bool WavRecorder::pollStorage(Print &log, uint32_t nowMs,
+                              CapsuleTransactionGate *gate) {
   if (bootRecoveryPending_ && !recoveryFinalizeActive_) {
     return pollBootRecovery(log, nowMs);
   }
@@ -1027,6 +1099,34 @@ bool WavRecorder::pollFinalize(Print &log, uint32_t nowMs,
                          RecorderFailureStage::commitAudio);
 }
 
+bool WavRecorder::pollFinalize(Print &log, uint32_t nowMs,
+                               CapsuleTransactionGate *gate) {
+#if defined(ARDUINO_ARCH_ESP32)
+  if (bootRecoveryPending_ && !recoveryFinalizeActive_) {
+    return pollBootRecovery(log, nowMs);
+  }
+  storageLog_ = &log;
+  storageNowMs_.store(nowMs, std::memory_order_release);
+  if (operationOwner_.load(std::memory_order_acquire) ==
+      RecorderOperationOwner::linkWifi) {
+    storageGateObserved_.store(true, std::memory_order_release);
+    if (!capsuleTransactionPermitted(gate, nowMs)) {
+      storageCancellationGate_.cancel();
+    }
+  }
+  if (recording_ || finalizePending_ || cleanupPending_ ||
+      !storageQueue_.empty() ||
+      periodicCheckpointPhase_ != PeriodicCheckpointPhase::idle) {
+    storageSessionActive_.store(true, std::memory_order_release);
+    xTaskNotifyGive(storageTask_);
+    return false;
+  }
+  return true;
+#else
+  return pollStorage(log, nowMs, gate);
+#endif
+}
+
 void WavRecorder::resetSessionState() {
   // An open handle is owned by either the active recording or its deferred
   // cleanup.  Closing it here would bypass the StorageCoordinator lease.
@@ -1051,6 +1151,11 @@ void WavRecorder::resetSessionState() {
   checkpointCrcState_ = recorderAudioCrc32Begin();
   checkpointedBytes_ = 0;
   memset(&checkpoint_, 0, sizeof(checkpoint_));
+#if defined(ARDUINO_ARCH_ESP32)
+  storageQueue_.reset();
+  acceptedDataBytes_.store(0, std::memory_order_release);
+  periodicCheckpointPhase_ = PeriodicCheckpointPhase::idle;
+#endif
   storageReservation_.release();
   terminalState_.reset();
   audioFrontEnd_.reset();
@@ -1369,6 +1474,144 @@ StorageOwner WavRecorder::activeStorageOwner() const {
   return storageReservation_ ? storageReservation_.owner()
                              : StorageOwner::recovery;
 }
+
+#if defined(ARDUINO_ARCH_ESP32)
+bool WavRecorder::ensureStorageTask(Print &log) {
+  storageLog_ = &log;
+  if (storageTask_ != nullptr) return storageQueueSlots_ != nullptr;
+  storageQueueSlots_ = static_cast<RecorderStorageFrame *>(heap_caps_calloc(
+      kRecorderStorageQueueSlots, sizeof(RecorderStorageFrame),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (storageQueueSlots_ == nullptr ||
+      !storageQueue_.bind(storageQueueSlots_, kRecorderStorageQueueSlots)) {
+    log.println(
+        "{\"event\":\"recording_storage_task\",\"ok\":false,\"stage\":\"psram_queue\"}");
+    return false;
+  }
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      storageTaskThunk, "pokepod_recorder_storage", 4096, this, 1,
+      &storageTask_, 0);
+  if (created != pdPASS || storageTask_ == nullptr) {
+    heap_caps_free(storageQueueSlots_);
+    storageQueueSlots_ = nullptr;
+    log.println(
+        "{\"event\":\"recording_storage_task\",\"ok\":false,\"stage\":\"task\"}");
+    return false;
+  }
+  log.printf(
+      "{\"event\":\"recording_storage_task\",\"ok\":true,\"queue_frames\":%u,\"queue_ms\":%u,\"memory\":\"psram\"}\n",
+      static_cast<unsigned>(kRecorderStorageQueueFrames),
+      static_cast<unsigned>(kRecorderStorageQueueFrames * 20U));
+  return true;
+}
+
+void WavRecorder::storageTaskThunk(void *context) {
+  static_cast<WavRecorder *>(context)->storageTaskMain();
+}
+
+bool WavRecorder::pollPeriodicCheckpoint(Print &log, uint32_t nowMs,
+                                         CapsuleTransactionGate *gate) {
+  if (periodicCheckpointPhase_ == PeriodicCheckpointPhase::flushAudio) {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        activeStorageOwner(), StorageAccess::mutation, 0);
+    if (!lease) return false;
+    file_.flush();
+    if (file_.getWriteError() != 0) {
+      periodicCheckpointPhase_ = PeriodicCheckpointPhase::idle;
+      return finishFailure(log, RecorderTerminal::metadataFailure,
+                           RecorderFailureStage::recoveryCheckpoint);
+    }
+    periodicCheckpointPhase_ = PeriodicCheckpointPhase::startTransaction;
+    return false;
+  }
+  if (periodicCheckpointPhase_ ==
+      PeriodicCheckpointPhase::startTransaction) {
+    finalizeInputs_[0] = {directory_ + "/recording.chk",
+                          &periodicCheckpointSource_, String()};
+    const String key = recordingId_ + "-checkpoint";
+    if (!transactionRunner_.startCommit(key.c_str(), finalizeInputs_, 1,
+                                        activeStorageOwner())) {
+      periodicCheckpointPhase_ = PeriodicCheckpointPhase::idle;
+      return finishFailure(log, RecorderTerminal::metadataFailure,
+                           RecorderFailureStage::recoveryCheckpoint);
+    }
+    periodicCheckpointPhase_ = PeriodicCheckpointPhase::pollTransaction;
+    return false;
+  }
+  if (periodicCheckpointPhase_ ==
+      PeriodicCheckpointPhase::pollTransaction) {
+    const CapsuleTransactionPollResult result =
+        transactionRunner_.poll(nowMs, gate);
+    if (result == CapsuleTransactionPollResult::progress ||
+        result == CapsuleTransactionPollResult::wouldBlock) return false;
+    periodicCheckpointPhase_ = PeriodicCheckpointPhase::idle;
+    if (result != CapsuleTransactionPollResult::committed) {
+      RecorderTerminal terminal = RecorderTerminal::metadataFailure;
+      if (result == CapsuleTransactionPollResult::cancelled) {
+        terminal = RecorderTerminal::cancelled;
+      } else if (result == CapsuleTransactionPollResult::cleanupBlocked ||
+                 result == CapsuleTransactionPollResult::recoveryBlocked) {
+        terminal = RecorderTerminal::cleanupBlocked;
+      }
+      return finishFailure(log, terminal,
+                           RecorderFailureStage::recoveryCheckpoint);
+    }
+    checkpoint_ = periodicCheckpoint_;
+    checkpointedBytes_ = periodicCheckpoint_.confirmedDataBytes;
+    return true;
+  }
+  return true;
+}
+
+void WavRecorder::storageTaskMain() {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    while (storageSessionActive_.load(std::memory_order_acquire)) {
+      Print *log = storageLog_;
+      if (log == nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+      }
+      CapsuleTransactionGate *gate = nullptr;
+      const bool wifi = operationOwner_.load(std::memory_order_acquire) ==
+          RecorderOperationOwner::linkWifi;
+      if (wifi) {
+        if (!storageGateObserved_.load(std::memory_order_acquire) &&
+            (periodicCheckpointPhase_ != PeriodicCheckpointPhase::idle ||
+             finalizePending_ || cleanupPending_)) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+          continue;
+        }
+        gate = &storageCancellationGate_;
+      }
+
+      if (cleanupPending_) {
+        storageQueue_.reset();
+        (void)pollStorage(*log,
+                          storageNowMs_.load(std::memory_order_acquire), gate);
+      } else if (periodicCheckpointPhase_ !=
+                 PeriodicCheckpointPhase::idle) {
+        (void)pollPeriodicCheckpoint(
+            *log, storageNowMs_.load(std::memory_order_acquire), gate);
+      } else if (storageQueue_.pop(storageFrame_)) {
+        if (!storageAppendMonoBytes(storageFrame_.bytes,
+                                    storageFrame_.length, *log)) {
+          storageQueue_.reset();
+        }
+      } else if (finalizePending_) {
+        (void)pollStorage(*log,
+                          storageNowMs_.load(std::memory_order_acquire), gate);
+      } else if (!recording_) {
+        storageSessionActive_.store(false, std::memory_order_release);
+        break;
+      } else {
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+  }
+}
+#endif
 
 bool WavRecorder::persistCheckpoint(bool failed, RecorderFailureStage stage,
                                     Print &log) {
