@@ -21,6 +21,7 @@ namespace fakefs {
 
 enum class Operation : uint8_t {
   open,
+  read,
   write,
   flush,
   seek,
@@ -33,6 +34,7 @@ enum class FaultAction : uint8_t {
   none,
   returnFailure,
   shortWrite,
+  shortRead,
   crashBefore,
   crashAfter,
 };
@@ -48,6 +50,7 @@ struct FaultPlan {
   FaultAction action = FaultAction::none;
   uint32_t occurrence = 0;
   uint32_t seen = 0;
+  bool repeat = false;
 };
 
 struct State {
@@ -56,6 +59,9 @@ struct State {
   FaultPlan fault;
   uint32_t operations = 0;
   uint64_t openNextFileCalls = 0;
+  size_t openHandles = 0;
+  size_t maximumReadBytes = 0;
+  size_t maximumWriteBytes = 0;
 
   void clearFault() { fault = {}; }
 
@@ -64,6 +70,12 @@ struct State {
     fault.action = action;
     fault.occurrence = occurrence;
     fault.seen = 0;
+    fault.repeat = false;
+  }
+
+  void failAlways(Operation operation, FaultAction action) {
+    fail(operation, 1, action);
+    fault.repeat = true;
   }
 
   FaultAction before(Operation operation) {
@@ -72,7 +84,9 @@ struct State {
       return FaultAction::none;
     }
     ++fault.seen;
-    if (fault.seen != fault.occurrence) return FaultAction::none;
+    if (!fault.repeat && fault.seen != fault.occurrence) {
+      return FaultAction::none;
+    }
     if (fault.action == FaultAction::crashBefore) {
       throw SimulatedCrash(operation);
     }
@@ -123,6 +137,10 @@ struct Handle {
   bool directory = false;
   bool writable = false;
   bool dirty = false;
+
+  ~Handle() {
+    if (open && state && state->openHandles > 0) --state->openHandles;
+  }
 };
 
 }  // namespace fakefs
@@ -167,6 +185,8 @@ class File {
       handle_->position += accepted;
       handle_->dirty = true;
     }
+    handle_->state->maximumWriteBytes =
+        std::max(handle_->state->maximumWriteBytes, accepted);
     handle_->state->after(fakefs::Operation::write, action);
     return accepted;
   }
@@ -174,10 +194,20 @@ class File {
   int read(uint8_t *bytes, size_t length) {
     if (!*this || handle_->directory || bytes == nullptr) return -1;
     if (handle_->position >= handle_->buffer.size()) return 0;
+    const fakefs::FaultAction action =
+        handle_->state->before(fakefs::Operation::read);
+    if (action == fakefs::FaultAction::returnFailure) return -1;
     const size_t available = handle_->buffer.size() - handle_->position;
-    const size_t received = std::min(length, available);
+    size_t received = std::min(length, available);
+    if ((action == fakefs::FaultAction::shortRead ||
+         action == fakefs::FaultAction::shortWrite) && received > 0) {
+      received = received == 1 ? 0 : received / 2;
+    }
     std::memcpy(bytes, handle_->buffer.data() + handle_->position, received);
     handle_->position += received;
+    handle_->state->maximumReadBytes =
+        std::max(handle_->state->maximumReadBytes, received);
+    handle_->state->after(fakefs::Operation::read, action);
     return static_cast<int>(received);
   }
 
@@ -212,7 +242,7 @@ class File {
   }
 
   int getWriteError() const {
-    return *this ? handle_->writeError : 1;
+    return handle_ ? handle_->writeError : 1;
   }
 
   void close() {
@@ -225,6 +255,7 @@ class File {
       handle_->dirty = false;
       if (handle_->writable) handle_->state->files.erase(handle_->path);
       handle_->open = false;
+      if (handle_->state->openHandles > 0) --handle_->state->openHandles;
       return;
     }
     if (handle_->writable && handle_->dirty) {
@@ -233,6 +264,7 @@ class File {
       handle_->dirty = false;
     }
     handle_->open = false;
+    if (handle_->state->openHandles > 0) --handle_->state->openHandles;
     handle_->state->after(fakefs::Operation::close, action);
   }
 
@@ -247,6 +279,7 @@ class File {
     child->state = handle_->state;
     child->path = path;
     child->open = true;
+    ++child->state->openHandles;
     child->directory = child->state->directories.count(path) != 0;
     if (!child->directory) child->buffer = child->state->files[path];
     return File(child);
@@ -302,6 +335,7 @@ class FS {
     handle->state = state_;
     handle->path = key;
     handle->open = true;
+    ++handle->state->openHandles;
     handle->directory = directory;
     handle->writable = write;
     if (directory) {
