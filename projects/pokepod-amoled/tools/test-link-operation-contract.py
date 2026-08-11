@@ -52,5 +52,8 @@ assert "releaseResource(" not in begin_release
 
 assert "connectionGeneration == 0" in CORE
 assert "cancelRetainedCoordinator" in CORE
+assert "bool active() const { return state_ != LinkOperationState::idle; }" in CORE
+assert "static_cast<uint32_t>(progressFramesQueued_)" in CORE
+assert "responseDrained_ && allFramesDrained()" in CORE
 assert "static_cast<int32_t>(nowMs - absoluteDeadlineMs_)" in CORE
 print("PASS link_operation_contract")

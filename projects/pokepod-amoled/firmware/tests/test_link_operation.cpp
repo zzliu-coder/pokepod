@@ -179,6 +179,26 @@ int main() {
   deadline.releaseResource(LinkOperationResource::storageReservation);
   acknowledgeSettlement(deadline, false, true);
 
+  // A terminal drain just before the deadline cannot exempt older progress
+  // frames. At the exact cutoff the remaining drain cancels the operation and
+  // removes completion eligibility.
+  LinkOperation lateProgress;
+  assert(lateProgress.admit(441, LinkTransport::wifi, 101, true, true,
+                            300000) == LinkOperationAdmission::accepted);
+  assert(lateProgress.advance(LinkOperationState::processing));
+  assert(lateProgress.queueFrame(LinkOperationFrameRole::progress, 101,
+                                 299999));
+  assert(lateProgress.advance(LinkOperationState::cleanup));
+  assert(lateProgress.queueFrame(LinkOperationFrameRole::terminal, 101,
+                                 299999, true));
+  assert(lateProgress.frameDrained(LinkOperationFrameRole::terminal, 101,
+                                   299999));
+  assert(!lateProgress.frameDrained(LinkOperationFrameRole::progress, 101,
+                                    300000));
+  assert(lateProgress.cancelReason() == LinkOperationCancelReason::deadline);
+  assert(lateProgress.discardQueuedFrames(101));
+  acknowledgeSettlement(lateProgress, false, true);
+
   // Disconnect suppresses responses and stale frame drains. Local rollback may
   // continue, but settlement waits for the adapter to discard transport frames.
   LinkOperation disconnect;
@@ -240,11 +260,52 @@ int main() {
       LinkTransport::wifi, 16, LinkOperationCancelReason::disconnect));
   assert(retainedDisconnect.cancelRetainedCoordinator(
       LinkTransport::wifi, 15, LinkOperationCancelReason::disconnect));
+  assert(retainedDisconnect.active());
   assert(!retainedDisconnect.cancelRetainedCoordinator(
       LinkTransport::wifi, 15, LinkOperationCancelReason::disconnect));
-  acknowledgeSettlement(retainedDisconnect, false, true, false);
+  assert(retainedDisconnect.beginRelease());
+  assert(retainedDisconnect.active());
+  // Complete the already-started release explicitly to exercise the
+  // request-less coordinator settlement through its ACK boundary.
+  assert(retainedDisconnect.settlement().releaseCoordinator);
+  assert(retainedDisconnect.acknowledgeRelease(
+      LinkOperationResource::coordinator, true));
+  assert(retainedDisconnect.finishRelease());
+  assert(!retainedDisconnect.active());
   assert(retainedDisconnect.transport() == LinkTransport::none);
   assert(retainedDisconnect.connectionGeneration() == 0);
+
+  // Two individually valid 16-bit role queues must not wrap their combined
+  // transport-drain count and unlock settlement early.
+  LinkOperation wideQueue;
+  assert(wideQueue.admit(49, LinkTransport::usb, 16, true) ==
+         LinkOperationAdmission::accepted);
+  for (uint32_t i = 0; i < UINT16_MAX; ++i) {
+    assert(wideQueue.queueFrame(LinkOperationFrameRole::progress, 16, 0));
+  }
+  assert(!wideQueue.queueFrame(LinkOperationFrameRole::progress, 16, 0));
+  assert(wideQueue.queueFrame(LinkOperationFrameRole::data, 16, 0));
+  assert(wideQueue.queuedFrameCount() == 65536UL);
+  wideQueue.cancel(LinkOperationCancelReason::disconnect);
+  assert(!wideQueue.settlement().ready);
+  assert(wideQueue.discardQueuedFrames(16));
+  acknowledgeSettlement(wideQueue, false, true);
+
+  // Cancelling or blocking an active maintenance operation always disables
+  // coordinator retention so external settlement cannot strand the lease.
+  LinkOperation maintenanceCancel;
+  assert(maintenanceCancel.admit(50, LinkTransport::usb, 17, true) ==
+         LinkOperationAdmission::accepted);
+  maintenanceCancel.retainCoordinatorAfterTerminal(true);
+  maintenanceCancel.cancel(LinkOperationCancelReason::quiesce);
+  acknowledgeSettlement(maintenanceCancel, false, true);
+
+  LinkOperation maintenanceBlock;
+  assert(maintenanceBlock.admit(51, LinkTransport::usb, 18, true) ==
+         LinkOperationAdmission::accepted);
+  maintenanceBlock.retainCoordinatorAfterTerminal(true);
+  assert(maintenanceBlock.block(LinkOperationCancelReason::operationFailure));
+  acknowledgeSettlement(maintenanceBlock, false, true);
 
   // Enumerate response/cleanup ordering for every non-transport resource. No
   // terminal settlement may retain a File, reservation, router or transaction.

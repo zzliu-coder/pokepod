@@ -116,7 +116,10 @@ class LinkOperation {
     return LinkOperationAdmission::accepted;
   }
 
-  bool active() const { return requestActive(); }
+  // Includes request-less settlement of a retained maintenance coordinator.
+  // Idle retention has no work to poll; once cancelled, the lifecycle remains
+  // active through external release acknowledgement.
+  bool active() const { return state_ != LinkOperationState::idle; }
 
   bool owns(uint32_t requestId, LinkTransport transport,
             uint32_t connectionGeneration) const {
@@ -138,7 +141,8 @@ class LinkOperation {
 
   bool observeDeadline(uint32_t nowMs) {
     if (!requestActive()) return false;
-    if (!deadlineExpired(nowMs) || responseDrained_) return true;
+    if (!deadlineExpired(nowMs) ||
+        (responseDrained_ && allFramesDrained())) return true;
     cancel(LinkOperationCancelReason::deadline);
     return false;
   }
@@ -147,8 +151,11 @@ class LinkOperation {
     if (!requestActive() || state_ == LinkOperationState::release) return;
     cancelReason_ = reason;
     cancelled_ = true;
+    retainCoordinator_ = false;
     responseAllowed_ = false;
-    if (!responseDrained_) completionEligible_ = false;
+    if (!responseDrained_ || !allFramesDrained()) {
+      completionEligible_ = false;
+    }
     state_ = LinkOperationState::cancelled;
   }
 
@@ -156,8 +163,11 @@ class LinkOperation {
     if (!requestActive() || state_ == LinkOperationState::release) return false;
     cancelReason_ = reason;
     blocked_ = true;
+    retainCoordinator_ = false;
     responseAllowed_ = false;
-    if (!responseDrained_) completionEligible_ = false;
+    if (!responseDrained_ || !allFramesDrained()) {
+      completionEligible_ = false;
+    }
     state_ = LinkOperationState::blocked;
     return true;
   }
@@ -376,9 +386,10 @@ class LinkOperation {
   bool responseAllowed() const { return responseAllowed_; }
   bool responseDrained() const { return responseDrained_; }
   bool cancelled() const { return cancelled_; }
-  uint16_t queuedFrameCount() const {
-    return progressFramesQueued_ + dataFramesQueued_ +
-        (terminalFrameQueued_ ? 1U : 0U);
+  uint32_t queuedFrameCount() const {
+    return static_cast<uint32_t>(progressFramesQueued_) +
+        static_cast<uint32_t>(dataFramesQueued_) +
+        (terminalFrameQueued_ ? 1UL : 0UL);
   }
 
  private:
