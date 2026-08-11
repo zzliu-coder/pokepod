@@ -3,7 +3,12 @@ import SwiftUI
 
 @main
 struct PokePodVoiceApp: App {
+    private static var shortcutDiagnostic: ShortcutController?
     @StateObject private var model = VoiceRuntimeModel()
+
+    init() {
+        Self.runShortcutDiagnosticIfRequested()
+    }
 
     var body: some Scene {
         MenuBarExtra {
@@ -12,6 +17,41 @@ struct PokePodVoiceApp: App {
             Label("PokePod Voice · \(model.state.title)", systemImage: model.state.symbol)
         }
         .menuBarExtraStyle(.window)
+    }
+
+    private static func runShortcutDiagnosticIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("--verify-option-z-hold") else {
+            return
+        }
+
+        let shortcut = ShortcutController()
+        shortcutDiagnostic = shortcut
+        print("option-z diagnostic: accessibility=\(shortcut.isAuthorized)")
+        guard shortcut.isAuthorized else {
+            DispatchQueue.main.async {
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            do {
+                try shortcut.pressOptionZ()
+                print("option-z diagnostic: key-down")
+            } catch {
+                print("option-z diagnostic: failed=\(error)")
+                shortcutDiagnostic = nil
+                NSApplication.shared.terminate(nil)
+                return
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                shortcut.releaseOptionZ()
+                print("option-z diagnostic: key-up")
+                shortcutDiagnostic = nil
+                NSApplication.shared.terminate(nil)
+            }
+        }
     }
 }
 
