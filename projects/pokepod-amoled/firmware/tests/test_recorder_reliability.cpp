@@ -68,6 +68,18 @@ int main() {
 
   constexpr const char *kId = "12345678-1234-4abc-8def-1234567890ab";
   constexpr const char *kCreatedAt = "2026-08-11T13:40:21+08:00";
+  constexpr const char *kUtcCreatedAt = "2026-08-11T05:40:21Z";
+  assert(recorderCheckpointCreatedAtShape(kCreatedAt));
+  assert(recorderCheckpointCreatedAtShape(kUtcCreatedAt));
+  assert(recorderCheckpointCreatedAtShape("2024-02-29T23:59:59Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-02-29T13:40:21Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-13-11T13:40:21Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-08-32T13:40:21Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-08-11T24:00:00Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-08-11T13:40:60Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-08-11 13:40:21Z"));
+  assert(!recorderCheckpointCreatedAtShape("2026-08-11T13:40:21+14:01"));
+  assert(!recorderCheckpointCreatedAtShape("2026-08-11T13:40:21+08"));
   StoredRecorderCheckpoint checkpoint{};
   assert(initializeRecorderCheckpoint(checkpoint, kId, kCreatedAt));
   assert(validateRecorderCheckpoint(checkpoint));
@@ -119,5 +131,7 @@ int main() {
   StoredRecorderCheckpoint invalidId{};
   assert(!initializeRecorderCheckpoint(invalidId, "not-a-uuid", kCreatedAt));
   assert(!initializeRecorderCheckpoint(invalidId, kId, ""));
+  assert(!initializeRecorderCheckpoint(invalidId, kId,
+                                       "2026-02-29T13:40:21Z"));
   return 0;
 }

@@ -103,6 +103,68 @@ inline bool recorderCheckpointUuidShape(const char *value) {
   return value[36] == '\0';
 }
 
+inline bool recorderCheckpointDigits(const char *value, size_t offset,
+                                     size_t count) {
+  for (size_t index = 0; index < count; ++index) {
+    const char character = value[offset + index];
+    if (character < '0' || character > '9') return false;
+  }
+  return true;
+}
+
+inline uint8_t recorderCheckpointTwoDigits(const char *value,
+                                           size_t offset) {
+  return static_cast<uint8_t>((value[offset] - '0') * 10 +
+                              (value[offset + 1] - '0'));
+}
+
+inline bool recorderCheckpointLeapYear(uint16_t year) {
+  return (year % 4U == 0U && year % 100U != 0U) || year % 400U == 0U;
+}
+
+inline bool recorderCheckpointCreatedAtShape(const char *value) {
+  if (value == nullptr ||
+      !recorderCheckpointDigits(value, 0, 4) ||
+      !recorderCheckpointDigits(value, 5, 2) ||
+      !recorderCheckpointDigits(value, 8, 2) ||
+      !recorderCheckpointDigits(value, 11, 2) ||
+      !recorderCheckpointDigits(value, 14, 2) ||
+      !recorderCheckpointDigits(value, 17, 2) ||
+      value[4] != '-' || value[7] != '-' || value[10] != 'T' ||
+      value[13] != ':' || value[16] != ':') {
+    return false;
+  }
+
+  const uint16_t year = static_cast<uint16_t>(
+      (value[0] - '0') * 1000 + (value[1] - '0') * 100 +
+      (value[2] - '0') * 10 + (value[3] - '0'));
+  const uint8_t month = recorderCheckpointTwoDigits(value, 5);
+  const uint8_t day = recorderCheckpointTwoDigits(value, 8);
+  const uint8_t hour = recorderCheckpointTwoDigits(value, 11);
+  const uint8_t minute = recorderCheckpointTwoDigits(value, 14);
+  const uint8_t second = recorderCheckpointTwoDigits(value, 17);
+  if (year < 2000U || month < 1U || month > 12U || hour > 23U ||
+      minute > 59U || second > 59U) {
+    return false;
+  }
+  static constexpr uint8_t kDaysPerMonth[] = {
+      31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  uint8_t maximumDay = kDaysPerMonth[month - 1U];
+  if (month == 2U && recorderCheckpointLeapYear(year)) maximumDay = 29U;
+  if (day < 1U || day > maximumDay) return false;
+
+  if (value[19] == 'Z') return value[20] == '\0';
+  if ((value[19] != '+' && value[19] != '-') ||
+      !recorderCheckpointDigits(value, 20, 2) || value[22] != ':' ||
+      !recorderCheckpointDigits(value, 23, 2) || value[25] != '\0') {
+    return false;
+  }
+  const uint8_t offsetHour = recorderCheckpointTwoDigits(value, 20);
+  const uint8_t offsetMinute = recorderCheckpointTwoDigits(value, 23);
+  return offsetHour <= 14U && offsetMinute <= 59U &&
+      (offsetHour != 14U || offsetMinute == 0U);
+}
+
 inline void finalizeRecorderCheckpoint(StoredRecorderCheckpoint &checkpoint) {
   checkpoint.crc32 = recorderCheckpointCrc32(
       reinterpret_cast<const uint8_t *>(&checkpoint),
@@ -123,7 +185,8 @@ inline bool initializeRecorderCheckpoint(StoredRecorderCheckpoint &checkpoint,
                               sizeof(checkpoint.capsuleId), capsuleId) ||
       !recorderCheckpointCopy(checkpoint.createdAt,
                               sizeof(checkpoint.createdAt), createdAt) ||
-      !recorderCheckpointUuidShape(checkpoint.capsuleId)) {
+      !recorderCheckpointUuidShape(checkpoint.capsuleId) ||
+      !recorderCheckpointCreatedAtShape(checkpoint.createdAt)) {
     memset(&checkpoint, 0, sizeof(checkpoint));
     return false;
   }
@@ -171,7 +234,7 @@ inline bool validateRecorderCheckpoint(
       recorderCheckpointHasTerminator(checkpoint.createdAt,
                                       sizeof(checkpoint.createdAt)) &&
       recorderCheckpointUuidShape(checkpoint.capsuleId) &&
-      checkpoint.createdAt[0] != '\0' &&
+      recorderCheckpointCreatedAtShape(checkpoint.createdAt) &&
       checkpoint.crc32 == recorderCheckpointCrc32(
           reinterpret_cast<const uint8_t *>(&checkpoint),
           offsetof(StoredRecorderCheckpoint, crc32));
