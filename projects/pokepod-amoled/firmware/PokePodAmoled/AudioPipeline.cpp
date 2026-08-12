@@ -53,9 +53,10 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"i2s\"}");
     return false;
   }
-  // Read one 1 ms stereo I2S interval at a time. The shared AudioFrontEnd
-  // selects the physical microphone slot and emits 16 kHz mono samples.
-  i2s_.setTimeout(50);
+  // ESP_I2S applies one Stream timeout to the complete hardware session; it
+  // does not accept a per-read timeout. The capture adapter and stop budget
+  // therefore share this exact fixed value.
+  i2s_.setTimeout(kAudioCaptureReadTimeoutMs);
 
   es8311_handle_t codec = es8311_create(0, ES8311_ADDRESS_0);
   if (codec == nullptr) {

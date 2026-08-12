@@ -5,8 +5,7 @@
 namespace pokepod {
 
 AudioCaptureReadResult AudioCaptureRuntime::PipelineSource::readStereo48(
-    uint8_t *output, size_t capacity, uint32_t timeoutMs) {
-  (void)timeoutMs;
+    uint8_t *output, size_t capacity) {
   AudioCaptureReadResult result;
   const int64_t startedUs = esp_timer_get_time();
   result.bytes = audio_ == nullptr
@@ -41,10 +40,13 @@ bool AudioCaptureRuntime::begin(BoardVariant variant, Print &log) {
   }
   ready_ = true;
   log.printf(
-      "{\"event\":\"capture_task\",\"ok\":true,\"priority\":%u,\"stack_bytes\":%u,\"ring_frames\":%u,\"dsp_profile\":\"%s\",\"source_overrun_observable\":false}\n",
+      "{\"event\":\"capture_task\",\"ok\":true,\"priority\":%u,\"stack_bytes\":%u,\"ring_frames\":%u,\"read_timeout_ms\":%u,\"stop_timeout_ms\":%u,\"dsp_profile\":\"%s\",\"source_overrun_observable\":false}\n",
       static_cast<unsigned>(kTaskPriority),
       static_cast<unsigned>(kTaskStackBytes),
-      static_cast<unsigned>(kRingFrames), audioDspProfileName(profile_));
+      static_cast<unsigned>(kRingFrames),
+      static_cast<unsigned>(kAudioCaptureReadTimeoutMs),
+      static_cast<unsigned>(kAudioCaptureStopTimeoutMs),
+      audioDspProfileName(profile_));
   return true;
 }
 

@@ -5,6 +5,7 @@
 #include <FS.h>
 
 #include "BoardConfig.h"
+#include "AudioCaptureTiming.h"
 #include "AudioBoardProfile.h"
 #include "PeakWindow.h"
 #include "PlaybackBufferPolicy.h"

@@ -39,12 +39,12 @@ class FakeCaptureSource final : public AudioCaptureSource {
 
   bool overrunObservable() const override { return true; }
 
-  AudioCaptureReadResult readStereo48(uint8_t *output, size_t capacity,
-                                      uint32_t timeoutMs) override {
+  AudioCaptureReadResult readStereo48(uint8_t *output,
+                                      size_t capacity) override {
     assert(active);
-    assert(timeoutMs == 25);
     if (next_ >= plan_.size()) {
-      return {AudioCaptureReadStatus::timeout, 0, timeoutMs * 1000};
+      return {AudioCaptureReadStatus::timeout, 0,
+              kAudioCaptureReadTimeoutMs * 1000U};
     }
     const PlannedRead item = plan_[next_++];
     size_t writable = item.bytes < capacity ? item.bytes : capacity;
@@ -80,6 +80,12 @@ void fillSamples(int16_t *samples, int16_t base) {
 }  // namespace
 
 int main() {
+  static_assert(kAudioCaptureReadTimeoutMs == 50U,
+                "hardware I2S timeout contract changed");
+  static_assert(kAudioCaptureStopTimeoutMs ==
+                    kAudioCaptureReadTimeoutMs *
+                        kAudioCaptureStopReadWindows,
+                "stop deadline must derive from the fixed read timeout");
   static_assert(kAudioCaptureFrameDurationMs == 20, "wire cadence changed");
   static_assert(kAudioCaptureSamplesPerFrame == 320, "frame size changed");
   static_assert(AudioCaptureService<6>::kRawStereoBytesPerFrame == 3840,

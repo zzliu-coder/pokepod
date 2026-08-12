@@ -5,6 +5,7 @@
 #include <atomic>
 
 #include "AudioCaptureRing.h"
+#include "AudioCaptureTiming.h"
 #include "AudioFrontEnd.h"
 
 namespace pokepod {
@@ -22,9 +23,10 @@ struct AudioCaptureReadResult {
   uint32_t elapsedUs = 0;
 };
 
-// Platform adapter implemented by the later integration lane. start/stop own
-// the I2S RX hardware; readStereo48() may return a partial block and must be
-// bounded by timeoutMs. No logging or allocation is permitted from these calls.
+// Platform adapter implemented by the integration lane. start/stop own the
+// I2S RX hardware; readStereo48() may return a partial block and is bounded by
+// the session-level kAudioCaptureReadTimeoutMs configured on the driver. No
+// logging or allocation is permitted from these calls.
 class AudioCaptureSource {
  public:
   virtual ~AudioCaptureSource() = default;
@@ -35,8 +37,7 @@ class AudioCaptureSource {
   // a zero overrun counter then means "not observable", not "no loss".
   virtual bool overrunObservable() const { return false; }
   virtual AudioCaptureReadResult readStereo48(uint8_t *output,
-                                              size_t capacity,
-                                              uint32_t timeoutMs) = 0;
+                                              size_t capacity) = 0;
 };
 
 enum class AudioCaptureCycleResult : uint8_t {
@@ -189,8 +190,6 @@ class AudioCaptureService {
  public:
   static constexpr size_t kRawStereoBytesPerFrame =
       48000 * kAudioCaptureFrameDurationMs / 1000 * 2 * sizeof(int16_t);
-  static constexpr uint32_t kReadTimeoutMs = kAudioCaptureFrameDurationMs + 5;
-
   bool configureDspProfile(AudioDspProfile profile) {
     if (running_ || profile == AudioDspProfile::unavailable) return false;
     frontEnd_.configure(profile);
@@ -233,7 +232,7 @@ class AudioCaptureService {
   AudioCaptureCycleResult captureOnce(uint32_t nowMs) {
     if (!running_ || source_ == nullptr) return AudioCaptureCycleResult::idle;
     AudioCaptureReadResult read = source_->readStereo48(
-        raw_ + rawUsed_, sizeof(raw_) - rawUsed_, kReadTimeoutMs);
+        raw_ + rawUsed_, sizeof(raw_) - rawUsed_);
     readCalls_.fetch_add(1, std::memory_order_relaxed);
     lastReadUs_.store(read.elapsedUs, std::memory_order_relaxed);
     uint32_t longest = longestReadUs_.load(std::memory_order_relaxed);

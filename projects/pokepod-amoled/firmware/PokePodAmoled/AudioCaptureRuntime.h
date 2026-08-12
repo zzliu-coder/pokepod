@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 
 #include "AudioCaptureService.h"
+#include "AudioCaptureTiming.h"
 #include "AudioCaptureSessionState.h"
 #include "AudioPipeline.h"
 
@@ -25,7 +26,7 @@ class AudioCaptureRuntime {
                 "capture ring must remain within the fixed RAM budget");
   static constexpr uint32_t kTaskStackBytes = 3072;
   static constexpr UBaseType_t kTaskPriority = 5;
-  static constexpr uint32_t kStopTimeoutMs = 500;
+  static constexpr uint32_t kStopTimeoutMs = kAudioCaptureStopTimeoutMs;
 
   bool begin(BoardVariant variant, Print &log);
   bool start(AudioPipeline &audio, uint32_t sessionId, Print &log);
@@ -57,8 +58,8 @@ class AudioCaptureRuntime {
     // adapter cannot truthfully distinguish RX DMA overrun from short/zero
     // reads, so diagnostics must report this capability as unavailable.
     bool overrunObservable() const override { return false; }
-    AudioCaptureReadResult readStereo48(uint8_t *output, size_t capacity,
-                                        uint32_t timeoutMs) override;
+    AudioCaptureReadResult readStereo48(uint8_t *output,
+                                        size_t capacity) override;
 
    private:
     AudioPipeline *audio_ = nullptr;
