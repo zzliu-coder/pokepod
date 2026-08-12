@@ -131,8 +131,14 @@ void runStorageContextOwnsReservationAndFile() {
   assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
 
+  std::atomic<bool> storageContextReady{false};
+  std::atomic<bool> uiObservedStorageContext{false};
   std::atomic<bool> finished{false};
   std::thread storageContext([&]() {
+    storageContextReady.store(true, std::memory_order_release);
+    while (!uiObservedStorageContext.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
     for (const char *id : {kFirstId, kSecondId}) {
       assert(recorder.start(log, id, kCreatedAt,
                             RecorderOperationOwner::localApp));
@@ -147,7 +153,11 @@ void runStorageContextOwnsReservationAndFile() {
     }
     finished.store(true, std::memory_order_release);
   });
-  uint32_t uiTicks = 0;
+  while (!storageContextReady.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  uint32_t uiTicks = 1;
+  uiObservedStorageContext.store(true, std::memory_order_release);
   while (!finished.load(std::memory_order_acquire)) {
     ++uiTicks;
     std::this_thread::yield();
