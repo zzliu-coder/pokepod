@@ -1,0 +1,116 @@
+#pragma once
+
+#include <Arduino.h>
+#include <stdint.h>
+
+#include "LinkOperation.h"
+#include "LinkRecordingStart.h"
+#include "LinkRecordingStop.h"
+#include "RecorderOutcome.h"
+
+namespace pokepod {
+
+class AudioCaptureDispatcher;
+class AudioCaptureRouter;
+class AudioCaptureRuntime;
+class AudioPipeline;
+class BleVoiceService;
+class CapsuleLibrary;
+class LinkCapsuleTransactionGate;
+class LinkTransferGate;
+class WavRecorder;
+
+enum class LinkRecordingRequestStatus : uint8_t {
+  accepted = 0,
+  busy,
+  failed,
+  cleanupPending,
+};
+
+struct LinkRecordingRequestResult {
+  LinkRecordingRequestStatus status = LinkRecordingRequestStatus::failed;
+  const char *message = "recording request failed";
+};
+
+enum class LinkRecordingEventKind : uint8_t {
+  none = 0,
+  startReady,
+  stopCommitted,
+  stopCommittedIndexFailed,
+  stopFailed,
+};
+
+struct LinkRecordingEvent {
+  LinkRecordingEventKind kind = LinkRecordingEventKind::none;
+  uint32_t requestId = 0;
+  String capsuleId;
+  bool respond = false;
+};
+
+// Owns the complete Link recording session after request dispatch.  It is the
+// only component allowed to combine LinkRecordingStart/Stop, the capture
+// runtime, recorder terminal facts, router ownership and transaction-gate
+// cancellation.  Wire responses remain in PokePodLinkService.
+class LinkRecordingSession {
+ public:
+  void begin(AudioPipeline &audio, AudioCaptureRuntime *captureRuntime,
+             AudioCaptureDispatcher *captureDispatcher,
+             AudioCaptureRouter &captureRouter, BleVoiceService &bleVoice,
+             WavRecorder &recorder, CapsuleLibrary &library, Print &log);
+
+  LinkRecordingRequestResult requestStart(
+      uint32_t requestId, const String &capsuleId, uint32_t captureSessionId,
+      const String &createdAt, RecorderOperationOwner recorderOwner,
+      LinkOperation &operation, LinkCapsuleTransactionGate &transactionGate,
+      LinkTransferGate *transferGate);
+  bool requestStop(uint32_t requestId, bool commit, bool respond,
+                   bool operationOwnsRequest, LinkOperation &operation,
+                   LinkCapsuleTransactionGate &transactionGate);
+
+  LinkRecordingEvent poll(LinkOperation &operation,
+                          LinkCapsuleTransactionGate &transactionGate,
+                          LinkTransport transport,
+                          LinkTransferGate *transferGate,
+                          bool sessionActive, bool quiesceRequested);
+  void observeAutomaticStop(LinkOperation &operation,
+                            LinkCapsuleTransactionGate &transactionGate);
+  void disconnect(LinkOperation &operation,
+                  LinkCapsuleTransactionGate &transactionGate);
+
+  bool ready() const;
+  bool ownsRequest(uint32_t requestId) const {
+    return start_.ownsRequest(requestId) || stop_.ownsRequest(requestId);
+  }
+  bool owned() const { return owned_; }
+  bool stopActive() const { return stop_.active(); }
+  bool recordingActive() const;
+  bool quiesced() const {
+    return !owned_ && !start_.active() && !stop_.active();
+  }
+
+ private:
+  LinkRecordingEvent advanceStart(
+      LinkOperation &operation, LinkCapsuleTransactionGate &transactionGate,
+      LinkTransport transport, LinkTransferGate *transferGate,
+      bool sessionActive, bool quiesceRequested);
+  LinkRecordingEvent advanceStop(
+      LinkOperation &operation, LinkCapsuleTransactionGate &transactionGate,
+      LinkTransport transport, LinkTransferGate *transferGate,
+      bool sessionActive, bool quiesceRequested);
+
+  AudioPipeline *audio_ = nullptr;
+  AudioCaptureRuntime *captureRuntime_ = nullptr;
+  AudioCaptureDispatcher *captureDispatcher_ = nullptr;
+  AudioCaptureRouter *captureRouter_ = nullptr;
+  BleVoiceService *bleVoice_ = nullptr;
+  WavRecorder *recorder_ = nullptr;
+  CapsuleLibrary *library_ = nullptr;
+  Print *log_ = nullptr;
+
+  bool owned_ = false;
+  LinkRecordingStart start_;
+  String capsuleId_;
+  LinkRecordingStop stop_;
+};
+
+}  // namespace pokepod

@@ -80,6 +80,7 @@ assert main.index("wirelessSync.enforceDeadline(now);") < main.index(
 )
 
 link = read("PokePodLinkService.cpp")
+link_recording = read("LinkRecordingSession.cpp")
 assert 'strcmp(operation, "pairing-export") == 0' in link
 assert "transport_ != LinkTransport::usb" in link
 assert "transport_ == LinkTransport::usb" in link
@@ -97,16 +98,16 @@ assert 'static constexpr char kHex[] = "0123456789abcdef"' in link
 assert "char hex[65] = {}" in link
 assert link.count("transferPermitted()") >= 12
 assert "AudioCaptureRuntime *captureRuntime" in read("PokePodLinkService.h")
-assert "recorder_->requestStart(*log_, id, board_->utcNow()," in link
-assert "recorderOwner);" in link
+assert "recorder_->requestStart(" in link_recording
+assert "recorderOwner);" in link_recording
 assert "RecordingSpaceSnapshot" not in link
 assert "RecorderOperationOwner::linkWifi" in link
 assert "RecorderOperationOwner::linkUsb" in link
-assert "recorder_->pollStart" in link
-assert "captureRuntime_->start(*audio_, captureSessionId, *log_)" in link
+assert "recorder_->pollStart" in link_recording
+assert "captureRuntime_->start(*audio_, captureSessionId, *log_)" in link_recording
 assert "recorder_->start(*log_, id, board_->utcNow())" not in link
 assert "audio_->startCapture(*log_)" not in link
-assert "captureRuntime_->stop(*log_)" in link
+assert "captureRuntime_->stop(*log_)" in link_recording
 
 main = read("PokePodApp.cpp")
 assert "LinkTransport::usb, &wirelessSync,\n                    nullptr" in main

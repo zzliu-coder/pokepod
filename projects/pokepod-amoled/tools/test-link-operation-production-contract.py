@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 SOURCE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+DIAGNOSTICS = (ROOT / "firmware/PokePodAmoled/LinkDiagnostics.cpp").read_text()
 GATE = (ROOT / "firmware/PokePodAmoled/LinkTransferGate.h").read_text()
 MATRIX = (ROOT / "firmware/tests/link_operation_migration.md").read_text()
 
@@ -105,11 +106,17 @@ assert "StorageAccess::read, 250" not in send_file
 status_start = SOURCE.index('if (strcmp(operation, "status") == 0)')
 status_end = SOURCE.index('} else if (strcmp(operation, "provisioning-start")',
                           status_start)
-status = SOURCE[status_start:status_end]
-assert "requestLinkRecordingStop" not in status
+status_dispatch = SOURCE[status_start:status_end]
+assert "requestLinkRecordingStop" not in status_dispatch
+assert "diagnostics_.statusJson()" in status_dispatch
+assert "sendTerminalOrDisconnect(requestId" in status_dispatch
+status = DIAGNOSTICS[DIAGNOSTICS.index("String LinkDiagnostics::statusJson() const"):
+                     DIAGNOSTICS.index("String LinkDiagnostics::provisioningJson() const")]
 assert "kStatusExtraBytes" in status
 assert "diagnosticsTruncated" in status
-assert "sendTerminalOrDisconnect(requestId, response)" in status
+assert "String response =" in status
+assert r'\"status\":\"ok\"' in status
+assert r'\"version\":2' in status
 
 fallback_start = SOURCE.index("bool PokePodLinkService::sendTerminalOrDisconnect")
 fallback_end = SOURCE.index("bool PokePodLinkService::sendEvent", fallback_start)

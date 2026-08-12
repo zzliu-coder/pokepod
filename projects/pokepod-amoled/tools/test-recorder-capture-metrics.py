@@ -12,6 +12,7 @@ wav_h = (firmware / "WavRecorder.h").read_text(encoding="utf-8")
 wav = (firmware / "WavRecorder.cpp").read_text(encoding="utf-8")
 app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
+link_recording = (firmware / "LinkRecordingSession.cpp").read_text(encoding="utf-8")
 dispatcher = (firmware / "AudioCaptureDispatcher.h").read_text(encoding="utf-8")
 
 assert "struct AudioCaptureFrontEndSnapshot" in service
@@ -65,8 +66,10 @@ local_abort = local_finish.index("recorder.abortCapture(usb.log())",
 assert local_drain < local_snapshot < local_stop
 assert local_snapshot < local_abort
 
-advance = link[link.index("void PokePodLinkService::advanceLinkRecordingStop()"):
-               link.index("bool PokePodLinkService::transferPermitted()")]
+advance = link_recording[
+    link_recording.index("LinkRecordingEvent LinkRecordingSession::advanceStop("):
+    link_recording.index("LinkRecordingEvent LinkRecordingSession::poll(")
+]
 drain = advance.index("captureDispatcher_->drain(")
 snapshot = advance.index("captureRuntime_->frontEndSnapshot()", drain)
 observe = advance.index("recorder_->observeAudioMetrics(", snapshot)
@@ -78,6 +81,6 @@ assert "!recorder_->captureFailureLatched()" in advance
 
 # Normal, disconnect and Link queue-overflow all use this single branch; the
 # stop state chooses commit/abort only after the final session snapshot.
-assert "suppressResponseAndAbort" in link
+assert "suppressResponseAndAbort" in link_recording
 
 print("PASS test_recorder_capture_metrics")

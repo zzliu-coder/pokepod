@@ -22,6 +22,7 @@ worker_header = source("TencentWorker.h")
 job_runtime = source("TencentJobRuntime.h")
 asr = source("TencentAsr.cpp")
 link = source("PokePodLinkService.cpp")
+link_diagnostics = source("LinkDiagnostics.cpp")
 dashboard = source("Dashboard.cpp")
 main = source("PokePodApp.cpp")
 
@@ -82,7 +83,7 @@ for field in (
     "asr_heap_largest_before_tls",
     "asr_psram_free_before_tls",
 ):
-    require(link, field, f"Link status is missing {field}")
+    require(link_diagnostics, field, f"Link status is missing {field}")
 wifi_ui = source("WifiUiPolicy.h")
 require(wifi_ui, 'return automaticEnabled ? "省电休眠" : "已关闭";',
         "Wi-Fi sleep and manual-off labels are not distinct")

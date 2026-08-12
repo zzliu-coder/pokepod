@@ -18,6 +18,7 @@ recorder = source("WavRecorder.cpp") + source("WavRecorder.h")
 capture = source("AudioCaptureService.h") + source("AudioCaptureRuntime.h")
 voice = source("VoiceSessionController.h")
 link = source("PokePodLinkService.cpp")
+link_diagnostics = source("LinkDiagnostics.cpp")
 audio = source("AudioFrontEnd.h")
 conditioner = source("VoiceConditioner.h")
 hiss_filter = source("TargetedHissFilter.h")
@@ -49,11 +50,11 @@ assert "kMaximumGainQ12 = 6 * 4096" in conditioner
 assert "kLimiter = 30000" in conditioner
 assert "kClosedGateGainQ12 = 128" in conditioner
 assert "audio_frontend_channel" in main
-assert "audio_frontend_channel" in link
+assert "audio_frontend_channel" in link_diagnostics
 assert "audio_frontend_noise_floor" in main
-assert "audio_frontend_noise_floor" in link
+assert "audio_frontend_noise_floor" in link_diagnostics
 assert "audio_frontend_suppressed_samples" in main
-assert "audio_frontend_suppressed_samples" in link
+assert "audio_frontend_suppressed_samples" in link_diagnostics
 
 assert "PageTransition pageTransition_" in source("Dashboard.h")
 assert "dashboard.advancePageTransition(now)" in main

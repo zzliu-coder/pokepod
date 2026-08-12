@@ -17,6 +17,7 @@ diagnostics = (firmware / "ProvisioningDiagnostics.cpp").read_text(encoding="utf
 power_diagnostics = (firmware / "PowerDiagnostics.cpp").read_text(encoding="utf-8")
 power_codec = (firmware / "PowerDiagnosticsCodec.h").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
+link_diagnostics = (firmware / "LinkDiagnostics.cpp").read_text(encoding="utf-8")
 dashboard = (firmware / "Dashboard.cpp").read_text(encoding="utf-8")
 cdc_status = (root / "cdc-status.py").read_text(encoding="utf-8")
 
@@ -60,14 +61,14 @@ assert "clear-provisioning-diagnostics" in link
 assert "power-diagnostics" in link
 assert "get-power-diagnostics" in link
 assert "clear-power-diagnostics" in link
-assert "powerDiagnosticsJson" in link
+assert "diagnostics_.powerJson()" in link
 assert "provisioning-start" in link
 assert "provisioning-stop" in link
-assert "resetReason" in link
-assert "provisioningStartupPhase" in link
-assert "internalHeapFree" in link
-assert "internalHeapLargest" in link
-assert "psramFree" in link
+assert "resetReason" in link_diagnostics
+assert "provisioningStartupPhase" in link_diagnostics
+assert "internalHeapFree" in link_diagnostics
+assert "internalHeapLargest" in link_diagnostics
+assert "psramFree" in link_diagnostics
 assert "internal_heap_free" in main
 assert "internal_heap_largest" in main
 assert "psram_free" in main
@@ -82,9 +83,9 @@ record_body = diagnostics[
 ]
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in record_body
-export_body = link[
-    link.index("String PokePodLinkService::provisioningDiagnosticsJson") :
-    link.index("String PokePodLinkService::powerDiagnosticsJson")
+export_body = link_diagnostics[
+    link_diagnostics.index("String LinkDiagnostics::provisioningJson") :
+    link_diagnostics.index("String LinkDiagnostics::powerJson")
 ]
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in export_body
@@ -109,9 +110,9 @@ assert 'operation == "get-power-diagnostics"' in cdc_status
 assert 'record["blockers"]' in cdc_status
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in power_diagnostics
-power_export = link[
-    link.index("String PokePodLinkService::powerDiagnosticsJson") :
-    link.index("bool PokePodLinkService::sendOk")
+power_export = link_diagnostics[
+    link_diagnostics.index("String LinkDiagnostics::powerJson") :
+    link_diagnostics.index("bool LinkDiagnostics::clearProvisioning")
 ]
 for secret in ("password", "secretId", "secretKey", "hotword"):
     assert secret not in power_export

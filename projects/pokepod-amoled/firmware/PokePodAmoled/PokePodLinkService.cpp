@@ -1,7 +1,5 @@
 #include "PokePodLinkService.h"
 
-#include "WifiFailurePolicy.h"
-
 #include <SD_MMC.h>
 #include <cJSON.h>
 #include <esp_heap_caps.h>
@@ -45,8 +43,6 @@ constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
 constexpr size_t kLinkPendingControlBytes =
     kLinkHeaderBytes + kLinkMaxControlBytes;
 constexpr size_t kLinkWriteSliceBytes = 512;
-constexpr size_t kStatusExtraBytes = kLinkMaxControlBytes - 96U;
-constexpr size_t kStatusDiagnosticStringBytes = 192U;
 constexpr const char *kTerminalQueueError =
     "{\"status\":\"error\",\"version\":2,"
     "\"message\":\"response unavailable\"}";
@@ -88,80 +84,6 @@ String printed(cJSON *root) {
   const String result = value == nullptr ? String() : String(value);
   cJSON_free(value);
   return result;
-}
-
-String jsonEscaped(const String &value) {
-  String escaped;
-  escaped.reserve(value.length() + 8);
-  for (size_t index = 0; index < value.length(); ++index) {
-    const char character = value[index];
-    switch (character) {
-      case '\\': escaped += "\\\\"; break;
-      case '"': escaped += "\\\""; break;
-      case '\n': escaped += "\\n"; break;
-      case '\r': escaped += "\\r"; break;
-      case '\t': escaped += "\\t"; break;
-      default:
-        if (static_cast<uint8_t>(character) >= 0x20) escaped += character;
-        break;
-    }
-  }
-  return escaped;
-}
-
-String utf8Prefix(const String &value, size_t maximumBytes) {
-  if (value.length() <= maximumBytes) return value;
-  if (maximumBytes <= 3) return String();
-  const size_t payloadBytes = maximumBytes - 3;
-  size_t offset = 0;
-  while (offset < value.length()) {
-    const uint8_t lead = static_cast<uint8_t>(value[offset]);
-    size_t characterBytes = 1;
-    if ((lead & 0xE0U) == 0xC0U) characterBytes = 2;
-    else if ((lead & 0xF0U) == 0xE0U) characterBytes = 3;
-    else if ((lead & 0xF8U) == 0xF0U) characterBytes = 4;
-    if (offset + characterBytes > value.length() ||
-        offset + characterBytes > payloadBytes) {
-      break;
-    }
-    bool continuationValid = true;
-    for (size_t index = 1; index < characterBytes; ++index) {
-      if ((static_cast<uint8_t>(value[offset + index]) & 0xC0U) != 0x80U) {
-        continuationValid = false;
-        break;
-      }
-    }
-    if (!continuationValid) characterBytes = 1;
-    offset += characterBytes;
-  }
-  return value.substring(0, offset) + "...";
-}
-
-void appendJsonKey(String &json, const char *key) {
-  if (!json.isEmpty()) json += ',';
-  json += '"';
-  json += key;
-  json += "\":";
-}
-
-void appendJsonBool(String &json, const char *key, bool value) {
-  appendJsonKey(json, key);
-  json += value ? "true" : "false";
-}
-
-void appendJsonNumber(String &json, const char *key, int64_t value) {
-  appendJsonKey(json, key);
-  char encoded[24];
-  snprintf(encoded, sizeof(encoded), "%lld",
-           static_cast<long long>(value));
-  json += encoded;
-}
-
-void appendJsonString(String &json, const char *key, const String &value) {
-  appendJsonKey(json, key);
-  json += '"';
-  json += jsonEscaped(value);
-  json += '"';
 }
 
 void replaceStringOrNull(cJSON *root, const char *name, const char *value) {
@@ -236,8 +158,6 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   fs_ = &fs;
   board_ = &board;
   audio_ = &audio;
-  captureRuntime_ = captureRuntime;
-  captureDispatcher_ = captureDispatcher;
   capabilities_ = capabilities;
   captureRouter_ = &captureRouter;
   usb_ = &usb;
@@ -248,11 +168,14 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   config_ = &config;
   wifi_ = &wifi;
   tencent_ = &tencent;
-  provisioningDiagnostics_ = &provisioningDiagnostics;
-  powerDiagnostics_ = &powerDiagnostics;
   provisioningCoordinator_ = provisioningCoordinator;
-  power_ = &power;
   log_ = &log;
+  recordingSession_.begin(audio, captureRuntime, captureDispatcher,
+                          captureRouter, bleVoice, recorder, library, log);
+  diagnostics_.bind(board, audio, usb, bleVoice, dashboard, library, recorder,
+                    config, wifi, tencent, provisioningDiagnostics,
+                    powerDiagnostics, power, provisioningCoordinator,
+                    capabilities);
   coordinator_ = coordinator;
   transport_ = transport;
   pairingProvider_ = pairingProvider;
@@ -428,12 +351,7 @@ void PokePodLinkService::disconnect() {
   manifestResponseJson_ = "";
   manifestFailureRequestId_ = 0;
   manifestFailureMessage_ = "";
-  if (linkRecordingStop_.active()) {
-    linkRecordingStop_.suppressResponseAndAbort();
-  } else if (linkOwnedRecording_) {
-    (void)requestLinkRecordingStop(0, false, false);
-  }
-  if (linkOwnedRecording_) transactionGate_.cancel();
+  recordingSession_.disconnect(operation_, transactionGate_);
   if (transactionPurpose_ == TransactionPurpose::incoming ||
       transactionPurpose_ == TransactionPurpose::commandText) {
     if (transactionRunner_.active()) transactionGate_.cancel();
@@ -482,7 +400,7 @@ bool PokePodLinkService::quiesced() const {
       !batchExecutor_.active() && batchPending_ == BatchPending::none &&
       deferredCommandFiles_.empty() && deferredTreeCleanupStack_.empty() &&
       !commandCleanupPending_ && !commandStorageActive_ &&
-      !linkOwnedRecording_ && !linkRecordingStop_.active() &&
+      recordingSession_.quiesced() &&
       !operation_.active() &&
       !operation_.ownsResource(LinkOperationResource::coordinator);
 }
@@ -494,8 +412,9 @@ void PokePodLinkService::pollDeferredCleanup() {
   advanceBatchStartupRecovery();
   advanceStartupPartCleanup();
   cleanupPurgeStaging();
-  advanceLinkRecordingStart();
-  advanceLinkRecordingStop();
+  handleLinkRecordingEvent(recordingSession_.poll(
+      operation_, transactionGate_, transport_, transferGate_, sessionActive_,
+      quiesceRequested_));
   if (incomingCleanupPending_) cleanupIncomingStorage();
   if (outgoingCleanupPending_) cleanupOutgoingStorage();
   if (manifestCleanupPending_) cleanupManifestStorage();
@@ -531,13 +450,7 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     finishPendingManifestFailure();
     return;
   }
-  if (linkOwnedRecording_ && !linkRecordingStop_.active()) {
-    if (recorder_ != nullptr && recorder_->captureFailureLatched()) {
-      (void)requestLinkRecordingStop(0, false, false);
-    } else if (recorder_ != nullptr && recorder_->stopRequested()) {
-      (void)requestLinkRecordingStop(0, true, false);
-    }
-  }
+  recordingSession_.observeAutomaticStop(operation_, transactionGate_);
   if (!transferPermitted()) {
     disconnect();
     return;
@@ -755,8 +668,7 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   handleImmediate(requestId, root);
   cJSON_Delete(root);
   if (manifestRequestId_ == requestId && manifestStepper_.active()) return;
-  if (linkRecordingStart_.ownsRequest(requestId)) return;
-  if (linkRecordingStop_.ownsRequest(requestId)) return;
+  if (recordingSession_.ownsRequest(requestId)) return;
 }
 
 bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
@@ -1188,202 +1100,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
-    const BoardStatus &status = board_->status();
-    String extra;
-    extra.reserve(3072);
-    appendJsonBool(extra, "recording", recorder_->recording());
-    appendJsonBool(extra, "transcribing", tencent_->working());
-    appendJsonNumber(extra, "batteryPercent", status.batteryPercent);
-    appendJsonBool(extra, "charging", status.charging);
-    appendJsonString(extra, "wifi", wifi_->phaseName());
-    appendJsonNumber(extra, "wifiDisconnectReason",
-                     wifi_->lastDisconnectReason());
-    appendJsonString(extra, "wifiDisconnectKind",
-                     wifiFailureKey(wifi_->lastDisconnectReason()));
-    appendJsonBool(extra, "wifiRadioOn", wifi_->radioOn());
-    appendJsonBool(extra, "wifiPowerSave", wifi_->powerSaveEnabled());
-    appendJsonNumber(extra, "wifiPowerSaveError", wifi_->powerSaveError());
-    appendJsonNumber(extra, "pendingCapsules", library_->pendingCount());
-    appendJsonNumber(extra, "asr_hash_ms", tencent_->lastHashElapsedMs());
-    appendJsonNumber(extra, "asr_connect_ms",
-                     tencent_->lastConnectElapsedMs());
-    appendJsonNumber(extra, "asr_upload_ms",
-                     tencent_->lastUploadElapsedMs());
-    appendJsonNumber(extra, "asr_total_ms", tencent_->lastTotalElapsedMs());
-    appendJsonString(extra, "asr_last_code", tencent_->lastCode());
-    appendJsonNumber(extra, "asr_tls_error", tencent_->lastNetworkError());
-    appendJsonString(extra, "asr_tls_detail",
-                     utf8Prefix(tencent_->lastNetworkErrorDetail(),
-                                kStatusDiagnosticStringBytes));
-    appendJsonNumber(extra, "asr_heap_free_before_tls",
-                     tencent_->lastInternalHeapFreeBeforeTls());
-    appendJsonNumber(extra, "asr_heap_largest_before_tls",
-                     tencent_->lastInternalHeapLargestBeforeTls());
-    appendJsonNumber(extra, "asr_psram_free_before_tls",
-                     tencent_->lastPsramFreeBeforeTls());
-    appendJsonBool(extra, "sdReady", status.sdCard);
-    if (capabilities_ != nullptr) {
-      appendJsonNumber(extra, "capabilityObservedMask",
-                       capabilities_->observedMask());
-      appendJsonNumber(extra, "capabilityReadyMask",
-                       capabilities_->readyMask());
-      appendJsonBool(extra, "capsuleLibraryReady",
-                     capabilities_->ready(DeviceCapability::capsuleLibrary));
-      appendJsonBool(extra, "recorderReady",
-                     capabilities_->ready(DeviceCapability::recording));
-      appendJsonBool(extra, "asrWorkerReady",
-                     capabilities_->ready(DeviceCapability::transcription));
-    }
-    appendJsonString(extra, "variant", variantName(status.variant));
-    appendJsonBool(extra, "ioExpander", status.ioExpander);
-    appendJsonBool(extra, "display", status.display);
-    appendJsonBool(extra, "touch", status.touch);
-    appendJsonBool(extra, "rtc", status.rtc);
-    appendJsonBool(extra, "imu", status.imu);
-    appendJsonBool(extra, "pmu", status.pmu);
-    appendJsonBool(extra, "vbusPresent", status.vbusPresent);
-    appendJsonBool(extra, "screenOn", status.screenOn);
-    appendJsonBool(extra, "audio", audio_ != nullptr && audio_->ready());
-    appendJsonBool(extra, "usb", usb_->ready());
-    appendJsonBool(extra, "host_connected", usb_->hostConnected());
-    appendJsonBool(extra, "bleVoiceConnected",
-                   bleVoice_ != nullptr && bleVoice_->connected());
-    appendJsonBool(extra, "bleVoiceReady",
-                   bleVoice_ != nullptr && bleVoice_->appReady());
-    appendJsonNumber(extra, "bleVoiceMtu",
-                     bleVoice_ == nullptr ? 0 : bleVoice_->mtu());
-    const BleVoiceQualitySnapshot bleQuality = bleVoice_ == nullptr
-        ? BleVoiceQualitySnapshot() : bleVoice_->quality();
-    appendJsonNumber(extra, "bleVoiceNotifyAttempts",
-                     bleQuality.notifyAttempts);
-    appendJsonNumber(extra, "bleVoiceNotifyAccepted",
-                     bleQuality.notifyAccepted);
-    appendJsonNumber(extra, "bleVoiceNotifyFailures",
-                     bleQuality.notifyFailures);
-    appendJsonNumber(extra, "bleVoiceQueueOverflows",
-                     bleQuality.queueOverflows);
-    appendJsonNumber(extra, "bleVoiceSessionFailures",
-                     bleQuality.sessionFailures);
-    appendJsonNumber(extra, "bleVoiceReadyTimeouts", bleQuality.readyTimeouts);
-    appendJsonNumber(extra, "bleVoiceStopAckTimeouts",
-                     bleQuality.stopAckTimeouts);
-    appendJsonNumber(extra, "bleVoiceStreamTimeouts",
-                     bleQuality.streamTimeouts);
-    appendJsonNumber(extra, "bleVoiceLastErrorCode",
-                     bleQuality.lastErrorCode);
-    appendJsonNumber(extra, "audio_read_bytes", audio_->bytesRead());
-    appendJsonNumber(extra, "audio_read_failures", audio_->readFailures());
-    appendJsonNumber(extra, "audio_peak", audio_->peakSample());
-    appendJsonString(extra, "playback_last_error",
-                     utf8Prefix(audio_->lastPlaybackError(),
-                                kStatusDiagnosticStringBytes));
-    appendJsonNumber(extra, "playback_start_failures",
-                     audio_->playbackStartFailures());
-    appendJsonNumber(extra, "playback_heap_largest_before_start",
-                     audio_->playbackHeapLargestBeforeStart());
-    appendJsonNumber(extra, "playback_file_reads",
-                     audio_->playbackFileReadCount());
-    appendJsonNumber(extra, "playback_pump_count",
-                     audio_->playbackPumpCount());
-    appendJsonNumber(extra, "playback_max_file_read_us",
-                     audio_->playbackMaxFileReadUs());
-    const AudioFrontEndMetrics &frontEnd = recorder_->audioMetrics();
-    appendJsonString(extra, "audio_frontend_channel",
-                     audioInputChannelName(frontEnd.selectedChannel));
-    appendJsonNumber(extra, "audio_frontend_left_peak", frontEnd.leftPeak);
-    appendJsonNumber(extra, "audio_frontend_right_peak", frontEnd.rightPeak);
-    appendJsonNumber(extra, "audio_frontend_output_peak", frontEnd.outputPeak);
-    appendJsonNumber(extra, "audio_frontend_noise_floor",
-                     frontEnd.estimatedNoiseFloor);
-    appendJsonNumber(extra, "audio_frontend_suppressed_samples",
-                     frontEnd.suppressedSamples);
-    appendJsonNumber(extra, "audio_frontend_limited_samples",
-                     frontEnd.limitedSamples);
-    appendJsonNumber(extra, "audio_frontend_max_gain_q12",
-                     frontEnd.maximumGainQ12);
-    appendJsonBool(extra, "tencentConfigured", config_->hasTencent());
-    appendJsonNumber(extra, "wifiNetworkCount", config_->wifiNetworks().size());
-    appendJsonNumber(extra, "ui_full_redraws", dashboard_->fullRedrawCount());
-    appendJsonNumber(extra, "ui_body_redraws", dashboard_->bodyRedrawCount());
-    appendJsonNumber(extra, "ui_partial_redraws",
-                     dashboard_->partialRedrawCount());
-    appendJsonNumber(extra, "ui_scroll_frame_last_us",
-                     dashboard_->scrollFrameLastUs());
-    appendJsonNumber(extra, "ui_scroll_frame_max_us",
-                     dashboard_->scrollFrameMaxUs());
-    appendJsonNumber(extra, "ui_scroll_compose_max_us",
-                     dashboard_->scrollComposeMaxUs());
-    appendJsonNumber(extra, "ui_scroll_transfer_max_us",
-                     dashboard_->scrollTransferMaxUs());
-    appendJsonNumber(extra, "ui_scroll_frames_over_budget",
-                     dashboard_->scrollFramesOverBudget());
-    appendJsonNumber(extra, "capsule_full_scans", library_->fullScanCount());
-    appendJsonNumber(extra, "capsule_incremental_refreshes",
-                     library_->incrementalRefreshCount());
-    appendJsonNumber(extra, "capsule_refresh_fallbacks",
-                     library_->refreshFallbackCount());
-    appendJsonNumber(extra, "capsule_last_scan_us", library_->lastScanUs());
-    appendJsonNumber(extra, "capsule_max_scan_us", library_->maxScanUs());
-    appendJsonBool(extra, "ui_frame_buffer", dashboard_->frameBufferReady());
-    appendJsonBool(extra, "ui_animation_buffer",
-                   dashboard_->animationBufferReady());
-    const RuntimePowerSnapshot &power = power_->snapshot();
-    appendJsonString(extra, "powerMode", powerModeName(power.mode));
-    appendJsonNumber(extra, "cpuMhz", power.cpuMhz);
-    appendJsonNumber(extra, "powerTransitions", power.transitions);
-    appendJsonNumber(extra, "lightSleepAttempts", power.lightSleepAttempts);
-    appendJsonNumber(extra, "lightSleepCount", power.lightSleepCount);
-    appendJsonNumber(extra, "lightSleepFailures", power.lightSleepFailures);
-    appendJsonNumber(extra, "lightSleepMs", power.lightSleepUs / 1000ULL);
-    appendJsonNumber(extra, "deepSleepWakeCount", power.deepSleepWakeCount);
-    appendJsonNumber(extra, "deepSleepArmAttempts", power.deepSleepArmAttempts);
-    appendJsonNumber(extra, "deepSleepArmFailures", power.deepSleepArmFailures);
-    appendJsonBool(extra, "wokeFromDeepSleep", power.wokeFromDeepSleep);
-    appendJsonBool(extra, "deepSleepTouchWakeArmed",
-                   power.deepSleepTouchWakeArmed);
-    appendJsonNumber(extra, "lastWakeCause", power.lastWakeCause);
-    appendJsonNumber(extra, "wakeCauses", power.wakeCauses);
-    const PowerDiagnosticsSnapshot &powerDiagnostic =
-        powerDiagnostics_->snapshot();
-    appendJsonNumber(extra, "powerActiveFacts", powerDiagnostic.activeFacts);
-    appendJsonNumber(extra, "powerLightBlockers", powerDiagnostic.lightBlockers);
-    appendJsonNumber(extra, "powerDeepBlockers", powerDiagnostic.deepBlockers);
-    appendJsonNumber(extra, "powerCurrentBlockers",
-                     powerDiagnostic.currentBlockers);
-    appendJsonNumber(extra, "powerIdleMs", powerDiagnostic.idleMs);
-    appendJsonNumber(extra, "powerDiagnosticCount", powerDiagnostics_->count());
-    appendJsonNumber(extra, "powerDiagnosticPersistFailures",
-                     powerDiagnostic.persistFailures);
-    appendJsonNumber(extra, "powerAutomaticScreenWakes",
-                     powerDiagnostic.automaticScreenWakes);
-    appendJsonNumber(extra, "resetReason", esp_reset_reason());
-    appendJsonNumber(extra, "internalHeapFree",
-                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
-                                             MALLOC_CAP_8BIT));
-    appendJsonNumber(extra, "internalHeapLargest",
-                     heap_caps_get_largest_free_block(
-                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    appendJsonNumber(extra, "psramFree", ESP.getFreePsram());
-    appendJsonBool(extra, "automaticPmSupported", power.automaticPmSupported);
-    appendJsonBool(extra, "bleModemSleepSupported",
-                   power.bleModemSleepSupported);
-    appendJsonNumber(extra, "provisioningDiagnosticCount",
-                     provisioningDiagnostics_->count());
-    appendJsonString(extra, "provisioningStartupPhase",
-                     provisioningCoordinator_ == nullptr
-                         ? "unavailable" : provisioningCoordinator_->phaseName());
-    if (extra.length() > kStatusExtraBytes) {
-      extra = "\"diagnosticsTruncated\":true";
-      appendJsonBool(extra, "recording", recorder_->recording());
-      appendJsonBool(extra, "transcribing", tencent_->working());
-      appendJsonNumber(extra, "batteryPercent", status.batteryPercent);
-      appendJsonString(extra, "wifi", wifi_->phaseName());
-      appendJsonBool(extra, "sdReady", status.sdCard);
-    }
-    String response = "{\"status\":\"ok\",\"version\":2,";
-    response += extra;
-    response += '}';
-    (void)sendTerminalOrDisconnect(requestId, response);
+    (void)sendTerminalOrDisconnect(requestId, diagnostics_.statusJson());
   } else if (strcmp(operation, "provisioning-start") == 0) {
     if (transport_ != LinkTransport::usb ||
         provisioningCoordinator_ == nullptr) {
@@ -1408,16 +1125,16 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendOk(requestId, "\"phase\":\"idle\"");
     }
   } else if (strcmp(operation, "get-provisioning-diagnostics") == 0) {
-    sendJson(requestId, provisioningDiagnosticsJson());
+    sendJson(requestId, diagnostics_.provisioningJson());
   } else if (strcmp(operation, "clear-provisioning-diagnostics") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
-    else if (provisioningDiagnostics_->clear(*log_)) sendOk(requestId);
+    else if (diagnostics_.clearProvisioning(*log_)) sendOk(requestId);
     else sendError(requestId, "provisioning diagnostics clear failed");
   } else if (strcmp(operation, "get-power-diagnostics") == 0) {
-    sendJson(requestId, powerDiagnosticsJson());
+    sendJson(requestId, diagnostics_.powerJson());
   } else if (strcmp(operation, "clear-power-diagnostics") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
-    else if (powerDiagnostics_->clear(*log_)) sendOk(requestId);
+    else if (diagnostics_.clearPower(*log_)) sendOk(requestId);
     else sendError(requestId, "power diagnostics clear failed");
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
@@ -1480,61 +1197,39 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendError(requestId, "invalid UTC time");
     } else sendOk(requestId);
   } else if (strcmp(operation, "record") == 0) {
-    if (foregroundBusy()) sendBusy(requestId);
-    else if ((capabilities_ != nullptr &&
-              !capabilities_->allows(kRecordingCapabilities)) ||
-             audio_ == nullptr || !audio_->ready() || !board_->sdReady() ||
-             captureRuntime_ == nullptr || !captureRuntime_->ready()) {
+    if (foregroundBusy()) {
+      sendBusy(requestId);
+    } else if ((capabilities_ != nullptr &&
+                !capabilities_->allows(kRecordingCapabilities)) ||
+               audio_ == nullptr || !audio_->ready() || !board_->sdReady() ||
+               !recordingSession_.ready()) {
       sendError(requestId, "recording capability is not ready");
     } else {
       const String id = newUuid();
       tencent_->wake();
-      // AudioCaptureRouter deliberately allows the same logical owner to
-      // re-enter. A Link request is a distinct session, so require the router
-      // to be genuinely idle before acquiring it. This prevents a failed Link
-      // start from releasing a UI-owned local recording.
-      const bool acquired = captureRouter_->available() &&
-          captureRouter_->acquire(AudioCaptureOwner::localCapsule);
       uint32_t sessionId = esp_random();
       if (sessionId == 0) sessionId = 1;
       const RecorderOperationOwner recorderOwner =
           transport_ == LinkTransport::wifi
               ? RecorderOperationOwner::linkWifi
               : RecorderOperationOwner::linkUsb;
-      if (acquired) transactionGate_.beginOperation(transferGate_);
-      const bool recorderStartAccepted = acquired &&
-          recorder_->requestStart(*log_, id, board_->utcNow(),
-                                  recorderOwner);
-      if (!recorderStartAccepted) {
-        if (recorder_->ownedBy(recorderOwner) ||
-            recorder_->operationActive() ||
-            recorder_->terminalResult().pending()) {
-          linkOwnedRecording_ = true;
-          (void)requestLinkRecordingStop(requestId, false, true);
-        } else if (acquired) {
-          captureRouter_->release(AudioCaptureOwner::localCapsule);
-          transactionGate_.reset();
-          sendError(requestId, "recording start failed");
-        }
-        if (!acquired) sendBusy(requestId);
-      } else {
-        linkOwnedRecording_ = true;
-        operation_.advance(LinkOperationState::processing);
-        operation_.ownResource(LinkOperationResource::router);
-        operation_.ownResource(LinkOperationResource::transaction);
-        if (!linkRecordingStart_.begin(requestId, sessionId)) {
-          (void)requestLinkRecordingStop(requestId, false, true);
-        } else {
-          linkRecordingCapsuleId_ = id;
-        }
+      const LinkRecordingRequestResult result = recordingSession_.requestStart(
+          requestId, id, sessionId, board_->utcNow(), recorderOwner,
+          operation_, transactionGate_, transferGate_);
+      if (result.status == LinkRecordingRequestStatus::busy) {
+        sendBusy(requestId);
+      } else if (result.status == LinkRecordingRequestStatus::failed) {
+        sendError(requestId, result.message);
       }
+      // accepted and cleanupPending complete asynchronously through poll().
     }
   } else if (strcmp(operation, "stop") == 0) {
-    if (!recorder_->recording() || !linkOwnedRecording_) {
+    if (!recordingSession_.recordingActive()) {
       sendError(requestId, "recording is not active");
-    }
-    else {
-      (void)requestLinkRecordingStop(requestId, true, true);
+    } else if (!recordingSession_.requestStop(
+                   requestId, true, true, operationOwns(requestId), operation_,
+                   transactionGate_)) {
+      sendBusy(requestId);
     }
   } else if (strcmp(operation, "reboot") == 0) {
     sendOk(requestId);
@@ -3909,83 +3604,6 @@ String PokePodLinkService::newUuid() const {
   return String(result);
 }
 
-String PokePodLinkService::provisioningDiagnosticsJson() const {
-  cJSON *root = cJSON_CreateObject();
-  cJSON_AddStringToObject(root, "status", "ok");
-  cJSON_AddNumberToObject(root, "version", kLinkVersion);
-  cJSON_AddNumberToObject(root, "schemaVersion", 1);
-  cJSON *records = cJSON_AddArrayToObject(root, "records");
-  if (provisioningDiagnostics_ != nullptr) {
-    for (size_t index = 0; index < provisioningDiagnostics_->count(); ++index) {
-      const StoredProvisioningLogRecord *record =
-          provisioningDiagnostics_->newest(index);
-      if (record == nullptr) continue;
-      cJSON *item = cJSON_CreateObject();
-      cJSON_AddNumberToObject(item, "sequence", record->sequence);
-      cJSON_AddNumberToObject(item, "epoch", record->epoch);
-      cJSON_AddNumberToObject(item, "elapsedMs", record->elapsedMs);
-      cJSON_AddStringToObject(item, "stage", provisioningLogStageKey(
-          static_cast<ProvisioningLogStage>(record->stage)));
-      cJSON_AddNumberToObject(item, "outcome", record->outcome);
-      cJSON_AddNumberToObject(item, "attempt", record->attempt);
-      cJSON_AddStringToObject(item, "ssid", record->ssid);
-      cJSON_AddNumberToObject(item, "rssi", record->rssi);
-      cJSON_AddNumberToObject(item, "reason", record->reason);
-      cJSON_AddStringToObject(item, "reasonKind",
-                              wifiFailureKey(record->reason));
-      cJSON_AddItemToArray(records, item);
-    }
-  }
-  const String result = printed(root);
-  cJSON_Delete(root);
-  return result;
-}
-
-String PokePodLinkService::powerDiagnosticsJson() const {
-  cJSON *root = cJSON_CreateObject();
-  cJSON_AddStringToObject(root, "status", "ok");
-  cJSON_AddNumberToObject(root, "version", kLinkVersion);
-  cJSON_AddNumberToObject(root, "schemaVersion", 1);
-  cJSON *blockerKeys = cJSON_AddArrayToObject(root, "blockerKeys");
-  for (uint8_t bit = 0;
-       bit <= static_cast<uint8_t>(PowerBlocker::beforeDeepTimeout); ++bit) {
-    cJSON_AddItemToArray(blockerKeys, cJSON_CreateString(powerBlockerKey(
-        static_cast<PowerBlocker>(bit))));
-  }
-  cJSON *records = cJSON_AddArrayToObject(root, "records");
-  if (powerDiagnostics_ != nullptr) {
-    for (size_t index = 0; index < powerDiagnostics_->count(); ++index) {
-      const StoredPowerLogRecord *record = powerDiagnostics_->newest(index);
-      if (record == nullptr) continue;
-      cJSON *item = cJSON_CreateObject();
-      cJSON_AddNumberToObject(item, "sequence", record->sequence);
-      cJSON_AddNumberToObject(item, "epoch", record->epoch);
-      cJSON_AddNumberToObject(item, "uptimeMs", record->uptimeMs);
-      cJSON_AddNumberToObject(item, "durationMs", record->durationMs);
-      cJSON_AddStringToObject(item, "event", powerLogEventKey(
-          static_cast<PowerLogEvent>(record->event)));
-      cJSON_AddStringToObject(item, "mode", powerModeName(
-          static_cast<PowerMode>(record->mode)));
-      cJSON_AddNumberToObject(item, "blockerMask", record->blockers);
-      cJSON_AddNumberToObject(item, "detail", record->detail);
-      char wakeMask[19];
-      snprintf(wakeMask, sizeof(wakeMask), "%016llx",
-               static_cast<unsigned long long>(record->ext1WakeMask));
-      cJSON_AddStringToObject(item, "wakeMask", wakeMask);
-      cJSON_AddNumberToObject(item, "error", record->error);
-      cJSON_AddNumberToObject(item, "flags", record->flags);
-      cJSON_AddNumberToObject(item, "resetReason", record->resetReason);
-      cJSON_AddNumberToObject(item, "wakeCause", record->wakeCause);
-      cJSON_AddNumberToObject(item, "batteryPercent",
-                              record->batteryPercent);
-      cJSON_AddItemToArray(records, item);
-    }
-  }
-  const String result = printed(root);
-  cJSON_Delete(root);
-  return result;
-}
-
 bool PokePodLinkService::sendOk(uint32_t requestId, const char *extraJson) {
   String value = "{\"status\":\"ok\",\"version\":2";
   if (extraJson != nullptr && extraJson[0] != '\0') {
@@ -4392,153 +4010,30 @@ void PokePodLinkService::onFrameSent(TxCompletion completion) {
   }
 }
 
-bool PokePodLinkService::requestLinkRecordingStop(uint32_t requestId,
-                                                   bool commit,
-                                                   bool respond) {
-  if (!linkOwnedRecording_ || captureRuntime_ == nullptr ||
-      recorder_ == nullptr || captureRouter_ == nullptr) return false;
-  if (linkRecordingStop_.active()) {
-    if (!respond) linkRecordingStop_.suppressResponseAndAbort();
-    return false;
-  }
-  if (!linkRecordingStop_.begin(requestId, commit, respond)) return false;
-  if (requestId != 0 && operationOwns(requestId)) {
-    operation_.advance(LinkOperationState::processing);
-    operation_.ownResource(LinkOperationResource::router);
-    operation_.ownResource(LinkOperationResource::transaction);
-  }
-  // stop() may time out while the task is still completing its bounded I2S
-  // read.  Ownership remains here; pollDeferredCleanup observes the eventual
-  // stopped fact even if PokePodApp consumed the semaphore first.
-  (void)captureRuntime_->stop(*log_);
-  return true;
-}
-
-void PokePodLinkService::advanceLinkRecordingStart() {
-  if (!linkRecordingStart_.active() || !linkOwnedRecording_ ||
-      recorder_ == nullptr || captureRuntime_ == nullptr ||
-      captureRouter_ == nullptr || audio_ == nullptr) return;
-  CapsuleTransactionGate *gate =
-      transport_ == LinkTransport::wifi || !sessionActive_ || quiesceRequested_
-          ? &transactionGate_
-          : nullptr;
-  const RecorderStartPollResult result = recorder_->pollStart(
-      *log_, millis(), gate);
-  if (result == RecorderStartPollResult::pending) return;
-
-  const uint32_t requestId = linkRecordingStart_.requestId();
-  const uint32_t captureSessionId = linkRecordingStart_.captureSessionId();
-  const String capsuleId = linkRecordingCapsuleId_;
-  linkRecordingStart_.finish();
-  linkRecordingCapsuleId_ = "";
-
-  const bool transportAlive = sessionActive_ && !quiesceRequested_ &&
-      transferPermitted();
-  if (result == RecorderStartPollResult::started && transportAlive &&
-      captureRuntime_->start(*audio_, captureSessionId, *log_)) {
-    const String extra = "\"recording\":true,\"capsuleId\":\"" +
-        capsuleId + "\"";
-    operation_.releaseResource(LinkOperationResource::transaction);
-    operation_.releaseResource(LinkOperationResource::router);
-    sendOk(requestId, extra.c_str());
-    return;
-  }
-
-  if (linkRecordingStop_.active()) {
-    linkRecordingStop_.suppressResponseAndAbort();
-  } else {
-    (void)requestLinkRecordingStop(requestId, false, transportAlive);
-  }
-}
-
-void PokePodLinkService::advanceLinkRecordingStop() {
-  if (!linkOwnedRecording_ ||
-      captureRuntime_ == nullptr || recorder_ == nullptr ||
-      captureRouter_ == nullptr) return;
-
-  // USB has no time-window gate while its CDC session is alive. Once either
-  // transport disconnects/quiesces, publish the latched cancellation gate so
-  // an in-flight recorder transaction rolls back instead of committing after
-  // its owner disappeared.
-  CapsuleTransactionGate *recordingGate =
-      transport_ == LinkTransport::wifi || !sessionActive_ || quiesceRequested_
-          ? &transactionGate_
-          : nullptr;
-  // Link is the sole owner of Link recordings. Publishing the same gate on
-  // every turn also lets the storage task advance periodic checkpoints while
-  // capture is still active; the App only polls localApp-owned sessions.
-  (void)recorder_->pollFinalize(*log_, millis(), recordingGate);
-  if (linkRecordingStart_.active()) return;
-  if (!linkRecordingStop_.active() && !recorder_->operationActive() &&
-      recorder_->terminalResult().pending()) {
-    (void)requestLinkRecordingStop(0, false, false);
-  }
-  if (!linkRecordingStop_.active()) return;
-
-  if (linkRecordingStop_.awaitsCapture()) {
-    if (captureRuntime_->running()) {
-      if (captureRuntime_->finalizePending()) {
-        (void)captureRuntime_->pollFinalize(*log_);
-      }
-      if (captureRuntime_->running()) return;
+void PokePodLinkService::handleLinkRecordingEvent(
+    const LinkRecordingEvent &event) {
+  if (!event.respond || event.requestId == 0) return;
+  switch (event.kind) {
+    case LinkRecordingEventKind::startReady: {
+      const String extra = "\"recording\":true,\"capsuleId\":\"" +
+          event.capsuleId + "\"";
+      sendOk(event.requestId, extra.c_str());
+      break;
     }
-    AudioCaptureDispatchResult dispatch;
-    if (captureDispatcher_ != nullptr && audio_ != nullptr &&
-        bleVoice_ != nullptr) {
-      dispatch = captureDispatcher_->drain(
-          *captureRuntime_, *captureRouter_, *audio_, *recorder_, *bleVoice_,
-          *log_, millis());
-    } else {
-      dispatch.ok = false;
-      dispatch.routingFailure = true;
-    }
-    const bool complete = linkRecordingStop_.commitRequested() && dispatch.ok &&
-        !captureRuntime_->incomplete() &&
-        !recorder_->captureFailureLatched();
-    const AudioCaptureFrontEndSnapshot finalMetrics =
-        captureRuntime_->frontEndSnapshot();
-    recorder_->observeAudioMetrics(finalMetrics.sessionId,
-                                   finalMetrics.generation,
-                                   finalMetrics.asMetrics());
-    if (recorder_->recording()) {
-      if (complete) {
-        (void)recorder_->stop(*log_, recorder_->stopRequested()
-            ? recorder_->requestedStopReason()
-            : RecorderStopReason::user);
-      } else {
-        (void)recorder_->abortCapture(*log_);
-      }
-    }
-    linkRecordingStop_.captureFinalized();
-  }
-
-  if (!linkRecordingStop_.awaitsRecorder()) return;
-  (void)recorder_->pollFinalize(*log_, millis(), recordingGate);
-  if (recorder_->operationActive()) return;
-
-  RecorderOutcome outcome;
-  if (!recorder_->takeTerminalResult(outcome)) return;
-
-  const uint32_t requestId = linkRecordingStop_.requestId();
-  const bool respond = linkRecordingStop_.shouldRespond() && sessionActive_ &&
-      transferPermitted();
-  const bool committed = outcome.success();
-  captureRouter_->release(AudioCaptureOwner::localCapsule);
-  linkOwnedRecording_ = false;
-  operation_.releaseResource(LinkOperationResource::router);
-  operation_.releaseResource(LinkOperationResource::transaction);
-  linkRecordingStop_.finish();
-  transactionGate_.reset();
-
-  if (!respond || requestId == 0) return;
-  if (committed && library_->requestScan()) {
-    sendOk(requestId,
-           "\"recording\":false,\"queued\":true,"
-           "\"indexRefresh\":\"queued\"");
-  } else if (committed) {
-    sendError(requestId, "recording committed but index refresh failed");
-  } else {
-    sendError(requestId, "recording commit failed");
+    case LinkRecordingEventKind::stopCommitted:
+      sendOk(event.requestId,
+             "\"recording\":false,\"queued\":true,"
+             "\"indexRefresh\":\"queued\"");
+      break;
+    case LinkRecordingEventKind::stopCommittedIndexFailed:
+      sendError(event.requestId,
+                "recording committed but index refresh failed");
+      break;
+    case LinkRecordingEventKind::stopFailed:
+      sendError(event.requestId, "recording commit failed");
+      break;
+    case LinkRecordingEventKind::none:
+      break;
   }
 }
 

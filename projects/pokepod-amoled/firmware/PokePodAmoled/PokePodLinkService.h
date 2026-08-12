@@ -9,8 +9,8 @@
 
 #include "LinkFrame.h"
 #include "LinkCapsuleTransactionGate.h"
-#include "LinkRecordingStop.h"
-#include "LinkRecordingStart.h"
+#include "LinkRecordingSession.h"
+#include "LinkDiagnostics.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
@@ -271,10 +271,7 @@ class PokePodLinkService {
   void finishOutgoingCleanup();
   void abortOutgoing();
   void onFrameSent(TxCompletion completion);
-  bool requestLinkRecordingStop(uint32_t requestId, bool commit,
-                                bool respond);
-  void advanceLinkRecordingStart();
-  void advanceLinkRecordingStop();
+  void handleLinkRecordingEvent(const LinkRecordingEvent &event);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
                      uint32_t expectedBytes, const String &temporaryPath,
@@ -304,8 +301,6 @@ class PokePodLinkService {
   bool stepDeferredFileCleanup();
   void finishCommandStorageCleanup();
   String newUuid() const;
-  String provisioningDiagnosticsJson() const;
-  String powerDiagnosticsJson() const;
   bool transferPermitted() const;
   uint32_t storageIoTimeout() const;
   StorageOwner storageOwner() const;
@@ -314,8 +309,6 @@ class PokePodLinkService {
   fs::FS *fs_ = nullptr;
   BoardServices *board_ = nullptr;
   AudioPipeline *audio_ = nullptr;
-  AudioCaptureRuntime *captureRuntime_ = nullptr;
-  AudioCaptureDispatcher *captureDispatcher_ = nullptr;
   const CapabilityRegistry *capabilities_ = nullptr;
   AudioCaptureRouter *captureRouter_ = nullptr;
   UsbLinkBridge *usb_ = nullptr;
@@ -326,10 +319,7 @@ class PokePodLinkService {
   DeviceConfig *config_ = nullptr;
   WifiController *wifi_ = nullptr;
   TencentWorker *tencent_ = nullptr;
-  ProvisioningDiagnostics *provisioningDiagnostics_ = nullptr;
-  PowerDiagnostics *powerDiagnostics_ = nullptr;
   ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
-  RuntimePowerManager *power_ = nullptr;
   Print *log_ = nullptr;
   LinkServiceCoordinator *coordinator_ = nullptr;
   LinkTransport transport_ = LinkTransport::none;
@@ -415,10 +405,8 @@ class PokePodLinkService {
   uint8_t *batchSeenIds_ = nullptr;
   StringByteSource batchByteSource_;
   StringByteSource batchSecondByteSource_;
-  bool linkOwnedRecording_ = false;
-  LinkRecordingStart linkRecordingStart_;
-  String linkRecordingCapsuleId_;
-  LinkRecordingStop linkRecordingStop_;
+  LinkRecordingSession recordingSession_;
+  LinkDiagnostics diagnostics_;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};
