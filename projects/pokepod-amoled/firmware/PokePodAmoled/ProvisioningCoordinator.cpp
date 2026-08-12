@@ -88,6 +88,14 @@ bool ProvisioningCoordinator::takeConfigurationChanged() {
   return portal_ != nullptr && portal_->takeConfigurationChanged();
 }
 
+bool ProvisioningCoordinator::sensitiveConfirmationPending() const {
+  return portal_ != nullptr && portal_->sensitiveConfirmationPending();
+}
+
+bool ProvisioningCoordinator::confirmSensitiveChange(uint32_t nowMs) {
+  return portal_ != nullptr && portal_->confirmSensitiveChange(nowMs);
+}
+
 void ProvisioningCoordinator::resumeNormalWifi() {
   if (normalWifiResumed_) return;
   normalWifiResumed_ = true;

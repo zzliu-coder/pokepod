@@ -98,6 +98,7 @@ bool touchVerticalScrolling = false;
 bool scrollRedrawPending = false;
 bool bootWirelessHolding = false;
 bool bootProvisioningExitArmed = false;
+bool bootProvisioningConfirmationConsumed = false;
 bool bootScreenWakeArmed = false;
 bool wirelessUiActive = false;
 UiAction touchAction = UiAction::none;
@@ -1464,11 +1465,26 @@ void loop() {
     }
     if (bootButton.pressedEdge()) {
       if (provisioningCoordinator.visible()) {
+        if (provisioningCoordinator.sensitiveConfirmationPending()) {
+          bootProvisioningExitArmed = false;
+          bootProvisioningConfirmationConsumed = true;
+          const bool confirmed =
+              provisioningCoordinator.confirmSensitiveChange(now);
+          dashboard.invalidate();
+          showMessage(confirmed ? "已确认腾讯密钥操作"
+                                : "实体确认超时，请再次保存");
+          drawDashboard();
+          return;
+        }
         bootProvisioningExitArmed = true;
         return;
       }
       bootPressedAtMs = now;
     } else if (bootButton.releasedEdge()) {
+      if (bootProvisioningConfirmationConsumed) {
+        bootProvisioningConfirmationConsumed = false;
+        return;
+      }
       if (bootProvisioningExitArmed) {
         bootProvisioningExitArmed = false;
         if (provisioningCoordinator.visible()) provisioningCoordinator.stop();

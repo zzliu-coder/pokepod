@@ -29,6 +29,13 @@ class ProvisioningPortal {
   const String &password() const { return password_; }
   const String &statusMessage() const { return statusMessage_; }
   ProvisioningState state() const;
+  bool sensitiveConfirmationPending() const {
+    return sensitiveConfirmation_.pending();
+  }
+  ProvisioningSensitiveAction sensitiveConfirmationAction() const {
+    return sensitiveConfirmation_.action();
+  }
+  bool confirmSensitiveChange(uint32_t nowMs);
   bool takeConfigurationChanged();
 
  private:
@@ -48,6 +55,8 @@ class ProvisioningPortal {
   void forgetRequest();
   bool authorizeMutation();
   void sendSaveJson(int statusCode, bool accepted);
+  void armStationValidation(uint32_t nowMs);
+  void discardSensitiveCandidate();
   void beginStationValidation();
   void restorePortalForRetry();
   const char *portalState() const;
@@ -84,6 +93,8 @@ class ProvisioningPortal {
   int16_t candidateRssi_ = -127;
   uint8_t validationAttempt_ = 0;
   ProvisioningCsrfPolicy csrf_;
+  ProvisioningCredentialPolicy credential_;
+  ProvisioningSensitiveConfirmationPolicy sensitiveConfirmation_;
 };
 
 }  // namespace pokepod

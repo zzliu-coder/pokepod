@@ -21,6 +21,12 @@ constexpr size_t kMaximumNetworks = 20;
 constexpr size_t kProvisioningCsrfBytes = 32;
 constexpr char kProvisioningCsrfHeader[] = "X-PokePod-CSRF";
 
+bool fillProvisioningRandom(void *, uint8_t *destination, size_t length) {
+  if (destination == nullptr || length == 0U) return false;
+  esp_fill_random(destination, length);
+  return true;
+}
+
 std::string newProvisioningCsrfToken() {
   static constexpr char hex[] = "0123456789abcdef";
   uint8_t bytes[kProvisioningCsrfBytes];
@@ -80,7 +86,12 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   char name[24];
   snprintf(name, sizeof(name), "PokePod-%04lX", static_cast<unsigned long>(suffix));
   ssid_ = name;
-  password_ = kProvisioningPassword;
+  if (!credential_.begin(fillProvisioningRandom, nullptr)) {
+    password_ = "";
+    statusMessage_ = "配网密码失败，请退出后重试";
+    return false;
+  }
+  password_ = credential_.password();
   // Keep the captive AP stable while the phone loads the page. Scanning on
   // the single ESP32 radio is explicit (the user can tap 重新扫描) so the
   // first HTTP request never competes with an STA scan.
@@ -93,6 +104,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   closeAtMs_ = 0;
   candidateRssi_ = -127;
   validationAttempt_ = 0;
+  sensitiveConfirmation_.reset();
   csrf_.begin(newProvisioningCsrfToken(), millis(), kPortalLifetimeMs);
   prepared_ = true;
   starting_ = true;
@@ -200,6 +212,10 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
   // HTTP handlers can create a new validation timestamp. Refresh the clock
   // after handling the request so this poll can never appear to predate it.
   nowMs = millis();
+  if (sensitiveConfirmation_.expire(nowMs)) {
+    discardSensitiveCandidate();
+    statusMessage_ = "实体确认已超时，请重新保存";
+  }
   if (transitionPending_ &&
       static_cast<int32_t>(nowMs - transitionAtMs_) >= 0) {
     transitionPending_ = false;
@@ -284,6 +300,10 @@ void ProvisioningPortal::stop() {
   networks_.clear();
   closeAtMs_ = 0;
   csrf_.close();
+  sensitiveConfirmation_.reset();
+  candidate_ = DeviceSettings{};
+  credential_.close();
+  password_ = "";
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
     diagnostics_->record(ProvisioningLogStage::portalStopped,
                          ProvisioningLogOutcome::info, ssid_, 0, 0,
@@ -433,9 +453,11 @@ void ProvisioningPortal::showNetworks() {
 
 void ProvisioningPortal::scanRequest() {
   if (!authorizeMutation()) return;
-  if (validating_) {
+  if (validating_ || sensitiveConfirmation_.pending()) {
     server_.send(409, "application/json; charset=utf-8",
-                 "{\"error\":\"正在验证 Wi-Fi\"}");
+                 sensitiveConfirmation_.pending()
+                     ? "{\"error\":\"请先在设备上确认腾讯密钥操作\"}"
+                     : "{\"error\":\"正在验证 Wi-Fi\"}");
     return;
   }
   startScan();
@@ -449,6 +471,11 @@ void ProvisioningPortal::showPortal() {
 
 void ProvisioningPortal::saveRequest() {
   if (!authorizeMutation()) return;
+  if (sensitiveConfirmation_.pending()) {
+    statusMessage_ = "请先按下设备实体键确认腾讯密钥操作";
+    sendSaveJson(409, false);
+    return;
+  }
   if (validating_) {
     statusMessage_ = "正在验证 Wi-Fi，请稍候";
     sendSaveJson(409, false);
@@ -471,7 +498,12 @@ void ProvisioningPortal::saveRequest() {
   next.wifiEnabled = true;
   const String secretId = server_.arg("secretId");
   const String secretKey = server_.arg("secretKey");
+  ProvisioningSensitiveAction sensitiveAction =
+      ProvisioningSensitiveAction::none;
   if (server_.hasArg("clearTencent")) {
+    if (config_->hasTencent()) {
+      sensitiveAction = ProvisioningSensitiveAction::clearTencent;
+    }
     next.secretId = "";
     next.secretKey = "";
     next.hotwordId = "";
@@ -484,6 +516,10 @@ void ProvisioningPortal::saveRequest() {
                            validationAttempt_, *log_);
       sendSaveJson(400, false);
       return;
+    }
+    const DeviceSettings &current = config_->settings();
+    if (secretId != current.secretId || secretKey != current.secretKey) {
+      sensitiveAction = ProvisioningSensitiveAction::replaceTencent;
     }
     next.secretId = secretId;
     next.secretKey = secretKey;
@@ -509,19 +545,57 @@ void ProvisioningPortal::saveRequest() {
   if (scanned != networks_.end()) candidateRssi_ = scanned->rssi;
   ++validationAttempt_;
   saved_ = false;
+  if (sensitiveAction != ProvisioningSensitiveAction::none) {
+    if (!sensitiveConfirmation_.begin(sensitiveAction, millis())) {
+      discardSensitiveCandidate();
+      statusMessage_ = "实体确认无法启动，请重新保存";
+      sendSaveJson(500, false);
+      return;
+    }
+    statusMessage_ = sensitiveAction == ProvisioningSensitiveAction::clearTencent
+        ? "请按下设备实体键确认清除腾讯密钥"
+        : "请按下设备实体键确认更换腾讯密钥";
+    sendSaveJson(202, true);
+    return;
+  }
+  armStationValidation(millis());
+  sendSaveJson(202, true);
+}
+
+void ProvisioningPortal::armStationValidation(uint32_t nowMs) {
   // This compact device status uses the fixed 16 px font. Keep the runtime
   // SSID in the full-font diagnostics and phone portal so arbitrary network
   // names can never render as missing glyph boxes here.
   statusMessage_ = "正在连接网络";
   validating_ = true;
-  validatingSinceMs_ = millis();
+  validatingSinceMs_ = nowMs;
   transitionPending_ = true;
   transitionAtMs_ = validatingSinceMs_ + 200;
-  // A single ESP32 radio cannot reliably keep serving the captive AP while
-  // associating its STA interface with a different channel. Acknowledge the
-  // request first, then close the AP and validate in STA-only mode. The short
-  // grace period lets the phone receive the HTTP 202 before the AP disappears.
-  sendSaveJson(202, true);
+}
+
+bool ProvisioningPortal::confirmSensitiveChange(uint32_t nowMs) {
+  if (!active_) return false;
+  if (monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
+    discardSensitiveCandidate();
+    stop();
+    return false;
+  }
+  if (!sensitiveConfirmation_.acceptPhysicalPress(nowMs)) {
+    discardSensitiveCandidate();
+    return false;
+  }
+  armStationValidation(nowMs);
+  statusMessage_ = "实体确认完成，正在连接网络";
+  return true;
+}
+
+void ProvisioningPortal::discardSensitiveCandidate() {
+  sensitiveConfirmation_.reset();
+  if (config_ != nullptr) {
+    candidate_ = config_->settings();
+  } else {
+    candidate_ = DeviceSettings{};
+  }
 }
 
 void ProvisioningPortal::beginStationValidation() {
@@ -553,9 +627,11 @@ void ProvisioningPortal::restorePortalForRetry() {
 
 void ProvisioningPortal::forgetRequest() {
   if (!authorizeMutation()) return;
-  if (validating_) {
+  if (validating_ || sensitiveConfirmation_.pending()) {
     server_.send(409, "application/json; charset=utf-8",
-                 "{\"error\":\"正在验证 Wi-Fi\"}");
+                 sensitiveConfirmation_.pending()
+                     ? "{\"error\":\"请先在设备上确认腾讯密钥操作\"}"
+                     : "{\"error\":\"正在验证 Wi-Fi\"}");
     return;
   }
   const String ssid = server_.arg("ssid");
@@ -586,13 +662,19 @@ bool ProvisioningPortal::authorizeMutation() {
 
 void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
   String json;
-  json.reserve(statusMessage_.length() + 80);
+  json.reserve(statusMessage_.length() + 180);
   json += "{\"accepted\":";
   json += accepted ? "true" : "false";
   json += ",\"validating\":";
   json += validating_ ? "true" : "false";
   json += ",\"saved\":";
   json += saved_ ? "true" : "false";
+  json += ",\"confirmationRequired\":";
+  json += sensitiveConfirmation_.pending() ? "true" : "false";
+  json += ",\"confirmationAction\":\"";
+  json += provisioningSensitiveActionName(sensitiveConfirmation_.action());
+  json += "\",\"confirmationRemainingSeconds\":";
+  json += String((sensitiveConfirmation_.remainingMs(millis()) + 999U) / 1000U);
   json += ",\"wifiState\":\"";
   json += portalState();
   json += "\"";
@@ -603,7 +685,8 @@ void ProvisioningPortal::sendSaveJson(int statusCode, bool accepted) {
 
 ProvisioningState ProvisioningPortal::state() const {
   if (saved_) return ProvisioningState::connected;
-  if (starting_ || validating_ || transitionPending_) {
+  if (starting_ || validating_ || transitionPending_ ||
+      sensitiveConfirmation_.pending()) {
     return ProvisioningState::connecting;
   }
   if (scanning_) return ProvisioningState::scanning;
@@ -759,7 +842,7 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
     html += F(R"HTML(<div class='danger'><label class='check'><input type='checkbox' name='clearTencent'><span>清除设备上保存的腾讯密钥</span></label></div>)HTML");
   }
   html += F(R"HTML(</div></details>
-<p class='privacy'>SecretKey 保存后不会显示，也不会通过 USB 或日志读回。</p>
+<p class='privacy'>SecretKey 保存后不会显示，也不会通过 USB 或日志读回。更新或清除密钥时，需按设备实体键确认。</p>
 </div>
 <div class='actions two'><button id='back' class='back' type='button'>上一步</button><button id='save' class='primary' type='submit'>保存并连接</button></div>
 </section>
@@ -775,7 +858,7 @@ const s=document.getElementById('ssid'),b=document.getElementById('rescan'),form
 let preferred=s.dataset.current;
 let validationTimer=0;
 function strength(r){return r>=-55?'强':r>=-70?'中':'弱'}
-function renderStatus(d){const state=d.wifiState||((d.saved)?'connected':(d.validating?'connecting':(d.scanning?'scanning':'ready')));const names={ready:['待设置','等待选择 Wi-Fi'],scanning:['扫描中','正在查找附近网络'],connecting:['连接中','正在验证 '+(d.wifiSsid||'目标网络')],connected:['已连接',d.wifiSsid?'已连接 '+d.wifiSsid:'Wi-Fi 已验证'],error:['连接失败','请检查热点后重试']};const copy=names[state]||names.ready;connection.dataset.state=state;connectionState.textContent=copy[0];connectionDetail.textContent=copy[1];status.dataset.state=state;if(d.message)status.textContent=d.message}
+function renderStatus(d){const state=d.wifiState||((d.saved)?'connected':(d.confirmationRequired||d.validating?'connecting':(d.scanning?'scanning':'ready')));const names={ready:['待设置','等待选择 Wi-Fi'],scanning:['扫描中','正在查找附近网络'],connecting:['连接中','正在验证 '+(d.wifiSsid||'目标网络')],connected:['已连接',d.wifiSsid?'已连接 '+d.wifiSsid:'Wi-Fi 已验证'],error:['连接失败','请检查热点后重试']};const copy=names[state]||names.ready;connection.dataset.state=state;connectionState.textContent=d.confirmationRequired?'待设备确认':copy[0];connectionDetail.textContent=d.confirmationRequired?'请按 PokePod 实体键确认腾讯密钥操作':copy[1];status.dataset.state=state;if(d.message)status.textContent=d.message}
 function syncViewport(){const viewport=window.visualViewport;const height=viewport?viewport.height:window.innerHeight;document.documentElement.style.setProperty('--viewport-height',Math.round(height)+'px')}
 function resetScroll(){requestAnimationFrame(()=>{const root=document.scrollingElement||document.documentElement;root.scrollTop=0;document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>{root.scrollTop=0})})}
 function renderRemembered(items){rememberedList.textContent='';rememberedWrap.hidden=!items.length;for(const item of items){const row=document.createElement('div');row.className='remembered-item';const name=document.createElement('span');name.textContent=item.ssid;const forget=document.createElement('button');forget.type='button';forget.className='forget';forget.textContent='忘记';forget.addEventListener('click',()=>forgetNetwork(item.ssid));row.append(name,forget);rememberedList.appendChild(row)}}
@@ -786,7 +869,7 @@ function blurKeyboard(){const active=document.activeElement;if(active&&active.bl
 function showTencent(){const manual=document.getElementById('manual').value;if(!s.value&&!manual){status.textContent='请选择网络或手工输入名称';try{s.focus({preventScroll:true})}catch(e){s.focus()}return}blurKeyboard();setTimeout(()=>{wifi.hidden=true;tencent.hidden=false;title.textContent='腾讯云转写';subtitle.textContent='保存语音转写凭证';p1.classList.remove('on');p2.classList.add('on');syncViewport();resetScroll()},180)}
 function showWifi(){blurKeyboard();tencent.hidden=true;wifi.hidden=false;title.textContent='连接网络';subtitle.textContent='选择附近的 2.4 GHz Wi-Fi';p2.classList.remove('on');p1.classList.add('on');syncViewport();resetScroll()}
 function showSuccess(){clearTimeout(validationTimer);wifi.hidden=true;tencent.hidden=true;success.hidden=false;renderStatus({wifiState:'connected',saved:true,wifiSsid:s.value||preferred,message:'保存成功；热点即将关闭'});title.textContent='设置完成';subtitle.textContent='PokePod 已连接到网络';save.disabled=true;syncViewport();resetScroll()}
-async function pollValidation(){try{const r=await fetch('/networks',{cache:'no-store'});const d=await r.json();renderStatus(d);if(d.saved){showSuccess();return}if(d.validating){validationTimer=setTimeout(pollValidation,500);return}save.disabled=false;save.textContent='重新保存';document.getElementById('back').disabled=false}catch(e){renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'});validationTimer=setTimeout(pollValidation,700)}}
+async function pollValidation(){try{const r=await fetch('/networks',{cache:'no-store'});const d=await r.json();renderStatus(d);if(d.saved){showSuccess();return}if(d.confirmationRequired){save.disabled=true;save.textContent='等待设备确认…';document.getElementById('back').disabled=true;validationTimer=setTimeout(pollValidation,500);return}if(d.validating){validationTimer=setTimeout(pollValidation,500);return}save.disabled=false;save.textContent='重新保存';document.getElementById('back').disabled=false}catch(e){renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'});validationTimer=setTimeout(pollValidation,700)}}
 async function submitForm(event){event.preventDefault();blurKeyboard();save.disabled=true;document.getElementById('back').disabled=true;save.textContent='正在连接…';renderStatus({wifiState:'connecting',message:'正在连接并验证 Wi-Fi',wifiSsid:s.value||document.getElementById('manual').value});try{const r=await fetch('/save',{method:'POST',headers:{'X-PokePod-CSRF':csrf},body:new FormData(form),cache:'no-store'});const d=await r.json();renderStatus(d);if(!r.ok){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='保存并连接';return}pollValidation()}catch(e){save.disabled=false;document.getElementById('back').disabled=false;save.textContent='重新保存';renderStatus({wifiState:'connecting',message:'设备正在切换网络，请等待配网页恢复'})}}
 b.addEventListener('click',()=>load(true));
 document.getElementById('next').addEventListener('click',showTencent);
@@ -813,6 +896,12 @@ String ProvisioningPortal::networksJson() const {
   json += validating_ ? "true" : "false";
   json += ",\"saved\":";
   json += saved_ ? "true" : "false";
+  json += ",\"confirmationRequired\":";
+  json += sensitiveConfirmation_.pending() ? "true" : "false";
+  json += ",\"confirmationAction\":\"";
+  json += provisioningSensitiveActionName(sensitiveConfirmation_.action());
+  json += "\",\"confirmationRemainingSeconds\":";
+  json += String((sensitiveConfirmation_.remainingMs(millis()) + 999U) / 1000U);
   json += ",\"wifiState\":\"";
   json += portalState();
   json += "\",\"wifiSsid\":\"";

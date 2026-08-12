@@ -2,6 +2,7 @@
 """Static contract for the captive portal's mobile keyboard behavior."""
 
 from pathlib import Path
+import re
 
 
 firmware_dir = Path(__file__).parents[1] / "firmware" / "PokePodAmoled"
@@ -12,6 +13,14 @@ link_source = (firmware_dir / "PokePodLinkService.cpp").read_text(encoding="utf-
 main_source = (firmware_dir / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
+portal_header = (firmware_dir / "ProvisioningPortal.h").read_text(encoding="utf-8")
+coordinator_header = (firmware_dir / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
+policy_source = (firmware_dir / "ProvisioningPolicy.h").read_text(encoding="utf-8")
+all_firmware_source = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in sorted(firmware_dir.iterdir())
+    if path.suffix in {".cpp", ".h", ".ino"}
+)
 
 assert "id='wifi-step'" in source
 assert "id='tencent-step'" in source
@@ -49,6 +58,38 @@ assert "form.addEventListener('submit',submitForm)" in source
 assert "fetch('/save'" in source
 assert "fetch('/forget-network'" in source
 assert "'X-PokePod-CSRF':csrf" in source
+
+# Every provisioning session owns a fresh short-lived AP credential. The
+# browser never receives a mutation endpoint that could approve a sensitive
+# cloud-key change without a physical press on the device.
+assert 'constexpr size_t kProvisioningPasswordLength = 10;' in policy_source
+assert '"23456789ABCDEFGHJKLMNPQRSTUVWXYZ"' in policy_source
+assert "ProvisioningCredentialPolicy" in policy_source
+assert "ProvisioningSensitiveConfirmationPolicy" in policy_source
+assert "esp_fill_random(destination, length);" in source
+assert "credential_.begin(fillProvisioningRandom, nullptr)" in source
+assert "password_ = credential_.password();" in source
+assert "credential_.close();" in source
+assert 'password_ = "";' in source
+assert "88888888" not in all_firmware_source
+assert 'server_.on("/confirm"' not in source
+assert 'confirmationRequired' in source
+assert 'confirmationAction' in source
+assert 'confirmationRemainingSeconds' in source
+assert "sensitiveConfirmation_.begin(sensitiveAction, millis())" in source
+assert "sensitiveConfirmation_.acceptPhysicalPress(nowMs)" in source
+assert "monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)" in source
+assert "sensitiveConfirmationPending()" in portal_header
+assert "confirmSensitiveChange(uint32_t nowMs)" in portal_header
+assert "sensitiveConfirmationPending()" in coordinator_header
+assert "confirmSensitiveChange(uint32_t nowMs)" in coordinator_header
+assert "bootProvisioningConfirmationConsumed" in main_source
+assert "provisioningCoordinator.confirmSensitiveChange(now)" in main_source
+assert "if (bootProvisioningConfirmationConsumed)" in main_source
+for log_call in re.findall(r"(?:log_|log\.)(?:printf|print|println)\([^;]*;", source,
+                           flags=re.DOTALL):
+    assert "password_" not in log_call
+
 assert 'server_.on("/forget-network", HTTP_POST' in source
 assert "config_->wifiNetwork(next.wifiSsid)" in source
 assert r'\"remembered\"' in source
@@ -62,6 +103,8 @@ assert "statusMessage_ = \"正在连接 \" + next.wifiSsid;" not in source
 assert "statusMessage_ = \"Wi-Fi 已连接\";" in source
 assert "view.portalStatus = provisioningPortal.statusMessage();" in main_source
 assert "view.portalState = provisioningPortal.state();" in main_source
+assert "view.portalPassword = provisioningPortal.password();" in main_source
+assert "renderer_.drawText(view.portalPassword" in dashboard_source
 assert "String portalStatus;" in dashboard_header
 assert "ProvisioningState portalState" in dashboard_header
 assert "const ProvisioningDiagnostics *provisioningDiagnostics" in dashboard_header
@@ -89,6 +132,17 @@ assert "sendSaveJson(202, true);" in save_handler
 assert "transitionPending_ = true;" in save_handler
 assert "transitionAtMs_ = validatingSinceMs_ + 200;" in save_handler
 assert "WiFi.softAPdisconnect(false)" not in save_handler
+sensitive_branch = save_handler[save_handler.index(
+    "if (sensitiveAction != ProvisioningSensitiveAction::none)"):
+    save_handler.index("armStationValidation(millis())")]
+assert "sendSaveJson(202, true);" in sensitive_branch
+assert "return;" in sensitive_branch
+confirm_handler = source[source.index(
+    "bool ProvisioningPortal::confirmSensitiveChange"):
+    source.index("void ProvisioningPortal::discardSensitiveCandidate")]
+assert confirm_handler.index("acceptPhysicalPress") < confirm_handler.index(
+    "armStationValidation")
+assert "stop();" in confirm_handler
 assert "void ProvisioningPortal::beginStationValidation()" in source
 assert "void ProvisioningPortal::restorePortalForRetry()" in source
 assert "restorePortalForRetry();" in source

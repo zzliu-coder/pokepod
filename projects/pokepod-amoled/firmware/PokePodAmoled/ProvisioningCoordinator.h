@@ -24,6 +24,8 @@ class ProvisioningCoordinator {
   bool active() const;
   bool pending() const { return startup_.pending(); }
   bool ownsWifi() const { return startup_.ownsWifi(); }
+  bool sensitiveConfirmationPending() const;
+  bool confirmSensitiveChange(uint32_t nowMs);
   ProvisioningStartupPhase phase() const { return startup_.phase(); }
   const char *phaseName() const {
     return provisioningStartupPhaseName(startup_.phase());
