@@ -54,6 +54,10 @@ enum class RecorderFailureStage : uint8_t {
   storageBusy,
   captureIncomplete,
   storageQueueOverflow,
+  storageProbeOpen,
+  storageProbeWrite,
+  storageProbeCleanup,
+  storageTooSlow,
 };
 
 struct RecorderOutcome {
@@ -125,6 +129,10 @@ inline const char *recorderFailureStageName(RecorderFailureStage stage) {
     case RecorderFailureStage::storageBusy: return "storage_busy";
     case RecorderFailureStage::captureIncomplete: return "capture_incomplete";
     case RecorderFailureStage::storageQueueOverflow: return "storage_queue_overflow";
+    case RecorderFailureStage::storageProbeOpen: return "storage_probe_open";
+    case RecorderFailureStage::storageProbeWrite: return "storage_probe_write";
+    case RecorderFailureStage::storageProbeCleanup: return "storage_probe_cleanup";
+    case RecorderFailureStage::storageTooSlow: return "storage_too_slow";
     default: return "none";
   }
 }

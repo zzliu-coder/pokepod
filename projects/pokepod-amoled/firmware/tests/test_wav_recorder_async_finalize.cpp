@@ -10,6 +10,7 @@
 #include "../PokePodAmoled/StorageCoordinator.cpp"
 #include "../PokePodAmoled/CapsuleTransaction.cpp"
 #include "../PokePodAmoled/WavRecorder.cpp"
+#include "support/RecordingCapacityTestSource.h"
 
 using namespace pokepod;
 
@@ -22,9 +23,7 @@ constexpr char kCreatedAt[] = "2026-08-11T05:40:21Z";
 
 class QuietPrint final : public Print {};
 
-RecordingSpaceSnapshot admittedSpace() {
-  return {kRecordingRequiredFreeBytes + 4096U, 0, true};
-}
+TestRecordingCapacitySource capacitySource;
 
 void finishBootRecovery(WavRecorder &recorder,
                         const std::shared_ptr<fakefs::State> &state,
@@ -89,9 +88,9 @@ void runNormalPendingAndSecondRecording() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kFirstId, kCreatedAt,
                         RecorderOperationOwner::localApp));
   appendFrame(recorder, log);
   const uint32_t operationsBeforeStop = state->operations;
@@ -100,7 +99,7 @@ void runNormalPendingAndSecondRecording() {
   assert(recorder.finalizing());
   assert(recorder.ownedBy(RecorderOperationOwner::localApp));
   assert(!recorder.terminalResult().pending());
-  assert(!recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(!recorder.start(log, kSecondId, kCreatedAt,
                          RecorderOperationOwner::localApp));
 
   drive(recorder, state, log, 700000U, nullptr);
@@ -116,7 +115,7 @@ void runNormalPendingAndSecondRecording() {
   RecorderOutcome acknowledged;
   assert(recorder.takeTerminalResult(acknowledged));
 
-  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kSecondId, kCreatedAt,
                         RecorderOperationOwner::localApp));
   appendFrame(recorder, log);
   assert(recorder.stop(log));
@@ -129,13 +128,13 @@ void runStorageContextOwnsReservationAndFile() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
 
   std::atomic<bool> finished{false};
   std::thread storageContext([&]() {
     for (const char *id : {kFirstId, kSecondId}) {
-      assert(recorder.start(log, id, kCreatedAt, admittedSpace(),
+      assert(recorder.start(log, id, kCreatedAt,
                             RecorderOperationOwner::localApp));
       appendFrame(recorder, log);
       assert(recorder.stop(log));
@@ -166,9 +165,9 @@ void runCaptureAbortCannotPublishQueued() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kFirstId, kCreatedAt,
                         RecorderOperationOwner::localApp));
   appendFrame(recorder, log);
   assert(recorder.abortCapture(log));
@@ -184,7 +183,7 @@ void runCaptureAbortCannotPublishQueued() {
   RecorderOutcome acknowledged;
   assert(recorder.takeTerminalResult(acknowledged));
 
-  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kSecondId, kCreatedAt,
                         RecorderOperationOwner::localApp));
   appendFrame(recorder, log);
   assert(recorder.stop(log));
@@ -197,9 +196,9 @@ void runAbsoluteGateAndUsbNullGate() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder wifi;
-  assert(wifi.begin(storage, log));
+  assert(wifi.begin(storage, capacitySource, log));
   finishBootRecovery(wifi, state, log);
-  assert(wifi.start(log, kFirstId, kCreatedAt, admittedSpace(),
+  assert(wifi.start(log, kFirstId, kCreatedAt,
                     RecorderOperationOwner::linkWifi));
   appendFrame(wifi, log);
   AbsoluteCapsuleTransactionDeadlineGate gate;
@@ -220,9 +219,9 @@ void runAbsoluteGateAndUsbNullGate() {
          std::string::npos);
 
   WavRecorder usb;
-  assert(usb.begin(storage, log));
+  assert(usb.begin(storage, capacitySource, log));
   finishBootRecovery(usb, state, log);
-  assert(usb.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(usb.start(log, kSecondId, kCreatedAt,
                    RecorderOperationOwner::linkUsb));
   appendFrame(usb, log);
   assert(usb.stop(log));
@@ -240,9 +239,9 @@ void runFailureCheckpointAndRecoveryTruth() {
     auto state = std::make_shared<fakefs::State>();
     fs::FS storage(state);
     WavRecorder recorder;
-    assert(recorder.begin(storage, log));
+    assert(recorder.begin(storage, capacitySource, log));
     finishBootRecovery(recorder, state, log);
-    assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+    assert(recorder.start(log, kFirstId, kCreatedAt,
                           RecorderOperationOwner::localApp));
     appendFrame(recorder, log);
     state->fail(fault, 1, fakefs::FaultAction::returnFailure);
@@ -260,14 +259,14 @@ void runFailureCheckpointAndRecoveryTruth() {
                                     kFirstId) == 0);
 
     WavRecorder rebooted;
-    assert(rebooted.begin(storage, log));
+    assert(rebooted.begin(storage, capacitySource, log));
     finishBootRecovery(rebooted, state, log);
     assert(state->directories.count(staging) == 1);
     assert(failedCheckpoint(state, kFirstId).failureStage ==
            checkpoint.failureStage);
 
     WavRecorder rebootedAgain;
-    assert(rebootedAgain.begin(storage, log));
+    assert(rebootedAgain.begin(storage, capacitySource, log));
     finishBootRecovery(rebootedAgain, state, log);
     assert(state->directories.count(staging) == 1);
     assert(failedCheckpoint(state, kFirstId).failureStage ==
@@ -306,10 +305,10 @@ void runIncrementalBootRecoveryBudget() {
   seedInterruptedRecording(state, kSecondId, 4096U);
 
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   assert(recorder.recoveryPending());
   assert(!recorder.start(log, "fedcba98-7654-4abc-8def-1234567890ab",
-                         kCreatedAt, admittedSpace(),
+                         kCreatedAt,
                          RecorderOperationOwner::localApp));
   uint32_t polls = 0;
   uint32_t uiHeartbeats = 0;
@@ -332,7 +331,7 @@ void runIncrementalBootRecoveryBudget() {
                             "/audio.wav") == 1);
 
   WavRecorder rebooted;
-  assert(rebooted.begin(storage, log));
+  assert(rebooted.begin(storage, capacitySource, log));
   finishBootRecovery(rebooted, state, log);
   assert(state->openHandles == 0);
 }
@@ -388,7 +387,7 @@ void runBootRecoveryFailClosed() {
     }
 
     WavRecorder recorder;
-    assert(recorder.begin(storage, log));
+    assert(recorder.begin(storage, capacitySource, log));
     uint32_t polls = 0;
     while (recorder.recoveryPending() && polls++ < 10000U) {
       const uint32_t before = state->operations;
@@ -403,7 +402,7 @@ void runBootRecoveryFailClosed() {
     assert(StorageCoordinator::instance().idle());
     assert(state->directories.count(std::string(kCapsuleStaging) + "/" +
                                     kFirstId + ".blocked") == 1);
-    assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+    assert(recorder.start(log, kSecondId, kCreatedAt,
                           RecorderOperationOwner::localApp));
     assert(recorder.abortCapture(log));
     drive(recorder, state, log, 12000U, nullptr);
@@ -427,7 +426,7 @@ void runCommittedAudioRecoveryPhase() {
               "{\"status\":\"queued\",\"revision\":2}");
 
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
   const std::string inbox = std::string(kCapsuleInbox) + "/" + kFirstId;
   assert(state->files.count(inbox + "/audio.wav") == 1);
@@ -437,7 +436,7 @@ void runCommittedAudioRecoveryPhase() {
   assert(state->directories.count(directory) == 0);
 
   WavRecorder rebooted;
-  assert(rebooted.begin(storage, log));
+  assert(rebooted.begin(storage, capacitySource, log));
   finishBootRecovery(rebooted, state, log);
   assert(state->files.count(inbox + "/audio.wav") == 1);
 }
@@ -463,7 +462,7 @@ void runBadFirstStagingDoesNotBlockHealthyRecovery() {
     }
 
     WavRecorder recorder;
-    assert(recorder.begin(storage, log));
+    assert(recorder.begin(storage, capacitySource, log));
     bool faultInjected = !persistentOpenFailure;
     bool faultCleared = !persistentOpenFailure;
     uint32_t polls = 0;
@@ -511,7 +510,7 @@ void runPatchFailureIsolatesOnlyCandidate() {
     const std::string first = std::string(kCapsuleStaging) + "/" + kFirstId;
     const std::string firstPartial = first + "/audio.wav.part";
     WavRecorder recorder;
-    assert(recorder.begin(storage, log));
+    assert(recorder.begin(storage, capacitySource, log));
     bool injected = false;
     bool cleared = false;
     uint32_t polls = 0;
@@ -545,9 +544,9 @@ void runFailureFactMustBecomeDurable() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kFirstId, kCreatedAt,
                         RecorderOperationOwner::localApp));
   appendFrame(recorder, log);
   assert(recorder.stop(log));
@@ -571,11 +570,11 @@ void runFailureFactMustBecomeDurable() {
   const std::string staging = std::string(kCapsuleStaging) + "/" + kFirstId;
   assert(state->directories.count(staging) == 1U);
   assert(state->files.count(staging + "/audio.wav.part") == 1U);
-  assert(!recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(!recorder.start(log, kSecondId, kCreatedAt,
                          RecorderOperationOwner::localApp));
   RecorderOutcome acknowledged;
   assert(recorder.takeTerminalResult(acknowledged));
-  assert(!recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(!recorder.start(log, kSecondId, kCreatedAt,
                          RecorderOperationOwner::localApp));
 }
 
@@ -585,7 +584,7 @@ void runRecoveryFinalizeFailureDoesNotWedge() {
   fs::FS storage(state);
   seedInterruptedRecording(state, kFirstId, 4096U);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
 
   bool injected = false;
   uint32_t polls = 0;
@@ -619,9 +618,9 @@ void runAutomaticMaximumDuration() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kFirstId, kCreatedAt,
                         RecorderOperationOwner::localApp));
   std::array<int16_t, 2048> samples{};
   uint32_t frames = 0;
@@ -646,9 +645,9 @@ void runLatchedDeliveryFailureCannotCommit() {
   auto state = std::make_shared<fakefs::State>();
   fs::FS storage(state);
   WavRecorder recorder;
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   finishBootRecovery(recorder, state, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kFirstId, kCreatedAt,
                         RecorderOperationOwner::linkUsb));
   appendFrame(recorder, log);
   recorder.reportCaptureFailure(
@@ -675,7 +674,7 @@ void runLatchedDeliveryFailureCannotCommit() {
 
   RecorderOutcome acknowledged;
   assert(recorder.takeTerminalResult(acknowledged));
-  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+  assert(recorder.start(log, kSecondId, kCreatedAt,
                         RecorderOperationOwner::linkUsb));
   appendFrame(recorder, log);
   assert(recorder.stop(log));

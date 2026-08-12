@@ -12,6 +12,7 @@
 #include "../PokePodAmoled/StorageCoordinator.cpp"
 #include "../PokePodAmoled/CapsuleTransaction.cpp"
 #include "../PokePodAmoled/WavRecorder.cpp"
+#include "support/RecordingCapacityTestSource.h"
 
 using namespace pokepod;
 
@@ -229,12 +230,10 @@ void runTransactionEdgeCases() {
   assertPairCoherent(state);
 }
 
-RecordingSpaceSnapshot admittedSpace() {
-  return {kRecordingRequiredFreeBytes + 4096U, 0, true};
-}
+TestRecordingCapacitySource capacitySource;
 
 void prepareRecorder(fs::FS &storage, WavRecorder &recorder, Print &log) {
-  assert(recorder.begin(storage, log));
+  assert(recorder.begin(storage, capacitySource, log));
   uint32_t polls = 0;
   while (recorder.recoveryPending() && polls++ < 10000U) {
     (void)recorder.pollFinalize(log, polls, nullptr);
@@ -260,7 +259,7 @@ void assertRecorderFault(fakefs::Operation operation,
   fs::FS storage(state);
   WavRecorder recorder;
   prepareRecorder(storage, recorder, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
+  assert(recorder.start(log, kFirstId, kCreatedAt));
 
   std::array<int16_t, 320> samples{};
   for (size_t index = 0; index < samples.size(); ++index) {
@@ -298,7 +297,7 @@ void assertRecorderShortWriteAt(uint32_t occurrence) {
   fs::FS storage(state);
   WavRecorder recorder;
   prepareRecorder(storage, recorder, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
+  assert(recorder.start(log, kFirstId, kCreatedAt));
   std::array<int16_t, 320> samples{};
   state->fail(fakefs::Operation::write, occurrence,
               fakefs::FaultAction::shortWrite);
@@ -325,12 +324,12 @@ void runRecorderOpenFailure() {
   prepareRecorder(storage, recorder, log);
   state->failAlways(fakefs::Operation::open,
                     fakefs::FaultAction::returnFailure);
-  assert(!recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
+  assert(!recorder.start(log, kFirstId, kCreatedAt));
   state->clearFault();
   drainRecorder(recorder, log);
   const RecorderOutcome outcome = recorder.terminalResult();
-  assert(outcome.terminal == RecorderTerminal::metadataFailure);
-  assert(outcome.failureStage == RecorderFailureStage::initialMetadata);
+  assert(outcome.terminal == RecorderTerminal::storageFailure);
+  assert(outcome.failureStage == RecorderFailureStage::storageProbeOpen);
 }
 
 void runRecorderFaultsAndReset() {
@@ -359,7 +358,7 @@ void runRecorderFaultsAndReset() {
   fs::FS storage(state);
   WavRecorder recorder;
   prepareRecorder(storage, recorder, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
+  assert(recorder.start(log, kFirstId, kCreatedAt));
   std::array<int16_t, 320> first{};
   state->fail(fakefs::Operation::write, 1,
               fakefs::FaultAction::shortWrite);
@@ -369,7 +368,7 @@ void runRecorderFaultsAndReset() {
 
   RecorderOutcome acknowledged;
   assert(recorder.takeTerminalResult(acknowledged));
-  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace()));
+  assert(recorder.start(log, kSecondId, kCreatedAt));
   assert(recorder.durationMs() == 0);
   assert(recorder.finalPath().endsWith("audio.wav"));
   std::array<int16_t, 640> second{};
@@ -411,7 +410,7 @@ void runCorruptCheckpointRecovery() {
   state->seedBytes(staging + "/audio.wav.part", partial.data(), partial.size());
 
   WavRecorder rebooted;
-  assert(rebooted.begin(storage, log));
+  assert(rebooted.begin(storage, capacitySource, log));
   uint32_t polls = 0;
   while (rebooted.recoveryPending() && polls++ < 10000U) {
     (void)rebooted.pollFinalize(log, polls, nullptr);
@@ -430,7 +429,7 @@ void runRecorderDeferredCleanupAcrossContexts() {
   fs::FS storage(state);
   WavRecorder recorder;
   prepareRecorder(storage, recorder, log);
-  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace()));
+  assert(recorder.start(log, kFirstId, kCreatedAt));
   std::array<int16_t, 320> samples{};
   assert(recorder.appendMono16(samples.data(), samples.size(), log));
 
@@ -459,7 +458,7 @@ void runRecorderDeferredCleanupAcrossContexts() {
   assert(StorageCoordinator::instance().mutationOwner() == StorageOwner::none);
   RecorderOutcome acknowledged;
   assert(recorder.takeTerminalResult(acknowledged));
-  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace()));
+  assert(recorder.start(log, kSecondId, kCreatedAt));
   assert(recorder.abortCapture(log));
   drainRecorder(recorder, log);
   assert(!recorder.cleanupPending());

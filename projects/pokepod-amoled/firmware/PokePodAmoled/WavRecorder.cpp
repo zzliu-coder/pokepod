@@ -66,8 +66,14 @@ String capsuleJson(const String &id, const String &timestamp) {
 
 }  // namespace
 
-bool WavRecorder::begin(fs::FS &fs, Print &log) {
+bool WavRecorder::begin(fs::FS &fs,
+                        RecordingCapacitySource &capacitySource,
+                        Print &log) {
   fs_ = &fs;
+  capacitySource_ = &capacitySource;
+#if !defined(ARDUINO_ARCH_ESP32)
+  recordingProbeBuffer_ = recordingProbeStorage_;
+#endif
 #if defined(ARDUINO_ARCH_ESP32)
   if (!ensureStorageTask(log)) return false;
 #endif
@@ -90,35 +96,20 @@ bool WavRecorder::begin(fs::FS &fs, Print &log) {
 
 bool WavRecorder::start(Print &log, const String &recordingId,
                         const String &createdAt) {
-  // The integration layer must provide a fresh SD capacity snapshot.  Keep
-  // this overload so older callers still compile, but fail closed until they
-  // adopt the admission-aware API.
-  const RecordingSpaceSnapshot unknown{};
-  return startInternal(log, recordingId, createdAt, &unknown,
+  return startInternal(log, recordingId, createdAt,
                        RecorderOperationOwner::localApp);
 }
 
 bool WavRecorder::start(Print &log, const String &recordingId,
                         const String &createdAt,
-                        const RecordingSpaceSnapshot &space) {
-  return startInternal(log, recordingId, createdAt, &space,
-                       RecorderOperationOwner::localApp);
-}
-
-bool WavRecorder::start(Print &log, const String &recordingId,
-                        const String &createdAt,
-                        const RecordingSpaceSnapshot &space,
                         RecorderOperationOwner owner) {
-  return startInternal(log, recordingId, createdAt, &space, owner);
+  return startInternal(log, recordingId, createdAt, owner);
 }
 
 bool WavRecorder::startInternal(Print &log, const String &recordingId,
                                 const String &createdAt,
-                                const RecordingSpaceSnapshot *space,
                                 RecorderOperationOwner owner) {
-  if (!requestStartInternal(log, recordingId, createdAt, space, owner)) {
-    return false;
-  }
+  if (!requestStartInternal(log, recordingId, createdAt, owner)) return false;
 #if defined(ARDUINO_ARCH_ESP32)
   while (true) {
     const RecorderStartPollResult result = pollStart(log, millis(), nullptr);
@@ -129,22 +120,19 @@ bool WavRecorder::startInternal(Print &log, const String &recordingId,
     return result == RecorderStartPollResult::started;
   }
 #else
-  return pollStart(log, 0, nullptr) ==
-      RecorderStartPollResult::started;
+  return pollStart(log, 0, nullptr) == RecorderStartPollResult::started;
 #endif
 }
 
 bool WavRecorder::requestStart(Print &log, const String &recordingId,
                                const String &createdAt,
-                               const RecordingSpaceSnapshot &space,
                                RecorderOperationOwner owner) {
-  return requestStartInternal(log, recordingId, createdAt, &space, owner);
+  return requestStartInternal(log, recordingId, createdAt, owner);
 }
 
 bool WavRecorder::requestStartInternal(Print &log,
                                        const String &recordingId,
                                        const String &createdAt,
-                                       const RecordingSpaceSnapshot *space,
                                        RecorderOperationOwner owner) {
   if (operationActive() || bootRecoveryFailed_ || file_ ||
       terminalState_.peek().pending()) {
@@ -153,36 +141,19 @@ bool WavRecorder::requestStartInternal(Print &log,
   }
   resetSessionState();
   operationOwner_ = owner;
-  if (fs_ == nullptr || owner == RecorderOperationOwner::none ||
+  if (fs_ == nullptr || capacitySource_ == nullptr ||
+      owner == RecorderOperationOwner::none ||
       !isUuid(recordingId.c_str()) || createdAt.isEmpty()) {
     return finishFailure(log, RecorderTerminal::admissionFailure,
                          RecorderFailureStage::invalidStart);
   }
 
-  const RecordingAdmission admission =
-      evaluateRecordingAdmission(space == nullptr
-                                     ? RecordingSpaceSnapshot{}
-                                     : *space);
-  if (!admission.allowed()) {
-    RecorderFailureStage stage = RecorderFailureStage::insufficientSpace;
-    if (admission.reason == RecordingAdmissionReason::capacityUnknown) {
-      stage = RecorderFailureStage::capacityUnknown;
-    } else if (admission.reason ==
-               RecordingAdmissionReason::invalidCapacity) {
-      stage = RecorderFailureStage::capacityInvalid;
-    }
-    log.printf("{\"event\":\"recording_admission_rejected\",\"stage\":\"%s\",\"available_bytes\":%llu,\"required_bytes\":%llu}\n",
-               recorderFailureStageName(stage),
-               static_cast<unsigned long long>(admission.availableBytes),
-               static_cast<unsigned long long>(admission.requiredBytes));
-    return finishFailure(log, RecorderTerminal::admissionFailure, stage);
-  }
-
+  // Identity is accepted by the control plane now; all filesystem paths are
+  // deliberately deferred until capacity has been read under storage
+  // ownership. This keeps an admission failure from creating or cleaning a
+  // staging directory that never belonged to the session.
   recordingId_ = recordingId;
   createdAt_ = createdAt;
-  directory_ = String(kCapsuleStaging) + "/" + recordingId_;
-  partialPath_ = directory_ + "/audio.wav.part";
-  finalPath_ = directory_ + "/audio.wav";
 
 #if defined(ARDUINO_ARCH_ESP32)
   storageLog_ = &log;
@@ -228,6 +199,13 @@ RecorderStartPollResult WavRecorder::pollStart(
   if (result == RecorderStartPollResult::cancelled) {
 #if defined(ARDUINO_ARCH_ESP32)
     storageStartCancelled_.store(true, std::memory_order_release);
+#endif
+    // A denied/expired start acknowledgement is itself a terminal fact. This
+    // also catches the race where the storage task completed staging just
+    // before the main task observed the absolute Wi-Fi deadline.
+    reportCaptureFailure(log, RecorderTerminal::cancelled,
+                         RecorderFailureStage::storageBusy);
+#if defined(ARDUINO_ARCH_ESP32)
     xTaskNotifyGive(storageTask_);
 #endif
     log.println(
@@ -241,40 +219,206 @@ RecorderStartPollResult WavRecorder::pollStart(
   return result;
 }
 
+bool WavRecorder::storageStartCancelled() const {
+#if defined(ARDUINO_ARCH_ESP32)
+  return storageStartCancelled_.load(std::memory_order_acquire);
+#else
+  return false;
+#endif
+}
+
+uint32_t WavRecorder::storageReservationTimeoutMs() const {
+  return operationOwner_.load(std::memory_order_acquire) ==
+             RecorderOperationOwner::linkWifi
+      ? 0U
+      : 250U;
+}
+
+uint32_t WavRecorder::storageIoTimeoutMs() const {
+  return operationOwner_.load(std::memory_order_acquire) ==
+             RecorderOperationOwner::linkWifi
+      ? 0U
+      : 1000U;
+}
+
+bool WavRecorder::runStoragePerformanceProbe(Print &log) {
+  if (capacitySource_ == nullptr || recordingProbeBuffer_ == nullptr) {
+    return finishFailure(log, RecorderTerminal::admissionFailure,
+                         RecorderFailureStage::capacityUnknown);
+  }
+  const String probePath = directory_ + "/.recording-probe.tmp";
+  File probe;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::recorder, StorageAccess::mutation,
+        storageIoTimeoutMs());
+    if (!lease) {
+      return finishFailure(log, RecorderTerminal::storageFailure,
+                           RecorderFailureStage::storageBusy);
+    }
+    probe = fs_->open(probePath, FILE_WRITE);
+  }
+  if (!probe) {
+    return finishFailure(log, RecorderTerminal::storageFailure,
+                         RecorderFailureStage::storageProbeOpen);
+  }
+
+  RecorderTerminal failureTerminal = RecorderTerminal::none;
+  RecorderFailureStage failureStage = RecorderFailureStage::none;
+  uint64_t maximumTailUs = 0;
+  const uint64_t probeStartedUs = capacitySource_->monotonicMicros();
+  uint64_t probeFinishedUs = probeStartedUs;
+
+  for (uint8_t index = 0; index < kRecordingProbeChunkCount; ++index) {
+    if (storageStartCancelled()) {
+      failureTerminal = RecorderTerminal::cancelled;
+      failureStage = RecorderFailureStage::storageBusy;
+      break;
+    }
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::recorder, StorageAccess::mutation,
+        storageIoTimeoutMs());
+    if (!lease) {
+      failureTerminal = RecorderTerminal::storageFailure;
+      failureStage = RecorderFailureStage::storageBusy;
+      break;
+    }
+    const uint64_t primitiveStartedUs = capacitySource_->monotonicMicros();
+    const size_t written = probe.write(recordingProbeBuffer_,
+                                       kRecordingProbeChunkBytes);
+    probe.flush();
+    const uint64_t primitiveFinishedUs = capacitySource_->monotonicMicros();
+    probeFinishedUs = primitiveFinishedUs;
+    const uint64_t tailUs = primitiveFinishedUs - primitiveStartedUs;
+    if (tailUs > maximumTailUs) maximumTailUs = tailUs;
+    if (written != kRecordingProbeChunkBytes || probe.getWriteError() != 0) {
+      failureTerminal = RecorderTerminal::storageFailure;
+      failureStage = RecorderFailureStage::storageProbeWrite;
+      break;
+    }
+    if (tailUs > kRecordingProbeMaximumTailUs) {
+      failureTerminal = RecorderTerminal::admissionFailure;
+      failureStage = RecorderFailureStage::storageTooSlow;
+      break;
+    }
+  }
+
+  const uint64_t totalUs = probeFinishedUs - probeStartedUs;
+  if (failureStage == RecorderFailureStage::none &&
+      totalUs > kRecordingProbeMaximumTotalUs) {
+    failureTerminal = RecorderTerminal::admissionFailure;
+    failureStage = RecorderFailureStage::storageTooSlow;
+  }
+
+  bool cleanupOk = false;
+  {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::recorder, StorageAccess::mutation,
+        storageIoTimeoutMs());
+    if (lease) {
+      const int errorBefore = probe.getWriteError();
+      probe.close();
+      const int errorAfter = probe.getWriteError();
+      const bool removed = fs_->remove(probePath);
+      cleanupOk = errorBefore == 0 && errorAfter == 0 && removed;
+    }
+  }
+  if (!cleanupOk && failureStage == RecorderFailureStage::none) {
+    failureTerminal = RecorderTerminal::storageFailure;
+    failureStage = RecorderFailureStage::storageProbeCleanup;
+  }
+
+  log.printf(
+      "{\"event\":\"recording_storage_probe\",\"ok\":%s,"
+      "\"bytes\":%lu,\"total_us\":%llu,\"maximum_tail_us\":%llu}\n",
+      failureStage == RecorderFailureStage::none ? "true" : "false",
+      static_cast<unsigned long>(kRecordingProbeBytes),
+      static_cast<unsigned long long>(totalUs),
+      static_cast<unsigned long long>(maximumTailUs));
+
+  if (failureStage != RecorderFailureStage::none) {
+    return finishFailure(log, failureTerminal, failureStage);
+  }
+  return true;
+}
+
 bool WavRecorder::startStorageSession(Print &log) {
   storageReservation_ = StorageCoordinator::instance().reserve(
-      StorageOwner::recorder, StorageAccess::mutation, 250);
+      StorageOwner::recorder, StorageAccess::mutation,
+      storageReservationTimeoutMs());
   if (!storageReservation_) {
     return finishFailure(log, RecorderTerminal::storageFailure,
                          RecorderFailureStage::storageBusy);
   }
-#if defined(ARDUINO_ARCH_ESP32)
-  if (storageStartCancelled_.load(std::memory_order_acquire)) {
+  if (storageStartCancelled()) {
     return finishFailure(log, RecorderTerminal::cancelled,
                          RecorderFailureStage::storageBusy);
   }
-#endif
-  StorageIoLease startIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::recorder, StorageAccess::mutation, 1000);
-  if (!startIo) {
-    return finishFailure(log, RecorderTerminal::storageFailure,
-                         RecorderFailureStage::storageBusy);
+
+  // Capacity is read exactly once, inside both ownership layers, immediately
+  // before staging creation. App and Link never obtain a stale snapshot.
+  RecordingSpaceSnapshot space{};
+  {
+    StorageIoLease capacityIo = StorageCoordinator::instance().acquireIo(
+        StorageOwner::recorder, StorageAccess::mutation,
+        storageIoTimeoutMs());
+    if (!capacityIo) {
+      return finishFailure(log, RecorderTerminal::storageFailure,
+                           RecorderFailureStage::storageBusy);
+    }
+    space = capacitySource_->query();
   }
-  if (fs_->exists(directory_)) {
-    return finishFailure(log, RecorderTerminal::commitFailure,
-                         RecorderFailureStage::stagingExists);
+  const RecordingAdmission admission = evaluateRecordingAdmission(space);
+  if (!admission.allowed()) {
+    RecorderFailureStage stage = RecorderFailureStage::insufficientSpace;
+    if (admission.reason == RecordingAdmissionReason::capacityUnknown) {
+      stage = RecorderFailureStage::capacityUnknown;
+    } else if (admission.reason == RecordingAdmissionReason::invalidCapacity) {
+      stage = RecorderFailureStage::capacityInvalid;
+    }
+    log.printf(
+        "{\"event\":\"recording_admission_rejected\",\"stage\":\"%s\","
+        "\"available_bytes\":%llu,\"required_bytes\":%llu}\n",
+        recorderFailureStageName(stage),
+        static_cast<unsigned long long>(admission.availableBytes),
+        static_cast<unsigned long long>(admission.requiredBytes));
+    return finishFailure(log, RecorderTerminal::admissionFailure, stage);
   }
-  if (!fs_->mkdir(directory_)) {
-    return finishFailure(log, RecorderTerminal::storageFailure,
-                         RecorderFailureStage::createDirectory);
-  }
-  startIo.release();
-#if defined(ARDUINO_ARCH_ESP32)
-  if (storageStartCancelled_.load(std::memory_order_acquire)) {
+  if (storageStartCancelled()) {
     return finishFailure(log, RecorderTerminal::cancelled,
                          RecorderFailureStage::storageBusy);
   }
-#endif
+
+  directory_ = String(kCapsuleStaging) + "/" + recordingId_;
+  partialPath_ = directory_ + "/audio.wav.part";
+  finalPath_ = directory_ + "/audio.wav";
+  {
+    StorageIoLease startIo = StorageCoordinator::instance().acquireIo(
+        StorageOwner::recorder, StorageAccess::mutation,
+        storageIoTimeoutMs());
+    if (!startIo) {
+      return finishFailure(log, RecorderTerminal::storageFailure,
+                           RecorderFailureStage::storageBusy);
+    }
+    if (fs_->exists(directory_)) {
+      return finishFailure(log, RecorderTerminal::commitFailure,
+                           RecorderFailureStage::stagingExists);
+    }
+    if (!fs_->mkdir(directory_)) {
+      return finishFailure(log, RecorderTerminal::storageFailure,
+                           RecorderFailureStage::createDirectory);
+    }
+  }
+  if (storageStartCancelled()) {
+    return finishFailure(log, RecorderTerminal::cancelled,
+                         RecorderFailureStage::storageBusy);
+  }
+  if (!runStoragePerformanceProbe(log)) return false;
+  if (storageStartCancelled()) {
+    return finishFailure(log, RecorderTerminal::cancelled,
+                         RecorderFailureStage::storageBusy);
+  }
+
   checkpointInitialized_ = initializeRecorderCheckpoint(
       checkpoint_, recordingId_.c_str(), createdAt_.c_str());
   if (!checkpointInitialized_) {
@@ -285,15 +429,13 @@ bool WavRecorder::startStorageSession(Print &log) {
     return finishFailure(log, RecorderTerminal::metadataFailure,
                          RecorderFailureStage::initialMetadata);
   }
-#if defined(ARDUINO_ARCH_ESP32)
-  if (storageStartCancelled_.load(std::memory_order_acquire)) {
+  if (storageStartCancelled()) {
     return finishFailure(log, RecorderTerminal::cancelled,
                          RecorderFailureStage::initialMetadata);
   }
-#endif
 
   StorageIoLease openIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::recorder, StorageAccess::mutation, 1000);
+      StorageOwner::recorder, StorageAccess::mutation, storageIoTimeoutMs());
   if (!openIo) {
     return finishFailure(log, RecorderTerminal::storageFailure,
                          RecorderFailureStage::storageBusy);
@@ -312,15 +454,15 @@ bool WavRecorder::startStorageSession(Print &log) {
     return finishFailure(log, RecorderTerminal::metadataFailure,
                          RecorderFailureStage::recoveryCheckpoint);
   }
-#if defined(ARDUINO_ARCH_ESP32)
-  if (storageStartCancelled_.load(std::memory_order_acquire)) {
+  if (storageStartCancelled()) {
     return finishFailure(log, RecorderTerminal::cancelled,
                          RecorderFailureStage::recoveryCheckpoint);
   }
-#endif
   recording_ = true;
-  log.printf("{\"event\":\"recording_started\",\"id\":\"%s\",\"format\":\"16k_s16le_mono\"}\n",
-             recordingId_.c_str());
+  log.printf(
+      "{\"event\":\"recording_started\",\"id\":\"%s\","
+      "\"format\":\"16k_s16le_mono\"}\n",
+      recordingId_.c_str());
   return true;
 }
 
@@ -386,7 +528,7 @@ bool WavRecorder::storageAppendMonoBytes(const uint8_t *data, size_t length,
   if (length > remaining) length = remaining & ~static_cast<size_t>(1U);
   if (length == 0) return false;
   StorageIoLease writeIo = StorageCoordinator::instance().acquireIo(
-      StorageOwner::recorder, StorageAccess::mutation, 1000);
+      StorageOwner::recorder, StorageAccess::mutation, storageIoTimeoutMs());
   if (!writeIo) {
     return finishFailure(log, RecorderTerminal::storageFailure,
                          RecorderFailureStage::storageBusy);
@@ -1582,7 +1724,7 @@ bool WavRecorder::pollCleanup(Print &log, uint32_t nowMs,
 
 bool WavRecorder::ensureDirectory(const char *path, Print &log) {
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      activeStorageOwner(), StorageAccess::mutation, 1000);
+      activeStorageOwner(), StorageAccess::mutation, storageIoTimeoutMs());
   if (!lease) return false;
   if (fs_->exists(path) || fs_->mkdir(path)) return true;
   log.printf("{\"event\":\"storage_error\",\"stage\":\"mkdir\",\"path\":\"%s\"}\n", path);
@@ -1624,18 +1766,29 @@ StorageOwner WavRecorder::activeStorageOwner() const {
 #if defined(ARDUINO_ARCH_ESP32)
 bool WavRecorder::ensureStorageTask(Print &log) {
   storageLog_ = &log;
-  if (storageTask_ != nullptr) return storageQueueSlots_ != nullptr;
+  if (storageTask_ != nullptr) {
+    return storageQueueSlots_ != nullptr && recordingProbeBuffer_ != nullptr;
+  }
   storageQueueSlots_ = static_cast<RecorderStorageFrame *>(heap_caps_calloc(
       kRecorderStorageQueueSlots, sizeof(RecorderStorageFrame),
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (storageQueueSlots_ == nullptr ||
+  recordingProbeBuffer_ = static_cast<uint8_t *>(heap_caps_calloc(
+      kRecordingProbeChunkBytes, 1,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (storageQueueSlots_ == nullptr || recordingProbeBuffer_ == nullptr ||
       !storageQueue_.bind(storageQueueSlots_, kRecorderStorageQueueSlots)) {
+    if (recordingProbeBuffer_ != nullptr) heap_caps_free(recordingProbeBuffer_);
+    recordingProbeBuffer_ = nullptr;
+    if (storageQueueSlots_ != nullptr) heap_caps_free(storageQueueSlots_);
+    storageQueueSlots_ = nullptr;
     log.println(
-        "{\"event\":\"recording_storage_task\",\"ok\":false,\"stage\":\"psram_queue\"}");
+        "{\"event\":\"recording_storage_task\",\"ok\":false,\"stage\":\"psram_buffers\"}");
     return false;
   }
   storageStartAck_ = xSemaphoreCreateBinary();
   if (storageStartAck_ == nullptr) {
+    heap_caps_free(recordingProbeBuffer_);
+    recordingProbeBuffer_ = nullptr;
     heap_caps_free(storageQueueSlots_);
     storageQueueSlots_ = nullptr;
     log.println(
@@ -1648,6 +1801,8 @@ bool WavRecorder::ensureStorageTask(Print &log) {
   if (created != pdPASS || storageTask_ == nullptr) {
     vSemaphoreDelete(storageStartAck_);
     storageStartAck_ = nullptr;
+    heap_caps_free(recordingProbeBuffer_);
+    recordingProbeBuffer_ = nullptr;
     heap_caps_free(storageQueueSlots_);
     storageQueueSlots_ = nullptr;
     log.println(
@@ -1801,7 +1956,7 @@ bool WavRecorder::persistCheckpoint(bool failed, RecorderFailureStage stage,
   if (!checkpointInitialized_ || directory_.isEmpty()) return false;
   if (file_) {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-        activeStorageOwner(), StorageAccess::mutation, 1000);
+        activeStorageOwner(), StorageAccess::mutation, storageIoTimeoutMs());
     if (!lease) return false;
     file_.flush();
     if (file_.getWriteError() != 0) return false;

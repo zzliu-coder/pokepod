@@ -16,22 +16,20 @@
 #include "RecorderStartState.h"
 #include "RecorderStorageQueue.h"
 #include "RecordingAdmissionPolicy.h"
+#include "RecordingCapacitySource.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
 
 class WavRecorder {
  public:
-  bool begin(fs::FS &fs, Print &log);
+  bool begin(fs::FS &fs, RecordingCapacitySource &capacitySource,
+             Print &log);
   bool start(Print &log, const String &recordingId, const String &createdAt);
   bool start(Print &log, const String &recordingId, const String &createdAt,
-             const RecordingSpaceSnapshot &space);
-  bool start(Print &log, const String &recordingId, const String &createdAt,
-             const RecordingSpaceSnapshot &space,
              RecorderOperationOwner owner);
   bool requestStart(Print &log, const String &recordingId,
                     const String &createdAt,
-                    const RecordingSpaceSnapshot &space,
                     RecorderOperationOwner owner);
   RecorderStartPollResult pollStart(
       Print &log, uint32_t nowMs,
@@ -128,11 +126,9 @@ class WavRecorder {
  private:
   bool startInternal(Print &log, const String &recordingId,
                      const String &createdAt,
-                     const RecordingSpaceSnapshot *space,
                      RecorderOperationOwner owner);
   bool requestStartInternal(Print &log, const String &recordingId,
                             const String &createdAt,
-                            const RecordingSpaceSnapshot *space,
                             RecorderOperationOwner owner);
   void resetSessionState();
   bool finishFailure(Print &log, RecorderTerminal terminal,
@@ -147,6 +143,10 @@ class WavRecorder {
   bool appendMonoBytes(const uint8_t *data, size_t length, Print &log);
   bool storageAppendMonoBytes(const uint8_t *data, size_t length, Print &log);
   bool startStorageSession(Print &log);
+  bool runStoragePerformanceProbe(Print &log);
+  bool storageStartCancelled() const;
+  uint32_t storageReservationTimeoutMs() const;
+  uint32_t storageIoTimeoutMs() const;
   StorageOwner activeStorageOwner() const;
   bool pollFinalizeRunner(Print &log, uint32_t nowMs,
                           CapsuleTransactionGate *gate);
@@ -292,6 +292,7 @@ class WavRecorder {
   };
 
   fs::FS *fs_ = nullptr;
+  RecordingCapacitySource *capacitySource_ = nullptr;
   File file_;
   File recoveryRoot_;
   File recoveryEntry_;
@@ -368,6 +369,10 @@ class WavRecorder {
   StorageAccess recoveryFileAccess_ = StorageAccess::read;
   uint16_t recoveryQuarantineSuffix_ = 0;
   uint8_t recoveryBuffer_[512]{};
+  uint8_t *recordingProbeBuffer_ = nullptr;
+#if !defined(ARDUINO_ARCH_ESP32)
+  uint8_t recordingProbeStorage_[kRecordingProbeChunkBytes]{};
+#endif
 
 #if defined(ARDUINO_ARCH_ESP32)
   class StorageCancellationGate final : public CapsuleTransactionGate {

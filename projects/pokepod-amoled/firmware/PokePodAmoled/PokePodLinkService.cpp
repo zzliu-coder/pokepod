@@ -1495,8 +1495,6 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       // start from releasing a UI-owned local recording.
       const bool acquired = captureRouter_->available() &&
           captureRouter_->acquire(AudioCaptureOwner::localCapsule);
-      const RecordingSpaceSnapshot space = {
-          SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
       uint32_t sessionId = esp_random();
       if (sessionId == 0) sessionId = 1;
       const RecorderOperationOwner recorderOwner =
@@ -1505,7 +1503,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
               : RecorderOperationOwner::linkUsb;
       if (acquired) transactionGate_.beginOperation(transferGate_);
       const bool recorderStartAccepted = acquired &&
-          recorder_->requestStart(*log_, id, board_->utcNow(), space,
+          recorder_->requestStart(*log_, id, board_->utcNow(),
                                   recorderOwner);
       if (!recorderStartAccepted) {
         if (recorder_->ownedBy(recorderOwner) ||

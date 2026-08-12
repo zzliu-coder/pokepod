@@ -4,6 +4,7 @@
 #include <esp_mac.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 
 #include "AudioPipeline.h"
 #include "AudioCaptureRuntime.h"
@@ -45,6 +46,20 @@ using namespace pokepod;
 
 namespace {
 
+class SdMmcRecordingCapacitySource final : public RecordingCapacitySource {
+ public:
+  RecordingSpaceSnapshot query() override {
+    const uint64_t totalBytes = SD_MMC.totalBytes();
+    const uint64_t usedBytes = SD_MMC.usedBytes();
+    return {totalBytes, usedBytes, totalBytes != 0};
+  }
+
+  uint64_t monotonicMicros() override {
+    return static_cast<uint64_t>(esp_timer_get_time());
+  }
+};
+
+SdMmcRecordingCapacitySource recordingCapacitySource;
 BoardServices board;
 AudioPipeline audio;
 AudioCaptureRouter captureRouter;
@@ -724,13 +739,11 @@ void toggleRecording() {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
     const bool acquired = captureRouter.acquire(AudioCaptureOwner::localCapsule);
-    const RecordingSpaceSnapshot space = {
-        SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
     uint32_t captureSessionId = esp_random();
     if (captureSessionId == 0) captureSessionId = 1;
     lastLocalCaptureMetrics = {};
     const bool recorderOk = acquired &&
-        recorder.start(usb.log(), recordingId(), board.utcNow(), space,
+        recorder.start(usb.log(), recordingId(), board.utcNow(),
                        RecorderOperationOwner::localApp);
     const bool ok = recorderOk &&
         captureRuntime.start(audio, captureSessionId, usb.log());
@@ -1246,7 +1259,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
       return false;
     case StorageBootPhase::recorder:
       bootRecorderStarted = board.sdReady() &&
-          recorder.begin(SD_MMC, usb.log());
+          recorder.begin(SD_MMC, recordingCapacitySource, usb.log());
       recorderHardwareReady =
           bootRecorderStarted && bootCaptureTaskStarted;
       storageBootPhase = StorageBootPhase::library;
