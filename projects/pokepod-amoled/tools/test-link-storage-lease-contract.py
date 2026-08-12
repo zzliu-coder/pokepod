@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CPP = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+FILE_TRANSFER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
 
 
 def methods(source: str):
@@ -26,7 +27,6 @@ direct_fs_allowed = {
     "advanceManifestFile",
     "cleanupPurgeStaging",
     "stepDeferredTreeCleanup",
-    "sendFile",
     "storageExists",
     "storageRename",
     "storageRemove",
@@ -43,6 +43,10 @@ for name, text in methods(CPP):
 
 assert "StorageAccess::read, 1000" not in CPP
 assert "StorageAccess::mutation, 1000" not in CPP
+assert "linkFileSystem()->open" in FILE_TRANSFER
+assert "acquireIo(" in FILE_TRANSFER
+assert "linkFileStorageOwner()" in FILE_TRANSFER
+assert "StorageAccess::read, 0" in FILE_TRANSFER
 assert "return transferGate_ == nullptr ? 1000U : 0U" in CPP
 
 exists = dict(methods(CPP))["storageExists"]

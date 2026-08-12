@@ -6,6 +6,8 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 SOURCE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 DIAGNOSTICS = (ROOT / "firmware/PokePodAmoled/LinkDiagnostics.cpp").read_text()
+FILE_TRANSFER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
+FILE_TRANSFER_HEADER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.h").read_text()
 GATE = (ROOT / "firmware/PokePodAmoled/LinkTransferGate.h").read_text()
 MATRIX = (ROOT / "firmware/tests/link_operation_migration.md").read_text()
 
@@ -80,12 +82,12 @@ generation = SOURCE[SOURCE.index(
 assert "completed_.clear()" in generation
 
 transmit = SOURCE[SOURCE.index("void PokePodLinkService::advanceTransmit("):
-                   SOURCE.index("void PokePodLinkService::queueNextFileChunk(")]
+                   SOURCE.index("bool PokePodLinkService::linkFileTransferPermitted(")]
 assert "operation_.frameDrained" in transmit
 assert "LinkOperationFrameRole role" in transmit
 
-abort = SOURCE[SOURCE.index("void PokePodLinkService::abortOutgoing()"):
-                SOURCE.index("void PokePodLinkService::onFrameSent(")]
+abort = SOURCE[SOURCE.index("void PokePodLinkService::linkFileCancelTransmitFrames()"):
+                SOURCE.index("fs::FS *PokePodLinkService::linkFileSystem(")]
 for reset in (
     "txFrameGeneration_ = 0", "pendingControlGeneration_ = 0",
     "txFrameRole_ = LinkOperationFrameRole::progress",
@@ -96,12 +98,14 @@ for reset in (
 assert "cancelRetainedCoordinator" in SOURCE
 assert "!operation_.ownsResource(LinkOperationResource::coordinator)" in SOURCE
 
-send_file = SOURCE[SOURCE.index("bool PokePodLinkService::sendFile("):
-                   SOURCE.index("bool PokePodLinkService::sendFrame(")]
-assert "storageIoTimeout()" in send_file
-assert "if (!lease)" in send_file
-assert "sendBusy(requestId)" in send_file
-assert "StorageAccess::read, 250" not in send_file
+assert "StorageReservation reservation_" in FILE_TRANSFER_HEADER
+assert "DeferredFileCleanup cleanup_" in FILE_TRANSFER_HEADER
+assert "linkFileStorageIoTimeout()" in FILE_TRANSFER
+assert "if (!lease)" in FILE_TRANSFER
+assert "linkFileSendBusy(requestId)" in FILE_TRANSFER
+assert "StorageAccess::read, 250" not in FILE_TRANSFER
+assert "LinkOperation operation_" not in FILE_TRANSFER_HEADER
+assert "LinkTransferGate" not in FILE_TRANSFER_HEADER
 
 status_start = SOURCE.index('if (strcmp(operation, "status") == 0)')
 status_end = SOURCE.index('} else if (strcmp(operation, "provisioning-start")',
@@ -133,7 +137,7 @@ assert "preserveForFallback" in queue
 
 assert 'sendFrame(LinkFrameType::eventJson' in SOURCE
 events = SOURCE[SOURCE.index("bool PokePodLinkService::sendEvent("):
-                SOURCE.index("bool PokePodLinkService::sendFile(")]
+                SOURCE.index("bool PokePodLinkService::sendFrame(")]
 assert "LinkOperationFrameRole::progress" in events
 assert "binary_ack" in SOURCE
 

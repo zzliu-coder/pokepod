@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "LinkFrame.h"
+#include "LinkFileTransfer.h"
 #include "LinkCapsuleTransactionGate.h"
 #include "LinkRecordingSession.h"
 #include "LinkDiagnostics.h"
@@ -47,7 +48,7 @@ class ProvisioningCoordinator;
 class RuntimePowerManager;
 class WirelessSyncPairingProvider;
 
-class PokePodLinkService {
+class PokePodLinkService : private LinkFileTransferHost {
  public:
   bool begin(Stream &stream, fs::FS &fs, BoardServices &board,
              AudioPipeline &audio,
@@ -96,13 +97,6 @@ class PokePodLinkService {
  private:
   enum class ReceivePhase : uint8_t { magic, header, payload };
   enum class IncomingKind : uint8_t { none, stagedFile, command, systemFont };
-  enum class OutgoingPhase : uint8_t { none, response, data };
-  enum class TxCompletion : uint8_t {
-    none,
-    fileResponse,
-    fileData,
-    fileFinal,
-  };
   enum class TransactionPurpose : uint8_t {
     none, startupRecovery, incoming, commandText, commandTextResult,
     commandFailureResult
@@ -252,8 +246,6 @@ class PokePodLinkService {
   bool sendTerminalOrDisconnect(uint32_t requestId, const String &json,
                                 bool completionEligible = true);
   bool sendEvent(uint32_t requestId, const String &json);
-  bool sendFile(uint32_t requestId, const String &path,
-                const char *resultTransactionId = nullptr);
   bool sendFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                  const uint8_t *payload, size_t size,
                  LinkOperationFrameRole role,
@@ -261,16 +253,36 @@ class PokePodLinkService {
                  bool preserveForFallback = false);
   bool queueFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                   const uint8_t *payload, size_t size,
-                  TxCompletion completion, LinkOperationFrameRole role,
+                  LinkFileTransferFrameCompletion completion,
+                  LinkOperationFrameRole role,
                   bool completionEligible = false,
                   bool preserveForFallback = false);
   void advanceTransmit(uint32_t nowMs);
-  void queueNextFileChunk();
-  void finishOutgoingFile(bool success);
-  bool cleanupOutgoingStorage();
-  void finishOutgoingCleanup();
-  void abortOutgoing();
-  void onFrameSent(TxCompletion completion);
+  // LinkFileTransferHost: transport and LinkOperation remain single-owner in
+  // this service while LinkFileTransfer owns the file and read reservation.
+  bool linkFileTransferPermitted() const override;
+  bool linkFileTransmitIdle() const override;
+  void linkFileCancelForDeadline(uint32_t requestId) override;
+  void linkFileSendBusy(uint32_t requestId) override;
+  void linkFileSendError(uint32_t requestId, const char *message) override;
+  bool linkFileQueueFrame(
+      LinkFrameType type, uint16_t flags, uint32_t requestId,
+      const uint8_t *payload, size_t size,
+      LinkFileTransferFrameCompletion completion,
+      LinkOperationFrameRole role, bool completionEligible) override;
+  void linkFileDisconnectTransport() override;
+  void linkFileClaimResources(uint32_t requestId) override;
+  void linkFileReleaseResources() override;
+  void linkFileAdvanceSettlement() override;
+  void linkFileCancelTransmitFrames() override;
+  fs::FS *linkFileSystem() override;
+  StorageOwner linkFileStorageOwner() const override;
+  uint32_t linkFileStorageIoTimeout() const override;
+  uint8_t *linkFilePayloadBuffer() override;
+  size_t linkFilePayloadCapacity() const override;
+  void linkFileResultFetched(const char *transactionId,
+                             bool fullySent) override;
+
   void handleLinkRecordingEvent(const LinkRecordingEvent &event);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
@@ -407,6 +419,7 @@ class PokePodLinkService {
   StringByteSource batchSecondByteSource_;
   LinkRecordingSession recordingSession_;
   LinkDiagnostics diagnostics_;
+  LinkFileTransfer fileTransfer_;
 
   ReceivePhase receivePhase_ = ReceivePhase::magic;
   uint8_t headerBytes_[kLinkHeaderBytes] = {};
@@ -442,24 +455,16 @@ class PokePodLinkService {
 
   LinkTransferStepper txStepper_;
   size_t txFrameBytes_ = 0;
-  TxCompletion txCompletion_ = TxCompletion::none;
+  LinkFileTransferFrameCompletion txCompletion_ =
+      LinkFileTransferFrameCompletion::none;
   LinkOperationFrameRole txFrameRole_ = LinkOperationFrameRole::progress;
   uint32_t txFrameGeneration_ = 0;
   size_t pendingControlBytes_ = 0;
-  TxCompletion pendingControlCompletion_ = TxCompletion::none;
+  LinkFileTransferFrameCompletion pendingControlCompletion_ =
+      LinkFileTransferFrameCompletion::none;
   LinkOperationFrameRole pendingControlRole_ =
       LinkOperationFrameRole::progress;
   uint32_t pendingControlGeneration_ = 0;
-  OutgoingPhase outgoingPhase_ = OutgoingPhase::none;
-  uint32_t outgoingRequestId_ = 0;
-  size_t outgoingLength_ = 0;
-  size_t outgoingRead_ = 0;
-  File outgoingFile_;
-  String outgoingResultTransactionId_;
-  StorageReservation outgoingStorageReservation_;
-  DeferredFileCleanup outgoingCleanup_;
-  bool outgoingCleanupPending_ = false;
-  bool outgoingCleanupSuccess_ = false;
 
   LinkManifestStepper manifestStepper_;
   std::vector<ManifestDirectoryCursor> manifestDirectories_;

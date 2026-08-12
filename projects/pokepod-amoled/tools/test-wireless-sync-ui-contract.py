@@ -11,24 +11,25 @@ sync_source = (source / "WirelessSyncService.cpp").read_text()
 app_source = (source / "PokePodApp.cpp").read_text()
 ui_policy = (source / "UiPolicy.h").read_text()
 dashboard_source = (source / "Dashboard.cpp").read_text()
+file_transfer = (source / "LinkFileTransfer.cpp").read_text()
 
 assert "maintenanceCompletionRevision() const" in link_header
 assert 'strcmp(operation, "endMaintenance") == 0' in link_source
 assert "maintenanceCompletion_.endResultPersisted" in link_source
-assert "maintenanceCompletion_.resultFetched(transactionId, fullySent)" not in link_source
-assert (
-    "maintenanceCompletion_.resultFetched(resultTransaction.c_str(), true)"
-    in link_source
+assert "maintenanceCompletion_.resultFetched(" in link_source
+finish_function = file_transfer.index("void LinkFileTransfer::finish(bool success)")
+cleanup_poll = file_transfer.index("if (!cleanup_.poll()) return false;")
+result_fetched = file_transfer.index("linkFileResultFetched(")
+abort_function = file_transfer.index("void LinkFileTransfer::abort()")
+file_final = file_transfer.index(
+    "completion == LinkFileTransferFrameCompletion::final"
 )
-file_final = link_source.index("completion == TxCompletion::fileFinal")
-finish_after_final = link_source.index("finishOutgoingFile(true);", file_final)
-result_fetched = link_source.index(
-    "maintenanceCompletion_.resultFetched(resultTransaction.c_str(), true)"
-)
-finish_function = link_source.index("void PokePodLinkService::finishOutgoingFile")
-abort_function = link_source.index("void PokePodLinkService::abortOutgoing")
+finish_after_final = file_transfer.index("finish(true);", file_final)
+assert finish_function < cleanup_poll < result_fetched < abort_function
 assert file_final < finish_after_final
-assert finish_function < result_fetched < abort_function
+abort_body = file_transfer[abort_function:file_final]
+assert "cleanupSuccess_ = false;" in abort_body
+assert "linkFileResultFetched" not in abort_body
 assert "maintenanceCompletion_.beginAccepted();" in link_source
 assert "beginResultPersisted" not in link_source
 batch_result = link_source.index(
