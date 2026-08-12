@@ -82,7 +82,15 @@ assert "recorder.ownedBy(RecorderOperationOwner::localApp)" in app
 assert "pendingRecorderFinalize && !recorder.operationActive()" in app
 assert "captureRouter.release(AudioCaptureOwner::localCapsule)" in app
 assert "if (captureRouter.localRecording()" in app
-assert "(void)recorder.abortCapture(usb.log())" in app
+overflow = app[app.index("if (!drainCapturedAudio(now))"):
+               app.index("if (recorder.ownedBy(",
+                         app.index("if (!drainCapturedAudio(now))"))]
+assert "recorder.abortCapture" not in overflow
+finish_stop = app[app.index("bool finishPendingCaptureStop() {"):
+                  app.index("bool requestCaptureStop(",
+                            app.index("bool finishPendingCaptureStop() {"))]
+assert finish_stop.index("observeCaptureMetrics()") < finish_stop.index(
+    "recorder.abortCapture(usb.log())")
 assert "录音已中断" in app
 assert "recorder.operationActive() || pendingRecorderFinalize" in app
 assert "recorder.pollCleanup" not in app

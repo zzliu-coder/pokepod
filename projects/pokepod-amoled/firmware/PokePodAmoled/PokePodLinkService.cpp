@@ -4503,6 +4503,11 @@ void PokePodLinkService::advanceLinkRecordingStop() {
     const bool drained = drainLinkCapture();
     const bool complete = linkRecordingStop_.commitRequested() && drained &&
         !captureRuntime_->incomplete();
+    const AudioCaptureFrontEndSnapshot finalMetrics =
+        captureRuntime_->frontEndSnapshot();
+    recorder_->observeAudioMetrics(finalMetrics.sessionId,
+                                   finalMetrics.generation,
+                                   finalMetrics.asMetrics());
     if (recorder_->recording()) {
       if (complete) {
         (void)recorder_->stop(*log_, recorder_->stopRequested()

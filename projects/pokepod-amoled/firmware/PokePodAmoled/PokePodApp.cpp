@@ -1488,7 +1488,6 @@ void loop() {
     if (!drainCapturedAudio(now)) {
       if (captureRouter.localRecording() &&
           recorder.ownedBy(RecorderOperationOwner::localApp)) {
-        (void)recorder.abortCapture(usb.log());
         (void)requestCaptureStop(PendingCaptureStop::localCapsule,
                                  RecorderStopReason::none, true, true);
         showMessage("录音已中断");
