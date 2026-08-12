@@ -1,2 +1,4 @@
 /work/
 /firmware/PokePodAmoled/build/
+__pycache__/
+*.py[cod]

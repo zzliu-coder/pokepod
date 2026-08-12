@@ -1,0 +1,54 @@
+{
+  "schema": "pokepod.host-test-gates.v1",
+  "source": [
+    "test-ble-thread-ownership.py",
+    "test-build-input-fingerprint.py",
+    "test-build-portability.py",
+    "test-capability-wiring.py",
+    "test-capsule-local-management.py",
+    "test-capsule-scan-service.py",
+    "test-capsule-startup.py",
+    "test-device-config-atomic.py",
+    "test-fixed-font-coverage.py",
+    "test-fixed-font-rle.py",
+    "test-flash-artifact-validation.py",
+    "test-flash-policy.py",
+    "test-flash-size-policy.py",
+    "test-hardmac-workflow.py",
+    "test-link-buffer-policy.py",
+    "test-link-command-atomic.py",
+    "test-link-deferred-cleanup.py",
+    "test-link-incoming-transaction-contract.py",
+    "test-link-manifest-contract.py",
+    "test-link-operation-contract.py",
+    "test-link-operation-production-contract.py",
+    "test-link-recording-stop.py",
+    "test-link-storage-lease-contract.py",
+    "test-performance-architecture.py",
+    "test-power-diagnostics-contract.py",
+    "test-provisioning-page.py",
+    "test-recorder-async-finalize.py",
+    "test-recorder-capture-metrics.py",
+    "test-recorder-storage-admission.py",
+    "test-resource-review.py",
+    "test-runtime-power-time-usb-contract.py",
+    "test-scroll-contract.py",
+    "test-storage-entrypoints.py",
+    "test-storage-session-cleanup.py",
+    "test-tencent-network-contract.py",
+    "test-three-stage-power-contract.py",
+    "test-time-audio-motion-contract.py",
+    "test-usb-connection-contract.py",
+    "test-wireless-sync-contract.py",
+    "test-wireless-sync-ui-contract.py"
+  ],
+  "asset": [
+    "test-cjk-font.py"
+  ],
+  "toolchain": [
+    "test-usb-toolchain-contract.py"
+  ],
+  "repository": [
+    "test-source-audit-package.py"
+  ]
+}

@@ -18,6 +18,7 @@ PROJECT_PATH = PurePosixPath("projects/pokepod-amoled")
 EXCLUDED_PARTS = {
     ".cache",
     ".pio",
+    "_audit",
     "__pycache__",
     "build",
     "output",

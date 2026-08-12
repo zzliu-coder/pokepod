@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 from pathlib import Path
 import re
 import struct
+import sys
 
 
 project = Path(__file__).parents[1]
@@ -45,11 +45,8 @@ def decode_packbits(encoded: bytes, decoded_bytes: int) -> tuple[bytes, int]:
     return bytes(decoded), packets
 
 
-builder_spec = importlib.util.spec_from_file_location(
-    "font_builder", project / "tools/build-cjk-font.py"
-)
-builder = importlib.util.module_from_spec(builder_spec)
-builder_spec.loader.exec_module(builder)
+sys.path.insert(0, str(project / "tools"))
+from font_packbits import encode_packbits  # noqa: E402
 for payload in (
     b"",
     bytes(range(128)),
@@ -57,7 +54,7 @@ for payload in (
     b"\x00" * 300,
     bytes((index * 37) & 0xFF for index in range(513)),
 ):
-    encoded = builder.encode_packbits(payload)
+    encoded = encode_packbits(payload)
     if payload:
         decoded, _ = decode_packbits(encoded, len(payload))
         assert decoded == payload

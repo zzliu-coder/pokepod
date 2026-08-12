@@ -139,11 +139,28 @@ Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊�
 ## 构建和自动测试
 
 ```sh
+# 只依赖源码审计包、Python、rg 和 C++17 编译器
+./firmware/run-source-only-tests.sh
+
+# 完整仓库中的二进制中文字库
+./firmware/run-asset-tests.sh
+
+# 已安装且锁定为 3.3.8 的 Arduino-ESP32 / TinyUSB
+./firmware/run-toolchain-tests.sh
+
+# 完整仓库回归：依次运行三层，并做源码审计包自举验证
 ./firmware/run-host-tests.sh
 ./firmware/build.sh
 ./firmware/build.sh --release
 ./verify.sh
 ```
+
+源码审计 ZIP 故意排除 `assets/cjk20.a4` 和 Arduino SDK，因此它必须能够独立
+通过 source-only 门，但不能把缺失资产或工具链伪装成通过。完整仓库的
+`run-host-tests.sh` 会无条件运行 source、asset、toolchain 三层；任何一层缺失
+都会明确失败。`test-source-audit-package.py` 还会在全新临时 Git 仓库中生成两份
+确定性 ZIP，解压后重新运行 source-only 门，并逐文件核对 manifest、SHA-256
+和敏感信息扫描结果。
 
 `build.sh` 固定 Waveshare 源码版本，并使用 Arduino-ESP32 3.3.8。快速产物位于
 `work/pokepod-build/output/fast`，正式产物位于

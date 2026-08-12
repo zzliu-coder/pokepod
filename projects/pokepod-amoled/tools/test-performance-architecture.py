@@ -40,7 +40,7 @@ require(library, "deferredPublish_.begin();",
 if "kMaxCapsulesOnDevice = 96" in library:
     raise SystemExit("FAIL performance_architecture: filesystem scan still truncates at 96")
 scan_start = library.index("bool CapsuleLibrary::processDirectorySlice")
-scan_end = library.index("bool CapsuleLibrary::openPendingMetadata", scan_start)
+scan_end = library.index("bool CapsuleLibrary::readPendingMetadataSlice", scan_start)
 if "readBestText" in library[scan_start:scan_end]:
     raise SystemExit("FAIL performance_architecture: scan eagerly reads preview text")
 read_start = library.index("bool CapsuleLibrary::readRecord")
