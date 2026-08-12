@@ -12,6 +12,7 @@ wav_h = (firmware / "WavRecorder.h").read_text(encoding="utf-8")
 wav = (firmware / "WavRecorder.cpp").read_text(encoding="utf-8")
 app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
+dispatcher = (firmware / "AudioCaptureDispatcher.h").read_text(encoding="utf-8")
 
 assert "struct AudioCaptureFrontEndSnapshot" in service
 assert "AudioCaptureFrontEndPublisher" in service
@@ -39,11 +40,17 @@ assert '\\\"audio_capture_session_id\\\"' in app
 assert '\\\"audio_capture_metrics_generation\\\"' in app
 assert '\\\"audio_capture_active\\\"' in app
 assert "const AudioFrontEndMetrics &frontEnd = recorder.audioMetrics()" not in app
-overflow = app[app.index("if (!drainCapturedAudio(now))"):
-               app.index("if (recorder.ownedBy(",
-                         app.index("if (!drainCapturedAudio(now))"))]
-assert "recorder.abortCapture" not in overflow
-assert "requestCaptureStop(PendingCaptureStop::localCapsule" in overflow
+dispatch_loop = app[
+    app.index("const AudioCaptureDispatchResult dispatch = drainCapturedAudio(now);"):
+    app.index("if (recorder.ownedBy(",
+              app.index("const AudioCaptureDispatchResult dispatch = drainCapturedAudio(now);"))
+]
+assert "recorder.abortCapture" not in dispatch_loop
+assert "requestCaptureStop(PendingCaptureStop::localCapsule" in dispatch_loop
+assert "failedRecorderOwner == RecorderOperationOwner::localApp" in dispatch_loop
+assert "captureRuntime.pop(" not in app
+assert "captureRuntime_->pop(" not in link
+assert "while (source.pop(frame))" in dispatcher
 
 local_finish = app[app.index("bool finishPendingCaptureStop() {"):
                    app.index("bool requestCaptureStop(",
@@ -60,13 +67,15 @@ assert local_snapshot < local_abort
 
 advance = link[link.index("void PokePodLinkService::advanceLinkRecordingStop()"):
                link.index("bool PokePodLinkService::transferPermitted()")]
-drain = advance.index("const bool drained = drainLinkCapture()")
+drain = advance.index("captureDispatcher_->drain(")
 snapshot = advance.index("captureRuntime_->frontEndSnapshot()", drain)
 observe = advance.index("recorder_->observeAudioMetrics(", snapshot)
 stop = advance.index("recorder_->stop(*log_", observe)
 abort = advance.index("recorder_->abortCapture(*log_)", observe)
 assert drain < snapshot < observe < stop
 assert observe < abort
+assert "!recorder_->captureFailureLatched()" in advance
+
 # Normal, disconnect and Link queue-overflow all use this single branch; the
 # stop state chooses commit/abort only after the final session snapshot.
 assert "suppressResponseAndAbort" in link

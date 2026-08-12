@@ -7,6 +7,7 @@
 
 #include "AudioPipeline.h"
 #include "AudioCaptureRuntime.h"
+#include "AudioCaptureDispatcher.h"
 #include "AudioCaptureRouter.h"
 #include "BleVoiceService.h"
 #include "BoardConfig.h"
@@ -48,6 +49,7 @@ BoardServices board;
 AudioPipeline audio;
 AudioCaptureRouter captureRouter;
 AudioCaptureRuntime captureRuntime;
+AudioCaptureDispatcher captureDispatcher;
 UsbLinkBridge usb;
 BleVoiceService bleVoice;
 WavRecorder recorder;
@@ -518,25 +520,9 @@ bool startWirelessHold() {
   return true;
 }
 
-bool drainCapturedAudio(uint32_t nowMs) {
-  bool ok = true;
-  AudioCaptureFrame frame;
-  while (captureRuntime.pop(frame)) {
-    audio.observeCapturedMono(frame.samples, kAudioCaptureSamplesPerFrame);
-    if (captureRouter.localRecording() && recorder.recording()) {
-      if (!recorder.appendMono16(frame.samples, kAudioCaptureSamplesPerFrame,
-                                 usb.log())) {
-        ok = false;
-      }
-    } else if (captureRouter.wirelessStreaming() &&
-               bleVoice.acceptingAudio()) {
-      if (!bleVoice.appendMono16(frame.samples, kAudioCaptureSamplesPerFrame,
-                                 nowMs)) {
-        ok = false;
-      }
-    }
-  }
-  return ok;
+AudioCaptureDispatchResult drainCapturedAudio(uint32_t nowMs) {
+  return captureDispatcher.drain(captureRuntime, captureRouter, audio, recorder,
+                                 bleVoice, usb.log(), nowMs);
 }
 
 void observeCaptureMetrics() {
@@ -549,7 +535,9 @@ void observeCaptureMetrics() {
   if (recorder.recording()) {
     recorder.observeAudioMetrics(snapshot.sessionId, snapshot.generation,
                                  snapshot.asMetrics());
-    if (captureRouter.localRecording()) lastLocalCaptureMetrics = snapshot;
+    if (recorder.ownedBy(RecorderOperationOwner::localApp)) {
+      lastLocalCaptureMetrics = snapshot;
+    }
   }
 }
 
@@ -560,9 +548,9 @@ bool finishPendingCaptureStop() {
       captureRuntime.running()) {
     return pendingCaptureStop == PendingCaptureStop::none;
   }
-  const bool drained = drainCapturedAudio(millis());
+  const AudioCaptureDispatchResult dispatch = drainCapturedAudio(millis());
   observeCaptureMetrics();
-  const bool complete = drained && !captureRuntime.incomplete() &&
+  const bool complete = dispatch.ok && !captureRuntime.incomplete() &&
       !pendingCaptureForceAbort;
   const PendingCaptureStop owner = pendingCaptureStop;
   const bool notifyUser = pendingCaptureNotifyUser;
@@ -1287,7 +1275,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
           runtimePower, usb.log(), &linkCoordinator,
           LinkTransport::usb, &wirelessSync,
                     nullptr, &provisioningCoordinator, nullptr,
-          &captureRuntime, &capabilities);
+          &captureRuntime, &captureDispatcher, &capabilities);
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
@@ -1296,7 +1284,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
           capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
           provisioningDiagnostics, powerDiagnostics, runtimePower,
           wirelessSyncIdentity, linkCoordinator, usb.log(), &captureRuntime,
-          &capabilities);
+          &captureDispatcher, &capabilities);
       capabilities.record(
           DeviceCapability::link,
           bootUsbStarted && bootUsbLinkStarted && bootSyncIdentityStarted &&
@@ -1485,17 +1473,21 @@ void loop() {
     audio.pumpPlayback(usb.log());
   } else if (captureRuntime.running()) {
     const bool wasRecording = recorder.recording();
-    if (!drainCapturedAudio(now)) {
-      if (captureRouter.localRecording() &&
-          recorder.ownedBy(RecorderOperationOwner::localApp)) {
+    const AudioCaptureDispatchResult dispatch = drainCapturedAudio(now);
+    if (!dispatch.ok) {
+      if (dispatch.failedRecorderOwner == RecorderOperationOwner::localApp) {
         (void)requestCaptureStop(PendingCaptureStop::localCapsule,
                                  RecorderStopReason::none, true, true);
         showMessage("录音已中断");
-      } else if (captureRouter.wirelessStreaming()) {
+      } else if (dispatch.voiceDeliveryFailure ||
+                 captureRouter.wirelessStreaming()) {
         (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
                                  RecorderStopReason::none, true, false);
         showMessage("无线语音已中断");
       }
+      // Link-owned recorder failures are durable facts inside WavRecorder.
+      // The owning LinkRecordingSession observes them in its own poll and
+      // performs protocol response, rollback and resource release.
     }
     if (recorder.ownedBy(RecorderOperationOwner::localApp) &&
         recorder.stopRequested() &&

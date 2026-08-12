@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CPP = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 HEADER = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 STATE = (ROOT / "firmware/PokePodAmoled/LinkRecordingStop.h").read_text()
+DISPATCHER = (ROOT / "firmware/PokePodAmoled/AudioCaptureDispatcher.h").read_text()
 
 assert "requestLinkRecordingStop" in HEADER
 assert "advanceLinkRecordingStop" in HEADER
@@ -36,13 +37,16 @@ assert "operation_.releaseResource(LinkOperationResource::router)" in advance
 assert "operation_.releaseResource(LinkOperationResource::transaction)" in advance
 assert "rememberCompleted(requestId)" not in advance
 assert "releaseRequestLease()" not in advance
-final_drain = advance.index("const bool drained = drainLinkCapture()")
+final_drain = advance.index("captureDispatcher_->drain(")
 final_snapshot = advance.index("captureRuntime_->frontEndSnapshot()", final_drain)
 final_observe = advance.index("recorder_->observeAudioMetrics(", final_snapshot)
 recorder_stop = advance.index("recorder_->stop(*log_", final_observe)
 recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_observe)
 assert final_drain < final_snapshot < final_observe < recorder_stop
 assert final_observe < recorder_abort
+assert "!recorder_->captureFailureLatched()" in advance
+assert "drainLinkCapture" not in CPP
+assert "while (source.pop(frame))" in DISPATCHER
 
 assert "awaitCaptureFinalize" in STATE
 assert "awaitRecorderTerminal" in STATE

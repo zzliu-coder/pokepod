@@ -40,6 +40,22 @@ class WavRecorder {
   bool stop(Print &log,
             RecorderStopReason reason = RecorderStopReason::user);
   bool abortCapture(Print &log);
+  // Latches the first capture-delivery failure and asks the storage owner to
+  // create a durable failed terminal. This is intentionally public only for
+  // the single AudioCaptureDispatcher; callers cannot clear or downgrade it.
+  void reportCaptureFailure(Print &log, RecorderTerminal terminal,
+                            RecorderFailureStage stage);
+  bool captureFailureLatched() const {
+    return captureFailureCode_.load(std::memory_order_acquire) != 0U;
+  }
+  RecorderFailureStage captureFailureStage() const {
+    return static_cast<RecorderFailureStage>(
+        captureFailureCode_.load(std::memory_order_acquire) & 0xFFU);
+  }
+  RecorderTerminal captureFailureTerminal() const {
+    return static_cast<RecorderTerminal>(
+        (captureFailureCode_.load(std::memory_order_acquire) >> 8U) & 0xFFU);
+  }
   // Advances at most one recorder primitive or one bounded transaction poll.
   // A null gate is the local/USB policy: no transfer-window deadline.
   bool pollFinalize(Print &log, uint32_t nowMs = 0,
@@ -286,6 +302,11 @@ class WavRecorder {
   String finalPath_;
   uint32_t dataBytes_ = 0;
   std::atomic<bool> recording_{false};
+  // First failure wins across the UI/capture producer and the storage task.
+  // A non-none stage is an irreversible "this recording cannot commit" fact.
+  // Terminal and stage are published as one atomic fact. A packed value avoids
+  // readers observing a failure stage before its terminal (or vice versa).
+  std::atomic<uint16_t> captureFailureCode_{0};
   std::atomic<RecorderOperationOwner> operationOwner_{
       RecorderOperationOwner::none};
   bool checkpointInitialized_ = false;

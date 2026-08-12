@@ -53,6 +53,7 @@ enum class RecorderFailureStage : uint8_t {
   recoveryCheckpoint,
   storageBusy,
   captureIncomplete,
+  storageQueueOverflow,
 };
 
 struct RecorderOutcome {
@@ -123,6 +124,7 @@ inline const char *recorderFailureStageName(RecorderFailureStage stage) {
     case RecorderFailureStage::recoveryCheckpoint: return "recovery_checkpoint";
     case RecorderFailureStage::storageBusy: return "storage_busy";
     case RecorderFailureStage::captureIncomplete: return "capture_incomplete";
+    case RecorderFailureStage::storageQueueOverflow: return "storage_queue_overflow";
     default: return "none";
   }
 }

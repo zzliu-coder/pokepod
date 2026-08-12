@@ -11,6 +11,7 @@ wav = (firmware / "WavRecorder.cpp").read_text(encoding="utf-8")
 app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 capture = (firmware / "AudioCaptureRuntime.h").read_text(encoding="utf-8")
 storage_queue = (firmware / "RecorderStorageQueue.h").read_text(encoding="utf-8")
+dispatcher = (firmware / "AudioCaptureDispatcher.h").read_text(encoding="utf-8")
 
 assert "CapsuleTransactionRunner transactionRunner_" in wav_h
 assert "RecorderOperationOwner operationOwner() const" in wav_h
@@ -65,27 +66,36 @@ assert "fs_->open(partialPath_, FILE_WRITE)" in storage_start
 append_start = wav.index("bool WavRecorder::appendMonoBytes")
 append_end = wav.index("bool WavRecorder::storageAppendMonoBytes", append_start)
 assert "persistCheckpoint" not in wav[append_start:append_end]
-abort_capture = wav[
-    wav.index("bool WavRecorder::abortCapture"):
+capture_failure = wav[
+    wav.index("void WavRecorder::reportCaptureFailure"):
     wav.index("bool WavRecorder::finalizeFailure")
 ]
-arduino_abort = abort_capture[
-    abort_capture.index("#if defined(ARDUINO_ARCH_ESP32)"):
-    abort_capture.index("#else")
+assert "captureFailureCode_.compare_exchange_strong" in capture_failure
+assert "storageAbortRequested_.store(true" in capture_failure
+assert "recording_.store(false" not in capture_failure
+assert "RecorderFailureStage::storageQueueOverflow" in wav
+assert "captureFailureLatched()" in wav[
+    wav.index("void WavRecorder::completeFinalize"):
+    wav.index("bool WavRecorder::pollBootRecovery")
 ]
-assert "finishFailure" not in arduino_abort
-assert "storageAbortRequested_.store(true" in arduino_abort
-assert "recording_.store(false" not in arduino_abort
+assert "while (source.pop(frame))" in dispatcher
+assert "reportCaptureFailure(" in dispatcher
+
 
 assert "RecorderOperationOwner::localApp" in app
 assert "recorder.ownedBy(RecorderOperationOwner::localApp)" in app
 assert "pendingRecorderFinalize && !recorder.operationActive()" in app
 assert "captureRouter.release(AudioCaptureOwner::localCapsule)" in app
-assert "if (captureRouter.localRecording()" in app
-overflow = app[app.index("if (!drainCapturedAudio(now))"):
-               app.index("if (recorder.ownedBy(",
-                         app.index("if (!drainCapturedAudio(now))"))]
-assert "recorder.abortCapture" not in overflow
+assert "AudioCaptureDispatcher captureDispatcher;" in app
+dispatch_loop = app[
+    app.index("const AudioCaptureDispatchResult dispatch = drainCapturedAudio(now);"):
+    app.index("if (recorder.ownedBy(",
+              app.index("const AudioCaptureDispatchResult dispatch = drainCapturedAudio(now);"))
+]
+assert "recorder.abortCapture" not in dispatch_loop
+assert "requestCaptureStop(PendingCaptureStop::localCapsule" in dispatch_loop
+assert "failedRecorderOwner == RecorderOperationOwner::localApp" in dispatch_loop
+
 finish_stop = app[app.index("bool finishPendingCaptureStop() {"):
                   app.index("bool requestCaptureStop(",
                             app.index("bool finishPendingCaptureStop() {"))]
@@ -99,9 +109,12 @@ assert app.index("if (safeShutdownQuiesce.pending())") < app.index(
     "if (linkService.receivingBinary())"
 )
 
-owner_gate = app.index("recorder.ownedBy(RecorderOperationOwner::localApp)")
-poll = app.index("recorder.pollFinalize(usb.log(), millis(), nullptr)",
-                 owner_gate)
-assert poll - owner_gate < 180
+owner_block_start = app.index(
+    "if (recorder.recording() &&\n"
+    "      recorder.ownedBy(RecorderOperationOwner::localApp)) {"
+)
+owner_block_end = app.index("\n  }", owner_block_start) + len("\n  }")
+owner_block = app[owner_block_start:owner_block_end]
+assert "recorder.pollFinalize(usb.log(), millis(), nullptr)" in owner_block
 
 print("PASS test_recorder_async_finalize")

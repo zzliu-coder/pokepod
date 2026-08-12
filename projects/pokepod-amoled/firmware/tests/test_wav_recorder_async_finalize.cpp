@@ -641,6 +641,48 @@ void runAutomaticMaximumDuration() {
          kMaximumRecordingAudioBytes);
 }
 
+void runLatchedDeliveryFailureCannotCommit() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  WavRecorder recorder;
+  assert(recorder.begin(storage, log));
+  finishBootRecovery(recorder, state, log);
+  assert(recorder.start(log, kFirstId, kCreatedAt, admittedSpace(),
+                        RecorderOperationOwner::linkUsb));
+  appendFrame(recorder, log);
+  recorder.reportCaptureFailure(
+      log, RecorderTerminal::storageFailure,
+      RecorderFailureStage::storageQueueOverflow);
+  assert(recorder.captureFailureLatched());
+  assert(recorder.captureFailureStage() ==
+         RecorderFailureStage::storageQueueOverflow);
+  // Even a caller that incorrectly asks for a normal stop cannot upgrade the
+  // latched failure into a successful terminal. Host cleanup has already
+  // cleared recording(), so stop() truthfully reports that no normal stop was
+  // accepted.
+  assert(!recorder.stop(log));
+  drive(recorder, state, log, 900000U, nullptr);
+  assert(recorder.terminalResult().terminal ==
+         RecorderTerminal::storageFailure);
+  assert(recorder.terminalResult().failureStage ==
+         RecorderFailureStage::storageQueueOverflow);
+  const std::string inbox = std::string(kCapsuleInbox) + "/" + kFirstId;
+  assert(state->directories.count(inbox) == 0U);
+  assert(state->files.count(inbox + "/audio.wav") == 0U);
+  assert(state->openHandles == 0U);
+  assert(StorageCoordinator::instance().idle());
+
+  RecorderOutcome acknowledged;
+  assert(recorder.takeTerminalResult(acknowledged));
+  assert(recorder.start(log, kSecondId, kCreatedAt, admittedSpace(),
+                        RecorderOperationOwner::linkUsb));
+  appendFrame(recorder, log);
+  assert(recorder.stop(log));
+  drive(recorder, state, log, 910000U, nullptr);
+  assert(recorder.terminalResult().success());
+}
+
 void runCaptureMetricsSessionIsolation() {
   WavRecorder recorder;
   AudioFrontEndMetrics first;
@@ -684,6 +726,7 @@ int main() {
   runFailureFactMustBecomeDurable();
   runRecoveryFinalizeFailureDoesNotWedge();
   runAutomaticMaximumDuration();
+  runLatchedDeliveryFailureCannotCommit();
   runCaptureMetricsSessionIsolation();
   return 0;
 }

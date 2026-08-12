@@ -16,6 +16,7 @@ namespace pokepod {
 
 class AudioPipeline;
 class AudioCaptureRuntime;
+class AudioCaptureDispatcher;
 class AudioCaptureRouter;
 class BleVoiceService;
 class BoardServices;
@@ -44,6 +45,7 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
              RuntimePowerManager &power, WirelessSyncIdentity &identity,
              LinkServiceCoordinator &coordinator, Print &log,
              AudioCaptureRuntime *captureRuntime = nullptr,
+             AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr);
   void poll(uint32_t nowMs, bool networkConnected);
   void enforceDeadline(uint32_t nowMs);

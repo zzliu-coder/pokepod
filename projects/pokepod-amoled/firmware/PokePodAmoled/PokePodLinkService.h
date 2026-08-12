@@ -31,6 +31,7 @@ namespace pokepod {
 class BoardServices;
 class AudioPipeline;
 class AudioCaptureRuntime;
+class AudioCaptureDispatcher;
 class AudioCaptureRouter;
 class CapsuleLibrary;
 class DeviceConfig;
@@ -66,6 +67,7 @@ class PokePodLinkService {
              ProvisioningCoordinator *provisioningCoordinator = nullptr,
              LinkWriteChannel *writeChannel = nullptr,
              AudioCaptureRuntime *captureRuntime = nullptr,
+             AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr);
   void poll(uint32_t nowMs);
   // Finishes read-only handle cleanup after an immediate transport cancel.
@@ -269,7 +271,6 @@ class PokePodLinkService {
   void finishOutgoingCleanup();
   void abortOutgoing();
   void onFrameSent(TxCompletion completion);
-  bool drainLinkCapture();
   bool requestLinkRecordingStop(uint32_t requestId, bool commit,
                                 bool respond);
   void advanceLinkRecordingStart();
@@ -314,6 +315,7 @@ class PokePodLinkService {
   BoardServices *board_ = nullptr;
   AudioPipeline *audio_ = nullptr;
   AudioCaptureRuntime *captureRuntime_ = nullptr;
+  AudioCaptureDispatcher *captureDispatcher_ = nullptr;
   const CapabilityRegistry *capabilities_ = nullptr;
   AudioCaptureRouter *captureRouter_ = nullptr;
   UsbLinkBridge *usb_ = nullptr;

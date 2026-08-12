@@ -12,6 +12,7 @@
 
 #include "AudioPipeline.h"
 #include "AudioCaptureRuntime.h"
+#include "AudioCaptureDispatcher.h"
 #include "AudioCaptureRouter.h"
 #include "BoardServices.h"
 #include "CapsuleLibrary.h"
@@ -229,12 +230,14 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                ProvisioningCoordinator *provisioningCoordinator,
                                LinkWriteChannel *writeChannel,
                                AudioCaptureRuntime *captureRuntime,
+                               AudioCaptureDispatcher *captureDispatcher,
                                const CapabilityRegistry *capabilities) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
   audio_ = &audio;
   captureRuntime_ = captureRuntime;
+  captureDispatcher_ = captureDispatcher;
   capabilities_ = capabilities;
   captureRouter_ = &captureRouter;
   usb_ = &usb;
@@ -529,8 +532,7 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     return;
   }
   if (linkOwnedRecording_ && !linkRecordingStop_.active()) {
-    const bool captureOk = drainLinkCapture();
-    if (!captureOk) {
+    if (recorder_ != nullptr && recorder_->captureFailureLatched()) {
       (void)requestLinkRecordingStop(0, false, false);
     } else if (recorder_ != nullptr && recorder_->stopRequested()) {
       (void)requestLinkRecordingStop(0, true, false);
@@ -4392,24 +4394,6 @@ void PokePodLinkService::onFrameSent(TxCompletion completion) {
   }
 }
 
-bool PokePodLinkService::drainLinkCapture() {
-  if (captureRuntime_ == nullptr) return false;
-  bool ok = true;
-  AudioCaptureFrame frame;
-  while (captureRuntime_->pop(frame)) {
-    if (audio_ != nullptr) {
-      audio_->observeCapturedMono(frame.samples,
-                                  kAudioCaptureSamplesPerFrame);
-    }
-    if (recorder_ != nullptr && recorder_->recording() &&
-        !recorder_->appendMono16(frame.samples,
-                                 kAudioCaptureSamplesPerFrame, *log_)) {
-      ok = false;
-    }
-  }
-  return ok;
-}
-
 bool PokePodLinkService::requestLinkRecordingStop(uint32_t requestId,
                                                    bool commit,
                                                    bool respond) {
@@ -4500,9 +4484,19 @@ void PokePodLinkService::advanceLinkRecordingStop() {
       }
       if (captureRuntime_->running()) return;
     }
-    const bool drained = drainLinkCapture();
-    const bool complete = linkRecordingStop_.commitRequested() && drained &&
-        !captureRuntime_->incomplete();
+    AudioCaptureDispatchResult dispatch;
+    if (captureDispatcher_ != nullptr && audio_ != nullptr &&
+        bleVoice_ != nullptr) {
+      dispatch = captureDispatcher_->drain(
+          *captureRuntime_, *captureRouter_, *audio_, *recorder_, *bleVoice_,
+          *log_, millis());
+    } else {
+      dispatch.ok = false;
+      dispatch.routingFailure = true;
+    }
+    const bool complete = linkRecordingStop_.commitRequested() && dispatch.ok &&
+        !captureRuntime_->incomplete() &&
+        !recorder_->captureFailureLatched();
     const AudioCaptureFrontEndSnapshot finalMetrics =
         captureRuntime_->frontEndSnapshot();
     recorder_->observeAudioMetrics(finalMetrics.sessionId,

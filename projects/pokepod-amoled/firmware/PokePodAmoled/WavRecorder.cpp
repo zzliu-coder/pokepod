@@ -362,8 +362,8 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
       kMaximumRecordingAudioBytes - accepted);
   if (length > remaining) length = remaining & ~static_cast<size_t>(1U);
   if (length == 0 || !storageQueue_.push(data, length)) {
-    log.println(
-        "{\"event\":\"recording_error\",\"stage\":\"storage_queue_overflow\"}");
+    reportCaptureFailure(log, RecorderTerminal::storageFailure,
+                         RecorderFailureStage::storageQueueOverflow);
     return false;
   }
   acceptedDataBytes_.fetch_add(static_cast<uint32_t>(length),
@@ -423,6 +423,16 @@ bool WavRecorder::storageAppendMonoBytes(const uint8_t *data, size_t length,
 
 bool WavRecorder::stop(Print &log, RecorderStopReason reason) {
   if (!recording_) return false;
+  if (captureFailureLatched()) {
+#if defined(ARDUINO_ARCH_ESP32)
+    storageAbortRequested_.store(true, std::memory_order_release);
+    xTaskNotifyGive(storageTask_);
+#else
+    (void)finishFailure(log, captureFailureTerminal(),
+                        captureFailureStage());
+#endif
+    return true;
+  }
   recording_ = false;
   automaticStopRequested_ = false;
   automaticStopReason_ = RecorderStopReason::none;
@@ -455,21 +465,46 @@ uint32_t WavRecorder::durationMs() const {
 }
 
 bool WavRecorder::abortCapture(Print &log) {
-  if (!recording_) return false;
+  if (!recording_ && !captureFailureLatched()) return false;
+  reportCaptureFailure(log, RecorderTerminal::captureFailure,
+                       RecorderFailureStage::captureIncomplete);
+  return true;
+}
+
+void WavRecorder::reportCaptureFailure(Print &log,
+                                       RecorderTerminal terminal,
+                                       RecorderFailureStage stage) {
+  if (terminal == RecorderTerminal::none ||
+      terminal == RecorderTerminal::completed ||
+      stage == RecorderFailureStage::none) {
+    return;
+  }
+  const uint16_t code =
+      (static_cast<uint16_t>(terminal) << 8U) |
+      static_cast<uint16_t>(stage);
+  uint16_t expected = 0;
+  const bool first = captureFailureCode_.compare_exchange_strong(
+      expected, code, std::memory_order_acq_rel, std::memory_order_acquire);
+  if (first) {
+    log.printf(
+        "{\"event\":\"recording_error\",\"stage\":\"%s\",\"latched\":true}\n",
+        recorderFailureStageName(stage));
+  }
 #if defined(ARDUINO_ARCH_ESP32)
-  (void)log;
-  // File/runner/phase state belongs exclusively to the storage task.
-  // Keep recording=true until the owner task drains this command. That fact
-  // prevents the task from taking its no-work exit if abort is published just
-  // after it checked the command flag. The application stops capture at once;
-  // the task alone publishes recording=false and durable failure cleanup.
   storageAbortRequested_.store(true, std::memory_order_release);
-  xTaskNotifyGive(storageTask_);
-  return true;
+  if (storageTask_ != nullptr) xTaskNotifyGive(storageTask_);
 #else
-  (void)finishFailure(log, RecorderTerminal::captureFailure,
-                      RecorderFailureStage::captureIncomplete);
-  return true;
+  const RecorderTerminal latchedTerminal = captureFailureTerminal();
+  const RecorderFailureStage latchedStage = captureFailureStage();
+  if (recording_ || finalizePending_) {
+    (void)finishFailure(
+        log, latchedTerminal == RecorderTerminal::none
+                 ? RecorderTerminal::captureFailure
+                 : latchedTerminal,
+        latchedStage == RecorderFailureStage::none
+                 ? RecorderFailureStage::captureIncomplete
+                 : latchedStage);
+  }
 #endif
 }
 
@@ -514,6 +549,14 @@ bool WavRecorder::pollFinalizeRunner(Print &log, uint32_t nowMs,
 }
 
 void WavRecorder::completeFinalize(Print &log) {
+  if (!recoveryFinalizeActive_ && captureFailureLatched()) {
+    (void)finishFailure(
+        log, captureFailureTerminal() == RecorderTerminal::none
+                 ? RecorderTerminal::captureFailure
+                 : captureFailureTerminal(),
+        captureFailureStage());
+    return;
+  }
   if (recoveryFinalizeActive_) {
     log.printf(
         "{\"event\":\"recording_recovered\",\"id\":\"%s\",\"duration_ms\":%lu}\n",
@@ -1232,6 +1275,7 @@ void WavRecorder::resetSessionState() {
   // cleanup.  Closing it here would bypass the StorageCoordinator lease.
   if (file_ || cleanupPending_ || finalizePending_) return;
   recording_ = false;
+  captureFailureCode_.store(0, std::memory_order_release);
   operationOwner_ = RecorderOperationOwner::none;
   recordingId_ = "";
   createdAt_ = "";
@@ -1699,8 +1743,15 @@ void WavRecorder::storageTaskMain() {
       if (storageAbortRequested_.exchange(false,
                                           std::memory_order_acq_rel)) {
         storageQueue_.reset();
-        (void)finishFailure(*log, RecorderTerminal::captureFailure,
-                            RecorderFailureStage::captureIncomplete);
+        RecorderTerminal terminal = captureFailureTerminal();
+        RecorderFailureStage stage = captureFailureStage();
+        if (terminal == RecorderTerminal::none) {
+          terminal = RecorderTerminal::captureFailure;
+        }
+        if (stage == RecorderFailureStage::none) {
+          stage = RecorderFailureStage::captureIncomplete;
+        }
+        (void)finishFailure(*log, terminal, stage);
         vTaskDelay(pdMS_TO_TICKS(1));
         continue;
       }

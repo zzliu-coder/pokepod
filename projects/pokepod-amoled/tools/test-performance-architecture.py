@@ -18,6 +18,8 @@ app = (FIRMWARE / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard = (FIRMWARE / "Dashboard.cpp").read_text(encoding="utf-8")
 audio = (FIRMWARE / "AudioPipeline.cpp").read_text(encoding="utf-8")
 renderer = (FIRMWARE / "ChineseRenderer.cpp").read_text(encoding="utf-8")
+dispatcher = (FIRMWARE / "AudioCaptureDispatcher.h").read_text(encoding="utf-8")
+link = (FIRMWARE / "PokePodLinkService.cpp").read_text(encoding="utf-8")
 
 for operation in (
     "markTranscribing", "commitRawText", "markFailure", "markRetryable",
@@ -99,10 +101,20 @@ require(app, "captureRuntime.start(audio, captureSessionId, usb.log())",
         "local recording bypasses the capture task")
 require(app, "captureRuntime.start(audio, sessionId, usb.log())",
         "BLE voice bypasses the capture task")
-require(app, "recorder.appendMono16(frame.samples",
+require(app, "AudioCaptureDispatcher captureDispatcher;",
+        "the product has no single capture dispatcher")
+require(app, "captureDispatcher.drain(captureRuntime",
+        "the application does not route capture through the dispatcher")
+require(dispatcher, "while (source.pop(frame))",
+        "the dispatcher is not the ring's sole consumer")
+require(dispatcher, "recorder.appendMono16(frame.samples",
         "capture frames are not delivered to the recorder")
-require(app, "bleVoice.appendMono16(frame.samples",
+require(dispatcher, "voice.appendMono16(frame.samples",
         "capture frames are not delivered to BLE voice")
+if "captureRuntime.pop(" in app or "captureRuntime_->pop(" in link:
+    raise SystemExit(
+        "FAIL performance_architecture: App or Link still consumes the ring directly"
+    )
 if "audio.read(audioBuffer" in app:
     raise SystemExit("FAIL performance_architecture: main loop still reads I2S")
 require(renderer, "sdCacheLookup_[slot]",
