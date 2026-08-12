@@ -1,6 +1,7 @@
 #include <assert.h>
 
 #include "../PokePodAmoled/LinkOperation.h"
+#include "../PokePodAmoled/LinkPolicy.h"
 
 using namespace pokepod;
 
@@ -51,6 +52,27 @@ struct AdapterHarness {
              externalSuccess);
     }
     return operation.finishRelease();
+  }
+};
+
+struct EpochHistory {
+  LinkRequestHistory history;
+  uint32_t liveGeneration = 0;
+
+  void connect(uint32_t generation) {
+    assert(generation != 0);
+    liveGeneration = generation;
+    history.clear();
+  }
+
+  void disconnect() { liveGeneration = 0; }
+
+  bool settleCompletion(LinkOperation &operation) {
+    const uint32_t requestId = operation.requestId();
+    const bool current = liveGeneration != 0 &&
+        operation.connectionGeneration() == liveGeneration;
+    return !current || requestId == 0 || history.contains(requestId) ||
+        history.complete(requestId);
   }
 };
 
@@ -180,6 +202,38 @@ int main() {
   assert(maintenance.settle());
   assert(!maintenance.coordinatorHeld);
   assert(maintenance.coordinatorReleaseAttempts == 1);
+
+  // A disconnected operation may finish deferred cleanup after a new
+  // physical connection uses the same request id.  Its old epoch is
+  // acknowledged locally and never inserts into the new replay cache.
+  EpochHistory epoch;
+  epoch.connect(20);
+  LinkOperation oldConnection;
+  assert(oldConnection.admit(200, LinkTransport::wifi, 20, true) ==
+         LinkOperationAdmission::accepted);
+  oldConnection.ownResource(LinkOperationResource::file);
+  oldConnection.cancel(LinkOperationCancelReason::disconnect);
+  epoch.disconnect();
+  epoch.connect(21);
+  assert(!epoch.history.contains(200));
+  assert(oldConnection.advance(LinkOperationState::cleanup));
+  oldConnection.releaseResource(LinkOperationResource::file);
+  assert(epoch.settleCompletion(oldConnection));
+  assert(!epoch.history.contains(200));
+  LinkOperation newConnection;
+  assert(newConnection.admit(200, LinkTransport::wifi, 21, false) ==
+         LinkOperationAdmission::accepted);
+
+  // IO-busy read/result is a retryable terminal response.  It releases only
+  // after that response drains, rather than leaving an accepted request idle.
+  AdapterHarness ioBusyRead;
+  ioBusyRead.accept(201, LinkTransport::wifi, 22, true, 300000);
+  assert(ioBusyRead.operation.queueFrame(LinkOperationFrameRole::terminal, 22,
+                                         100, false));
+  assert(ioBusyRead.operation.frameDrained(LinkOperationFrameRole::terminal,
+                                           22, 101));
+  assert(ioBusyRead.settle());
+  assert(!ioBusyRead.completed);
 
   return 0;
 }

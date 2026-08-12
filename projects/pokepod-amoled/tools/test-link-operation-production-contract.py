@@ -59,13 +59,24 @@ settle = SOURCE[SOURCE.index(
     SOURCE.index("void PokePodLinkService::disconnect()")]
 assert SOURCE.count("completed_.complete") == 1
 assert "completed_.complete" in settle
+assert "completed_.contains(requestId) || completed_.complete(requestId)" in settle
+assert "operation_.connectionGeneration() == connectionGeneration_" in settle
 assert SOURCE.count("coordinator_->release") == 2  # admission rollback + settlement
 assert "coordinator_->release" in settle
+assert "coordinator_->owner() == transport_" in settle
+assert "coordinator_->owner() == LinkTransport::none" in settle
 
 disconnect = SOURCE[SOURCE.index("void PokePodLinkService::disconnect()"):
                     SOURCE.index("void PokePodLinkService::requestQuiesce()")]
 assert "cancelLinkOperation" in disconnect
 assert "advanceLinkOperationSettlement" in disconnect
+assert "connectionGeneration_ = 0" in disconnect
+assert "completed_.clear()" not in disconnect
+
+generation = SOURCE[SOURCE.index(
+    "uint32_t PokePodLinkService::activateConnectionGeneration()"):
+    SOURCE.index("LinkOperationAdmission PokePodLinkService::admitLinkOperation")]
+assert "completed_.clear()" in generation
 
 transmit = SOURCE[SOURCE.index("void PokePodLinkService::advanceTransmit("):
                    SOURCE.index("void PokePodLinkService::queueNextFileChunk(")]
@@ -83,6 +94,19 @@ for reset in (
 
 assert "cancelRetainedCoordinator" in SOURCE
 assert "!operation_.ownsResource(LinkOperationResource::coordinator)" in SOURCE
+
+send_file = SOURCE[SOURCE.index("bool PokePodLinkService::sendFile("):
+                   SOURCE.index("bool PokePodLinkService::sendFrame(")]
+assert "storageIoTimeout()" in send_file
+assert "if (!lease)" in send_file
+assert "sendBusy(requestId)" in send_file
+assert "StorageAccess::read, 250" not in send_file
+
+status_start = SOURCE.index('if (strcmp(operation, "status") == 0)')
+status_end = SOURCE.index('} else if (strcmp(operation, "provisioning-start")',
+                          status_start)
+status = SOURCE[status_start:status_end]
+assert "requestLinkRecordingStop" not in status
 
 assert 'sendFrame(LinkFrameType::eventJson' in SOURCE
 events = SOURCE[SOURCE.index("bool PokePodLinkService::sendEvent("):

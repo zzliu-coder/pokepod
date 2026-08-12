@@ -284,6 +284,10 @@ uint32_t PokePodLinkService::activateConnectionGeneration() {
   ++nextConnectionGeneration_;
   if (nextConnectionGeneration_ == 0) ++nextConnectionGeneration_;
   connectionGeneration_ = nextConnectionGeneration_;
+  // Request ids are scoped to one physical CDC/TLS connection.  Clear the
+  // replay cache only when a fresh transport epoch is observed, after any
+  // previous operation has finished owner-scoped cleanup.
+  completed_.clear();
   return connectionGeneration_;
 }
 
@@ -350,8 +354,14 @@ void PokePodLinkService::advanceLinkOperationSettlement() {
   LinkOperationSettlement pending = operation_.settlement();
   if (pending.rememberCompleted) {
     const uint32_t requestId = operation_.requestId();
-    if (requestId != 0) completed_.complete(requestId);
-    (void)operation_.acknowledgeCompletion(true);
+    // A disconnected epoch has no live replay history.  A late cleanup from
+    // that epoch is acknowledged locally without contaminating a later
+    // connection's request-id cache.
+    const bool currentEpoch = sessionActive_ && connectionGeneration_ != 0 &&
+        operation_.connectionGeneration() == connectionGeneration_;
+    const bool completed = !currentEpoch || requestId == 0 ||
+        completed_.contains(requestId) || completed_.complete(requestId);
+    (void)operation_.acknowledgeCompletion(completed);
   }
   pending = operation_.settlement();
   if (pending.releaseRequest) {
@@ -359,11 +369,15 @@ void PokePodLinkService::advanceLinkOperationSettlement() {
   }
   pending = operation_.settlement();
   if (pending.releaseCoordinator) {
+    bool released = coordinator_ == nullptr || transport_ == LinkTransport::none;
     if (coordinator_ != nullptr && transport_ != LinkTransport::none) {
-      coordinator_->release(transport_);
+      if (coordinator_->owner() == transport_) {
+        coordinator_->release(transport_);
+      }
+      released = coordinator_->owner() == LinkTransport::none;
     }
     (void)operation_.acknowledgeRelease(
-        LinkOperationResource::coordinator, true);
+        LinkOperationResource::coordinator, released);
   }
   const bool released = operation_.finishRelease();
   if (released && !sessionActive_) connectionGeneration_ = 0;
@@ -403,9 +417,11 @@ void PokePodLinkService::disconnect() {
   }
   activeMaintenance_ = "";
   maintenanceCompletion_.disconnect();
-  completed_.clear();
   commandLoadRespond_ = false;
   resetFrame();
+  // The core keeps the old generation until its resources settle.  The
+  // service generation represents only the live physical connection.
+  connectionGeneration_ = 0;
   advanceLinkOperationSettlement();
   if (!operation_.active() &&
       !operation_.ownsResource(LinkOperationResource::coordinator)) {
@@ -1318,9 +1334,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     appendJsonString(extra, "provisioningStartupPhase",
                      provisioningCoordinator_ == nullptr
                          ? "unavailable" : provisioningCoordinator_->phaseName());
-    if (!sendOk(requestId, extra.c_str())) {
-      (void)requestLinkRecordingStop(requestId, false, false);
-    }
+    (void)sendOk(requestId, extra.c_str());
   } else if (strcmp(operation, "provisioning-start") == 0) {
     if (transport_ != LinkTransport::usb ||
         provisioningCoordinator_ == nullptr) {
@@ -3955,7 +3969,6 @@ bool PokePodLinkService::sendJson(uint32_t requestId, const String &json) {
 
 bool PokePodLinkService::sendJson(uint32_t requestId, const String &json,
                                   bool completionEligible) {
-  if (json.length() > kLinkMaxControlBytes) return false;
   if (operationOwns(requestId)) {
     if (operation_.state() == LinkOperationState::receiving) {
       operation_.advance(LinkOperationState::processing);
@@ -3969,7 +3982,6 @@ bool PokePodLinkService::sendJson(uint32_t requestId, const String &json,
 }
 
 bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
-  if (json.length() > kLinkMaxControlBytes) return false;
   return sendFrame(LinkFrameType::eventJson, 0, requestId,
                    reinterpret_cast<const uint8_t *>(json.c_str()),
                    json.length(), LinkOperationFrameRole::progress);
@@ -3977,14 +3989,20 @@ bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
 
 bool PokePodLinkService::sendFile(uint32_t requestId, const String &path,
                                   const char *resultTransactionId) {
-  if (!transferPermitted()) return false;
+  if (!transferPermitted()) {
+    if (operationOwns(requestId)) {
+      operation_.cancel(LinkOperationCancelReason::deadline);
+      operation_.discardQueuedFrames(connectionGeneration_);
+    }
+    return false;
+  }
   if (outgoingPhase_ != OutgoingPhase::none || txStepper_.active() ||
       pendingControlBytes_ != 0) {
     sendBusy(requestId);
     return false;
   }
   StorageReservation reservation = StorageCoordinator::instance().reserve(
-      storageOwner(), StorageAccess::read, 250);
+      storageOwner(), StorageAccess::read, storageIoTimeout());
   if (!reservation) {
     sendBusy(requestId);
     return false;
@@ -3994,7 +4012,10 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path,
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         storageOwner(), StorageAccess::read, storageIoTimeout());
-    if (!lease) return false;
+    if (!lease) {
+      sendBusy(requestId);
+      return false;
+    }
     file = fs_->open(path, FILE_READ);
     if (!file || file.isDirectory()) {
       if (file) file.close();
