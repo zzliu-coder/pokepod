@@ -88,6 +88,7 @@ uint32_t lastTouchMs = 0;
 uint32_t lastDashboardMs = 0;
 uint32_t lastScrollFrameMs = 0;
 uint32_t lastSensorMs = 0;
+AudioCaptureFrontEndSnapshot lastLocalCaptureMetrics;
 uint32_t bootPressedAtMs = 0;
 uint32_t lastNetworkTimeSyncRevision = 0;
 uint32_t lastCapsuleLibraryRevision = 0;
@@ -538,6 +539,20 @@ bool drainCapturedAudio(uint32_t nowMs) {
   return ok;
 }
 
+void observeCaptureMetrics() {
+  const AudioCaptureFrontEndSnapshot snapshot =
+      captureRuntime.frontEndSnapshot();
+  if (snapshot.sessionId == 0 || snapshot.generation == 0) return;
+  // Recorder finalization runs on the storage task. Publish the final metrics
+  // before stop() crosses that ownership boundary, then keep the snapshot
+  // immutable until the terminal outcome is consumed.
+  if (recorder.recording()) {
+    recorder.observeAudioMetrics(snapshot.sessionId, snapshot.generation,
+                                 snapshot.asMetrics());
+    if (captureRouter.localRecording()) lastLocalCaptureMetrics = snapshot;
+  }
+}
+
 bool consumeRecorderTerminal(bool notifyUser);
 
 bool finishPendingCaptureStop() {
@@ -546,6 +561,7 @@ bool finishPendingCaptureStop() {
     return pendingCaptureStop == PendingCaptureStop::none;
   }
   const bool drained = drainCapturedAudio(millis());
+  observeCaptureMetrics();
   const bool complete = drained && !captureRuntime.incomplete() &&
       !pendingCaptureForceAbort;
   const PendingCaptureStop owner = pendingCaptureStop;
@@ -596,6 +612,9 @@ bool requestCaptureStop(PendingCaptureStop owner, RecorderStopReason reason,
 }
 
 void pollDeferredServiceCleanup() {
+  // Publish the realtime owner's coherent diagnostics before Link/UI status
+  // handling. This also feeds Link-owned recordings without duplicating DSP.
+  observeCaptureMetrics();
   if (recorder.recoveryPending()) {
     (void)recorder.pollFinalize(usb.log(), millis(), nullptr);
   }
@@ -681,11 +700,21 @@ bool consumeRecorderTerminal(bool notifyUser) {
     }
     showMessage(message);
   }
+  const AudioFrontEndMetrics captureMetrics =
+      lastLocalCaptureMetrics.asMetrics();
   usb.log().printf(
-      "{\"event\":\"recording_result_consumed\",\"completed\":%s,\"terminal\":%u,\"stage\":\"%s\",\"bytes\":%lu}\n",
+      "{\"event\":\"recording_result_consumed\",\"completed\":%s,\"terminal\":%u,\"stage\":\"%s\",\"bytes\":%lu,\"capture_session_id\":%lu,\"capture_metrics_generation\":%lu,\"audio_frontend_channel\":\"%s\",\"audio_frontend_left_peak\":%u,\"audio_frontend_right_peak\":%u,\"audio_frontend_output_peak\":%u,\"audio_frontend_noise_floor\":%u,\"audio_frontend_suppressed_samples\":%lu,\"audio_frontend_limited_samples\":%lu,\"audio_frontend_max_gain_q12\":%lu}\n",
       completed ? "true" : "false", static_cast<unsigned>(outcome.terminal),
       recorderFailureStageName(outcome.failureStage),
-      static_cast<unsigned long>(outcome.dataBytes));
+      static_cast<unsigned long>(outcome.dataBytes),
+      static_cast<unsigned long>(lastLocalCaptureMetrics.sessionId),
+      static_cast<unsigned long>(lastLocalCaptureMetrics.generation),
+      audioInputChannelName(captureMetrics.selectedChannel),
+      captureMetrics.leftPeak, captureMetrics.rightPeak,
+      captureMetrics.outputPeak, captureMetrics.estimatedNoiseFloor,
+      static_cast<unsigned long>(captureMetrics.suppressedSamples),
+      static_cast<unsigned long>(captureMetrics.limitedSamples),
+      static_cast<unsigned long>(captureMetrics.maximumGainQ12));
   return true;
 }
 
@@ -711,6 +740,7 @@ void toggleRecording() {
         SD_MMC.totalBytes(), SD_MMC.usedBytes(), SD_MMC.totalBytes() != 0};
     uint32_t captureSessionId = esp_random();
     if (captureSessionId == 0) captureSessionId = 1;
+    lastLocalCaptureMetrics = {};
     const bool recorderOk = acquired &&
         recorder.start(usb.log(), recordingId(), board.utcNow(), space,
                        RecorderOperationOwner::localApp);
@@ -745,9 +775,11 @@ void emitStatus() {
   const BoardStatus &s = board.status();
   const BleVoiceQualitySnapshot quality = bleVoice.quality();
   const RuntimePowerSnapshot &power = runtimePower.snapshot();
-  const AudioFrontEndMetrics &frontEnd = recorder.audioMetrics();
+  const AudioCaptureFrontEndSnapshot captureSnapshot =
+      captureRuntime.frontEndSnapshot();
+  const AudioFrontEndMetrics frontEnd = captureSnapshot.asMetrics();
   usb.log().printf(
-      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"audio_frontend_channel\":\"%s\",\"audio_frontend_left_peak\":%u,\"audio_frontend_right_peak\":%u,\"audio_frontend_output_peak\":%u,\"audio_frontend_noise_floor\":%u,\"audio_frontend_suppressed_samples\":%lu,\"audio_frontend_limited_samples\":%lu,\"audio_frontend_max_gain_q12\":%lu,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"deep_sleep_wake_count\":%lu,\"woke_from_deep_sleep\":%s,\"deep_sleep_touch_wake\":%s,\"critical_battery\":%s,\"idle_ms\":%lu,\"last_wake_cause\":%u,\"reset_reason\":%u,\"internal_heap_free\":%u,\"internal_heap_largest\":%u,\"psram_free\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_startup_phase\":\"%s\",\"provisioning_diagnostic_count\":%u}\n",
+      "{\"event\":\"status\",\"variant\":\"%s\",\"display\":%s,\"touch\":%s,\"sd\":%s,\"audio\":%s,\"audio_active\":%s,\"usb\":%s,\"host_connected\":%s,\"ble_voice_connected\":%s,\"ble_voice_ready\":%s,\"ble_voice_mtu\":%u,\"ble_voice_streaming\":%s,\"ble_voice_notify_attempts\":%lu,\"ble_voice_notify_accepted\":%lu,\"ble_voice_notify_failures\":%lu,\"ble_voice_queue_overflows\":%lu,\"ble_voice_session_failures\":%lu,\"ble_voice_ready_timeouts\":%lu,\"ble_voice_stop_ack_timeouts\":%lu,\"ble_voice_stream_timeouts\":%lu,\"ble_voice_last_error_code\":%u,\"audio_read_bytes\":%llu,\"audio_read_failures\":%lu,\"audio_peak\":%u,\"audio_capture_session_id\":%lu,\"audio_capture_metrics_generation\":%lu,\"audio_capture_active\":%s,\"audio_frontend_channel\":\"%s\",\"audio_frontend_left_peak\":%u,\"audio_frontend_right_peak\":%u,\"audio_frontend_output_peak\":%u,\"audio_frontend_noise_floor\":%u,\"audio_frontend_suppressed_samples\":%lu,\"audio_frontend_limited_samples\":%lu,\"audio_frontend_max_gain_q12\":%lu,\"recording\":%s,\"duration_ms\":%lu,\"battery\":%d,\"charging\":%s,\"vbus\":%s,\"wifi\":\"%s\",\"wifi_rssi\":%ld,\"wifi_radio_on\":%s,\"wifi_power_save\":%s,\"pending_capsules\":%u,\"tencent_configured\":%s,\"transcribing\":%s,\"power_mode\":\"%s\",\"cpu_mhz\":%u,\"light_sleep_count\":%lu,\"light_sleep_us\":%llu,\"deep_sleep_wake_count\":%lu,\"woke_from_deep_sleep\":%s,\"deep_sleep_touch_wake\":%s,\"critical_battery\":%s,\"idle_ms\":%lu,\"last_wake_cause\":%u,\"reset_reason\":%u,\"internal_heap_free\":%u,\"internal_heap_largest\":%u,\"psram_free\":%u,\"automatic_pm_supported\":%s,\"ble_modem_sleep_supported\":%s,\"provisioning_startup_phase\":\"%s\",\"provisioning_diagnostic_count\":%u}\n",
       variantName(s.variant), s.display ? "true" : "false", s.touch ? "true" : "false",
       s.sdCard ? "true" : "false", audio.ready() ? "true" : "false",
       audio.active() ? "true" : "false",
@@ -766,6 +798,9 @@ void emitStatus() {
       static_cast<unsigned>(quality.lastErrorCode),
       static_cast<unsigned long long>(audio.bytesRead()),
       static_cast<unsigned long>(audio.readFailures()), audio.peakSample(),
+      static_cast<unsigned long>(captureSnapshot.sessionId),
+      static_cast<unsigned long>(captureSnapshot.generation),
+      captureSnapshot.active ? "true" : "false",
       audioInputChannelName(frontEnd.selectedChannel), frontEnd.leftPeak,
       frontEnd.rightPeak, frontEnd.outputPeak,
       frontEnd.estimatedNoiseFloor,

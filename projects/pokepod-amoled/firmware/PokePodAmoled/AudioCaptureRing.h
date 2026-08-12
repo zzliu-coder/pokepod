@@ -49,6 +49,15 @@ class AudioSpscCounter {
     value_.store(value, std::memory_order_release);
 #endif
   }
+  void beginPublication(uint32_t value) {
+#ifdef ARDUINO
+    value_ = value;
+    __asm__ __volatile__("memw" ::: "memory");
+#else
+    value_.store(value, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+  }
   void incrementWriter() { storeRelaxed(loadRelaxed() + 1); }
 
  private:

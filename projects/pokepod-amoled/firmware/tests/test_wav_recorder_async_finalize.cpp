@@ -641,6 +641,33 @@ void runAutomaticMaximumDuration() {
          kMaximumRecordingAudioBytes);
 }
 
+void runCaptureMetricsSessionIsolation() {
+  WavRecorder recorder;
+  AudioFrontEndMetrics first;
+  first.selectedChannel = AudioInputChannel::right;
+  first.outputPeak = 1234;
+  first.suppressedSamples = 17;
+  recorder.observeAudioMetrics(41, 2, first);
+  assert(recorder.audioMetricsSessionId() == 41);
+  assert(recorder.audioMetricsGeneration() == 2);
+  assert(recorder.audioMetrics().outputPeak == 1234);
+
+  AudioFrontEndMetrics stale = first;
+  stale.outputPeak = 9999;
+  recorder.observeAudioMetrics(41, 1, stale);
+  assert(recorder.audioMetrics().outputPeak == 1234);
+
+  AudioFrontEndMetrics next;
+  next.selectedChannel = AudioInputChannel::left;
+  next.outputPeak = 7;
+  recorder.observeAudioMetrics(42, 1, next);
+  assert(recorder.audioMetricsSessionId() == 42);
+  assert(recorder.audioMetricsGeneration() == 1);
+  assert(recorder.audioMetrics().selectedChannel == AudioInputChannel::left);
+  assert(recorder.audioMetrics().outputPeak == 7);
+  assert(recorder.audioMetrics().suppressedSamples == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -657,5 +684,6 @@ int main() {
   runFailureFactMustBecomeDurable();
   runRecoveryFinalizeFailureDoesNotWedge();
   runAutomaticMaximumDuration();
+  runCaptureMetricsSessionIsolation();
   return 0;
 }

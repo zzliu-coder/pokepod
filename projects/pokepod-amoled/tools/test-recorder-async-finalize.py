@@ -31,7 +31,11 @@ assert '"pokepod_recorder_storage"' in wav
 assert "storageQueue_.push(data, length)" in wav
 assert "std::atomic<RecorderStopReason> automaticStopReason_" in wav_h
 assert "std::atomic<bool> storageAbortRequested_" in wav_h
-assert "#if defined(ARDUINO_ARCH_ESP32)\n  if (!recording_ || data == nullptr)" in wav
+assert "bool append(const uint8_t *data" not in wav_h
+assert "bool WavRecorder::append(const uint8_t *data" not in wav
+assert "AudioFrontEnd audioFrontEnd_" not in wav_h
+assert "audioFrontEnd_.processStereo16" not in wav
+assert "AudioFrontEndMetrics audioMetrics_" in wav_h
 assert "#if defined(ARDUINO_ARCH_ESP32)\n  if (!recording_ || data == nullptr || length == 0" in wav
 assert "pollPeriodicCheckpoint" in wav
 public_poll = wav[
@@ -54,7 +58,7 @@ start_internal = wav[
 assert "StorageCoordinator::instance().reserve" not in start_internal
 storage_start = wav[
     wav.index("bool WavRecorder::startStorageSession"):
-    wav.index("bool WavRecorder::append(")
+    wav.index("bool WavRecorder::appendMono16")
 ]
 assert "StorageCoordinator::instance().reserve" in storage_start
 assert "fs_->open(partialPath_, FILE_WRITE)" in storage_start

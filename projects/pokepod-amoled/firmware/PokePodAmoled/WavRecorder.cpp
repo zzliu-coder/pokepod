@@ -324,35 +324,6 @@ bool WavRecorder::startStorageSession(Print &log) {
   return true;
 }
 
-bool WavRecorder::append(const uint8_t *data, size_t length, Print &log) {
-#if defined(ARDUINO_ARCH_ESP32)
-  if (!recording_ || data == nullptr) return false;
-#else
-  if (!recording_ || !file_ || data == nullptr) return false;
-#endif
-  uint8_t mono[AudioFrontEnd::kSelectionReplayOutputBytes];
-  size_t offset = 0;
-  while (offset + 4 <= length) {
-    size_t inputBytes = length - offset;
-    if (inputBytes > kAudioBytesPerChunk) inputBytes = kAudioBytesPerChunk;
-    inputBytes -= inputBytes % 4;
-    const size_t converted = audioFrontEnd_.processStereo16(
-        data + offset, inputBytes, mono, sizeof(mono));
-    if (converted > 0 && !appendMonoBytes(mono, converted, log)) return false;
-    if (durationMs() >= kMaxRecordingMs) {
-      automaticStopRequested_ = true;
-      automaticStopReason_ = RecorderStopReason::maxDuration;
-      return true;
-    }
-    offset += inputBytes;
-  }
-  if (durationMs() >= kMaxRecordingMs) {
-    automaticStopRequested_ = true;
-    automaticStopReason_ = RecorderStopReason::maxDuration;
-  }
-  return true;
-}
-
 bool WavRecorder::appendMono16(const int16_t *samples, size_t sampleCount,
                                Print &log) {
   if (samples == nullptr || sampleCount == 0 ||
@@ -561,7 +532,7 @@ void WavRecorder::completeFinalize(Print &log) {
   }
   finalizePhase_ = FinalizePhase::idle;
   terminalState_.complete(finalizeStopReason_, dataBytes_);
-  const AudioFrontEndMetrics &audio = audioFrontEnd_.metrics();
+  const AudioFrontEndMetrics &audio = audioMetrics_;
   log.printf("{\"event\":\"recording_stopped\",\"ok\":true,\"duration_ms\":%lu,\"bytes\":%lu,\"path\":\"%s\",\"audio_channel\":\"%s\",\"left_peak\":%u,\"right_peak\":%u,\"output_peak\":%u,\"noise_floor\":%u,\"suppressed_samples\":%lu,\"limited_samples\":%lu,\"maximum_gain_q12\":%lu}\n",
              static_cast<unsigned long>(durationMs()),
              static_cast<unsigned long>(dataBytes_), finalPath_.c_str(),
@@ -1287,7 +1258,9 @@ void WavRecorder::resetSessionState() {
 #endif
   storageReservation_.release();
   terminalState_.reset();
-  audioFrontEnd_.reset();
+  audioMetrics_ = {};
+  audioMetricsSessionId_ = 0;
+  audioMetricsGeneration_ = 0;
 }
 
 bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,

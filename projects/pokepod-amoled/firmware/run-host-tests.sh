@@ -51,6 +51,7 @@ python3 "$SCRIPT_DIR/../tools/test-capsule-local-management.py"
 python3 "$SCRIPT_DIR/../tools/test-storage-entrypoints.py"
 python3 "$SCRIPT_DIR/../tools/test-storage-session-cleanup.py"
 python3 "$SCRIPT_DIR/../tools/test-recorder-async-finalize.py"
+python3 "$SCRIPT_DIR/../tools/test-recorder-capture-metrics.py"
 python3 "$SCRIPT_DIR/../tools/test-capsule-scan-service.py"
 python3 "$SCRIPT_DIR/../tools/test-source-audit-package.py"
 

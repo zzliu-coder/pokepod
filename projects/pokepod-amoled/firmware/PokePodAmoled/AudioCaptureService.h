@@ -62,6 +62,125 @@ struct AudioCaptureServiceMetrics {
   uint32_t partialMonoSamples = 0;
 };
 
+// Cross-core diagnostics are published separately from AudioFrontEnd's live
+// state.  Every payload field is a 32-bit atomic and sequence is odd while the
+// realtime owner is publishing.  Readers therefore obtain one coherent
+// session snapshot without racing the DSP object or holding a lock in the
+// capture task.
+struct AudioCaptureFrontEndSnapshot {
+  uint32_t generation = 0;
+  uint32_t sessionId = 0;
+  bool active = false;
+  AudioDspProfile profile = AudioDspProfile::unavailable;
+  AudioInputChannel selectedChannel = AudioInputChannel::undecided;
+  uint32_t clippedInputSamples = 0;
+  uint16_t leftPeak = 0;
+  uint16_t rightPeak = 0;
+  uint32_t gatedSamples = 0;
+  uint32_t suppressedSamples = 0;
+  uint32_t limitedSamples = 0;
+  uint16_t outputPeak = 0;
+  uint16_t estimatedNoiseFloor = 0;
+  uint32_t maximumGainQ12 = 4096;
+
+  AudioFrontEndMetrics asMetrics() const {
+    AudioFrontEndMetrics value;
+    value.profile = profile;
+    value.selectedChannel = selectedChannel;
+    value.clippedInputSamples = clippedInputSamples;
+    value.leftPeak = leftPeak;
+    value.rightPeak = rightPeak;
+    value.gatedSamples = gatedSamples;
+    value.suppressedSamples = suppressedSamples;
+    value.limitedSamples = limitedSamples;
+    value.outputPeak = outputPeak;
+    value.estimatedNoiseFloor = estimatedNoiseFloor;
+    value.maximumGainQ12 = maximumGainQ12;
+    return value;
+  }
+};
+
+class AudioCaptureFrontEndPublisher {
+ public:
+  AudioCaptureFrontEndPublisher() {
+    profile_.storeRelaxed(
+        static_cast<uint32_t>(AudioDspProfile::unavailable));
+    maximumGainQ12_.storeRelaxed(4096);
+  }
+
+  void publish(uint32_t sessionId, bool active,
+               const AudioFrontEndMetrics &metrics) {
+    const uint32_t before = sequence_.loadRelaxed();
+    sequence_.beginPublication(before + 1U);
+    sessionId_.storeRelaxed(sessionId);
+    active_.storeRelaxed(active ? 1U : 0U);
+    profile_.storeRelaxed(static_cast<uint32_t>(metrics.profile));
+    selectedChannel_.storeRelaxed(
+        static_cast<uint32_t>(metrics.selectedChannel));
+    clippedInputSamples_.storeRelaxed(metrics.clippedInputSamples);
+    leftPeak_.storeRelaxed(metrics.leftPeak);
+    rightPeak_.storeRelaxed(metrics.rightPeak);
+    gatedSamples_.storeRelaxed(metrics.gatedSamples);
+    suppressedSamples_.storeRelaxed(metrics.suppressedSamples);
+    limitedSamples_.storeRelaxed(metrics.limitedSamples);
+    outputPeak_.storeRelaxed(metrics.outputPeak);
+    estimatedNoiseFloor_.storeRelaxed(metrics.estimatedNoiseFloor);
+    maximumGainQ12_.storeRelaxed(metrics.maximumGainQ12);
+    sequence_.storeRelease(before + 2U);
+  }
+
+  AudioCaptureFrontEndSnapshot snapshot() const {
+    AudioCaptureFrontEndSnapshot value;
+    for (;;) {
+      const uint32_t before = sequence_.loadAcquire();
+      if ((before & 1U) != 0) continue;
+      value.sessionId = sessionId_.loadRelaxed();
+      value.active = active_.loadRelaxed() != 0;
+      value.profile = static_cast<AudioDspProfile>(
+          profile_.loadRelaxed());
+      value.selectedChannel = static_cast<AudioInputChannel>(
+          selectedChannel_.loadRelaxed());
+      value.clippedInputSamples =
+          clippedInputSamples_.loadRelaxed();
+      value.leftPeak = static_cast<uint16_t>(
+          leftPeak_.loadRelaxed());
+      value.rightPeak = static_cast<uint16_t>(
+          rightPeak_.loadRelaxed());
+      value.gatedSamples = gatedSamples_.loadRelaxed();
+      value.suppressedSamples =
+          suppressedSamples_.loadRelaxed();
+      value.limitedSamples = limitedSamples_.loadRelaxed();
+      value.outputPeak = static_cast<uint16_t>(
+          outputPeak_.loadRelaxed());
+      value.estimatedNoiseFloor = static_cast<uint16_t>(
+          estimatedNoiseFloor_.loadRelaxed());
+      value.maximumGainQ12 =
+          maximumGainQ12_.loadRelaxed();
+      const uint32_t after = sequence_.loadAcquire();
+      if (before == after && (after & 1U) == 0) {
+        value.generation = after / 2U;
+        return value;
+      }
+    }
+  }
+
+ private:
+  AudioSpscCounter sequence_;
+  AudioSpscCounter sessionId_;
+  AudioSpscCounter active_;
+  AudioSpscCounter profile_;
+  AudioSpscCounter selectedChannel_;
+  AudioSpscCounter clippedInputSamples_;
+  AudioSpscCounter leftPeak_;
+  AudioSpscCounter rightPeak_;
+  AudioSpscCounter gatedSamples_;
+  AudioSpscCounter suppressedSamples_;
+  AudioSpscCounter limitedSamples_;
+  AudioSpscCounter outputPeak_;
+  AudioSpscCounter estimatedNoiseFloor_;
+  AudioSpscCounter maximumGainQ12_;
+};
+
 // Task-ready capture core. The integration lane owns the single high-priority
 // FreeRTOS task and calls captureOnce() from that task. Consumers call pop()
 // from the main loop. This class contains only fixed storage and bounded calls.
@@ -97,6 +216,7 @@ class AudioCaptureService {
     partialMonoSamples_.store(0, std::memory_order_relaxed);
     frontEnd_.reset();
     ring_.resetSession(sessionId);
+    frontEndPublisher_.publish(sessionId_, true, frontEnd_.metrics());
     return true;
   }
 
@@ -107,6 +227,7 @@ class AudioCaptureService {
     rawUsed_ = 0;
     monoUsed_ = 0;
     partialMonoSamples_.store(0, std::memory_order_relaxed);
+    frontEndPublisher_.publish(sessionId_, false, frontEnd_.metrics());
   }
 
   AudioCaptureCycleResult captureOnce(uint32_t nowMs) {
@@ -151,6 +272,7 @@ class AudioCaptureService {
 
     const size_t convertedBytes = frontEnd_.processStereo16(
         raw_, sizeof(raw_), converted_, sizeof(converted_));
+    frontEndPublisher_.publish(sessionId_, true, frontEnd_.metrics());
     rawUsed_ = 0;
     appendConverted(converted_, convertedBytes, nowMs);
     // A driver overrun makes the session incomplete even when the bytes that
@@ -168,8 +290,8 @@ class AudioCaptureService {
   bool pop(AudioCaptureFrame &frame) { return ring_.pop(frame); }
   bool running() const { return running_; }
   uint32_t sessionId() const { return sessionId_; }
-  const AudioFrontEndMetrics &frontEndMetrics() const {
-    return frontEnd_.metrics();
+  AudioCaptureFrontEndSnapshot frontEndSnapshot() const {
+    return frontEndPublisher_.snapshot();
   }
 
   AudioCaptureServiceMetrics metrics() const {
@@ -215,6 +337,7 @@ class AudioCaptureService {
 
   AudioCaptureSource *source_ = nullptr;
   AudioFrontEnd frontEnd_;
+  AudioCaptureFrontEndPublisher frontEndPublisher_;
   AudioCaptureRing<RingFrames> ring_;
   uint8_t raw_[kRawStereoBytesPerFrame] = {};
   uint8_t converted_[kAudioCaptureSamplesPerFrame * sizeof(int16_t)] = {};

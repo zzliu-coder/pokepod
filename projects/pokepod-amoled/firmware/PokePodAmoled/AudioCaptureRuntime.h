@@ -42,6 +42,9 @@ class AudioCaptureRuntime {
     return incomplete_.load(std::memory_order_acquire);
   }
   AudioCaptureServiceMetrics metrics() const { return service_.metrics(); }
+  AudioCaptureFrontEndSnapshot frontEndSnapshot() const {
+    return service_.frontEndSnapshot();
+  }
   UBaseType_t taskStackHighWater() const;
 
  private:

@@ -15,6 +15,7 @@ dashboard = source("Dashboard.cpp")
 board = source("BoardServices.cpp")
 main = source("PokePodApp.cpp")
 recorder = source("WavRecorder.cpp") + source("WavRecorder.h")
+capture = source("AudioCaptureService.h") + source("AudioCaptureRuntime.h")
 voice = source("VoiceSessionController.h")
 link = source("PokePodLinkService.cpp")
 audio = source("AudioFrontEnd.h")
@@ -27,10 +28,14 @@ assert "buildLocalDateTimeToUtcEpoch(__DATE__, __TIME__" in board
 assert "setUtcEpoch(static_cast<time_t>(utcEpoch))" in board
 assert "board.setUtcEpoch(synchronizedEpoch)" in main
 
-assert "AudioFrontEnd audioFrontEnd_" in recorder
+assert "AudioFrontEnd audioFrontEnd_" not in recorder
 assert "AudioFrontEnd audioFrontEnd_" in voice
-assert "audioFrontEnd_.processStereo16" in recorder
+assert "audioFrontEnd_.processStereo16" not in recorder
 assert "audioFrontEnd_.processStereo16" in voice
+assert "AudioFrontEnd frontEnd_" in capture
+assert "frontEnd_.processStereo16" in capture
+assert "AudioCaptureFrontEndSnapshot frontEndSnapshot() const" in capture
+assert "recorder.observeAudioMetrics(snapshot.sessionId" in main
 assert "AudioDecimator" not in recorder + voice
 assert "kFirTaps = 79" in audio
 assert '#include "VoiceConditioner.h"' in audio

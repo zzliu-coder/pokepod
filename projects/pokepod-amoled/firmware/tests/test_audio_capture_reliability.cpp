@@ -84,6 +84,31 @@ int main() {
   static_assert(kAudioCaptureSamplesPerFrame == 320, "frame size changed");
   static_assert(AudioCaptureService<6>::kRawStereoBytesPerFrame == 3840,
                 "48 kHz stereo input block changed");
+  AudioCaptureFrontEndPublisher publisher;
+  std::atomic<bool> publisherDone{false};
+  std::thread publisherOwner([&]() {
+    for (uint32_t value = 1; value <= 50000U; ++value) {
+      AudioFrontEndMetrics published;
+      published.leftPeak = static_cast<uint16_t>(value);
+      published.rightPeak = static_cast<uint16_t>(value);
+      published.outputPeak = static_cast<uint16_t>(value);
+      published.suppressedSamples = value;
+      published.limitedSamples = value;
+      publisher.publish(91, true, published);
+    }
+    publisherDone.store(true, std::memory_order_release);
+  });
+  while (!publisherDone.load(std::memory_order_acquire)) {
+    const AudioCaptureFrontEndSnapshot coherent = publisher.snapshot();
+    if (coherent.generation == 0) continue;
+    assert(coherent.sessionId == 91);
+    assert(coherent.leftPeak == coherent.rightPeak);
+    assert(coherent.leftPeak == coherent.outputPeak);
+    assert(coherent.suppressedSamples == coherent.limitedSamples);
+    assert(static_cast<uint16_t>(coherent.suppressedSamples) ==
+           coherent.leftPeak);
+  }
+  publisherOwner.join();
   std::array<RecorderStorageFrame, kRecorderStorageQueueSlots> storageFrames{};
   RecorderStorageQueue storageQueue;
   assert(storageQueue.bind(storageFrames.data(), storageFrames.size()));
@@ -179,10 +204,22 @@ int main() {
   });
   AudioCaptureService<2> service;
   assert(service.startSession(77, source));
+  AudioCaptureFrontEndSnapshot frontEnd = service.frontEndSnapshot();
+  assert(frontEnd.sessionId == 77);
+  assert(frontEnd.generation == 1);
+  assert(frontEnd.active);
+  assert(frontEnd.selectedChannel == AudioInputChannel::undecided);
+  assert(frontEnd.outputPeak == 0);
   assert(!service.startSession(78, source));
   assert(service.captureOnce(1) == AudioCaptureCycleResult::partialInput);
   // The first complete raw block primes channel selection and FIR state.
   assert(service.captureOnce(2) == AudioCaptureCycleResult::partialInput);
+  frontEnd = service.frontEndSnapshot();
+  assert(frontEnd.sessionId == 77);
+  assert(frontEnd.generation == 2);
+  assert(frontEnd.active);
+  assert(frontEnd.selectedChannel != AudioInputChannel::undecided);
+  assert(frontEnd.leftPeak != 0 || frontEnd.rightPeak != 0);
   AudioCaptureCycleResult result = service.captureOnce(22);
   // Data-loss evidence has terminal priority even when the remaining bytes
   // still produce a valid frame. The frame remains available to the consumer.
@@ -215,8 +252,29 @@ int main() {
   assert(metrics.sourceFailures == 1);
   service.stopSession();
   assert(!service.running());
+  frontEnd = service.frontEndSnapshot();
+  assert(frontEnd.sessionId == 77);
+  assert(frontEnd.generation == 6);
+  assert(!frontEnd.active);
+  const uint16_t previousPeak = frontEnd.outputPeak;
   assert(source.starts == 1 && source.stops == 1);
   assert(service.captureOnce(122) == AudioCaptureCycleResult::idle);
+
+  // A new runtime session publishes the caller-provided ID and a fully reset
+  // DSP snapshot before capture work can begin. No terminal metrics leak into
+  // the next success, abort or overflow path.
+  FakeCaptureSource nextSource({});
+  assert(service.startSession(78, nextSource));
+  frontEnd = service.frontEndSnapshot();
+  assert(frontEnd.sessionId == 78);
+  assert(frontEnd.generation == 7);
+  assert(frontEnd.active);
+  assert(frontEnd.outputPeak == 0);
+  assert(frontEnd.outputPeak != previousPeak || previousPeak == 0);
+  assert(frontEnd.suppressedSamples == 0);
+  assert(frontEnd.limitedSamples == 0);
+  assert(frontEnd.maximumGainQ12 == VoiceConditioner::kInitialGainQ12);
+  service.stopSession();
 
   FakeCaptureSource refused({});
   refused.startAllowed = false;

@@ -36,7 +36,6 @@ class WavRecorder {
   RecorderStartPollResult pollStart(
       Print &log, uint32_t nowMs,
       CapsuleTransactionGate *gate = nullptr);
-  bool append(const uint8_t *data, size_t length, Print &log);
   bool appendMono16(const int16_t *samples, size_t sampleCount, Print &log);
   bool stop(Print &log,
             RecorderStopReason reason = RecorderStopReason::user);
@@ -87,8 +86,22 @@ class WavRecorder {
   const String &finalPath() const { return finalPath_; }
   const String &capsuleId() const { return recordingId_; }
   const AudioFrontEndMetrics &audioMetrics() const {
-    return audioFrontEnd_.metrics();
+    return audioMetrics_;
   }
+  void observeAudioMetrics(uint32_t sessionId, uint32_t generation,
+                           const AudioFrontEndMetrics &metrics) {
+    if (sessionId == 0 || generation == 0) return;
+    if (audioMetricsSessionId_ != sessionId) {
+      audioMetricsSessionId_ = sessionId;
+      audioMetricsGeneration_ = 0;
+      audioMetrics_ = {};
+    }
+    if (generation < audioMetricsGeneration_) return;
+    audioMetricsGeneration_ = generation;
+    audioMetrics_ = metrics;
+  }
+  uint32_t audioMetricsSessionId() const { return audioMetricsSessionId_; }
+  uint32_t audioMetricsGeneration() const { return audioMetricsGeneration_; }
   const RecorderOutcome &terminalResult() const {
     return terminalState_.peek();
   }
@@ -296,7 +309,12 @@ class WavRecorder {
   StoredRecorderCheckpoint failureMarkerReadback_{};
   bool failureMarkerReadbackValid_ = false;
   RecorderOutcomeState terminalState_;
-  AudioFrontEnd audioFrontEnd_;
+  // Compatibility snapshot for status surfaces that still obtain recorder
+  // diagnostics. The capture runtime owns all stereo DSP and the application
+  // injects only coherent, generation-bound POD snapshots here.
+  AudioFrontEndMetrics audioMetrics_{};
+  uint32_t audioMetricsSessionId_ = 0;
+  uint32_t audioMetricsGeneration_ = 0;
   FinalizePhase finalizePhase_ = FinalizePhase::idle;
   std::atomic<bool> finalizePending_{false};
   RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;
