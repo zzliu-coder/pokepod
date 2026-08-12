@@ -167,6 +167,7 @@ bool bootCaptureTaskStarted = false;
 bool bootSyncIdentityStarted = false;
 bool bootRecorderStarted = false;
 bool bootCapsuleLibraryStarted = false;
+bool bootCapsuleLibraryBeginAttempted = false;
 bool bootTencentWorkerStarted = false;
 bool bootWifiStarted = false;
 bool bootUsbLinkStarted = false;
@@ -226,7 +227,8 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
       audio.playbackCleanupPending();
   const bool linkLeaseActive = linkService.receivingBinary() ||
       linkService.maintenanceActive() || wirelessSync.linkBusy() ||
-      wirelessSync.openWindow() || capsuleLibrary.scanActive() ||
+      wirelessSync.openWindow() || capsuleLibrary.startupActive() ||
+      capsuleLibrary.scanActive() ||
       capsuleLibrary.scanRequested() || capsuleOperations.sleepBlocker();
   const PowerFacts facts = {
       usb.tinyUsbMounted(),
@@ -1265,9 +1267,22 @@ bool advanceStorageBoot(uint32_t nowMs) {
       storageBootPhase = StorageBootPhase::library;
       return false;
     case StorageBootPhase::library:
-      bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary.begin(
-          SD_MMC, usb.log(),
-          !capsuleOperations.mutationCapabilityBlocked());
+      if (!bootCapsuleLibraryBeginAttempted) {
+        bootCapsuleLibraryBeginAttempted = true;
+        bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary.begin(
+            SD_MMC, usb.log(),
+            !capsuleOperations.mutationCapabilityBlocked());
+        if (!bootCapsuleLibraryStarted) {
+          capabilities.record(DeviceCapability::capsuleLibrary, false);
+          storageBootPhase = StorageBootPhase::transcription;
+        }
+        return false;
+      }
+      if (capsuleLibrary.startupActive()) {
+        (void)capsuleLibrary.pollStartup(nowMs);
+        return false;
+      }
+      bootCapsuleLibraryStarted = capsuleLibrary.startupReady();
       capabilities.record(DeviceCapability::capsuleLibrary,
                           bootCapsuleLibraryStarted);
       lastCapsuleLibraryRevision = capsuleLibrary.revision();

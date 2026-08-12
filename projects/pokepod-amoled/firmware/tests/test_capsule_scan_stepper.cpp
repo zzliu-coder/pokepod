@@ -164,6 +164,37 @@ void finishScan(CapsuleLibrary &library) {
   }
 }
 
+void finishStartup(CapsuleLibrary &library,
+                   const std::shared_ptr<fakefs::State> &filesystem) {
+  size_t polls = 0;
+  while (library.startupActive()) {
+    assert(library.indexedCount() == 0);
+    assert(library.count() == 0);
+    assert(library.revision() == 0);
+    const uint32_t before = filesystem->operations;
+    const uint64_t beforeNext = filesystem->openNextFileCalls;
+    const CapsuleLibraryStartupState state = library.pollStartup(
+        static_cast<uint32_t>(polls));
+    const uint32_t primitives = filesystem->operations - before;
+    const uint64_t enumerations =
+        filesystem->openNextFileCalls - beforeNext;
+    // Directory enumeration and bounded metadata reads are the only scanner
+    // slices that may pair a handle close with their one bounded operation.
+    assert(static_cast<uint64_t>(primitives) + enumerations <= 1);
+    assert(library.startupMaximumIoBytes() <= 4096);
+    if (library.startupActive() &&
+        state != CapsuleLibraryStartupState::waitingForAuthority) {
+      StorageReservation competing = StorageCoordinator::instance().reserve(
+          StorageOwner::capsuleTransaction, StorageAccess::mutation, 0);
+      assert(!competing);
+    }
+    assert(++polls < 200000);
+  }
+  assert(library.startupReady());
+  assert(!library.startupBlocked());
+  assert(filesystem->openHandles == 0);
+}
+
 void assertHydrated(CapsuleLibrary &library, const FixtureRecord &expected) {
   CapsuleSummary record;
   assert(library.hydrate(expected.id.c_str(), record, true));
@@ -185,6 +216,7 @@ void runProductionLargeFixture() {
   Print log;
   CapsuleLibrary library;
   assert(library.begin(filesystem, log));
+  finishStartup(library, state);
   assert(library.indexedCount() == 0);
 
   const auto records = seedFixture(0, 360, 359, state);
@@ -246,6 +278,7 @@ void runProductionCancelAndCapacityFailure() {
   CapsuleLibrary library;
   const auto original = seedFixture(0, 64, 63, state);
   assert(library.begin(filesystem, log));
+  finishStartup(library, state);
   assert(library.indexedCount() == original.size());
 
   seedFixture(64, 296, 359, state);
@@ -287,6 +320,7 @@ void runProductionCustomPathIndex() {
   Print log;
   CapsuleLibrary library;
   assert(library.begin(filesystem, log));
+  finishStartup(library, state);
   const auto records = seedCustomFixture(0, 360, state);
   assert(library.startScan({1, 1024}));
   finishScan(library);
@@ -351,6 +385,7 @@ void runProductionCustomPathFailClosed() {
   const FixtureRecord original = seedCustomRecord(0, state);
   CapsuleLibrary library;
   assert(library.begin(filesystem, log));
+  finishStartup(library, state);
   const size_t oldPathBytes = library.customPathBytes();
 
   // This path exceeds the existing 255-byte storage contract. The complete
@@ -375,6 +410,7 @@ void runProductionQueuedRescanGate() {
   Print log;
   CapsuleLibrary library;
   assert(library.begin(filesystem, log));
+  finishStartup(library, state);
   const uint32_t bootScans = library.fullScanCount();
   seedFixture(0, 12, 11, state);
 
@@ -419,6 +455,7 @@ void runProductionHeapSoak() {
   CapsuleLibrary library;
   const auto records = seedFixture(0, 32, 31, state);
   assert(library.begin(filesystem, log));
+  finishStartup(library, state);
   const size_t fixedIndexBytes = fake_heap_caps::liveBytes();
   assert(fixedIndexBytes ==
          2 * kCapsuleLocatorCapacity * sizeof(CapsuleLocator) +
@@ -438,6 +475,55 @@ void runProductionHeapSoak() {
   assert(library.indexedCount() == records.size());
 }
 
+void runProductionCooperativeStartup() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const auto records = seedFixture(0, kCapsuleLocatorCapacity,
+                                   kCapsuleLocatorCapacity - 1, state);
+  const size_t interrupted[] = {10, 173, 511};
+  for (const size_t index : interrupted) {
+    state->seed(records[index].directory + "/processing.json",
+                processingJson(records[index].id, "transcribing",
+                               records[index].wav ? "audio.wav" : "audio.m4a"));
+  }
+  // Unknown schemas remain immutable even if their status resembles an
+  // interrupted local job.
+  const std::string unknown = processingJson(
+      records[7].id, "transcribing",
+      records[7].wav ? "audio.wav" : "audio.m4a", 9);
+  state->seed(records[7].directory + "/processing.json", unknown);
+  state->seed("/PokeCapsule/.system/transactions/bad-one.journal", "bad");
+  state->seed("/PokeCapsule/.system/transactions/bad-two.journal", "broken");
+
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  assert(library.startupActive());
+  assert(library.indexedCount() == 0);
+  assert(library.count() == 0);
+  assert(library.nextQueued() == nullptr);
+  finishStartup(library, state);
+
+  assert(library.indexedCount() == kCapsuleLocatorCapacity);
+  assert(library.startupPolls() > kCapsuleLocatorCapacity);
+  assert(library.startupMaximumIoBytes() <= 4096);
+  for (const size_t index : interrupted) {
+    CapsuleSummary record;
+    assert(library.hydrate(records[index].id.c_str(), record));
+    assert(record.status == CapsuleStatus::queued);
+  }
+  CapsuleSummary readOnly;
+  assert(library.hydrate(records[7].id.c_str(), readOnly));
+  assert(readOnly.readOnly);
+  assert(state->text(records[7].directory + "/processing.json") == unknown);
+  assert(!state->has("/PokeCapsule/.system/transactions/bad-one.journal"));
+  assert(!state->has("/PokeCapsule/.system/transactions/bad-two.journal"));
+  assert(state->has(
+      "/PokeCapsule/.system/transactions/bad-one.journal.blocked"));
+  assert(state->has(
+      "/PokeCapsule/.system/transactions/bad-two.journal.blocked"));
+}
+
 }  // namespace
 
 int main() {
@@ -447,6 +533,7 @@ int main() {
   runProductionCustomPathFailClosed();
   runProductionQueuedRescanGate();
   runProductionHeapSoak();
+  runProductionCooperativeStartup();
   assert(fake_heap_caps::liveBytes() == 0);
   return 0;
 }

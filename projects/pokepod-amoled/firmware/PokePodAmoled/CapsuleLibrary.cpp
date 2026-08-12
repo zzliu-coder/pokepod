@@ -98,43 +98,286 @@ bool CapsuleLibrary::allocateIndex() {
 
 bool CapsuleLibrary::begin(fs::FS &fs, Print &log,
                            bool requeueInterruptedTranscription) {
+  if (startupActive() || startupReady()) return false;
   fs_ = &fs;
   log_ = &log;
-  if (!transaction_.begin(fs, log) || !transaction_.recoverAll()) return false;
-  if (!allocateIndex()) return false;
-  if (!scan()) return false;
-
-  if (!requeueInterruptedTranscription) return true;
-  std::vector<String> interrupted;
-  for (size_t index = 0; index < locatorCount_; ++index) {
-    const CapsuleLocator &locator = locators_[index];
-    const CapsuleStatus status = static_cast<CapsuleStatus>(locator.status);
-    if (!capsuleLocatorHasFlag(locator, locatorReadOnly) &&
-        capsuleStatusNeedsStartupRequeue(statusName(status))) {
-      interrupted.push_back(locator.id);
-    }
+  if (!transaction_.begin(fs, log) ||
+      !startupTransactionRunner_.begin(fs, log)) {
+    startupState_ = CapsuleLibraryStartupState::blocked;
+    return false;
   }
-  for (const String &id : interrupted) {
-    if (log_ != nullptr) {
-      log_->printf("{\"event\":\"asr_startup_requeue\",\"capsule_id\":\"%s\"}\n",
-                   id.c_str());
-    }
-    if (!requeue(id)) return false;
-  }
+  startupRequeueInterrupted_ = requeueInterruptedTranscription;
+  startupPolls_ = 0;
+  startupMaximumIoBytes_ = 0;
+  startupRequeueIndex_ = 0;
+  clearStartupRequeue();
+  startupState_ = CapsuleLibraryStartupState::waitingForAuthority;
   return true;
 }
 
+CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
+  if (!startupActive()) return startupState_;
+  ++startupPolls_;
+  switch (startupState_) {
+    case CapsuleLibraryStartupState::waitingForAuthority: {
+      startupAuthorityReservation_ = StorageCoordinator::instance().reserve(
+          StorageOwner::recovery, StorageAccess::mutation, 0);
+      if (!startupAuthorityReservation_) return startupState_;
+      if (!startupTransactionRunner_.startRecovery(StorageOwner::recovery)) {
+        failStartup("recovery-start");
+        return startupState_;
+      }
+      startupState_ = CapsuleLibraryStartupState::recoveringTransactions;
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::recoveringTransactions: {
+      const CapsuleTransactionPollResult result =
+          startupTransactionRunner_.poll(nowMs, nullptr);
+      if (startupTransactionRunner_.lastPollBytes() > startupMaximumIoBytes_) {
+        startupMaximumIoBytes_ = startupTransactionRunner_.lastPollBytes();
+      }
+      if (result == CapsuleTransactionPollResult::recovered) {
+        startupState_ = CapsuleLibraryStartupState::allocatingIndex;
+      } else if (result == CapsuleTransactionPollResult::failed ||
+                 result == CapsuleTransactionPollResult::cancelled ||
+                 result == CapsuleTransactionPollResult::cleanupBlocked ||
+                 result == CapsuleTransactionPollResult::recoveryBlocked) {
+        failStartup("recovery");
+      }
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::allocatingIndex:
+      if (!allocateIndex()) {
+        failStartup("index-allocation");
+      } else {
+        startupState_ = CapsuleLibraryStartupState::startingScan;
+      }
+      return startupState_;
+    case CapsuleLibraryStartupState::startingScan:
+      if (startScanWithOwner({1, 4096}, StorageOwner::recovery)) {
+        startupScanGeneration_ = true;
+        startupState_ = CapsuleLibraryStartupState::scanning;
+      }
+      return startupState_;
+    case CapsuleLibraryStartupState::scanning: {
+      const CapsuleScanState state = stepScan();
+      if (state == CapsuleScanState::completed) {
+        startupScanGeneration_ = false;
+        startupRequeueIndex_ = 0;
+        startupState_ = CapsuleLibraryStartupState::selectingInterrupted;
+      } else if (state == CapsuleScanState::failed ||
+                 state == CapsuleScanState::cancelled) {
+        startupScanGeneration_ = false;
+        failStartup("scan");
+      }
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::selectingInterrupted:
+      if (!startupRequeueInterrupted_ ||
+          startupRequeueIndex_ >= locatorCount_) {
+        startupState_ = CapsuleLibraryStartupState::publishingIndex;
+      } else if (selectStartupRequeue()) {
+        startupState_ = CapsuleLibraryStartupState::openingProcessing;
+      }
+      return startupState_;
+    case CapsuleLibraryStartupState::openingProcessing: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return startupState_;
+      startupRequeueFile_ = fs_->open(startupRequeuePath_, FILE_READ);
+      if (!startupRequeueFile_ || startupRequeueFile_.isDirectory() ||
+          startupRequeueFile_.size() == 0 ||
+          startupRequeueFile_.size() > kMaxMetadataBytes ||
+          !startupRequeueText_.reserve(startupRequeueFile_.size() + 1)) {
+        if (startupRequeueFile_) {
+          startupState_ = CapsuleLibraryStartupState::closingBlockedFile;
+        } else {
+          failStartup("requeue-open");
+        }
+      } else {
+        startupState_ = CapsuleLibraryStartupState::readingProcessing;
+      }
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::readingProcessing: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return startupState_;
+      uint8_t chunk[1024];
+      const size_t remaining = kMaxMetadataBytes - startupRequeueText_.length();
+      const size_t wanted = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+      const int count = wanted == 0 ? 0 : startupRequeueFile_.read(chunk, wanted);
+      if (count < 0 || (count == 0 && startupRequeueFile_.available())) {
+        startupState_ = CapsuleLibraryStartupState::closingBlockedFile;
+      } else {
+        if (count > 0) {
+          startupRequeueText_.concat(
+              reinterpret_cast<const char *>(chunk), static_cast<size_t>(count));
+          if (static_cast<size_t>(count) > startupMaximumIoBytes_) {
+            startupMaximumIoBytes_ = static_cast<size_t>(count);
+          }
+        }
+        if (!startupRequeueFile_.available()) {
+          startupState_ = CapsuleLibraryStartupState::closingProcessing;
+        }
+      }
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::closingProcessing: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return startupState_;
+      startupRequeueFile_.close();
+      startupRequeueText_.trim();
+      if (startupRequeueText_.isEmpty()) {
+        failStartup("requeue-empty");
+      } else {
+        startupState_ = CapsuleLibraryStartupState::preparingRequeue;
+      }
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::preparingRequeue:
+      if (!prepareProcessingText(startupRequeueText_, CapsuleStatus::queued,
+                                 "", "", "", false,
+                                 startupRequeueEncoded_,
+                                 startupRequeueId_.c_str())) {
+        failStartup("requeue-prepare");
+      } else {
+        startupRequeueSource_.bind(&startupRequeueEncoded_);
+        startupRequeueInput_.targetPath = startupRequeuePath_;
+        startupRequeueInput_.source = &startupRequeueSource_;
+        startupRequeueInput_.preparedPath = "";
+        startupState_ = CapsuleLibraryStartupState::startingRequeueCommit;
+      }
+      return startupState_;
+    case CapsuleLibraryStartupState::startingRequeueCommit:
+      if (startupTransactionRunner_.startCommit(
+              startupRequeueId_.c_str(), &startupRequeueInput_, 1,
+              StorageOwner::recovery)) {
+        if (log_ != nullptr) {
+          log_->printf(
+              "{\"event\":\"asr_startup_requeue\",\"capsule_id\":\"%s\"}\n",
+              startupRequeueId_.c_str());
+        }
+        startupState_ = CapsuleLibraryStartupState::pollingRequeueCommit;
+      } else {
+        failStartup("requeue-commit-start");
+      }
+      return startupState_;
+    case CapsuleLibraryStartupState::pollingRequeueCommit: {
+      const CapsuleTransactionPollResult result =
+          startupTransactionRunner_.poll(nowMs, nullptr);
+      if (startupTransactionRunner_.lastPollBytes() > startupMaximumIoBytes_) {
+        startupMaximumIoBytes_ = startupTransactionRunner_.lastPollBytes();
+      }
+      if (result == CapsuleTransactionPollResult::committed) {
+        if (!updateStartupRequeuedLocator()) {
+          failStartup("requeue-index");
+        } else {
+          clearStartupRequeue();
+          startupState_ = CapsuleLibraryStartupState::selectingInterrupted;
+        }
+      } else if (result == CapsuleTransactionPollResult::failed ||
+                 result == CapsuleTransactionPollResult::cancelled ||
+                 result == CapsuleTransactionPollResult::cleanupBlocked ||
+                 result == CapsuleTransactionPollResult::recoveryBlocked) {
+        failStartup("requeue-commit");
+      }
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::publishingIndex:
+      publishRecords();
+      startupAuthorityReservation_.release();
+      startupState_ = CapsuleLibraryStartupState::ready;
+      if (log_ != nullptr) {
+        log_->printf(
+            "{\"event\":\"capsule_startup_ready\",\"count\":%u,"
+            "\"polls\":%u,\"max_io_bytes\":%u}\n",
+            static_cast<unsigned>(locatorCount_),
+            static_cast<unsigned>(startupPolls_),
+            static_cast<unsigned>(startupMaximumIoBytes_));
+      }
+      return startupState_;
+    case CapsuleLibraryStartupState::closingBlockedFile: {
+      StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+          StorageOwner::recovery, StorageAccess::read, 0);
+      if (!lease) return startupState_;
+      if (startupRequeueFile_) startupRequeueFile_.close();
+      failStartup("requeue-read");
+      return startupState_;
+    }
+    case CapsuleLibraryStartupState::idle:
+    case CapsuleLibraryStartupState::ready:
+    case CapsuleLibraryStartupState::blocked:
+      return startupState_;
+  }
+  failStartup("invalid-state");
+  return startupState_;
+}
+
 bool CapsuleLibrary::scan() {
-  // The only product caller is begin(): boot must publish an initial index
-  // before any consumer can safely query it. Runtime paths use requestScan()
-  // and pollScan().
-  if (!startScanWithOwner({}, StorageOwner::capsuleTransaction)) return false;
-  while (scanStepper_.active()) stepScan();
-  return scanStepper_.state() == CapsuleScanState::completed;
+  return requestScan();
+}
+
+void CapsuleLibrary::failStartup(const char *stage) {
+  if (log_ != nullptr) {
+    log_->printf("{\"event\":\"capsule_startup_blocked\",\"stage\":\"%s\"}\n",
+                 stage == nullptr ? "unknown" : stage);
+  }
+  clearStartupRequeue();
+  startupScanGeneration_ = false;
+  startupAuthorityReservation_.release();
+  startupState_ = CapsuleLibraryStartupState::blocked;
+}
+
+void CapsuleLibrary::clearStartupRequeue() {
+  startupRequeueFile_ = File();
+  startupRequeueId_ = "";
+  startupRequeuePath_ = "";
+  startupRequeueText_ = "";
+  startupRequeueEncoded_ = "";
+  startupRequeueSource_.bind(nullptr);
+  startupRequeueInput_ = {};
+}
+
+bool CapsuleLibrary::selectStartupRequeue() {
+  if (startupRequeueIndex_ >= locatorCount_) return false;
+  const size_t index = startupRequeueIndex_++;
+  const CapsuleLocator &locator = locators_[index];
+  const CapsuleStatus status = static_cast<CapsuleStatus>(locator.status);
+  if (capsuleLocatorHasFlag(locator, locatorReadOnly) ||
+      !capsuleStatusNeedsStartupRequeue(statusName(status))) {
+    return false;
+  }
+  String directory;
+  if (!customPath(locator, directory)) {
+    failStartup("requeue-path");
+    return false;
+  }
+  startupRequeueLocatorIndex_ = index;
+  startupRequeueId_ = locator.id;
+  startupRequeuePath_ = directory + "/processing.json";
+  startupRequeueText_ = "";
+  startupRequeueEncoded_ = "";
+  return true;
+}
+
+bool CapsuleLibrary::updateStartupRequeuedLocator() {
+  if (startupRequeueLocatorIndex_ >= locatorCount_ ||
+      !startupRequeueId_.equalsIgnoreCase(
+          locators_[startupRequeueLocatorIndex_].id)) {
+    return false;
+  }
+  CapsuleLocator &locator = locators_[startupRequeueLocatorIndex_];
+  locator.status = static_cast<uint8_t>(CapsuleStatus::queued);
+  locator.flags |= static_cast<uint16_t>(locatorPending);
+  locator.flags &= static_cast<uint16_t>(~static_cast<uint16_t>(locatorFailed));
+  return true;
 }
 
 bool CapsuleLibrary::requestScan(const CapsuleScanBudget &budget) {
-  if (fs_ == nullptr || locators_ == nullptr || scanLocators_ == nullptr) {
+  if (!startupReady() || fs_ == nullptr || locators_ == nullptr ||
+      scanLocators_ == nullptr) {
     return false;
   }
   CapsuleScanBudget normalized = budget;
@@ -157,6 +400,7 @@ bool CapsuleLibrary::requestScan(const CapsuleScanBudget &budget) {
 }
 
 CapsuleScanState CapsuleLibrary::pollScan() {
+  if (!startupReady()) return scanStepper_.state();
   // One poll performs one action: either advance one bounded slice or attempt
   // to start one requested generation. A generation completed in this call is
   // never followed immediately by another start.
@@ -168,15 +412,17 @@ CapsuleScanState CapsuleLibrary::pollScan() {
 }
 
 bool CapsuleLibrary::startScan(const CapsuleScanBudget &budget) {
+  if (!startupReady()) return false;
   return startScanWithOwner(budget, StorageOwner::capsuleScan);
 }
 
 bool CapsuleLibrary::startScanWithOwner(const CapsuleScanBudget &budget,
                                         StorageOwner owner) {
-  if (fs_ == nullptr || scanStepper_.active() || !allocateIndex()) return false;
+  const bool startupOwner = owner == StorageOwner::recovery && startupActive();
+  if ((!startupReady() && !startupOwner) || fs_ == nullptr ||
+      scanStepper_.active() || !allocateIndex()) return false;
   scanReservation_ = StorageCoordinator::instance().reserve(
-      owner, StorageAccess::read,
-      owner == StorageOwner::capsuleScan ? 0 : 1000);
+      owner, StorageAccess::read, 0);
   if (!scanReservation_) return false;
   scanOwner_ = owner;
   resetScanTransient();
@@ -210,9 +456,19 @@ CapsuleScanState CapsuleLibrary::stepScan() {
       finishStepTiming();
       return scanStepper_.state();
     }
-    if (scanDirectory_) scanDirectory_.close();
-    if (scanPending_.file) scanPending_.file.close();
-    scanDirectoryOpen_ = false;
+    bool cleanupComplete = false;
+    if (scanPending_.file) {
+      scanPending_.file.close();
+    } else if (scanEntry_) {
+      scanEntry_.close();
+      scanEntryPending_ = false;
+    } else if (scanDirectory_) {
+      scanDirectory_.close();
+      scanDirectoryOpen_ = false;
+      scanDirectoryExhausted_ = false;
+    } else {
+      cleanupComplete = true;
+    }
     scanIo.release();
     const uint32_t leaseElapsed = static_cast<uint32_t>(
         esp_timer_get_time() - leaseStartedUs);
@@ -220,8 +476,10 @@ CapsuleScanState CapsuleLibrary::stepScan() {
       maximumScanLeaseUs_ = leaseElapsed;
     }
     scanStepper_.finishSlice();
-    finishScan(scanCancelRequested_ ? CapsuleScanState::cancelled
-                                    : CapsuleScanState::failed);
+    if (cleanupComplete) {
+      finishScan(scanCancelRequested_ ? CapsuleScanState::cancelled
+                                      : CapsuleScanState::failed);
+    }
     finishStepTiming();
     return scanStepper_.state();
   }
@@ -239,12 +497,6 @@ CapsuleScanState CapsuleLibrary::stepScan() {
   }
   if (scanPending_.phase != ScanMetadataPhase::none) {
     recordReady = readPendingMetadataSlice();
-    if (recordReady) {
-      scanPending_.hasWav = fs_->exists(
-          scanPending_.directory + "/audio.wav");
-      scanPending_.hasM4a = fs_->exists(
-          scanPending_.directory + "/audio.m4a");
-    }
   } else {
     traversalComplete = processDirectorySlice();
   }
@@ -295,31 +547,13 @@ void CapsuleLibrary::cancelScan() {
 }
 
 bool CapsuleLibrary::processDirectorySlice() {
-  while (scanDirectoryIndex_ < scanDirectories_.size()) {
-    const ScanDirectoryTask task = scanDirectories_[scanDirectoryIndex_];
-    if (!scanDirectoryOpen_) {
-      if (scanStepper_.remainingDirectoryEntries() == 0) return false;
-      scanStepper_.consumeDirectoryEntry();
-      scanDirectory_ = fs_->open(task.path);
-      scanDirectoryOpen_ = scanDirectory_ && scanDirectory_.isDirectory();
-      if (!scanDirectoryOpen_) {
-        if (scanDirectory_) scanDirectory_.close();
-        ++scanDirectoryIndex_;
-      }
-      return false;
-    }
-    if (scanStepper_.remainingDirectoryEntries() == 0) return false;
-    scanStepper_.consumeDirectoryEntry();
-    File entry = scanDirectory_.openNextFile();
-    if (!entry) {
-      scanDirectory_.close();
-      scanDirectoryOpen_ = false;
-      ++scanDirectoryIndex_;
-      return false;
-    }
-    const String fullName = entry.name();
-    const bool isDirectory = entry.isDirectory();
-    entry.close();
+  if (scanDirectoryIndex_ >= scanDirectories_.size()) return true;
+  const ScanDirectoryTask task = scanDirectories_[scanDirectoryIndex_];
+  if (scanEntryPending_) {
+    const String fullName = scanEntry_.name();
+    const bool isDirectory = scanEntry_.isDirectory();
+    scanEntry_.close();
+    scanEntryPending_ = false;
     const int slash = fullName.lastIndexOf('/');
     const String name = slash >= 0 ? fullName.substring(slash + 1) : fullName;
     if (!isDirectory) return false;
@@ -332,7 +566,7 @@ bool CapsuleLibrary::processDirectorySlice() {
       scanPending_.directory = task.path + "/" + name;
       scanPending_.folder = task.folder;
       scanPending_.id = name;
-      scanPending_.phase = ScanMetadataPhase::capsule;
+      scanPending_.phase = ScanMetadataPhase::capsuleOpen;
     } else if (task.depth < 2 && !name.startsWith(".")) {
       scanDirectories_.push_back(
           {task.path + "/" + name, task.folder + "/" + name,
@@ -340,67 +574,128 @@ bool CapsuleLibrary::processDirectorySlice() {
     }
     return false;
   }
-  return true;
-}
-
-bool CapsuleLibrary::openPendingMetadata(const char *name) {
-  scanPending_.file = fs_->open(scanPending_.directory + "/" + name,
-                                FILE_READ);
-  if (!scanPending_.file || scanPending_.file.isDirectory() ||
-      scanPending_.file.size() == 0 ||
-      scanPending_.file.size() > kMaxMetadataBytes) {
-    if (scanPending_.file) scanPending_.file.close();
-    scanPending_.damaged = true;
-    scanPending_.phase = ScanMetadataPhase::ready;
+  if (scanDirectoryExhausted_) {
+    if (scanDirectory_) scanDirectory_.close();
+    scanDirectoryOpen_ = false;
+    scanDirectoryExhausted_ = false;
+    ++scanDirectoryIndex_;
     return false;
   }
-  return true;
+  if (!scanDirectoryOpen_) {
+    if (scanStepper_.remainingDirectoryEntries() == 0) return false;
+    scanStepper_.consumeDirectoryEntry();
+    scanDirectory_ = fs_->open(task.path);
+    scanDirectoryOpen_ = scanDirectory_ && scanDirectory_.isDirectory();
+    if (!scanDirectoryOpen_) {
+      if (scanDirectory_) {
+        scanDirectoryExhausted_ = true;
+      } else {
+        ++scanDirectoryIndex_;
+      }
+    }
+    return false;
+  }
+  if (scanStepper_.remainingDirectoryEntries() == 0) return false;
+  scanStepper_.consumeDirectoryEntry();
+  scanEntry_ = scanDirectory_.openNextFile();
+  if (!scanEntry_) {
+    scanDirectoryExhausted_ = true;
+  } else {
+    scanEntryPending_ = true;
+  }
+  return false;
 }
 
 bool CapsuleLibrary::readPendingMetadataSlice() {
-  if (scanPending_.phase == ScanMetadataPhase::ready) return true;
-  String *target = scanPending_.phase == ScanMetadataPhase::capsule
-      ? &scanPending_.capsuleText : &scanPending_.processingText;
-  const char *name = scanPending_.phase == ScanMetadataPhase::capsule
-      ? "capsule.json" : "processing.json";
-  if (!scanPending_.file && !openPendingMetadata(name)) return true;
-
-  uint8_t chunk[512];
-  while (scanPending_.file.available() &&
-         scanStepper_.remainingReadBytes() > 0) {
-    const size_t request = scanStepper_.remainingReadBytes() < sizeof(chunk)
-        ? scanStepper_.remainingReadBytes() : sizeof(chunk);
-    const int count = scanPending_.file.read(chunk, request);
-    if (count <= 0) {
-      scanPending_.damaged = true;
+  switch (scanPending_.phase) {
+    case ScanMetadataPhase::capsuleOpen:
+    case ScanMetadataPhase::processingOpen: {
+      const bool capsule =
+          scanPending_.phase == ScanMetadataPhase::capsuleOpen;
+      scanPending_.file = fs_->open(
+          scanPending_.directory +
+              (capsule ? "/capsule.json" : "/processing.json"),
+          FILE_READ);
+      if (!scanPending_.file || scanPending_.file.isDirectory() ||
+          scanPending_.file.size() == 0 ||
+          scanPending_.file.size() > kMaxMetadataBytes) {
+        scanPending_.damaged = true;
+        scanPending_.phase = scanPending_.file
+            ? ScanMetadataPhase::failedClose : ScanMetadataPhase::audioWav;
+      } else {
+        scanPending_.phase = capsule ? ScanMetadataPhase::capsuleRead
+                                     : ScanMetadataPhase::processingRead;
+      }
+      return false;
+    }
+    case ScanMetadataPhase::capsuleRead:
+    case ScanMetadataPhase::processingRead: {
+      String *target = scanPending_.phase == ScanMetadataPhase::capsuleRead
+          ? &scanPending_.capsuleText : &scanPending_.processingText;
+      if (!scanPending_.file.available()) {
+        scanPending_.phase = scanPending_.phase == ScanMetadataPhase::capsuleRead
+            ? ScanMetadataPhase::capsuleClose
+            : ScanMetadataPhase::processingClose;
+        return false;
+      }
+      if (scanStepper_.remainingReadBytes() == 0) return false;
+      uint8_t chunk[512];
+      const size_t request = scanStepper_.remainingReadBytes() < sizeof(chunk)
+          ? scanStepper_.remainingReadBytes() : sizeof(chunk);
+      const int count = scanPending_.file.read(chunk, request);
+      if (count <= 0) {
+        scanPending_.damaged = true;
+        scanPending_.phase = ScanMetadataPhase::failedClose;
+        return false;
+      }
+      const size_t accepted = scanStepper_.consumeReadBytes(
+          static_cast<size_t>(count));
+      target->concat(reinterpret_cast<const char *>(chunk), accepted);
+      if (target->length() > kMaxMetadataBytes) {
+        scanPending_.damaged = true;
+        scanPending_.phase = ScanMetadataPhase::failedClose;
+      } else if (!scanPending_.file.available()) {
+        scanPending_.phase = scanPending_.phase == ScanMetadataPhase::capsuleRead
+            ? ScanMetadataPhase::capsuleClose
+            : ScanMetadataPhase::processingClose;
+      }
+      return false;
+    }
+    case ScanMetadataPhase::capsuleClose:
+    case ScanMetadataPhase::processingClose: {
+      const bool capsule =
+          scanPending_.phase == ScanMetadataPhase::capsuleClose;
       scanPending_.file.close();
+      String *target = capsule ? &scanPending_.capsuleText
+                               : &scanPending_.processingText;
+      target->trim();
+      if (target->isEmpty()) {
+        scanPending_.damaged = true;
+        scanPending_.phase = ScanMetadataPhase::audioWav;
+      } else {
+        scanPending_.phase = capsule ? ScanMetadataPhase::processingOpen
+                                     : ScanMetadataPhase::audioWav;
+      }
+      return false;
+    }
+    case ScanMetadataPhase::failedClose:
+      if (scanPending_.file) scanPending_.file.close();
+      scanPending_.phase = ScanMetadataPhase::audioWav;
+      return false;
+    case ScanMetadataPhase::audioWav:
+      scanPending_.hasWav = fs_->exists(scanPending_.directory + "/audio.wav");
+      scanPending_.phase = ScanMetadataPhase::audioM4a;
+      return false;
+    case ScanMetadataPhase::audioM4a:
+      scanPending_.hasM4a = fs_->exists(scanPending_.directory + "/audio.m4a");
       scanPending_.phase = ScanMetadataPhase::ready;
       return true;
-    }
-    const size_t accepted = scanStepper_.consumeReadBytes(
-        static_cast<size_t>(count));
-    target->concat(reinterpret_cast<const char *>(chunk), accepted);
-    if (target->length() > kMaxMetadataBytes) {
-      scanPending_.damaged = true;
-      scanPending_.file.close();
-      scanPending_.phase = ScanMetadataPhase::ready;
+    case ScanMetadataPhase::ready:
       return true;
-    }
+    case ScanMetadataPhase::none:
+      return false;
   }
-  if (scanPending_.file.available()) return false;
-  scanPending_.file.close();
-  target->trim();
-  if (target->isEmpty()) {
-    scanPending_.damaged = true;
-    scanPending_.phase = ScanMetadataPhase::ready;
-    return true;
-  }
-  if (scanPending_.phase == ScanMetadataPhase::capsule) {
-    scanPending_.phase = ScanMetadataPhase::processing;
-    return false;
-  }
-  scanPending_.phase = ScanMetadataPhase::ready;
-  return true;
+  return false;
 }
 
 bool CapsuleLibrary::appendStagedRecord(const CapsuleSummary &record) {
@@ -422,6 +717,9 @@ void CapsuleLibrary::resetScanTransient() {
   scanDirectories_.clear();
   scanDirectoryIndex_ = 0;
   scanDirectoryOpen_ = false;
+  scanEntry_ = File();
+  scanEntryPending_ = false;
+  scanDirectoryExhausted_ = false;
   scanPending_ = ScanPendingRecord();
   scanLocatorCount_ = 0;
   scanPathPoolUsed_ = 0;
@@ -444,7 +742,7 @@ void CapsuleLibrary::finishScan(CapsuleScanState state) {
     pathPoolUsed_ = scanPathPoolUsed_;
     indexOverflow_ = false;
     invalidateRecordCache();
-    requestPublish();
+    if (!startupScanGeneration_) requestPublish();
     ++fullScanCount_;
     const uint32_t elapsedUs = static_cast<uint32_t>(
         esp_timer_get_time() - scanStartedUs_);
@@ -455,7 +753,7 @@ void CapsuleLibrary::finishScan(CapsuleScanState state) {
       log_->printf("{\"event\":\"capsule_scan\",\"count\":%u,"
                    "\"pending\":%u,\"slices\":%u}\n",
                    static_cast<unsigned>(locatorCount_),
-                   static_cast<unsigned>(pendingCount()),
+                   static_cast<unsigned>(internalPendingCount()),
                    static_cast<unsigned>(scanStepper_.slices()));
     }
   } else if (state == CapsuleScanState::cancelled) {
@@ -481,7 +779,7 @@ void CapsuleLibrary::finishScan(CapsuleScanState state) {
 }
 
 bool CapsuleLibrary::includeInboxCapsule(const String &id) {
-  if (!isUuid(id.c_str())) return false;
+  if (!startupReady() || !isUuid(id.c_str())) return false;
   return refreshRecord(id, String(kCapsuleInbox) + "/" + id, "Inbox");
 }
 
@@ -561,7 +859,7 @@ void CapsuleLibrary::populateDamagedRecord(
   record.error = "胶囊需要检查";
 }
 
-size_t CapsuleLibrary::pendingCount() const {
+size_t CapsuleLibrary::internalPendingCount() const {
   size_t count = 0;
   for (size_t index = 0; index < locatorCount_; ++index) {
     const CapsuleLocator &locator = locators_[index];
@@ -573,13 +871,19 @@ size_t CapsuleLibrary::pendingCount() const {
   return count;
 }
 
+size_t CapsuleLibrary::pendingCount() const {
+  return startupReady() ? internalPendingCount() : 0;
+}
+
 const CapsuleSummary *CapsuleLibrary::at(size_t index,
                                          bool loadPreview) const {
+  if (!startupReady()) return nullptr;
   return index < visible_.size()
       ? cachedRecord(visible_[index], loadPreview) : nullptr;
 }
 
 const CapsuleSummary *CapsuleLibrary::nextQueued() const {
+  if (!startupReady()) return nullptr;
   for (const size_t index : order_) {
     const CapsuleLocator &locator = locators_[index];
     if (!capsuleLocatorHasFlag(locator, locatorReadOnly) &&
@@ -593,12 +897,14 @@ const CapsuleSummary *CapsuleLibrary::nextQueued() const {
 }
 
 const CapsuleSummary *CapsuleLibrary::find(const String &id) const {
+  if (!startupReady()) return nullptr;
   const size_t index = recordIndex(id);
   return index < locatorCount_ ? cachedRecord(index, false) : nullptr;
 }
 
 bool CapsuleLibrary::hydrate(const String &id, CapsuleSummary &record,
                              bool loadPreview) const {
+  if (!startupReady()) return false;
   const size_t index = recordIndex(id);
   if (index >= locatorCount_ || !hydrateLocator(locators_[index], record)) {
     return false;
@@ -956,7 +1262,7 @@ CapsuleBatchResult CapsuleLibrary::batch(
 void CapsuleLibrary::setScope(CapsuleScope scope) {
   if (scope_ == scope) return;
   scope_ = scope;
-  rebuildVisible();
+  if (startupReady()) rebuildVisible();
 }
 
 size_t CapsuleLibrary::recordIndex(const String &id) const {
@@ -1194,6 +1500,7 @@ bool CapsuleLibrary::rebuildPublishedLocator(
 
 bool CapsuleLibrary::operationSnapshot(
     const char *id, CapsuleOperationSnapshot &snapshot) const {
+  if (!startupReady()) return false;
   if (id == nullptr || !isUuid(id)) return false;
   const size_t index = recordIndex(id);
   if (index >= locatorCount_) return false;
@@ -1239,6 +1546,7 @@ bool CapsuleLibrary::operationSnapshot(
 
 bool CapsuleLibrary::operationCommitted(const char *id, const char *target,
                                         bool removed) {
+  if (!startupReady()) return false;
   if (id == nullptr || !isUuid(id)) return false;
   if (removed) {
     const size_t before = locatorCount_;
@@ -1592,8 +1900,27 @@ bool CapsuleLibrary::prepareProcessing(const String &id, CapsuleStatus status,
   if (record == nullptr || record->readOnly) return false;
   const String source = readText(record->directory + "/processing.json",
                                  kMaxMetadataBytes);
+  return prepareProcessingText(source, status, rawTextFile, errorStage, error,
+                               incrementAttempts, encodedValue);
+}
+
+bool CapsuleLibrary::prepareProcessingText(
+    const String &source, CapsuleStatus status, const String &rawTextFile,
+    const String &errorStage, const String &error, bool incrementAttempts,
+    String &encodedValue, const char *expectedCapsuleId) {
   cJSON *root = cJSON_ParseWithLength(source.c_str(), source.length());
   if (root == nullptr) return false;
+  cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schemaVersion");
+  const int schemaVersion = cJSON_IsNumber(schema) ? schema->valueint : -1;
+  const char *capsuleId = jsonString(root, "capsuleId");
+  const char *wireStatus = jsonString(root, "status");
+  if ((schemaVersion != 1 && schemaVersion != 2) ||
+      (expectedCapsuleId != nullptr &&
+       (capsuleId == nullptr || strcasecmp(capsuleId, expectedCapsuleId) != 0 ||
+        !capsuleStatusNeedsStartupRequeue(wireStatus)))) {
+    cJSON_Delete(root);
+    return false;
+  }
   cJSON *revision = cJSON_GetObjectItemCaseSensitive(root, "revision");
   const int nextRevision = cJSON_IsNumber(revision) ? revision->valueint + 1 : 1;
   cJSON_ReplaceItemInObjectCaseSensitive(root, "revision", cJSON_CreateNumber(nextRevision));

@@ -26,6 +26,26 @@ enum class CapsuleStatus {
   damaged,
 };
 
+enum class CapsuleLibraryStartupState : uint8_t {
+  idle = 0,
+  waitingForAuthority,
+  recoveringTransactions,
+  allocatingIndex,
+  startingScan,
+  scanning,
+  selectingInterrupted,
+  openingProcessing,
+  readingProcessing,
+  closingProcessing,
+  preparingRequeue,
+  startingRequeueCommit,
+  pollingRequeueCommit,
+  publishingIndex,
+  closingBlockedFile,
+  ready,
+  blocked,
+};
+
 struct CapsuleSummary {
   String id;
   String directory;
@@ -78,6 +98,21 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
 
   bool begin(fs::FS &fs, Print &log,
              bool requeueInterruptedTranscription = true);
+  CapsuleLibraryStartupState pollStartup(uint32_t nowMs = 0);
+  CapsuleLibraryStartupState startupState() const { return startupState_; }
+  bool startupActive() const {
+    return startupState_ != CapsuleLibraryStartupState::idle &&
+        startupState_ != CapsuleLibraryStartupState::ready &&
+        startupState_ != CapsuleLibraryStartupState::blocked;
+  }
+  bool startupReady() const {
+    return startupState_ == CapsuleLibraryStartupState::ready;
+  }
+  bool startupBlocked() const {
+    return startupState_ == CapsuleLibraryStartupState::blocked;
+  }
+  uint32_t startupPolls() const { return startupPolls_; }
+  size_t startupMaximumIoBytes() const { return startupMaximumIoBytes_; }
   bool scan();
   // Queue a full rebuild without doing filesystem work in the caller. The
   // request is sticky: if a scan is running, or a mutation currently prevents
@@ -100,16 +135,16 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   uint32_t maximumScanStepUs() const { return maximumScanStepUs_; }
   uint32_t maximumScanLeaseUs() const { return maximumScanLeaseUs_; }
   bool includeInboxCapsule(const String &id);
-  size_t count() const { return visible_.size(); }
-  uint32_t revision() const { return revision_; }
+  size_t count() const { return startupReady() ? visible_.size() : 0; }
+  uint32_t revision() const { return startupReady() ? revision_ : 0; }
   uint32_t fullScanCount() const { return fullScanCount_; }
   uint32_t incrementalRefreshCount() const { return incrementalRefreshCount_; }
   uint32_t refreshFallbackCount() const { return refreshFallbackCount_; }
   uint32_t lastScanUs() const { return lastScanUs_; }
   uint32_t maxScanUs() const { return maxScanUs_; }
   bool indexOverflow() const { return indexOverflow_; }
-  size_t indexedCount() const { return locatorCount_; }
-  size_t customPathBytes() const { return pathPoolUsed_; }
+  size_t indexedCount() const { return startupReady() ? locatorCount_ : 0; }
+  size_t customPathBytes() const { return startupReady() ? pathPoolUsed_ : 0; }
   static constexpr size_t customPathCapacity() {
     return kCapsuleCustomPathPoolBytes;
   }
@@ -156,8 +191,15 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   };
   enum class ScanMetadataPhase : uint8_t {
     none = 0,
-    capsule,
-    processing,
+    capsuleOpen,
+    capsuleRead,
+    capsuleClose,
+    processingOpen,
+    processingRead,
+    processingClose,
+    failedClose,
+    audioWav,
+    audioM4a,
     ready,
   };
   struct ScanPendingRecord {
@@ -172,13 +214,33 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
     bool hasWav = false;
     bool hasM4a = false;
   };
+  class StartupStringByteSource final : public CapsuleTransactionByteSource {
+   public:
+    void bind(const String *value) { value_ = value; }
+    uint32_t length() const override {
+      return value_ == nullptr ? 0U : static_cast<uint32_t>(value_->length());
+    }
+    size_t readAt(uint32_t offset, uint8_t *destination,
+                  size_t maximumBytes) override {
+      if (value_ == nullptr || destination == nullptr ||
+          offset >= value_->length()) {
+        return 0;
+      }
+      const size_t available = value_->length() - offset;
+      const size_t count = available < maximumBytes ? available : maximumBytes;
+      memcpy(destination, value_->c_str() + offset, count);
+      return count;
+    }
+
+   private:
+    const String *value_ = nullptr;
+  };
 
   bool readRecordText(const String &directory, const String &folder,
                       const String &capsuleText,
                       const String &processingText,
                       CapsuleSummary &record,
                       bool detectDamagedAudio = true) const;
-  bool openPendingMetadata(const char *name);
   bool readPendingMetadataSlice();
   bool processDirectorySlice();
   bool appendStagedRecord(const CapsuleSummary &record);
@@ -197,6 +259,16 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
                          const String &rawTextFile, const String &errorStage,
                          const String &error, bool incrementAttempts,
                          String &encoded);
+  bool prepareProcessingText(const String &source, CapsuleStatus status,
+                             const String &rawTextFile,
+                             const String &errorStage, const String &error,
+                             bool incrementAttempts, String &encoded,
+                             const char *expectedCapsuleId = nullptr);
+  void failStartup(const char *stage);
+  void clearStartupRequeue();
+  bool selectStartupRequeue();
+  bool updateStartupRequeuedLocator();
+  size_t internalPendingCount() const;
   bool updateFavorite(const String &id, bool favorite);
   bool removeTree(const String &path);
   size_t recordIndex(const String &id) const;
@@ -244,6 +316,22 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   fs::FS *fs_ = nullptr;
   Print *log_ = nullptr;
   CapsuleTransaction transaction_;
+  CapsuleTransactionRunner startupTransactionRunner_;
+  StorageReservation startupAuthorityReservation_;
+  CapsuleLibraryStartupState startupState_ = CapsuleLibraryStartupState::idle;
+  bool startupRequeueInterrupted_ = true;
+  bool startupScanGeneration_ = false;
+  size_t startupRequeueIndex_ = 0;
+  size_t startupRequeueLocatorIndex_ = 0;
+  String startupRequeueId_;
+  String startupRequeuePath_;
+  String startupRequeueText_;
+  String startupRequeueEncoded_;
+  File startupRequeueFile_;
+  StartupStringByteSource startupRequeueSource_;
+  CapsuleTransactionInput startupRequeueInput_;
+  uint32_t startupPolls_ = 0;
+  size_t startupMaximumIoBytes_ = 0;
   CapsuleLocator *locators_ = nullptr;
   CapsuleLocator *scanLocators_ = nullptr;
   char *pathPool_ = nullptr;
@@ -277,8 +365,11 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   std::vector<ScanDirectoryTask> scanDirectories_;
   size_t scanDirectoryIndex_ = 0;
   File scanDirectory_;
+  File scanEntry_;
   ScanPendingRecord scanPending_;
   bool scanDirectoryOpen_ = false;
+  bool scanEntryPending_ = false;
+  bool scanDirectoryExhausted_ = false;
   bool scanCancelRequested_ = false;
   bool scanFailureRequested_ = false;
   bool scanIndexOverflow_ = false;

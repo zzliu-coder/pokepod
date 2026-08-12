@@ -20,7 +20,9 @@ required = {
     "read reservation": "startScanWithOwner(budget, StorageOwner::capsuleScan)",
     "short lease": "StorageIoLease scanIo",
     "nonblocking lease": "scanOwner_, StorageAccess::read, 0",
-    "nonblocking reservation": "owner == StorageOwner::capsuleScan ? 0 : 1000",
+    "nonblocking reservation": "owner, StorageAccess::read, 0",
+    "cooperative startup": "CapsuleLibraryStartupState pollStartup",
+    "startup authority": "startupAuthorityReservation_",
     "double buffer": "std::swap(locators_, scanLocators_)",
     "shared codec": "CapsuleMetadataCodec::decode",
     "step timing": "maximumScanStepUs()",
@@ -45,6 +47,8 @@ for required_test_path in (
     "library.hydrate", "seedFixture(0, 360", "cycle < 10000",
     "library.requestScan", "library.pollScan", "library.scanRequested",
     "StorageOwner::capsuleTransaction, StorageAccess::mutation",
+    "runProductionCooperativeStartup", "kCapsuleLocatorCapacity",
+    "primitives) + enumerations <= 1",
 ):
     if required_test_path not in host_test:
         raise SystemExit("FAIL host test misses production path: " + required_test_path)
@@ -62,5 +66,12 @@ if link.count("library_->requestScan()") < 3:
 if 'strcmp(batchJournalState_.operation, "rescan") == 0' not in link or \
         '(queued ? "queued" : "committed")' not in link:
     raise SystemExit("FAIL Link rescan response claims synchronous completion")
+
+if "capsuleLibrary.pollStartup(nowMs)" not in app:
+    raise SystemExit("FAIL app does not cooperatively advance library startup")
+if "while (scanStepper_.active())" in library:
+    raise SystemExit("FAIL startup/runtime scan still contains a synchronous drain loop")
+if "if (!startupReady()) return nullptr;" not in library:
+    raise SystemExit("FAIL consumers can observe an unpublished startup index")
 
 print("PASS production capsule scan service contract")
