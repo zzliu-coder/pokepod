@@ -243,14 +243,19 @@ class PokePodLinkService {
   void sendBusy(uint32_t requestId, uint32_t retryAfterMs = 150);
   void sendError(uint32_t requestId, const char *message);
   bool sendJson(uint32_t requestId, const String &json);
+  bool sendJson(uint32_t requestId, const String &json,
+                bool completionEligible);
   bool sendEvent(uint32_t requestId, const String &json);
   bool sendFile(uint32_t requestId, const String &path,
                 const char *resultTransactionId = nullptr);
   bool sendFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
-                 const uint8_t *payload, size_t size);
+                 const uint8_t *payload, size_t size,
+                 LinkOperationFrameRole role,
+                 bool completionEligible = false);
   bool queueFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                   const uint8_t *payload, size_t size,
-                  TxCompletion completion);
+                  TxCompletion completion, LinkOperationFrameRole role,
+                  bool completionEligible = false);
   void advanceTransmit(uint32_t nowMs);
   void queueNextFileChunk();
   void finishOutgoingFile(bool success);
@@ -258,13 +263,11 @@ class PokePodLinkService {
   void finishOutgoingCleanup();
   void abortOutgoing();
   void onFrameSent(TxCompletion completion);
-  void releaseRequestLeaseNow();
   bool drainLinkCapture();
   bool requestLinkRecordingStop(uint32_t requestId, bool commit,
                                 bool respond);
   void advanceLinkRecordingStart();
   void advanceLinkRecordingStop();
-  void rememberCompleted(uint32_t requestId);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
                      uint32_t expectedBytes, const String &temporaryPath,
@@ -276,8 +279,6 @@ class PokePodLinkService {
   String readText(const String &path, size_t limit) const;
   String deviceId() const;
   bool foregroundBusy() const;
-  bool acquireRequestLease(uint32_t requestId);
-  void releaseRequestLease();
   bool safeFolder(const char *value, bool allowBuiltIn = true) const;
   String folderDirectory(const char *value) const;
   String activeCapsuleDirectory(const String &id) const;
@@ -330,9 +331,6 @@ class PokePodLinkService {
   LinkOperation operation_;
   uint32_t connectionGeneration_ = 0;
   uint32_t nextConnectionGeneration_ = 0;
-  bool requestLeaseHeld_ = false;
-  uint32_t requestLeaseOwnerRequestId_ = 0;
-  bool releaseRequestLeaseWhenTxDrained_ = false;
   CapsuleTransaction transaction_;
   CapsuleTransactionRunner transactionRunner_;
   LinkCapsuleTransactionGate transactionGate_;
@@ -449,8 +447,13 @@ class PokePodLinkService {
   LinkTransferStepper txStepper_;
   size_t txFrameBytes_ = 0;
   TxCompletion txCompletion_ = TxCompletion::none;
+  LinkOperationFrameRole txFrameRole_ = LinkOperationFrameRole::progress;
+  uint32_t txFrameGeneration_ = 0;
   size_t pendingControlBytes_ = 0;
   TxCompletion pendingControlCompletion_ = TxCompletion::none;
+  LinkOperationFrameRole pendingControlRole_ =
+      LinkOperationFrameRole::progress;
+  uint32_t pendingControlGeneration_ = 0;
   OutgoingPhase outgoingPhase_ = OutgoingPhase::none;
   uint32_t outgoingRequestId_ = 0;
   size_t outgoingLength_ = 0;

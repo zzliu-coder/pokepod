@@ -224,7 +224,6 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   writeChannel_ = writeChannel;
   connectionGeneration_ = 0;
   nextConnectionGeneration_ = 0;
-  requestLeaseHeld_ = false;
   activeMaintenance_ = "";
   quiesceRequested_ = false;
   if (!transaction_.begin(fs, log)) return false;
@@ -366,10 +365,14 @@ void PokePodLinkService::advanceLinkOperationSettlement() {
     (void)operation_.acknowledgeRelease(
         LinkOperationResource::coordinator, true);
   }
-  (void)operation_.finishRelease();
+  const bool released = operation_.finishRelease();
+  if (released && !sessionActive_) connectionGeneration_ = 0;
 }
 
 void PokePodLinkService::disconnect() {
+  cancelLinkOperation(quiesceRequested_
+      ? LinkOperationCancelReason::quiesce
+      : LinkOperationCancelReason::disconnect);
   if (batchExecutor_.active()) abandonBatchCommand();
   manifestResponseRequestId_ = 0;
   manifestResponseJson_ = "";
@@ -403,7 +406,11 @@ void PokePodLinkService::disconnect() {
   completed_.clear();
   commandLoadRespond_ = false;
   resetFrame();
-  releaseRequestLeaseNow();
+  advanceLinkOperationSettlement();
+  if (!operation_.active() &&
+      !operation_.ownsResource(LinkOperationResource::coordinator)) {
+    connectionGeneration_ = 0;
+  }
 }
 
 void PokePodLinkService::requestQuiesce() {
@@ -424,7 +431,8 @@ bool PokePodLinkService::quiesced() const {
       deferredCommandFiles_.empty() && deferredTreeCleanupStack_.empty() &&
       !commandCleanupPending_ && !commandStorageActive_ &&
       !linkOwnedRecording_ && !linkRecordingStop_.active() &&
-      !requestLeaseHeld_;
+      !operation_.active() &&
+      !operation_.ownsResource(LinkOperationResource::coordinator);
 }
 
 void PokePodLinkService::pollDeferredCleanup() {
@@ -444,6 +452,7 @@ void PokePodLinkService::pollDeferredCleanup() {
     stepDeferredTreeCleanup();
   }
   finishCommandStorageCleanup();
+  advanceLinkOperationSettlement();
   if (!startupReady_ && !startupRecoveryFailed_ &&
       !startupBatchRecoveryPending_ && !startupPartCleanupPending_ &&
       !startupPurgePending_ && deferredTreeCleanupStack_.empty()) {
@@ -526,6 +535,7 @@ void PokePodLinkService::consumeByte(uint8_t value) {
     if (value == magic[magicMatched_]) {
       headerBytes_[magicMatched_++] = value;
       if (magicMatched_ == 4) {
+        activateConnectionGeneration();
         sessionActive_ = true;
         headerUsed_ = 4;
         receivePhase_ = ReceivePhase::header;
@@ -589,21 +599,19 @@ void PokePodLinkService::processFrame() {
 
 void PokePodLinkService::processRequest(uint32_t requestId,
                                         const uint8_t *payload, size_t size) {
-  // An asynchronous recording request is the sole owner of the coordinator
-  // lease until its real recorder terminal. Coalesce the same request id and
-  // reject every other request before it can acquire/release that lease.
-  if (requestId != 0 &&
-      (linkRecordingStart_.active() || linkRecordingStop_.active())) {
-    if (linkRecordingStart_.ownsRequest(requestId) ||
-        linkRecordingStop_.ownsRequest(requestId)) return;
+  if (requestId == 0 || completed_.contains(requestId)) {
+    sendError(requestId, requestId == 0 ? "requestId must be non-zero" :
+                                         "duplicate requestId");
+    return;
+  }
+  const LinkOperationAdmission admission = admitLinkOperation(requestId);
+  if (admission == LinkOperationAdmission::sameRequest) return;
+  if (admission == LinkOperationAdmission::busy) {
     sendBusy(requestId);
     return;
   }
-  if (requestId == 0 || completed_.contains(requestId) ||
-      incomingKind_ != IncomingKind::none) {
-    sendError(requestId, requestId == 0 ? "requestId must be non-zero" :
-              (completed_.contains(requestId) ? "duplicate requestId" :
-                                                "another request is receiving data"));
+  if (admission != LinkOperationAdmission::accepted) {
+    sendError(requestId, "request admission failed");
     return;
   }
   cJSON *root = cJSON_ParseWithLength(
@@ -613,7 +621,6 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       jsonInt64(root, "version") != kLinkVersion) {
     cJSON_Delete(root);
     sendError(requestId, "malformed Link v2 request");
-    rememberCompleted(requestId);
     return;
   }
 
@@ -622,47 +629,30 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       !capabilities_->allows(required)) {
     cJSON_Delete(root);
     sendError(requestId, "required device capability is not ready");
-    rememberCompleted(requestId);
     return;
   }
 
   const int64_t binaryLength = jsonInt64(root, "binaryLength", 0);
   const bool chunkAcks = jsonBool(root, "chunkAcks");
   if (strcmp(operation, "font-write") == 0) {
-    if (!acquireRequestLease(requestId)) {
-      cJSON_Delete(root);
-      rememberCompleted(requestId);
-      return;
-    }
     cJSON_Delete(root);
     const String finalPath = String(kCapsuleSystem) + "/fonts/cjk20.a4";
     const String temporaryPath = kLinkFontUploadPart;
     if (foregroundBusy()) {
       sendBusy(requestId);
-      rememberCompleted(requestId);
-      releaseRequestLease();
     } else if (binaryLength < 20 || binaryLength > 5 * 1024 * 1024 ||
                !ensureDirectoryTree(parentPath(finalPath)) ||
                !beginIncoming(IncomingKind::systemFont, requestId,
                               static_cast<uint32_t>(binaryLength),
                               temporaryPath, finalPath, "", chunkAcks)) {
       sendError(requestId, "invalid font transfer");
-      rememberCompleted(requestId);
-      releaseRequestLease();
     }
     return;
   }
   if (strcmp(operation, "stage-write") == 0 || strcmp(operation, "command") == 0) {
-    if (!acquireRequestLease(requestId)) {
-      cJSON_Delete(root);
-      rememberCompleted(requestId);
-      return;
-    }
     if (foregroundBusy()) {
       cJSON_Delete(root);
       sendBusy(requestId);
-      rememberCompleted(requestId);
-      releaseRequestLease();
       return;
     }
     const char *transactionId = jsonString(root, "transactionId");
@@ -670,8 +660,6 @@ void PokePodLinkService::processRequest(uint32_t requestId,
         binaryLength > static_cast<int64_t>(kMaxIncomingCommandBytes * 3U)) {
       cJSON_Delete(root);
       sendError(requestId, "invalid transaction or binary length");
-      rememberCompleted(requestId);
-      releaseRequestLease();
       return;
     }
     if (strcmp(operation, "stage-write") == 0) {
@@ -681,8 +669,6 @@ void PokePodLinkService::processRequest(uint32_t requestId,
           binaryLength > 3LL * 1024LL * 1024LL) {
         cJSON_Delete(root);
         sendError(requestId, "invalid staged file target");
-        rememberCompleted(requestId);
-        releaseRequestLease();
         return;
       }
       const String directory = String(kCapsuleStaging) + "/" + transactionId +
@@ -695,16 +681,12 @@ void PokePodLinkService::processRequest(uint32_t requestId,
                          static_cast<uint32_t>(binaryLength), temporaryPath,
                          finalPath, transactionId, chunkAcks)) {
         sendError(requestId, "cannot open staged file");
-        rememberCompleted(requestId);
-        releaseRequestLease();
       }
       return;
     }
     if (binaryLength > static_cast<int64_t>(kMaxCommandJsonBytes)) {
       cJSON_Delete(root);
       sendError(requestId, "command is too large");
-      rememberCompleted(requestId);
-      releaseRequestLease();
       return;
     }
     const String finalPath = String(kCapsuleSystem) + "/commands/incoming/" +
@@ -715,19 +697,15 @@ void PokePodLinkService::processRequest(uint32_t requestId,
                        static_cast<uint32_t>(binaryLength), temporaryPath,
                        finalPath, transactionId, chunkAcks)) {
       sendError(requestId, "cannot open command file");
-      rememberCompleted(requestId);
-      releaseRequestLease();
     }
     return;
   }
 
-  if (acquireRequestLease(requestId)) handleImmediate(requestId, root);
+  handleImmediate(requestId, root);
   cJSON_Delete(root);
   if (manifestRequestId_ == requestId && manifestStepper_.active()) return;
   if (linkRecordingStart_.ownsRequest(requestId)) return;
   if (linkRecordingStop_.ownsRequest(requestId)) return;
-  rememberCompleted(requestId);
-  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
@@ -764,6 +742,9 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
   incomingFinalPath_ = finalPath;
   incomingTransactionId_ = transactionId;
   incomingLastByteMs_ = millis();
+  operation_.advance(LinkOperationState::receiving);
+  operation_.ownResource(LinkOperationResource::storageReservation);
+  operation_.ownResource(LinkOperationResource::file);
   return true;
 }
 
@@ -809,6 +790,7 @@ void PokePodLinkService::finishIncoming() {
   incomingFile_.flush();
   const bool writeOk = incomingFile_.getWriteError() == 0;
   incomingFile_.close();
+  operation_.releaseResource(LinkOperationResource::file);
   incomingKind_ = IncomingKind::none;
   incomingRequestId_ = 0;
   incomingExpected_ = incomingReceived_ = 0;
@@ -833,6 +815,8 @@ void PokePodLinkService::finishIncoming() {
     return;
   }
   transactionGate_.beginOperation(transferGate_);
+  operation_.advance(LinkOperationState::durableCommit);
+  operation_.ownResource(LinkOperationResource::transaction);
   transactionPurpose_ = TransactionPurpose::incoming;
   transactionIncomingKind_ = kind;
   transactionRequestId_ = requestId;
@@ -1077,6 +1061,7 @@ void PokePodLinkService::finishIncomingTransaction(bool committed) {
   transactionId_ = "";
   transactionRespond_ = false;
   transactionGate_.reset();
+  operation_.releaseResource(LinkOperationResource::transaction);
   if (!committed) {
     incomingCleanupRespond_ = respond;
     incomingCleanupRequestId_ = requestId;
@@ -1088,6 +1073,7 @@ void PokePodLinkService::finishIncomingTransaction(bool committed) {
     return;
   }
   incomingStorageReservation_.release();
+  operation_.releaseResource(LinkOperationResource::storageReservation);
   if (kind == IncomingKind::command) {
     handleCommandFile(requestId, finalPath, transaction);
     if (commandCleanupPending_) return;
@@ -1095,10 +1081,6 @@ void PokePodLinkService::finishIncomingTransaction(bool committed) {
     sendOk(requestId, "\"installed\":true,\"rebootRequired\":true");
   } else if (respond) {
     sendOk(requestId);
-  }
-  if (respond) {
-    rememberCompleted(requestId);
-    if (activeMaintenance_.isEmpty()) releaseRequestLease();
   }
 }
 
@@ -1138,10 +1120,11 @@ void PokePodLinkService::finishIncomingCleanup() {
   incomingCleanupRequestId_ = 0;
   incomingCleanupMessage_ = "";
   incomingCleanupRespond_ = false;
+  operation_.releaseResource(LinkOperationResource::file);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
+  operation_.releaseResource(LinkOperationResource::transaction);
   if (respond && requestId != 0) {
     sendError(requestId, message.c_str());
-    rememberCompleted(requestId);
-    if (activeMaintenance_.isEmpty()) releaseRequestLease();
   }
 }
 
@@ -1335,7 +1318,9 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     appendJsonString(extra, "provisioningStartupPhase",
                      provisioningCoordinator_ == nullptr
                          ? "unavailable" : provisioningCoordinator_->phaseName());
-    sendOk(requestId, extra.c_str());
+    if (!sendOk(requestId, extra.c_str())) {
+      (void)requestLinkRecordingStop(requestId, false, false);
+    }
   } else if (strcmp(operation, "provisioning-start") == 0) {
     if (transport_ != LinkTransport::usb ||
         provisioningCoordinator_ == nullptr) {
@@ -1473,6 +1458,9 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         if (!acquired) sendBusy(requestId);
       } else {
         linkOwnedRecording_ = true;
+        operation_.advance(LinkOperationState::processing);
+        operation_.ownResource(LinkOperationResource::router);
+        operation_.ownResource(LinkOperationResource::transaction);
         if (!linkRecordingStart_.begin(requestId, sessionId)) {
           (void)requestLinkRecordingStop(requestId, false, true);
         } else {
@@ -1540,6 +1528,11 @@ bool PokePodLinkService::beginManifest(uint32_t requestId,
   manifestRequestId_ = requestId;
   manifestRootOpened_ = false;
   manifestError_ = "manifest computation failed";
+  if (operationOwns(requestId)) {
+    operation_.advance(LinkOperationState::processing);
+    operation_.ownResource(LinkOperationResource::storageReservation);
+    operation_.ownResource(LinkOperationResource::file);
+  }
   return true;
 }
 
@@ -1864,6 +1857,8 @@ bool PokePodLinkService::cleanupManifestStorage() {
   }
   manifestDirectories_.clear();
   manifestStorageReservation_.release();
+  operation_.releaseResource(LinkOperationResource::file);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
   manifestStepper_.reset();
   manifestCleanupPending_ = false;
   return true;
@@ -1879,8 +1874,6 @@ void PokePodLinkService::finishPendingManifestResponse() {
     disconnect();
     return;
   }
-  rememberCompleted(requestId);
-  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 void PokePodLinkService::finishPendingManifestFailure() {
@@ -1893,8 +1886,6 @@ void PokePodLinkService::finishPendingManifestFailure() {
     return;
   }
   sendError(requestId, message.c_str());
-  rememberCompleted(requestId);
-  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 void PokePodLinkService::handleConfigure(uint32_t requestId, void *jsonRoot) {
@@ -1961,9 +1952,9 @@ void PokePodLinkService::handleCommandFile(uint32_t requestId,
   if (beginCommandLoad(requestId, path, transactionId, alreadyComplete)) return;
   commandStorageActive_ = false;
   commandStorageReservation_.release();
+  operation_.releaseResource(LinkOperationResource::transaction);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
   sendError(requestId, "command load failed");
-  rememberCompleted(requestId);
-  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 bool PokePodLinkService::beginCommandLoad(
@@ -1991,6 +1982,12 @@ bool PokePodLinkService::beginCommandLoad(
   commandLoadRespond_ = sessionActive_ && transferPermitted();
   commandLoadAlreadyComplete_ = alreadyComplete;
   commandLoadState_ = CommandLoadState::reading;
+  if (operationOwns(requestId)) {
+    operation_.advance(LinkOperationState::processing);
+    operation_.ownResource(LinkOperationResource::transaction);
+    operation_.ownResource(LinkOperationResource::storageReservation);
+    operation_.ownResource(LinkOperationResource::file);
+  }
   return true;
 }
 
@@ -2056,8 +2053,11 @@ void PokePodLinkService::finishCommandLoad(bool keepCommand) {
   commandLoadRespond_ = false;
   commandLoadAlreadyComplete_ = false;
   commandLoadState_ = CommandLoadState::none;
+  operation_.releaseResource(LinkOperationResource::file);
   commandStorageActive_ = false;
   commandStorageReservation_.release();
+  operation_.releaseResource(LinkOperationResource::transaction);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
 }
 
 void PokePodLinkService::dispatchLoadedCommand() {
@@ -2092,6 +2092,7 @@ void PokePodLinkService::dispatchLoadedCommand() {
     commandLoadRespond_ = false;
     commandLoadAlreadyComplete_ = false;
     commandLoadState_ = CommandLoadState::none;
+    operation_.releaseResource(LinkOperationResource::file);
     return;
   }
   const BatchStart batch = tryStartBatchCommand(
@@ -2106,6 +2107,7 @@ void PokePodLinkService::dispatchLoadedCommand() {
     commandLoadRespond_ = false;
     commandLoadAlreadyComplete_ = false;
     commandLoadState_ = CommandLoadState::none;
+    operation_.releaseResource(LinkOperationResource::file);
     return;
   }
   if (batch == BatchStart::rejected) {
@@ -2124,6 +2126,7 @@ void PokePodLinkService::dispatchLoadedCommand() {
     commandLoadRespond_ = false;
     commandLoadAlreadyComplete_ = false;
     commandLoadState_ = CommandLoadState::none;
+    operation_.releaseResource(LinkOperationResource::file);
     return;
   }
   const bool validEnvelope = root != nullptr && cJSON_IsObject(root) &&
@@ -2150,9 +2153,12 @@ void PokePodLinkService::dispatchLoadedCommand() {
   commandLoadRespond_ = false;
   commandLoadAlreadyComplete_ = false;
   commandLoadState_ = CommandLoadState::none;
+  operation_.releaseResource(LinkOperationResource::file);
   if (!accepted) {
     commandStorageActive_ = false;
     commandStorageReservation_.release();
+    operation_.releaseResource(LinkOperationResource::transaction);
+    operation_.releaseResource(LinkOperationResource::storageReservation);
   }
 }
 
@@ -2303,7 +2309,9 @@ void PokePodLinkService::finishTextResult(bool persisted) {
     // mutation is acknowledged without the durable result file.
     commandStorageActive_ = false;
     commandStorageReservation_.release();
+    operation_.releaseResource(LinkOperationResource::storageReservation);
   }
+  operation_.releaseResource(LinkOperationResource::transaction);
   commandTextRequestId_ = 0;
   commandTextPath_ = "";
   commandTextTransactionId_ = "";
@@ -2356,7 +2364,9 @@ void PokePodLinkService::finishCommandFailureResult(bool persisted) {
   } else {
     commandStorageActive_ = false;
     commandStorageReservation_.release();
+    operation_.releaseResource(LinkOperationResource::storageReservation);
   }
+  operation_.releaseResource(LinkOperationResource::transaction);
   commandTextRequestId_ = 0;
   commandTextPath_ = "";
   commandTextTransactionId_ = "";
@@ -3653,11 +3663,11 @@ void PokePodLinkService::finishBatchCommand() {
   transactionGate_.reset();
   commandStorageActive_ = false;
   commandStorageReservation_.release();
+  operation_.releaseResource(LinkOperationResource::transaction);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
   (void)library_->requestScan();
   if (respond) {
     sendOk(requestId, "\"accepted\":true");
-    rememberCompleted(requestId);
-    if (activeMaintenance_.isEmpty()) releaseRequestLease();
   }
 }
 
@@ -3687,10 +3697,10 @@ void PokePodLinkService::finishCommandStorageCleanup() {
   commandCleanupRequestId_ = 0;
   commandStorageActive_ = false;
   commandStorageReservation_.release();
+  operation_.releaseResource(LinkOperationResource::transaction);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
   if (requestId != 0 && sessionActive_ && transferPermitted()) {
     sendOk(requestId, "\"accepted\":true");
-    rememberCompleted(requestId);
-    if (activeMaintenance_.isEmpty()) releaseRequestLease();
   }
 }
 
@@ -3927,7 +3937,7 @@ bool PokePodLinkService::sendOk(uint32_t requestId, const char *extraJson) {
 
 void PokePodLinkService::sendBusy(uint32_t requestId, uint32_t retryAfterMs) {
   sendJson(requestId, "{\"status\":\"busy\",\"version\":2,\"retryAfterMs\":" +
-      String(retryAfterMs) + "}");
+      String(retryAfterMs) + "}", false);
 }
 
 void PokePodLinkService::sendError(uint32_t requestId, const char *message) {
@@ -3940,15 +3950,29 @@ void PokePodLinkService::sendError(uint32_t requestId, const char *message) {
 }
 
 bool PokePodLinkService::sendJson(uint32_t requestId, const String &json) {
+  return sendJson(requestId, json, true);
+}
+
+bool PokePodLinkService::sendJson(uint32_t requestId, const String &json,
+                                  bool completionEligible) {
   if (json.length() > kLinkMaxControlBytes) return false;
+  if (operationOwns(requestId)) {
+    if (operation_.state() == LinkOperationState::receiving) {
+      operation_.advance(LinkOperationState::processing);
+    }
+    operation_.retainCoordinatorAfterTerminal(!activeMaintenance_.isEmpty());
+  }
   return sendFrame(LinkFrameType::responseJson, 0, requestId,
-                   reinterpret_cast<const uint8_t *>(json.c_str()), json.length());
+                   reinterpret_cast<const uint8_t *>(json.c_str()),
+                   json.length(), LinkOperationFrameRole::terminal,
+                   completionEligible);
 }
 
 bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
   if (json.length() > kLinkMaxControlBytes) return false;
   return sendFrame(LinkFrameType::eventJson, 0, requestId,
-                   reinterpret_cast<const uint8_t *>(json.c_str()), json.length());
+                   reinterpret_cast<const uint8_t *>(json.c_str()),
+                   json.length(), LinkOperationFrameRole::progress);
 }
 
 bool PokePodLinkService::sendFile(uint32_t requestId, const String &path,
@@ -3990,9 +4014,17 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path,
   outgoingResultTransactionId_ = resultTransactionId == nullptr
       ? String() : String(resultTransactionId);
   outgoingStorageReservation_ = std::move(reservation);
+  if (operationOwns(requestId)) {
+    operation_.advance(LinkOperationState::processing);
+    operation_.ownResource(LinkOperationResource::storageReservation);
+    operation_.ownResource(LinkOperationResource::file);
+  }
   if (!queueFrame(LinkFrameType::responseJson, 0, requestId,
                   reinterpret_cast<const uint8_t *>(response.c_str()),
-                  response.length(), TxCompletion::fileResponse)) {
+                  response.length(), TxCompletion::fileResponse,
+                  length == 0 ? LinkOperationFrameRole::terminal
+                              : LinkOperationFrameRole::data,
+                  length == 0)) {
     finishOutgoingFile(false);
     return false;
   }
@@ -4001,17 +4033,28 @@ bool PokePodLinkService::sendFile(uint32_t requestId, const String &path,
 
 bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
                                    uint32_t requestId,
-                                   const uint8_t *payload, size_t size) {
+                                   const uint8_t *payload, size_t size,
+                                   LinkOperationFrameRole role,
+                                   bool completionEligible) {
   return queueFrame(type, flags, requestId, payload, size,
-                    TxCompletion::none);
+                    TxCompletion::none, role, completionEligible);
 }
 
 bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
                                     uint32_t requestId,
                                     const uint8_t *payload, size_t size,
-                                    TxCompletion completion) {
+                                    TxCompletion completion,
+                                    LinkOperationFrameRole role,
+                                    bool completionEligible) {
+  const bool lifecycleOwned = operationOwns(requestId);
+  const auto failOwnedQueue = [&]() {
+    if (!lifecycleOwned) return;
+    operation_.cancel(LinkOperationCancelReason::operationFailure);
+    operation_.discardQueuedFrames(connectionGeneration_);
+  };
   if (stream_ == nullptr || !transferPermitted() || size >
       (type == LinkFrameType::data ? kLinkMaxDataBytes : kLinkMaxControlBytes)) {
+    failOwnedQueue();
     return false;
   }
   LinkFrameHeader header;
@@ -4023,30 +4066,46 @@ bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
   uint8_t *target = nullptr;
   size_t *targetBytes = nullptr;
   TxCompletion *targetCompletion = nullptr;
+  LinkOperationFrameRole *targetRole = nullptr;
+  uint32_t *targetGeneration = nullptr;
   if (!txStepper_.active() && txFrameBytes_ == 0) {
     target = txFrame_;
     targetBytes = &txFrameBytes_;
     targetCompletion = &txCompletion_;
+    targetRole = &txFrameRole_;
+    targetGeneration = &txFrameGeneration_;
   } else if (type != LinkFrameType::data && pendingControlBytes_ == 0) {
     target = pendingControlFrame_;
     targetBytes = &pendingControlBytes_;
     targetCompletion = &pendingControlCompletion_;
+    targetRole = &pendingControlRole_;
+    targetGeneration = &pendingControlGeneration_;
   } else {
+    failOwnedQueue();
     return false;
   }
   if (target == nullptr ||
-      !encodeLinkHeader(header, target, kLinkHeaderBytes)) return false;
+      !encodeLinkHeader(header, target, kLinkHeaderBytes)) {
+    failOwnedQueue();
+    return false;
+  }
   if (size > 0) memcpy(target + kLinkHeaderBytes, payload, size);
+  if (lifecycleOwned && !operation_.queueFrame(
+          role, connectionGeneration_, millis(), completionEligible)) {
+    failOwnedQueue();
+    return false;
+  }
   *targetBytes = kLinkHeaderBytes + size;
   *targetCompletion = completion;
+  *targetRole = role;
+  *targetGeneration = lifecycleOwned ? connectionGeneration_ : 0;
   if (target == txFrame_ && !txStepper_.beginFrame(*targetBytes)) {
     *targetBytes = 0;
     *targetCompletion = TxCompletion::none;
+    *targetRole = LinkOperationFrameRole::progress;
+    *targetGeneration = 0;
+    failOwnedQueue();
     return false;
-  }
-  if (requestLeaseHeld_ && requestId == requestLeaseOwnerRequestId_ &&
-      activeMaintenance_.isEmpty()) {
-    releaseRequestLeaseWhenTxDrained_ = true;
   }
   return true;
 }
@@ -4087,23 +4146,39 @@ void PokePodLinkService::advanceTransmit(uint32_t nowMs) {
   if (result != LinkTransferStepResult::frameComplete) return;
 
   const TxCompletion completion = txCompletion_;
+  const LinkOperationFrameRole role = txFrameRole_;
+  const uint32_t generation = txFrameGeneration_;
   txFrameBytes_ = 0;
   txCompletion_ = TxCompletion::none;
+  txFrameRole_ = LinkOperationFrameRole::progress;
+  txFrameGeneration_ = 0;
+  if (generation != 0) {
+    (void)operation_.frameDrained(role, generation, millis());
+  }
   onFrameSent(completion);
 
   if (!txStepper_.active() && pendingControlBytes_ > 0) {
     memcpy(txFrame_, pendingControlFrame_, pendingControlBytes_);
     txFrameBytes_ = pendingControlBytes_;
     txCompletion_ = pendingControlCompletion_;
+    txFrameRole_ = pendingControlRole_;
+    txFrameGeneration_ = pendingControlGeneration_;
     pendingControlBytes_ = 0;
     pendingControlCompletion_ = TxCompletion::none;
-    txStepper_.beginFrame(txFrameBytes_);
+    pendingControlRole_ = LinkOperationFrameRole::progress;
+    pendingControlGeneration_ = 0;
+    if (!txStepper_.beginFrame(txFrameBytes_)) {
+      if (txFrameGeneration_ != 0) {
+        operation_.cancel(LinkOperationCancelReason::operationFailure);
+        operation_.discardQueuedFrames(txFrameGeneration_);
+      }
+      txFrameBytes_ = 0;
+      txCompletion_ = TxCompletion::none;
+      txFrameRole_ = LinkOperationFrameRole::progress;
+      txFrameGeneration_ = 0;
+    }
   }
-  if (!txStepper_.active() && pendingControlBytes_ == 0 &&
-      outgoingPhase_ == OutgoingPhase::none &&
-      releaseRequestLeaseWhenTxDrained_) {
-    releaseRequestLeaseNow();
-  }
+  advanceLinkOperationSettlement();
 }
 
 void PokePodLinkService::queueNextFileChunk() {
@@ -4138,7 +4213,10 @@ void PokePodLinkService::queueNextFileChunk() {
   if (!queueFrame(LinkFrameType::data, final ? 1 : 0,
                   outgoingRequestId_, payload_, count,
                   final ? TxCompletion::fileFinal :
-                          TxCompletion::fileData)) {
+                          TxCompletion::fileData,
+                  final ? LinkOperationFrameRole::terminal
+                        : LinkOperationFrameRole::data,
+                  final)) {
     finishOutgoingFile(false);
     disconnect();
   }
@@ -4172,21 +4250,24 @@ void PokePodLinkService::finishOutgoingCleanup() {
   outgoingRead_ = 0;
   outgoingResultTransactionId_ = "";
   outgoingCleanupSuccess_ = false;
+  operation_.releaseResource(LinkOperationResource::file);
+  operation_.releaseResource(LinkOperationResource::storageReservation);
   if (success && !resultTransaction.isEmpty()) {
     maintenanceCompletion_.resultFetched(resultTransaction.c_str(), true);
   }
-  if (!txStepper_.active() && pendingControlBytes_ == 0 &&
-      releaseRequestLeaseWhenTxDrained_ && activeMaintenance_.isEmpty()) {
-    releaseRequestLeaseNow();
-  }
+  advanceLinkOperationSettlement();
 }
 
 void PokePodLinkService::abortOutgoing() {
   txStepper_.cancel();
   txFrameBytes_ = 0;
   txCompletion_ = TxCompletion::none;
+  txFrameRole_ = LinkOperationFrameRole::progress;
+  txFrameGeneration_ = 0;
   pendingControlBytes_ = 0;
   pendingControlCompletion_ = TxCompletion::none;
+  pendingControlRole_ = LinkOperationFrameRole::progress;
+  pendingControlGeneration_ = 0;
   if (outgoingCleanupPending_) {
     // A socket cancellation before deferred handle cleanup completes is not a
     // confirmed result fetch, even if the final frame had left the TX buffer.
@@ -4197,8 +4278,9 @@ void PokePodLinkService::abortOutgoing() {
   } else {
     outgoingStorageReservation_.release();
     outgoingResultTransactionId_ = "";
+    operation_.releaseResource(LinkOperationResource::file);
+    operation_.releaseResource(LinkOperationResource::storageReservation);
   }
-  releaseRequestLeaseWhenTxDrained_ = false;
 }
 
 void PokePodLinkService::onFrameSent(TxCompletion completion) {
@@ -4238,6 +4320,11 @@ bool PokePodLinkService::requestLinkRecordingStop(uint32_t requestId,
     return false;
   }
   if (!linkRecordingStop_.begin(requestId, commit, respond)) return false;
+  if (requestId != 0 && operationOwns(requestId)) {
+    operation_.advance(LinkOperationState::processing);
+    operation_.ownResource(LinkOperationResource::router);
+    operation_.ownResource(LinkOperationResource::transaction);
+  }
   // stop() may time out while the task is still completing its bounded I2S
   // read.  Ownership remains here; pollDeferredCleanup observes the eventual
   // stopped fact even if PokePodApp consumed the semaphore first.
@@ -4269,9 +4356,9 @@ void PokePodLinkService::advanceLinkRecordingStart() {
       captureRuntime_->start(*audio_, captureSessionId, *log_)) {
     const String extra = "\"recording\":true,\"capsuleId\":\"" +
         capsuleId + "\"";
+    operation_.releaseResource(LinkOperationResource::transaction);
+    operation_.releaseResource(LinkOperationResource::router);
     sendOk(requestId, extra.c_str());
-    rememberCompleted(requestId);
-    if (activeMaintenance_.isEmpty()) releaseRequestLease();
     return;
   }
 
@@ -4341,6 +4428,8 @@ void PokePodLinkService::advanceLinkRecordingStop() {
   const bool committed = outcome.success();
   captureRouter_->release(AudioCaptureOwner::localCapsule);
   linkOwnedRecording_ = false;
+  operation_.releaseResource(LinkOperationResource::router);
+  operation_.releaseResource(LinkOperationResource::transaction);
   linkRecordingStop_.finish();
   transactionGate_.reset();
 
@@ -4354,8 +4443,6 @@ void PokePodLinkService::advanceLinkRecordingStop() {
   } else {
     sendError(requestId, "recording commit failed");
   }
-  rememberCompleted(requestId);
-  if (activeMaintenance_.isEmpty()) releaseRequestLease();
 }
 
 bool PokePodLinkService::transferPermitted() const {
@@ -4373,10 +4460,6 @@ StorageOwner PokePodLinkService::storageOwner() const {
   if (commandStorageActive_) return StorageOwner::capsuleTransaction;
   return transport_ == LinkTransport::wifi ? StorageOwner::wifiLink
                                             : StorageOwner::usbLink;
-}
-
-void PokePodLinkService::rememberCompleted(uint32_t requestId) {
-  if (requestId != 0) completed_.complete(requestId);
 }
 
 bool PokePodLinkService::ensureDirectoryTree(const String &path) {
@@ -4547,46 +4630,6 @@ String PokePodLinkService::deviceId() const {
   char value[24];
   formatPokePodDeviceId(ESP.getEfuseMac(), value);
   return String(value);
-}
-
-bool PokePodLinkService::acquireRequestLease(uint32_t requestId) {
-  if (requestLeaseHeld_) return true;
-  if (coordinator_ == nullptr || transport_ == LinkTransport::none) {
-    requestLeaseHeld_ = true;
-    requestLeaseOwnerRequestId_ = requestId;
-    return true;
-  }
-  if (!coordinator_->acquire(transport_)) {
-    sendBusy(requestId, 250);
-    return false;
-  }
-  requestLeaseHeld_ = true;
-  requestLeaseOwnerRequestId_ = requestId;
-  return true;
-}
-
-void PokePodLinkService::releaseRequestLease() {
-  if (!requestLeaseHeld_) return;
-  if (txStepper_.active() || pendingControlBytes_ != 0 ||
-      outgoingPhase_ != OutgoingPhase::none) {
-    releaseRequestLeaseWhenTxDrained_ = true;
-    return;
-  }
-  releaseRequestLeaseNow();
-}
-
-void PokePodLinkService::releaseRequestLeaseNow() {
-  if (!requestLeaseHeld_) {
-    requestLeaseOwnerRequestId_ = 0;
-    releaseRequestLeaseWhenTxDrained_ = false;
-    return;
-  }
-  if (coordinator_ != nullptr && transport_ != LinkTransport::none) {
-    coordinator_->release(transport_);
-  }
-  requestLeaseHeld_ = false;
-  requestLeaseOwnerRequestId_ = 0;
-  releaseRequestLeaseWhenTxDrained_ = false;
 }
 
 bool PokePodLinkService::foregroundBusy() const {

@@ -32,7 +32,10 @@ assert "transport_ == LinkTransport::wifi || !sessionActive_ || quiesceRequested
 assert advance.index("recorder_->takeTerminalResult(outcome)") < advance.index(
     "captureRouter_->release")
 assert "recorder_->pollCleanup" not in advance
-assert "rememberCompleted(requestId)" in advance
+assert "operation_.releaseResource(LinkOperationResource::router)" in advance
+assert "operation_.releaseResource(LinkOperationResource::transaction)" in advance
+assert "rememberCompleted(requestId)" not in advance
+assert "releaseRequestLease()" not in advance
 
 assert "awaitCaptureFinalize" in STATE
 assert "awaitRecorderTerminal" in STATE
@@ -56,29 +59,27 @@ assert start_advance.index("RecorderStartPollResult::started") < start_advance.i
     "captureRuntime_->start")
 assert start_advance.index("captureRuntime_->start") < start_advance.index(
     "sendOk(requestId")
-assert start_advance.index("sendOk(requestId") < start_advance.index(
-    "rememberCompleted(requestId)")
-assert "releaseRequestLease()" in start_advance
+assert "operation_.releaseResource(LinkOperationResource::router)" in start_advance
+assert "operation_.releaseResource(LinkOperationResource::transaction)" in start_advance
+assert "rememberCompleted(requestId)" not in start_advance
+assert "releaseRequestLease()" not in start_advance
 
 process = CPP[CPP.index("void PokePodLinkService::processRequest("):
               CPP.index("bool PokePodLinkService::beginIncoming(")]
 assert "linkRecordingStart_.ownsRequest(requestId)" in process
-assert "linkRecordingStart_.active() || linkRecordingStop_.active()" in process
+assert "admitLinkOperation(requestId)" in process
 assert "sendBusy(requestId);" in process
-async_guard = process.index(
-    "linkRecordingStart_.active() || linkRecordingStop_.active()")
+async_guard = process.index("admitLinkOperation(requestId)")
 assert async_guard < process.index("cJSON_ParseWithLength")
-assert async_guard < process.index("acquireRequestLease(requestId)")
 assert process.index("handleImmediate(requestId, root)") < process.rindex(
     "linkRecordingStart_.ownsRequest(requestId)")
 
 queue = CPP[CPP.index("bool PokePodLinkService::queueFrame("):
             CPP.index("void PokePodLinkService::advanceTransmit(")]
-assert "requestId == requestLeaseOwnerRequestId_" in queue
-lease = CPP[CPP.index("bool PokePodLinkService::acquireRequestLease("):
-            CPP.index("bool PokePodLinkService::foregroundBusy(")]
-assert "requestLeaseOwnerRequestId_ = requestId" in lease
-assert "requestLeaseOwnerRequestId_ = 0" in lease
+assert "operation_.queueFrame(" in queue
+assert "LinkOperationFrameRole role" in queue
+assert "requestLeaseOwnerRequestId_" not in queue
+assert "releaseRequestLeaseWhenTxDrained_" not in queue
 
 poll = CPP[CPP.index("void PokePodLinkService::pollDeferredCleanup()"):
            CPP.index("void PokePodLinkService::poll(uint32_t nowMs)")]

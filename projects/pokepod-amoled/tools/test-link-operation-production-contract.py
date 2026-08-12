@@ -38,4 +38,56 @@ absolute = GATE[GATE.index("bool absoluteDeadline(uint32_t &deadlineMs) const ov
 assert "deadlineMs = deadlineMs_" in absolute
 assert ".arm(" not in absolute
 
+for legacy in (
+    "requestLeaseHeld_", "requestLeaseOwnerRequestId_",
+    "releaseRequestLeaseWhenTxDrained_", "rememberCompleted(",
+    "releaseRequestLease(",
+):
+    assert legacy not in HEADER
+    assert legacy not in SOURCE
+
+queue = SOURCE[SOURCE.index("bool PokePodLinkService::queueFrame("):
+               SOURCE.index("void PokePodLinkService::advanceTransmit(")]
+assert "operation_.queueFrame(" in queue
+assert "completed_.complete" not in queue
+assert "coordinator_->release" not in queue
+assert "failOwnedQueue" in queue
+assert "operation_.discardQueuedFrames" in queue
+
+settle = SOURCE[SOURCE.index(
+    "void PokePodLinkService::advanceLinkOperationSettlement()"):
+    SOURCE.index("void PokePodLinkService::disconnect()")]
+assert SOURCE.count("completed_.complete") == 1
+assert "completed_.complete" in settle
+assert SOURCE.count("coordinator_->release") == 2  # admission rollback + settlement
+assert "coordinator_->release" in settle
+
+disconnect = SOURCE[SOURCE.index("void PokePodLinkService::disconnect()"):
+                    SOURCE.index("void PokePodLinkService::requestQuiesce()")]
+assert "cancelLinkOperation" in disconnect
+assert "advanceLinkOperationSettlement" in disconnect
+
+transmit = SOURCE[SOURCE.index("void PokePodLinkService::advanceTransmit("):
+                   SOURCE.index("void PokePodLinkService::queueNextFileChunk(")]
+assert "operation_.frameDrained" in transmit
+assert "LinkOperationFrameRole role" in transmit
+
+abort = SOURCE[SOURCE.index("void PokePodLinkService::abortOutgoing()"):
+                SOURCE.index("void PokePodLinkService::onFrameSent(")]
+for reset in (
+    "txFrameGeneration_ = 0", "pendingControlGeneration_ = 0",
+    "txFrameRole_ = LinkOperationFrameRole::progress",
+    "pendingControlRole_ = LinkOperationFrameRole::progress",
+):
+    assert reset in abort, f"disconnect does not discard queued role: {reset}"
+
+assert "cancelRetainedCoordinator" in SOURCE
+assert "!operation_.ownsResource(LinkOperationResource::coordinator)" in SOURCE
+
+assert 'sendFrame(LinkFrameType::eventJson' in SOURCE
+events = SOURCE[SOURCE.index("bool PokePodLinkService::sendEvent("):
+                SOURCE.index("bool PokePodLinkService::sendFile(")]
+assert "LinkOperationFrameRole::progress" in events
+assert "binary_ack" in SOURCE
+
 print("PASS link_operation_production_contract")
