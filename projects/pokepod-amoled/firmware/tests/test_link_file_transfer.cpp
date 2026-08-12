@@ -173,6 +173,124 @@ void testQueueFailureNeverPublishesResult() {
   assert(host.fs.state()->openHandles == 0);
 }
 
+void testEmptyFileUsesTerminalResponseAndCompletesAfterCleanup() {
+  FakeHost host;
+  host.fs.state()->seed("/empty.wav", "");
+  LinkFileTransfer transfer;
+  transfer.bind(host);
+  static constexpr const char *kTransaction =
+      "33333333-3333-4333-8333-333333333333";
+
+  assert(transfer.send(12, "/empty.wav", kTransaction));
+  assert(host.frames.size() == 1);
+  assert(host.frames[0].role == LinkOperationFrameRole::terminal);
+  assert(host.frames[0].completionEligible);
+  assert(host.fetched.empty());
+
+  host.drainLast(transfer);
+  assert(transfer.quiesced());
+  assert(host.fetched == kTransaction);
+  assert(host.settlements == 1);
+  assert(host.fs.state()->openHandles == 0);
+}
+
+void testBusyPhysicalIoRetriesWithoutDuplicatingBytes() {
+  FakeHost host;
+  host.fs.state()->seed("/retry.wav", "abcd");
+  LinkFileTransfer transfer;
+  transfer.bind(host);
+  assert(transfer.send(13, "/retry.wav"));
+  host.drainLast(transfer);
+
+  std::atomic<bool> leaseReady{false};
+  std::atomic<bool> releaseLease{false};
+  std::thread other([&]() {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::fontRead, StorageAccess::read, 50);
+    assert(lease);
+    leaseReady.store(true);
+    while (!releaseLease.load()) std::this_thread::yield();
+  });
+  while (!leaseReady.load()) std::this_thread::yield();
+
+  transfer.advance();
+  assert(host.frames.size() == 1);
+  assert(host.disconnects == 0);
+
+  releaseLease.store(true);
+  other.join();
+  transfer.advance();
+  assert(host.frames.size() == 2);
+  assert(std::string(host.frames[1].payload.begin(),
+                     host.frames[1].payload.end()) == "abc");
+  host.drainLast(transfer);
+  transfer.advance();
+  assert(host.frames.size() == 3);
+  assert(std::string(host.frames[2].payload.begin(),
+                     host.frames[2].payload.end()) == "d");
+  host.drainLast(transfer);
+  assert(transfer.quiesced());
+}
+
+void testFinalFrameDisconnectBeforeCleanupNeverPublishesResult() {
+  FakeHost host;
+  host.capacity = sizeof(host.buffer);
+  host.fs.state()->seed("/result.json", "result");
+  LinkFileTransfer transfer;
+  transfer.bind(host);
+  assert(transfer.send(14, "/result.json",
+                       "44444444-4444-4444-8444-444444444444"));
+  host.drainLast(transfer);
+  transfer.advance();
+  assert(host.frames.size() == 2);
+  assert(host.frames.back().completion ==
+         LinkFileTransferFrameCompletion::final);
+
+  std::atomic<bool> leaseReady{false};
+  std::atomic<bool> releaseLease{false};
+  std::thread other([&]() {
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        StorageOwner::fontRead, StorageAccess::read, 50);
+    assert(lease);
+    leaseReady.store(true);
+    while (!releaseLease.load()) std::this_thread::yield();
+  });
+  while (!leaseReady.load()) std::this_thread::yield();
+
+  host.drainLast(transfer);
+  assert(transfer.cleanupPending());
+  assert(host.fetched.empty());
+  transfer.abort();
+  assert(host.fetched.empty());
+
+  releaseLease.store(true);
+  other.join();
+  assert(transfer.pollCleanup());
+  assert(transfer.quiesced());
+  assert(host.fetched.empty());
+  assert(!host.resources);
+  assert(host.fs.state()->openHandles == 0);
+}
+
+void testDataQueueFailureDisconnectsAndReleasesEverything() {
+  FakeHost host;
+  host.fs.state()->seed("/queue.wav", "abcd");
+  LinkFileTransfer transfer;
+  transfer.bind(host);
+  assert(transfer.send(15, "/queue.wav",
+                       "55555555-5555-4555-8555-555555555555"));
+  host.drainLast(transfer);
+  host.failQueue = true;
+  transfer.advance();
+
+  assert(host.disconnects == 1);
+  assert(transfer.quiesced());
+  assert(host.fetched.empty());
+  assert(!host.resources);
+  assert(host.settlements == 1);
+  assert(host.fs.state()->openHandles == 0);
+}
+
 void testAbortWaitsForOwnerScopedPhysicalCleanup() {
   FakeHost host;
   host.fs.state()->seed("/large.wav", "01234567");
@@ -228,6 +346,10 @@ void testAdmissionErrorsDoNotAcquireResources() {
 int main() {
   testStreamsOneOwnerAndCompletesAfterCleanup();
   testQueueFailureNeverPublishesResult();
+  testEmptyFileUsesTerminalResponseAndCompletesAfterCleanup();
+  testBusyPhysicalIoRetriesWithoutDuplicatingBytes();
+  testFinalFrameDisconnectBeforeCleanupNeverPublishesResult();
+  testDataQueueFailureDisconnectsAndReleasesEverything();
   testAbortWaitsForOwnerScopedPhysicalCleanup();
   testAdmissionErrorsDoNotAcquireResources();
   return 0;
