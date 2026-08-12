@@ -16,6 +16,12 @@ class LinkTransferGate {
   virtual bool permits(uint32_t nowMs) = 0;
   virtual void attachCancellationSink(LinkTransferCancellationSink *sink) = 0;
   virtual void detachCancellationSink(LinkTransferCancellationSink *sink) = 0;
+  // Exposes an already-armed absolute deadline to request lifecycle owners.
+  // Reading this value never arms, extends or otherwise mutates the gate.
+  virtual bool absoluteDeadline(uint32_t &deadlineMs) const {
+    (void)deadlineMs;
+    return false;
+  }
 };
 
 inline bool linkTransferPermitted(LinkTransferGate *gate,
@@ -58,6 +64,12 @@ class AbsoluteLinkDeadlineGate final : public LinkTransferGate {
 
   void detachCancellationSink(LinkTransferCancellationSink *sink) override {
     if (sink_ == sink) sink_ = nullptr;
+  }
+
+  bool absoluteDeadline(uint32_t &deadlineMs) const override {
+    if (!active_) return false;
+    deadlineMs = deadlineMs_;
+    return true;
   }
 
   bool active() const { return active_; }

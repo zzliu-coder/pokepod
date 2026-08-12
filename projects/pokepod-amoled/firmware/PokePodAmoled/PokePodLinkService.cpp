@@ -222,6 +222,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   pairingProvider_ = pairingProvider;
   transferGate_ = transferGate;
   writeChannel_ = writeChannel;
+  connectionGeneration_ = 0;
+  nextConnectionGeneration_ = 0;
   requestLeaseHeld_ = false;
   activeMaintenance_ = "";
   quiesceRequested_ = false;
@@ -276,6 +278,95 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   }
   transactionPurpose_ = TransactionPurpose::startupRecovery;
   return true;
+}
+
+uint32_t PokePodLinkService::activateConnectionGeneration() {
+  if (connectionGeneration_ != 0) return connectionGeneration_;
+  ++nextConnectionGeneration_;
+  if (nextConnectionGeneration_ == 0) ++nextConnectionGeneration_;
+  connectionGeneration_ = nextConnectionGeneration_;
+  return connectionGeneration_;
+}
+
+LinkOperationAdmission PokePodLinkService::admitLinkOperation(
+    uint32_t requestId) {
+  const LinkTransport lifecycleTransport =
+      transport_ == LinkTransport::none ? LinkTransport::usb : transport_;
+  const uint32_t generation = activateConnectionGeneration();
+  uint32_t absoluteDeadlineMs = 0;
+  const bool deadlineArmed = transferGate_ != nullptr &&
+      transferGate_->absoluteDeadline(absoluteDeadlineMs);
+
+  // An active or retained lifecycle decides same-request/busy before touching
+  // the external coordinator. This prevents a rejected request from releasing
+  // the operation that is already in flight.
+  if (operation_.active() ||
+      operation_.ownsResource(LinkOperationResource::coordinator)) {
+    return operation_.admit(requestId, lifecycleTransport, generation, false,
+                            deadlineArmed, absoluteDeadlineMs);
+  }
+
+  bool coordinatorOwned = false;
+  if (coordinator_ != nullptr && transport_ != LinkTransport::none) {
+    if (!coordinator_->acquire(transport_)) {
+      return LinkOperationAdmission::busy;
+    }
+    coordinatorOwned = true;
+  }
+  const LinkOperationAdmission admission = operation_.admit(
+      requestId, lifecycleTransport, generation, coordinatorOwned,
+      deadlineArmed, absoluteDeadlineMs);
+  if (admission != LinkOperationAdmission::accepted && coordinatorOwned) {
+    coordinator_->release(transport_);
+  }
+  return admission;
+}
+
+bool PokePodLinkService::operationOwns(uint32_t requestId) const {
+  const LinkTransport lifecycleTransport =
+      transport_ == LinkTransport::none ? LinkTransport::usb : transport_;
+  return connectionGeneration_ != 0 &&
+      operation_.owns(requestId, lifecycleTransport, connectionGeneration_);
+}
+
+void PokePodLinkService::cancelLinkOperation(
+    LinkOperationCancelReason reason) {
+  if (operation_.active()) {
+    operation_.cancel(reason);
+    if (connectionGeneration_ != 0) {
+      operation_.discardQueuedFrames(connectionGeneration_);
+    }
+    return;
+  }
+  if (connectionGeneration_ == 0) return;
+  const LinkTransport lifecycleTransport =
+      transport_ == LinkTransport::none ? LinkTransport::usb : transport_;
+  (void)operation_.cancelRetainedCoordinator(
+      lifecycleTransport, connectionGeneration_, reason);
+}
+
+void PokePodLinkService::advanceLinkOperationSettlement() {
+  const LinkOperationSettlement proposal = operation_.settlement();
+  if (!proposal.ready || !operation_.beginRelease()) return;
+  LinkOperationSettlement pending = operation_.settlement();
+  if (pending.rememberCompleted) {
+    const uint32_t requestId = operation_.requestId();
+    if (requestId != 0) completed_.complete(requestId);
+    (void)operation_.acknowledgeCompletion(true);
+  }
+  pending = operation_.settlement();
+  if (pending.releaseRequest) {
+    (void)operation_.acknowledgeRelease(LinkOperationResource::request, true);
+  }
+  pending = operation_.settlement();
+  if (pending.releaseCoordinator) {
+    if (coordinator_ != nullptr && transport_ != LinkTransport::none) {
+      coordinator_->release(transport_);
+    }
+    (void)operation_.acknowledgeRelease(
+        LinkOperationResource::coordinator, true);
+  }
+  (void)operation_.finishRelease();
 }
 
 void PokePodLinkService::disconnect() {

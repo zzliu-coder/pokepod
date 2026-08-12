@@ -15,6 +15,7 @@
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
 #include "LinkCommandExecutor.h"
+#include "LinkOperation.h"
 #include "LinkTreeStepper.h"
 #include "LinkTransferGate.h"
 #include "LinkTransferStepper.h"
@@ -149,6 +150,11 @@ class PokePodLinkService {
   };
 
   void consumeByte(uint8_t value);
+  uint32_t activateConnectionGeneration();
+  LinkOperationAdmission admitLinkOperation(uint32_t requestId);
+  bool operationOwns(uint32_t requestId) const;
+  void cancelLinkOperation(LinkOperationCancelReason reason);
+  void advanceLinkOperationSettlement();
   void resetFrame();
   void processFrame();
   void processRequest(uint32_t requestId, const uint8_t *payload, size_t size);
@@ -321,6 +327,9 @@ class PokePodLinkService {
   WirelessSyncPairingProvider *pairingProvider_ = nullptr;
   LinkTransferGate *transferGate_ = nullptr;
   LinkWriteChannel *writeChannel_ = nullptr;
+  LinkOperation operation_;
+  uint32_t connectionGeneration_ = 0;
+  uint32_t nextConnectionGeneration_ = 0;
   bool requestLeaseHeld_ = false;
   uint32_t requestLeaseOwnerRequestId_ = 0;
   bool releaseRequestLeaseWhenTxDrained_ = false;
