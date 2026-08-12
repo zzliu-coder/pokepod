@@ -55,9 +55,11 @@ struct AdapterHarness {
   }
 };
 
-struct EpochHistory {
+struct ServiceEpochHarness {
+  LinkOperation operation;
   LinkRequestHistory history;
   uint32_t liveGeneration = 0;
+  uint32_t coordinatorGeneration = 0;
 
   void connect(uint32_t generation) {
     assert(generation != 0);
@@ -67,12 +69,71 @@ struct EpochHistory {
 
   void disconnect() { liveGeneration = 0; }
 
-  bool settleCompletion(LinkOperation &operation) {
+  LinkOperationAdmission admit(uint32_t requestId) {
+    if (coordinatorGeneration != 0) return LinkOperationAdmission::busy;
+    const LinkOperationAdmission result = operation.admit(
+        requestId, LinkTransport::wifi, liveGeneration, true);
+    if (result == LinkOperationAdmission::accepted) {
+      coordinatorGeneration = liveGeneration;
+    }
+    return result;
+  }
+
+  bool settle() {
+    if (!operation.settlement().ready || !operation.beginRelease()) {
+      return false;
+    }
     const uint32_t requestId = operation.requestId();
     const bool current = liveGeneration != 0 &&
         operation.connectionGeneration() == liveGeneration;
-    return !current || requestId == 0 || history.contains(requestId) ||
+    const bool completed = !current || requestId == 0 ||
+        history.contains(requestId) ||
         history.complete(requestId);
+    if (operation.settlement().rememberCompleted) {
+      assert(operation.acknowledgeCompletion(completed));
+    }
+    if (operation.settlement().releaseRequest) {
+      assert(operation.acknowledgeRelease(
+          LinkOperationResource::request, true));
+    }
+    if (operation.settlement().releaseCoordinator) {
+      if (coordinatorGeneration == operation.connectionGeneration()) {
+        coordinatorGeneration = 0;
+      }
+      assert(operation.acknowledgeRelease(
+          LinkOperationResource::coordinator,
+          coordinatorGeneration == 0));
+    }
+    return operation.finishRelease();
+  }
+};
+
+struct TerminalFallbackHarness {
+  LinkOperation operation;
+  bool connected = true;
+  bool fallbackQueued = false;
+
+  void accept(uint32_t requestId, uint32_t generation) {
+    assert(operation.admit(requestId, LinkTransport::wifi, generation, true) ==
+           LinkOperationAdmission::accepted);
+  }
+
+  bool send(size_t primaryBytes, bool primaryQueueAvailable,
+            bool fallbackQueueAvailable, uint32_t generation) {
+    constexpr size_t maximum = 4096;
+    if (primaryBytes <= maximum && primaryQueueAvailable) {
+      return operation.queueFrame(LinkOperationFrameRole::terminal,
+                                  generation, 1, true);
+    }
+    if (fallbackQueueAvailable) {
+      fallbackQueued = operation.queueFrame(
+          LinkOperationFrameRole::terminal, generation, 2, false);
+      return false;
+    }
+    operation.cancel(LinkOperationCancelReason::operationFailure);
+    operation.discardQueuedFrames(generation);
+    connected = false;
+    return false;
   }
 };
 
@@ -206,23 +267,44 @@ int main() {
   // A disconnected operation may finish deferred cleanup after a new
   // physical connection uses the same request id.  Its old epoch is
   // acknowledged locally and never inserts into the new replay cache.
-  EpochHistory epoch;
+  ServiceEpochHarness epoch;
   epoch.connect(20);
-  LinkOperation oldConnection;
-  assert(oldConnection.admit(200, LinkTransport::wifi, 20, true) ==
-         LinkOperationAdmission::accepted);
-  oldConnection.ownResource(LinkOperationResource::file);
-  oldConnection.cancel(LinkOperationCancelReason::disconnect);
+  assert(epoch.admit(200) == LinkOperationAdmission::accepted);
+  epoch.operation.ownResource(LinkOperationResource::file);
+  epoch.operation.cancel(LinkOperationCancelReason::disconnect);
   epoch.disconnect();
   epoch.connect(21);
   assert(!epoch.history.contains(200));
-  assert(oldConnection.advance(LinkOperationState::cleanup));
-  oldConnection.releaseResource(LinkOperationResource::file);
-  assert(epoch.settleCompletion(oldConnection));
+  assert(epoch.admit(200) == LinkOperationAdmission::busy);
+  assert(epoch.coordinatorGeneration == 20);
+  assert(epoch.operation.advance(LinkOperationState::cleanup));
+  epoch.operation.releaseResource(LinkOperationResource::file);
+  assert(epoch.settle());
   assert(!epoch.history.contains(200));
-  LinkOperation newConnection;
-  assert(newConnection.admit(200, LinkTransport::wifi, 21, false) ==
-         LinkOperationAdmission::accepted);
+  assert(epoch.coordinatorGeneration == 0);
+  assert(epoch.admit(200) == LinkOperationAdmission::accepted);
+
+  // Oversized dynamic status never leaves a live client waiting. The primary
+  // payload can fall back to one fixed terminal error; if even that cannot be
+  // queued, the connection is cancelled and closed.
+  TerminalFallbackHarness fallback;
+  fallback.accept(300, 30);
+  assert(!fallback.send(5000, true, true, 30));
+  assert(fallback.connected && fallback.fallbackQueued);
+  assert(fallback.operation.frameDrained(LinkOperationFrameRole::terminal,
+                                         30, 3));
+
+  TerminalFallbackHarness noFallback;
+  noFallback.accept(301, 31);
+  assert(!noFallback.send(5000, true, false, 31));
+  assert(!noFallback.connected);
+  assert(noFallback.operation.cancelled());
+
+  TerminalFallbackHarness primaryQueueFailure;
+  primaryQueueFailure.accept(302, 32);
+  assert(!primaryQueueFailure.send(1000, false, true, 32));
+  assert(primaryQueueFailure.connected &&
+         primaryQueueFailure.fallbackQueued);
 
   // IO-busy read/result is a retryable terminal response.  It releases only
   // after that response drains, rather than leaving an accepted request idle.

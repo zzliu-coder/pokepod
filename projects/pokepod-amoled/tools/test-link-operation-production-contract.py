@@ -107,6 +107,22 @@ status_end = SOURCE.index('} else if (strcmp(operation, "provisioning-start")',
                           status_start)
 status = SOURCE[status_start:status_end]
 assert "requestLinkRecordingStop" not in status
+assert "kStatusExtraBytes" in status
+assert "diagnosticsTruncated" in status
+assert "sendTerminalOrDisconnect(requestId, response)" in status
+
+fallback_start = SOURCE.index("bool PokePodLinkService::sendTerminalOrDisconnect")
+fallback_end = SOURCE.index("bool PokePodLinkService::sendEvent", fallback_start)
+fallback = SOURCE[fallback_start:fallback_end]
+assert "kTerminalQueueError" in fallback
+assert "disconnect()" in fallback
+assert "operation_.cancel" in fallback
+
+queue_start = SOURCE.index("bool PokePodLinkService::queueFrame")
+queue_end = SOURCE.index("void PokePodLinkService::advanceTransmit", queue_start)
+queue = SOURCE[queue_start:queue_end]
+assert queue.index("txStepper_.beginFrame") < queue.index("operation_.queueFrame")
+assert "preserveForFallback" in queue
 
 assert 'sendFrame(LinkFrameType::eventJson' in SOURCE
 events = SOURCE[SOURCE.index("bool PokePodLinkService::sendEvent("):

@@ -245,17 +245,23 @@ class PokePodLinkService {
   bool sendJson(uint32_t requestId, const String &json);
   bool sendJson(uint32_t requestId, const String &json,
                 bool completionEligible);
+  bool sendJson(uint32_t requestId, const String &json,
+                bool completionEligible, bool preserveForFallback);
+  bool sendTerminalOrDisconnect(uint32_t requestId, const String &json,
+                                bool completionEligible = true);
   bool sendEvent(uint32_t requestId, const String &json);
   bool sendFile(uint32_t requestId, const String &path,
                 const char *resultTransactionId = nullptr);
   bool sendFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                  const uint8_t *payload, size_t size,
                  LinkOperationFrameRole role,
-                 bool completionEligible = false);
+                 bool completionEligible = false,
+                 bool preserveForFallback = false);
   bool queueFrame(LinkFrameType type, uint16_t flags, uint32_t requestId,
                   const uint8_t *payload, size_t size,
                   TxCompletion completion, LinkOperationFrameRole role,
-                  bool completionEligible = false);
+                  bool completionEligible = false,
+                  bool preserveForFallback = false);
   void advanceTransmit(uint32_t nowMs);
   void queueNextFileChunk();
   void finishOutgoingFile(bool success);

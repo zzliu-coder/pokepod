@@ -44,6 +44,11 @@ constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
 constexpr size_t kLinkPendingControlBytes =
     kLinkHeaderBytes + kLinkMaxControlBytes;
 constexpr size_t kLinkWriteSliceBytes = 512;
+constexpr size_t kStatusExtraBytes = kLinkMaxControlBytes - 96U;
+constexpr size_t kStatusDiagnosticStringBytes = 192U;
+constexpr const char *kTerminalQueueError =
+    "{\"status\":\"error\",\"version\":2,"
+    "\"message\":\"response unavailable\"}";
 constexpr const char *kLinkCommandUploadPart =
     "/PokeCapsule/.system/commands/incoming/upload.part";
 constexpr const char *kLinkStagedUploadPart =
@@ -101,6 +106,34 @@ String jsonEscaped(const String &value) {
     }
   }
   return escaped;
+}
+
+String utf8Prefix(const String &value, size_t maximumBytes) {
+  if (value.length() <= maximumBytes) return value;
+  if (maximumBytes <= 3) return String();
+  const size_t payloadBytes = maximumBytes - 3;
+  size_t offset = 0;
+  while (offset < value.length()) {
+    const uint8_t lead = static_cast<uint8_t>(value[offset]);
+    size_t characterBytes = 1;
+    if ((lead & 0xE0U) == 0xC0U) characterBytes = 2;
+    else if ((lead & 0xF0U) == 0xE0U) characterBytes = 3;
+    else if ((lead & 0xF8U) == 0xF0U) characterBytes = 4;
+    if (offset + characterBytes > value.length() ||
+        offset + characterBytes > payloadBytes) {
+      break;
+    }
+    bool continuationValid = true;
+    for (size_t index = 1; index < characterBytes; ++index) {
+      if ((static_cast<uint8_t>(value[offset + index]) & 0xC0U) != 0x80U) {
+        continuationValid = false;
+        break;
+      }
+    }
+    if (!continuationValid) characterBytes = 1;
+    offset += characterBytes;
+  }
+  return value.substring(0, offset) + "...";
 }
 
 void appendJsonKey(String &json, const char *key) {
@@ -1178,7 +1211,8 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     appendJsonString(extra, "asr_last_code", tencent_->lastCode());
     appendJsonNumber(extra, "asr_tls_error", tencent_->lastNetworkError());
     appendJsonString(extra, "asr_tls_detail",
-                     tencent_->lastNetworkErrorDetail());
+                     utf8Prefix(tencent_->lastNetworkErrorDetail(),
+                                kStatusDiagnosticStringBytes));
     appendJsonNumber(extra, "asr_heap_free_before_tls",
                      tencent_->lastInternalHeapFreeBeforeTls());
     appendJsonNumber(extra, "asr_heap_largest_before_tls",
@@ -1238,7 +1272,9 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     appendJsonNumber(extra, "audio_read_bytes", audio_->bytesRead());
     appendJsonNumber(extra, "audio_read_failures", audio_->readFailures());
     appendJsonNumber(extra, "audio_peak", audio_->peakSample());
-    appendJsonString(extra, "playback_last_error", audio_->lastPlaybackError());
+    appendJsonString(extra, "playback_last_error",
+                     utf8Prefix(audio_->lastPlaybackError(),
+                                kStatusDiagnosticStringBytes));
     appendJsonNumber(extra, "playback_start_failures",
                      audio_->playbackStartFailures());
     appendJsonNumber(extra, "playback_heap_largest_before_start",
@@ -1334,7 +1370,18 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     appendJsonString(extra, "provisioningStartupPhase",
                      provisioningCoordinator_ == nullptr
                          ? "unavailable" : provisioningCoordinator_->phaseName());
-    (void)sendOk(requestId, extra.c_str());
+    if (extra.length() > kStatusExtraBytes) {
+      extra = "\"diagnosticsTruncated\":true";
+      appendJsonBool(extra, "recording", recorder_->recording());
+      appendJsonBool(extra, "transcribing", tencent_->working());
+      appendJsonNumber(extra, "batteryPercent", status.batteryPercent);
+      appendJsonString(extra, "wifi", wifi_->phaseName());
+      appendJsonBool(extra, "sdReady", status.sdCard);
+    }
+    String response = "{\"status\":\"ok\",\"version\":2,";
+    response += extra;
+    response += '}';
+    (void)sendTerminalOrDisconnect(requestId, response);
   } else if (strcmp(operation, "provisioning-start") == 0) {
     if (transport_ != LinkTransport::usb ||
         provisioningCoordinator_ == nullptr) {
@@ -3969,6 +4016,12 @@ bool PokePodLinkService::sendJson(uint32_t requestId, const String &json) {
 
 bool PokePodLinkService::sendJson(uint32_t requestId, const String &json,
                                   bool completionEligible) {
+  return sendJson(requestId, json, completionEligible, false);
+}
+
+bool PokePodLinkService::sendJson(uint32_t requestId, const String &json,
+                                  bool completionEligible,
+                                  bool preserveForFallback) {
   if (operationOwns(requestId)) {
     if (operation_.state() == LinkOperationState::receiving) {
       operation_.advance(LinkOperationState::processing);
@@ -3978,7 +4031,22 @@ bool PokePodLinkService::sendJson(uint32_t requestId, const String &json,
   return sendFrame(LinkFrameType::responseJson, 0, requestId,
                    reinterpret_cast<const uint8_t *>(json.c_str()),
                    json.length(), LinkOperationFrameRole::terminal,
-                   completionEligible);
+                   completionEligible, preserveForFallback);
+}
+
+bool PokePodLinkService::sendTerminalOrDisconnect(
+    uint32_t requestId, const String &json, bool completionEligible) {
+  if (sendJson(requestId, json, completionEligible, true)) return true;
+  if (operationOwns(requestId) && operation_.responseAllowed() &&
+      sendJson(requestId, String(kTerminalQueueError), false)) {
+    return false;
+  }
+  if (operationOwns(requestId)) {
+    operation_.cancel(LinkOperationCancelReason::operationFailure);
+    operation_.discardQueuedFrames(connectionGeneration_);
+  }
+  disconnect();
+  return false;
 }
 
 bool PokePodLinkService::sendEvent(uint32_t requestId, const String &json) {
@@ -4056,9 +4124,11 @@ bool PokePodLinkService::sendFrame(LinkFrameType type, uint16_t flags,
                                    uint32_t requestId,
                                    const uint8_t *payload, size_t size,
                                    LinkOperationFrameRole role,
-                                   bool completionEligible) {
+                                   bool completionEligible,
+                                   bool preserveForFallback) {
   return queueFrame(type, flags, requestId, payload, size,
-                    TxCompletion::none, role, completionEligible);
+                    TxCompletion::none, role, completionEligible,
+                    preserveForFallback);
 }
 
 bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
@@ -4066,16 +4136,20 @@ bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
                                     const uint8_t *payload, size_t size,
                                     TxCompletion completion,
                                     LinkOperationFrameRole role,
-                                    bool completionEligible) {
+                                    bool completionEligible,
+                                    bool preserveForFallback) {
   const bool lifecycleOwned = operationOwns(requestId);
   const auto failOwnedQueue = [&]() {
     if (!lifecycleOwned) return;
     operation_.cancel(LinkOperationCancelReason::operationFailure);
     operation_.discardQueuedFrames(connectionGeneration_);
   };
+  const auto failQueue = [&]() {
+    if (!preserveForFallback) failOwnedQueue();
+  };
   if (stream_ == nullptr || !transferPermitted() || size >
       (type == LinkFrameType::data ? kLinkMaxDataBytes : kLinkMaxControlBytes)) {
-    failOwnedQueue();
+    failQueue();
     return false;
   }
   LinkFrameHeader header;
@@ -4102,20 +4176,15 @@ bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
     targetRole = &pendingControlRole_;
     targetGeneration = &pendingControlGeneration_;
   } else {
-    failOwnedQueue();
+    failQueue();
     return false;
   }
   if (target == nullptr ||
       !encodeLinkHeader(header, target, kLinkHeaderBytes)) {
-    failOwnedQueue();
+    failQueue();
     return false;
   }
   if (size > 0) memcpy(target + kLinkHeaderBytes, payload, size);
-  if (lifecycleOwned && !operation_.queueFrame(
-          role, connectionGeneration_, millis(), completionEligible)) {
-    failOwnedQueue();
-    return false;
-  }
   *targetBytes = kLinkHeaderBytes + size;
   *targetCompletion = completion;
   *targetRole = role;
@@ -4125,7 +4194,17 @@ bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
     *targetCompletion = TxCompletion::none;
     *targetRole = LinkOperationFrameRole::progress;
     *targetGeneration = 0;
-    failOwnedQueue();
+    failQueue();
+    return false;
+  }
+  if (lifecycleOwned && !operation_.queueFrame(
+          role, connectionGeneration_, millis(), completionEligible)) {
+    if (target == txFrame_) txStepper_.cancel();
+    *targetBytes = 0;
+    *targetCompletion = TxCompletion::none;
+    *targetRole = LinkOperationFrameRole::progress;
+    *targetGeneration = 0;
+    failQueue();
     return false;
   }
   return true;
