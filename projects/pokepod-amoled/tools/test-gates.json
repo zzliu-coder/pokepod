@@ -33,6 +33,7 @@
     "test-performance-architecture.py",
     "test-power-diagnostics-contract.py",
     "test-provisioning-page.py",
+    "test-provisioning-documentation-contract.py",
     "test-recorder-async-finalize.py",
     "test-recorder-capture-metrics.py",
     "test-recorder-storage-admission.py",
