@@ -15,6 +15,9 @@ MAILBOX = (
 PROTOCOL = (ROOT / "firmware/PokePodAmoled/BleVoiceProtocol.h").read_text(
     encoding="utf-8"
 )
+OVERFLOW_POLICY = (
+    ROOT / "firmware/PokePodAmoled/BleCallbackOverflowPolicy.h"
+).read_text(encoding="utf-8")
 
 
 def body(signature: str) -> str:
@@ -141,10 +144,16 @@ assert "attemptToken == other.attemptToken" in MAILBOX
 assert "static constexpr size_t kCommandBytes = 8" in MAILBOX
 assert "static constexpr size_t kCallbackEventCapacity = 16" in HEADER
 assert "static constexpr size_t kNotifyStatusEventCapacity = 4" in HEADER
+assert "bool empty() const" in MAILBOX
 
 overflow = body("void BleVoiceService::drainCallbackEvents(")
-assert "finishCallbackOverflowIfDisconnected(nowMs);" in overflow
 assert "resetAfterOverflow" not in overflow
+overflow_advance = body("void BleVoiceService::advanceCallbackOverflow(")
+assert "finishCallbackOverflowIfDisconnected(nowMs)" in overflow_advance
+assert "callbackOverflow_.poll(nowMs)" in overflow_advance
+assert "server_->disconnect(callbackOverflow_.epoch().connectionId)" in \
+    overflow_advance
+assert "ble_voice_callback_overflow_hard_failed" in overflow_advance
 overflow_finish = body(
     "bool BleVoiceService::finishCallbackOverflowIfDisconnected("
 )
@@ -153,6 +162,21 @@ assert overflow_finish.index("callbackOverflow_.confirm") < overflow_finish.inde
     "resetAfterOverflow"
 )
 assert "physicalDisconnects_.observe" in disconnect_callback
+assert "kDisconnectRetryMs = 250" in OVERFLOW_POLICY
+assert "kCleanupDeadlineMs = 5000" in OVERFLOW_POLICY
+assert "BleCallbackOverflowPhase::hardFailed" in OVERFLOW_POLICY
+assert "reached(nowMs, deadlineMs_)" in OVERFLOW_POLICY
+assert "reached(nowMs, nextRetryAtMs_)" in OVERFLOW_POLICY
+assert "physicalDisconnect.matches(epoch_)" in OVERFLOW_POLICY
+assert "bool quiescedForSleep() const" in HEADER
+assert "return bleVoiceQuiescedForSleep(sleepQuiescenceFacts())" in HEADER
+assert "facts.overflowCleanupActive = callbackOverflow_.active()" in HEADER
+assert "facts.physicalConnectionPending = physicalConnectionPending()" in HEADER
+assert "facts.callbackMailboxEmpty = callbackEvents_.empty()" in HEADER
+assert "facts.notifyMailboxEmpty = notifyStatusEvents_.empty()" in HEADER
+pause = body("bool BleVoiceService::pauseForIdleSleep()")
+assert "physicalConnectionPending()" in pause
+assert "return quiescedForSleep();" in pause
 
 # BLE Voice v1 UUIDs and wire sizes stay byte-for-byte compatible.
 for invariant in (

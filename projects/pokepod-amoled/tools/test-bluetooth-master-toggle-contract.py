@@ -55,7 +55,7 @@ assert "router_" not in controller
 assert "router.owner() != AudioCaptureOwner::wirelessVoice" in controller
 assert "!enablePolicy_.acceptsNewWork()" in service
 assert "enablePolicy_.transitionPending()" in service_h
-assert "if (!enablePolicy_.acceptsNewWork() || idlePaused_" in service
+assert "if (!enablePolicy_.acceptsNewWork() || callbackOverflow_.active()" in service
 assert "bool physicalConnectionPending() const" in service_h
 assert "uint16_t physicalConnectionId() const" in service_h
 for entrypoint in (
@@ -70,6 +70,7 @@ enable_actions = service[service.index(
     "void BleVoiceService::applyEnableActions("
 ):service.index("void BleVoiceService::clearDisabledRuntime(")]
 assert "actions.disconnect && physicalConnectionPending()" in enable_actions
+assert "!callbackOverflow_.active()" in enable_actions
 assert "const uint16_t connectionId = physicalConnectionId();" in enable_actions
 assert "server_->disconnect(connectionId);" in enable_actions
 assert "actions.disconnect && connected_" not in enable_actions

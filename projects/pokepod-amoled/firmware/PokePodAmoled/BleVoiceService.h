@@ -58,12 +58,24 @@ class BleVoiceService {
   bool disablePending() const { return enablePolicy_.transitionPending(); }
   bool idlePaused() const { return idlePaused_; }
   bool radioActive() const {
-    return disablePending() || physicalConnectionPending() ||
+    return !quiescedForSleep() ||
         (userEnabled() && !idlePaused_);
   }
+  bool quiescedForSleep() const {
+    return bleVoiceQuiescedForSleep(sleepQuiescenceFacts());
+  }
+  bool callbackOverflowHardFailed() const {
+    return callbackOverflow_.hardFailed();
+  }
+  uint16_t callbackOverflowAttempts() const {
+    return callbackOverflow_.attempts();
+  }
+  uint32_t callbackOverflowHardFailures() const {
+    return callbackOverflow_.hardFailureCount();
+  }
   bool appReady() const {
-    return enablePolicy_.acceptsNewWork() && connected_ && appReady_ &&
-        mtuReady();
+    return enablePolicy_.acceptsNewWork() && !callbackOverflow_.active() &&
+        connected_ && appReady_ && mtuReady();
   }
   bool mtuReady() const { return bleVoiceMtuReady(mtu_); }
   uint16_t mtu() const { return mtu_; }
@@ -149,6 +161,7 @@ class BleVoiceService {
   void processPasskey(uint32_t passkey);
   void failClosedCallbackOverflow(uint32_t nowMs,
                                   const BleVoiceConnectionEpoch &epoch);
+  void advanceCallbackOverflow(uint32_t nowMs);
   bool finishCallbackOverflowIfDisconnected(uint32_t nowMs);
   void refreshCallbackSnapshot(uint32_t nowMs);
   void clearControlNotify();
@@ -165,15 +178,30 @@ class BleVoiceService {
                           uint32_t nowMs);
   void clearDisabledRuntime(uint32_t nowMs);
   bool physicalConnectionPending() const {
-    return connected_ || callbackOverflow_.physicalConnectionPending();
+    return connected_ || connectionPolicy_.hasCurrent() ||
+        callbackSecurity_.connectionId() != kInvalidBleConnectionId ||
+        callbackOverflow_.physicalConnectionPending();
   }
   uint16_t physicalConnectionId() const {
     if (callbackOverflow_.physicalConnectionPending()) {
       return callbackOverflow_.epoch().connectionId;
     }
-    return connectionPolicy_.hasCurrent()
-        ? connectionPolicy_.currentConnectionId()
-        : kInvalidBleConnectionId;
+    if (connectionPolicy_.hasCurrent()) {
+      return connectionPolicy_.currentConnectionId();
+    }
+    return callbackSecurity_.connectionId();
+  }
+  BleSleepQuiescenceFacts sleepQuiescenceFacts() const {
+    BleSleepQuiescenceFacts facts;
+    facts.sessionActive = controller_.active();
+    facts.pairingActive = pairingUntilMs_ != 0;
+    facts.enableTransitionPending = enablePolicy_.transitionPending();
+    facts.overflowCleanupActive = callbackOverflow_.active();
+    facts.physicalConnectionPending = physicalConnectionPending();
+    facts.notifyPending = controlNotifyPending_ || audioNotifyPending_;
+    facts.callbackMailboxEmpty = callbackEvents_.empty();
+    facts.notifyMailboxEmpty = notifyStatusEvents_.empty();
+    return facts;
   }
 
   BLEServer *server_ = nullptr;

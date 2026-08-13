@@ -331,6 +331,14 @@ class BleVoiceCallbackMailbox {
     return accepting_.load(std::memory_order_acquire);
   }
 
+  // Read-only owner observation used by the sleep quiescence contract. A
+  // concurrent publish either advances tail before this snapshot or remains a
+  // producer-side fact for the next poll; it never changes queue semantics.
+  bool empty() const {
+    return head_.load(std::memory_order_acquire) ==
+        tail_.load(std::memory_order_acquire);
+  }
+
   void closeAdmission() { failClosed(); }
 
   // Only the Arduino-loop owner may rearm. Once admission is false, any

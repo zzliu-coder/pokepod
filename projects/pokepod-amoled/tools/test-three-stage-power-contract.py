@@ -42,6 +42,7 @@ assert "SD_MMC.end()" in main
 assert "lowBatteryShutdown.critical()" in main
 
 assert "pauseForIdleSleep" in ble
+assert "return quiescedForSleep();" in ble
 assert "resumeAfterIdleSleep" in ble
 assert "idlePaused_" in ble
 assert "prepareForDeepSleep" in ble
