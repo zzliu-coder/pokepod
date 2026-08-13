@@ -173,6 +173,8 @@ assert forbidden_home not in combined
 assert forbidden_app_root not in combined
 assert "Release build requires a clean PokePod tree" in build
 assert "Release build requires a Git commit" in build
+assert "Release build requires a positive Git commit timestamp" in build
+assert 'git -C "$PROJECT_DIR" show -s --format=%ct "$SOURCE_REVISION"' in build
 assert "Release build requires the production ESP32 core profile" in build
 assert 'source_revision=${SOURCE_REVISION:-unknown}' in build
 assert "stat -f" not in build and "shasum" not in build

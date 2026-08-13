@@ -168,7 +168,9 @@ Android、Poke3 和 PokePod 不互相直连。它们各自写入同一套胶囊�
 `work/pokepod-build/output/fast`，正式产物位于
 `work/pokepod-build/output/release`。两者都带有记录源码版本、输入指纹、工具链、
 大小、单槽剩余空间、资源等级和 SHA-256 的 `artifact.json`，并生成
-`flash-resource.json`。Flash `<75%` 为绿色；`75%–80%` 为黄色，发布前必须检查
+`flash-resource.json`。正式构建还会把 `SOURCE_DATE_EPOCH` 锁定为当前源码 commit
+的 Git 时间戳，让编译器的 `__DATE__` / `__TIME__` 在同一 commit 上保持确定；
+时间戳缺失或格式非法会直接阻断构建。Flash `<75%` 为绿色；`75%–80%` 为黄色，发布前必须检查
 map、最大符号、相对基线增量和重复实现；`80%–85%` 冻结非必要功能并专项瘦身；
 `>=85%` 构建会阻断发布。两个 3 MiB OTA 槽位分别计算，内部 RAM、PSRAM、连续堆
 和任务栈分别验收。快速与正式产物互相不会覆盖。`verify.sh` 运行固件主机测试、干净固件编译、

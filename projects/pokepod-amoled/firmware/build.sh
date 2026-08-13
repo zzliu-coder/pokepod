@@ -20,6 +20,10 @@ PORTABLE_TOOL="$PROJECT_DIR/tools/portable_build_utils.py"
 BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
 FORCE_BUILD=0
 SOURCE_REVISION=$(git -C "$PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)
+SOURCE_DATE_EPOCH_VALUE=interactive
+# Do not let an inherited value change a binary without appearing in the build
+# fingerprint. Release builds replace this with the exact Git commit time.
+unset SOURCE_DATE_EPOCH
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -77,6 +81,23 @@ fi
 if [ "$BUILD_MODE" = release ] && [ -z "$SOURCE_REVISION" ]; then
   echo "Release build requires a Git commit" >&2
   exit 65
+fi
+if [ "$BUILD_MODE" = release ]; then
+  SOURCE_DATE_EPOCH_VALUE=$(
+    git -C "$PROJECT_DIR" show -s --format=%ct "$SOURCE_REVISION" 2>/dev/null || true
+  )
+  case "$SOURCE_DATE_EPOCH_VALUE" in
+    ''|*[!0-9]*)
+      echo "Release build requires a positive Git commit timestamp" >&2
+      exit 65
+      ;;
+  esac
+  if [ "$SOURCE_DATE_EPOCH_VALUE" -le 0 ]; then
+    echo "Release build requires a positive Git commit timestamp" >&2
+    exit 65
+  fi
+  SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE
+  export SOURCE_DATE_EPOCH
 fi
 
 BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
@@ -292,6 +313,7 @@ BUILD_FINGERPRINT=$(python3 "$FINGERPRINT_TOOL" \
   --literal "gfx-view=$GFX_VIEW_ID" \
   --literal "vendor-path=$VENDOR_DIR" \
   --literal "fqbn=$FQBN" \
+  --literal "source-date-epoch=$SOURCE_DATE_EPOCH_VALUE" \
   --literal "extra-arguments=$EXTRA_ARGUMENTS_HASH")
 printf '%s\n' "$BUILD_FINGERPRINT" > "$CURRENT_FINGERPRINT"
 

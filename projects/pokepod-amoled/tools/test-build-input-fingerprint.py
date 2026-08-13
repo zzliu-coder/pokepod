@@ -55,6 +55,9 @@ gfx_manifest = [
 assert 'BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}' in build
 assert 'BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"' in build
 assert 'CLEAN_FLAG=--clean' in build
+assert 'unset SOURCE_DATE_EPOCH' in build
+assert 'export SOURCE_DATE_EPOCH' in build
+assert '--literal "source-date-epoch=$SOURCE_DATE_EPOCH_VALUE"' in build
 assert 'CACHE HIT' in build
 assert 'build-input-fingerprint.py' in build
 assert 'GFX_MINIMAL_LIBRARY="$WORK_DIR/gfx-minimal/$GFX_VIEW_ID"' in build

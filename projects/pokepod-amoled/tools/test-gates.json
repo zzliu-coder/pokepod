@@ -39,6 +39,7 @@
     "test-recorder-capture-metrics.py",
     "test-recorder-storage-admission.py",
     "test-release-documentation-contract.py",
+    "test-release-reproducibility-contract.py",
     "test-resource-review.py",
     "test-runtime-power-time-usb-contract.py",
     "test-scroll-contract.py",
@@ -55,6 +56,7 @@
     "test-cjk-font.py"
   ],
   "toolchain": [
+    "test-source-date-epoch-toolchain.py",
     "test-usb-toolchain-contract.py"
   ],
   "repository": [
