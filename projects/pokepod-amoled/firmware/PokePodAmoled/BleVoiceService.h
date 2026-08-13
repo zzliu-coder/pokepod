@@ -71,6 +71,20 @@ class BleVoiceService {
   bool callbackOverflowRecoveryRequired() const {
     return callbackOverflow_.requiresProcessRecovery();
   }
+  bool appHandshakeDisconnectPending() const {
+    return appHandshake_.disconnectPending();
+  }
+  bool appHandshakeRecoveryRequired() const {
+    return appHandshake_.recoveryRequired();
+  }
+  bool claimAppHandshakeRecoveryRestart() {
+    if (!appHandshakeRecoveryRequired() ||
+        appHandshakeRecoveryRestartClaimed_) {
+      return false;
+    }
+    appHandshakeRecoveryRestartClaimed_ = true;
+    return true;
+  }
   bool claimCallbackOverflowRecoveryRestart() {
     if (!callbackOverflowRecoveryRequired() ||
         callbackOverflowRecoveryRestartClaimed_) {
@@ -87,7 +101,8 @@ class BleVoiceService {
   }
   bool appReady() const {
     return enablePolicy_.acceptsNewWork() && !callbackOverflow_.active() &&
-        connected_ && appReady_ && mtuReady();
+        !appHandshake_.disconnectPending() && connected_ && appReady_ &&
+        mtuReady();
   }
   bool mtuReady() const { return bleVoiceMtuReady(mtu_); }
   uint16_t mtu() const { return mtu_; }
@@ -273,6 +288,7 @@ class BleVoiceService {
   bool idlePaused_ = false;
   BleSessionStopRequestLatch sessionStopRequest_;
   bool callbackOverflowRecoveryRestartClaimed_ = false;
+  bool appHandshakeRecoveryRestartClaimed_ = false;
 };
 
 }  // namespace pokepod

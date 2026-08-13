@@ -46,6 +46,7 @@ struct DashboardView {
   bool usbConnected = false;
   bool bleVoiceConnected = false;
   bool bleVoiceReady = false;
+  bool bleVoiceHandshakeDisconnectPending = false;
   bool bleVoiceBonded = false;
   bool bleVoicePairing = false;
   uint32_t bleVoicePasskey = 0;

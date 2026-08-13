@@ -97,7 +97,20 @@ passkey_handler = service[
 assert "passkey_ = passkey" not in passkey_handler
 assert "ble_voice_stale_passkey_ignored" in passkey_handler
 assert "ble_voice_handshake_timeout_disconnect" in service
+handshake_timeout = service[
+    service.index("if (connected_ && appHandshake_.requestDisconnect("):
+    service.index("if (controlNotifyPending_", service.index(
+        "if (connected_ && appHandshake_.requestDisconnect("))
+]
+assert "server_->disconnect(connectionId);" in handshake_timeout
+assert "processDisconnect(" not in handshake_timeout
+assert "appHandshakeRecoveryRequired()" in app
+assert "claimAppHandshakeRecoveryRestart()" in app
+assert "ble_voice_handshake_recovery_restart" in app
+assert "!appHandshake_.disconnectPending() && connected_ && appReady_" in service_h
+assert "appReady_ = !appHandshake_.disconnectPending() && authenticated_" in service
 assert 'String("等待 Mac 应用")' in dashboard
+assert '"正在断开 Mac"' in dashboard
 assert '"已连接 · 质量不足"' not in dashboard
 pairing_action = app[
     app.index("action == UiAction::toggleBluetoothPairing"):

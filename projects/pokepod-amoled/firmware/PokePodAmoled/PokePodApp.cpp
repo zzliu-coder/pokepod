@@ -521,6 +521,8 @@ void drawDashboard() {
   view.usbConnected = usbCableConnected();
   view.bleVoiceConnected = bleVoice.connected();
   view.bleVoiceReady = bleVoice.appReady();
+  view.bleVoiceHandshakeDisconnectPending =
+      bleVoice.appHandshakeDisconnectPending();
   view.bleVoiceBonded = bleVoice.bonded();
   view.bleVoicePairing = bleVoice.pairingMode(now);
   view.bleVoicePasskey = bleVoice.passkey();
@@ -1832,10 +1834,32 @@ void loop() {
         !captureRuntime.running() && !recorder.operationActive() &&
         !localRecordingStart.active() && !linkService.receivingBinary() &&
         !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
+        !capsuleLibrary.scanActive() && !capsuleOperations.busy() &&
         !tencentWorker.working() && StorageCoordinator::instance().idle();
     if (restartSafe && bleVoice.claimCallbackOverflowRecoveryRestart()) {
       usb.log().println(
           "{\"event\":\"ble_voice_callback_overflow_recovery_restart\"}");
+#if defined(ARDUINO_ARCH_ESP32)
+      ESP.restart();
+#endif
+    }
+  }
+  if (bleVoice.appHandshakeRecoveryRequired()) {
+    // The host did not confirm the exact physical disconnect after repeated
+    // requests. Keep the old epoch closed and restart only after all durable
+    // work is idle; never fabricate a disconnect or restart advertising over
+    // a connection the controller may still own.
+    const bool restartSafe =
+        pendingCaptureStop == PendingCaptureStop::none &&
+        captureRouter.owner() == AudioCaptureOwner::none &&
+        !captureRuntime.running() && !recorder.operationActive() &&
+        !localRecordingStart.active() && !linkService.receivingBinary() &&
+        !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
+        !capsuleLibrary.scanActive() && !capsuleOperations.busy() &&
+        !tencentWorker.working() && StorageCoordinator::instance().idle();
+    if (restartSafe && bleVoice.claimAppHandshakeRecoveryRestart()) {
+      usb.log().println(
+          "{\"event\":\"ble_voice_handshake_recovery_restart\"}");
 #if defined(ARDUINO_ARCH_ESP32)
       ESP.restart();
 #endif

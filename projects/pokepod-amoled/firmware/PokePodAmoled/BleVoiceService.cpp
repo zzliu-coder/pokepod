@@ -637,12 +637,7 @@ void BleVoiceService::poll(uint32_t nowMs) {
                         nowMs, pairingMode(nowMs))) {
     if (server_ != nullptr && connectionPolicy_.hasCurrent()) {
       const uint16_t connectionId = connectionPolicy_.currentConnectionId();
-      const uint32_t generation = connectionGeneration_;
       server_->disconnect(connectionId);
-      // The connection never reached an app session, so there is no capture
-      // owner to drain. Retire this exact epoch locally as well; a missing host
-      // callback must not leave the screen claiming a permanent connection.
-      processDisconnect(connectionId, generation, nowMs);
       if (log_ != nullptr) {
         log_->println("{\"event\":\"ble_voice_handshake_timeout_disconnect\"}");
       }
@@ -924,6 +919,7 @@ void BleVoiceService::processConnect(uint16_t connectionId,
   connectionId_ = connectionId;
   connectionGeneration_ = connectionGeneration;
   appHandshake_.connected(millis());
+  appHandshakeRecoveryRestartClaimed_ = false;
   connectionPowerMode_ = BleConnectionPowerMode::voice;
   requestConnectionPowerMode(BleConnectionPowerMode::idle);
   currentPeerAddressValid_ = peerAddress != nullptr;
@@ -1082,7 +1078,8 @@ void BleVoiceService::processCommand(uint16_t connectionId,
   const auto type = static_cast<BleVoiceCommandType>(command.type);
   if (type == BleVoiceCommandType::ready) {
     if (command.sessionId == 0) {
-      appReady_ = authenticated_ && mtuReady();
+      appReady_ = !appHandshake_.disconnectPending() && authenticated_ &&
+          mtuReady();
       if (appReady_) appHandshake_.ready();
       notifyControl(BleVoiceEventType::status, 0, appReady_ ? 1 : 2);
     } else {

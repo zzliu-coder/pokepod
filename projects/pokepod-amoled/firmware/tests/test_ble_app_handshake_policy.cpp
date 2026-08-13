@@ -10,8 +10,17 @@ int main() {
   timeout.connected(1000);
   assert(!timeout.requestDisconnect(15999, false));
   assert(timeout.requestDisconnect(16000, false));
+  assert(timeout.disconnectPending());
   assert(!timeout.requestDisconnect(16249, false));
   assert(timeout.requestDisconnect(16250, false));
+  timeout.ready();
+  assert(timeout.requestDisconnect(16500, true));
+  assert(!timeout.requestDisconnect(
+      16000 + BleAppHandshakePolicy::kCleanupDeadlineMs, false));
+  assert(timeout.recoveryRequired());
+  timeout.disconnected();
+  assert(!timeout.disconnectPending());
+  assert(!timeout.recoveryRequired());
 
   BleAppHandshakePolicy ready;
   ready.connected(500);

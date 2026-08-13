@@ -792,6 +792,8 @@ void Dashboard::drawDevice(const DashboardView &view) {
     voiceDetail = issues == 0
         ? String("就绪 · MTU") + String(view.bleVoiceMtu)
         : String("就绪 · 异常 ") + String(issues);
+  } else if (view.bleVoiceHandshakeDisconnectPending) {
+    voiceDetail = "正在断开 Mac";
   } else if (view.bleVoiceConnected) {
     voiceDetail = view.bleVoiceMtu < kBleVoiceMinimumMtu
         ? String("等待蓝牙 MTU") + String(view.bleVoiceMtu)
@@ -931,6 +933,9 @@ void Dashboard::drawBluetoothPairing(const DashboardView &view) {
   } else if (view.bleVoiceReady) {
     status = "已连接 · 可以语音输入";
     statusColor = ui::kWireless;
+  } else if (view.bleVoiceHandshakeDisconnectPending) {
+    status = "正在断开 Mac";
+    statusColor = ui::kWaiting;
   } else if (view.bleVoiceConnected) {
     status = view.bleVoiceMtu < kBleVoiceMinimumMtu
         ? "已连接 · 等待蓝牙 MTU"
@@ -1444,6 +1449,7 @@ uint64_t Dashboard::signature(const DashboardView &view,
   value.add(view.usbConnected);
   value.add(view.bleVoiceConnected);
   value.add(view.bleVoiceReady);
+  value.add(view.bleVoiceHandshakeDisconnectPending);
   value.add(view.bleVoiceBonded);
   value.add(view.bleVoicePairing);
   value.add(view.bluetoothEnabled);
