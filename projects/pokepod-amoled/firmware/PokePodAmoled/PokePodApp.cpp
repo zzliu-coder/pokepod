@@ -576,11 +576,14 @@ bool consumeRecorderTerminal(bool notifyUser);
 
 void finishLocalRecordingStartFailure(bool notifyUser, bool ownsRouter) {
   const bool ownsRecorder =
-      recorder.ownedBy(RecorderOperationOwner::localApp);
+      LocalRecordingOwnershipPolicy::mayManageFailure(
+          recorder.ownedBy(RecorderOperationOwner::localApp));
   pendingRecorderFinalize = ownsRecorder && recorder.operationActive();
   pendingRecorderResultNotify = pendingRecorderResultNotify || notifyUser;
   if (pendingRecorderFinalize) return;
-  if (ownsRouter) captureRouter.release(AudioCaptureOwner::localCapsule);
+  if (LocalRecordingOwnershipPolicy::mayReleaseRouter(ownsRouter)) {
+    captureRouter.release(AudioCaptureOwner::localCapsule);
+  }
   const bool terminalConsumed = ownsRecorder &&
       consumeRecorderTerminal(pendingRecorderResultNotify);
   pendingRecorderResultNotify = false;
@@ -800,7 +803,10 @@ void toggleRecording() {
   } else {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
-    const bool acquired = captureRouter.available() &&
+    const bool mayAdmit = LocalRecordingOwnershipPolicy::mayAdmit(
+        captureRouter.available(), recorder.operationActive(),
+        recorder.terminalResult().pending());
+    const bool acquired = mayAdmit &&
         captureRouter.acquire(AudioCaptureOwner::localCapsule);
     uint32_t captureSessionId = esp_random();
     if (captureSessionId == 0) captureSessionId = 1;

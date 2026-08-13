@@ -5,6 +5,16 @@
 using namespace pokepod;
 
 int main() {
+  // A Link recording uses the same router enum but owns a distinct recorder
+  // operation. The local App must reject admission and must never consume or
+  // release Link's terminal resources.
+  assert(!LocalRecordingOwnershipPolicy::mayAdmit(false, true, true));
+  assert(!LocalRecordingOwnershipPolicy::mayManageFailure(false));
+  assert(!LocalRecordingOwnershipPolicy::mayReleaseRouter(false));
+  assert(LocalRecordingOwnershipPolicy::mayAdmit(true, false, false));
+  assert(LocalRecordingOwnershipPolicy::mayManageFailure(true));
+  assert(LocalRecordingOwnershipPolicy::mayReleaseRouter(true));
+
   LocalRecordingStartState state;
   uint32_t sessionId = 99;
 

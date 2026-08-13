@@ -37,13 +37,14 @@ assert advance.index("LocalRecordingStartAction::startCapture") < advance.index(
     "captureRuntime.start("
 )
 assert "recorder.abortCapture(usb.log())" in advance
-assert "captureRouter.available() &&" in toggle
+assert "LocalRecordingOwnershipPolicy::mayAdmit(" in toggle
+assert "captureRouter.available()" in toggle
 assert "recorder.ownedBy(RecorderOperationOwner::localApp)" in app[
     app.index("void finishLocalRecordingStartFailure(") : app.index(
         "void advanceLocalRecordingStart() {"
     )
 ]
-assert "if (ownsRouter) captureRouter.release(" in app
+assert "LocalRecordingOwnershipPolicy::mayReleaseRouter(ownsRouter)" in app
 assert "advanceLocalRecordingStart();" in cleanup
 assert "localRecordingStart.active() || recorder.operationActive()" in app
 assert "localRecordingStart.requestCancel();\n  safeShutdownQuiesce.request();" in app

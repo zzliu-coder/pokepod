@@ -6,6 +6,23 @@
 
 namespace pokepod {
 
+class LocalRecordingOwnershipPolicy {
+ public:
+  static bool mayAdmit(bool routerAvailable, bool recorderOperationActive,
+                       bool recorderTerminalPending) {
+    return routerAvailable && !recorderOperationActive &&
+        !recorderTerminalPending;
+  }
+
+  static bool mayManageFailure(bool recorderOwnedByLocalApp) {
+    return recorderOwnedByLocalApp;
+  }
+
+  static bool mayReleaseRouter(bool acquiredByLocalRequest) {
+    return acquiredByLocalRequest;
+  }
+};
+
 enum class LocalRecordingStartAction : uint8_t {
   idle = 0,
   waiting,
