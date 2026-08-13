@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -10,82 +9,119 @@ import tempfile
 
 
 TOOLS = Path(__file__).resolve().parent
-SCRIPT = TOOLS / "verify-fast-candidate-evidence.py"
+STAGER = TOOLS / "stage-fast-candidate-evidence.py"
+VERIFIER = TOOLS / "verify-fast-candidate-evidence.py"
 REVISION = "a" * 40
-WRITER = TOOLS / "write-github-candidate-manifest.py"
 
 
-def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
 with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
     root = Path(raw)
-    paths = {
+    sources = {
         name: root / name
         for name in (
-            "firmware.bin", "firmware.elf", "firmware.map", "build.log",
-            "artifact.json", "flash-resource.json", "resource-review.json",
+            "firmware.bin",
+            "firmware.elf",
+            "firmware.map",
+            "build.log",
+            "artifact.json",
+            "flash-resource.json",
+            "resource-review.json",
             "summary.json",
         )
     }
-    for index, path in enumerate(paths.values()):
+    for index, path in enumerate(sources.values()):
         path.write_bytes(f"evidence-{index}".encode())
-    paths["artifact.json"].write_text(
+    sources["artifact.json"].write_text(
         json.dumps({"sourceRevision": REVISION, "sourceDirty": False}),
         encoding="utf-8",
     )
-    paths["flash-resource.json"].write_text(
-        json.dumps({
-            "schema": "pokepod.flash-size-policy.v1",
-            "releaseAllowed": True,
-        }),
+    sources["flash-resource.json"].write_text(
+        json.dumps(
+            {"schema": "pokepod.flash-size-policy.v1", "releaseAllowed": True}
+        ),
         encoding="utf-8",
     )
-    paths["resource-review.json"].write_text(
+    sources["resource-review.json"].write_text(
         json.dumps({"sourceRevision": REVISION}), encoding="utf-8"
     )
-    paths["summary.json"].write_text(
+    sources["summary.json"].write_text(
         json.dumps({"sourceRevision": REVISION}), encoding="utf-8"
     )
-    sha_manifest = root / "candidate-sha256.txt"
-    sha_manifest.write_text(
-        "".join(f"{digest(path)}  {path}\n" for path in paths.values()),
-        encoding="utf-8",
-    )
-    candidate_manifest = root / "candidate-manifest.json"
-    writer_command = [
-        sys.executable, str(WRITER), "--output", str(candidate_manifest),
-        "--source-revision", REVISION,
-    ]
-    for path in paths.values():
-        writer_command.extend(("--file", str(path)))
-    subprocess.check_call(writer_command)
-    command = [
-        sys.executable, str(SCRIPT), "--source-revision", REVISION,
-        "--binary", str(paths["firmware.bin"]),
-        "--elf", str(paths["firmware.elf"]),
-        "--map", str(paths["firmware.map"]),
-        "--build-log", str(paths["build.log"]),
-        "--artifact", str(paths["artifact.json"]),
-        "--flash-resource", str(paths["flash-resource.json"]),
-        "--resource-review", str(paths["resource-review.json"]),
-        "--summary", str(paths["summary.json"]),
-        "--sha256-manifest", str(sha_manifest),
-        "--candidate-manifest", str(candidate_manifest),
-    ]
-    passed = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    def stage(candidate: Path) -> None:
+        command = [
+            sys.executable,
+            str(STAGER),
+            "--output",
+            str(candidate),
+            "--source-revision",
+            REVISION,
+            "--binary",
+            str(sources["firmware.bin"]),
+            "--elf",
+            str(sources["firmware.elf"]),
+            "--map",
+            str(sources["firmware.map"]),
+            "--build-log",
+            str(sources["build.log"]),
+            "--artifact",
+            str(sources["artifact.json"]),
+            "--flash-resource",
+            str(sources["flash-resource.json"]),
+            "--resource-review",
+            str(sources["resource-review.json"]),
+            "--summary",
+            str(sources["summary.json"]),
+        ]
+        result = run(command)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def verify(candidate: Path, revision: str = REVISION) -> subprocess.CompletedProcess[str]:
+        return run(
+            [
+                sys.executable,
+                str(VERIFIER),
+                "--source-revision",
+                revision,
+                "--candidate-dir",
+                str(candidate),
+            ]
+        )
+
+    valid = root / "valid-candidate"
+    stage(valid)
+    passed = verify(valid)
     assert passed.returncode == 0, passed.stdout + passed.stderr
 
-    bad_sha = command.copy()
-    bad_sha[bad_sha.index(REVISION)] = "b" * 40
-    rejected = subprocess.run(bad_sha, text=True, capture_output=True, check=False)
-    assert rejected.returncode != 0
-    assert "SHA mismatch" in rejected.stderr
+    bad_sha = verify(valid, "b" * 40)
+    assert bad_sha.returncode != 0
+    assert "SHA mismatch" in bad_sha.stderr
 
-    paths["firmware.map"].unlink()
-    missing = subprocess.run(command, text=True, capture_output=True, check=False)
-    assert missing.returncode != 0
-    assert "missing or empty" in missing.stderr
+    mutated = root / "mutated-after-manifest"
+    stage(mutated)
+    with (mutated / "PokePodAmoled.ino.bin").open("ab") as stream:
+        stream.write(b"post-manifest mutation")
+    rejected_mutation = verify(mutated)
+    assert rejected_mutation.returncode != 0
+    assert "digest mismatch" in rejected_mutation.stderr
+
+    unexpected = root / "unexpected-flashable-sibling"
+    stage(unexpected)
+    (unexpected / "merged.bin").write_bytes(b"unmanifested flash image")
+    rejected_extra = verify(unexpected)
+    assert rejected_extra.returncode != 0
+    assert "file set mismatch" in rejected_extra.stderr
+    assert "merged.bin" in rejected_extra.stderr
+
+    missing = root / "missing-payload"
+    stage(missing)
+    (missing / "PokePodAmoled.ino.map").unlink()
+    rejected_missing = verify(missing)
+    assert rejected_missing.returncode != 0
+    assert "file set mismatch" in rejected_missing.stderr
 
 print("PASS test-exact-candidate-evidence")

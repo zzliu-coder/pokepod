@@ -145,8 +145,7 @@ jobs:
           BUILD_LOG="$POKEPOD_BUILD_ROOT/build-fast.log"
           REVIEW="$POKEPOD_BUILD_ROOT/resource-review.json"
           SUMMARY="$POKEPOD_BUILD_ROOT/fast-candidate-summary.json"
-          CANDIDATE_MANIFEST="$POKEPOD_BUILD_ROOT/candidate-manifest.json"
-          HASH_MANIFEST="$POKEPOD_BUILD_ROOT/candidate-sha256.txt"
+          CANDIDATE_DIR="$POKEPOD_BUILD_ROOT/github-fast-candidate"
           for path in "$BIN" "$ELF" "$MAP" "$BUILD_LOG" "$OUTPUT/artifact.json" "$OUTPUT/flash-resource.json"; do
             test -s "$path"
           done
@@ -193,26 +192,17 @@ jobs:
             --baseline-commit 2278bb11af4c97f83e71e6e3529b440e80810419 \
             --baseline-program-bytes 2401888 \
             --baseline-internal-globals 168060
-          sha256sum \
-            "$BIN" "$ELF" "$MAP" "$BUILD_LOG" \
-            "$OUTPUT/artifact.json" "$OUTPUT/flash-resource.json" \
-            "$REVIEW" "$SUMMARY" > "$HASH_MANIFEST"
-          python3 tools/write-github-candidate-manifest.py \
-            --output "$CANDIDATE_MANIFEST" \
-            --source-revision "$GITHUB_SHA" \
-            --file "$BIN" --file "$ELF" --file "$MAP" \
-            --file "$BUILD_LOG" --file "$OUTPUT/artifact.json" \
-            --file "$OUTPUT/flash-resource.json" \
-            --file "$REVIEW" --file "$SUMMARY"
-          python3 tools/verify-fast-candidate-evidence.py \
+          python3 tools/stage-fast-candidate-evidence.py \
+            --output "$CANDIDATE_DIR" \
             --source-revision "$GITHUB_SHA" \
             --binary "$BIN" --elf "$ELF" --map "$MAP" \
             --build-log "$BUILD_LOG" \
             --artifact "$OUTPUT/artifact.json" \
             --flash-resource "$OUTPUT/flash-resource.json" \
-            --resource-review "$REVIEW" --summary "$SUMMARY" \
-            --sha256-manifest "$HASH_MANIFEST" \
-            --candidate-manifest "$CANDIDATE_MANIFEST"
+            --resource-review "$REVIEW" --summary "$SUMMARY"
+          python3 tools/verify-fast-candidate-evidence.py \
+            --source-revision "$GITHUB_SHA" \
+            --candidate-dir "$CANDIDATE_DIR"
           cat "$SUMMARY"
 
       - name: Upload Fast candidate evidence
@@ -221,12 +211,4 @@ jobs:
           name: pokepod-fast-candidate-${{ github.sha }}
           if-no-files-found: error
           retention-days: 14
-          path: |
-            projects/pokepod-amoled/work/pokepod-build/output/fast/
-            projects/pokepod-amoled/work/pokepod-build/build-fast/PokePodAmoled.ino.elf
-            projects/pokepod-amoled/work/pokepod-build/build-fast/PokePodAmoled.ino.map
-            projects/pokepod-amoled/work/pokepod-build/build-fast.log
-            projects/pokepod-amoled/work/pokepod-build/resource-review.json
-            projects/pokepod-amoled/work/pokepod-build/fast-candidate-summary.json
-            projects/pokepod-amoled/work/pokepod-build/candidate-manifest.json
-            projects/pokepod-amoled/work/pokepod-build/candidate-sha256.txt
+          path: projects/pokepod-amoled/work/pokepod-build/github-fast-candidate/

@@ -6,8 +6,8 @@
 - C++ 每个 compile/run 和 Python 每个测试默认分别限时 60 秒。首个真实错误会打印测试名、阶段、命令、退出码或 timeout，再停止同一门内其余进程。
 - Source、asset、ASan/UBSan、repository audit、锁定的 Arduino-ESP32 3.3.8 和 forced clean Fast 依次执行。
 - Fast 构建本身编译并链接全部生产翻译单元，包括 `BleVoiceService.cpp` 和 `CapsuleLibrary.cpp`；CI 随后检查其 `.o`、最终 ELF/MAP 和 exact-SHA evidence。
-- 上传包必须包含 BIN、ELF、MAP、build log、artifact、Flash/RAM 与资源审查、largest symbols、candidate summary、candidate manifest 和 SHA-256 清单。任何缺件、dirty source、SHA 不一致或资源红线都会失败。
-- 第三方 Action 使用完整 commit SHA，并在行尾保留可读版本注释。workflow 权限保持 `contents: read`，不执行串口、烧录、Release 或仓库写操作。
+- 上传动作只接收一个新建的封闭候选目录。目录固定包含 BIN、ELF、MAP、build log、artifact、Flash/RAM 与资源审查、largest symbols、candidate summary、candidate manifest 和 SHA-256 清单；任何额外文件、缺件、dirty source、SHA 不一致、生成清单后的篡改或资源红线都会失败。
+- 第三方 Action 使用合同内固定的完整 commit SHA 与精确版本注释；测试离线核对 allowlist，避免把任意 40 位字符串误当成可信 pin。workflow 权限保持 `contents: read`，不执行串口、烧录、Release 或仓库写操作。
 
 ## GitHub 外部状态
 

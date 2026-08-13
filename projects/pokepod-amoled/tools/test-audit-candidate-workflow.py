@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep the repository CI lane aligned with the audit candidate contract."""
 
+from collections import Counter
 from pathlib import Path
 import re
 
@@ -33,11 +34,12 @@ for required in (
     "$BUILD/sketch/BleVoiceService.cpp.o",
     "$BUILD/sketch/CapsuleLibrary.cpp.o",
     "file \"$ELF\" | grep -q 'ELF '",
-    "candidate-manifest.json",
+    "stage-fast-candidate-evidence.py",
     "verify-fast-candidate-evidence.py",
+    "--candidate-dir \"$CANDIDATE_DIR\"",
     "--source-revision \"$GITHUB_SHA\"",
     "if-no-files-found: error",
-    "\"$BIN\" \"$ELF\" \"$MAP\" \"$BUILD_LOG\"",
+    "--binary \"$BIN\" --elf \"$ELF\" --map \"$MAP\"",
 ):
     assert required in source, f"audit workflow contract missing: {required}"
 for forbidden in (
@@ -51,12 +53,36 @@ for forbidden in (
 ):
     assert forbidden not in source, f"audit workflow performs forbidden action: {forbidden}"
 assert "permissions:\n  contents: read" in source
-assert "sourceDirty" not in source  # clean status is validated by the evidence writer.
-uses = re.findall(r"^\s*uses:\s*([^#\s]+)(?:\s*#\s*(.+))?$", source, re.MULTILINE)
-assert uses, "workflow must use pinned third-party actions"
-for reference, comment in uses:
-    assert re.fullmatch(r"[^/@]+/[^/@]+@[0-9a-f]{40}", reference), reference
-    assert comment and re.search(r"v\d", comment), f"action version comment missing: {reference}"
+assert "sourceDirty" not in source  # clean status is validated by staged evidence.
+uses = re.findall(r"^\s*uses:\s*([^#\s]+)(?:\s*#\s*(\S+))?\s*$", source, re.MULTILINE)
+expected_uses = Counter(
+    {
+        ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"): 2,
+        ("actions/cache@caa296126883cff596d87d8935842f9db880ef25", "v5.1.0"): 1,
+        ("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"): 1,
+    }
+)
+assert Counter(uses) == expected_uses, (
+    "third-party action pin/version allowlist mismatch: "
+    f"observed={Counter(uses)} expected={expected_uses}"
+)
+
+upload_block = source[source.index("- name: Upload Fast candidate evidence") :]
+assert (
+    "path: projects/pokepod-amoled/work/pokepod-build/github-fast-candidate/"
+    in upload_block
+)
+for forbidden_upload_path in (
+    "output/fast/",
+    "build-fast/PokePodAmoled.ino.elf",
+    "build-fast/PokePodAmoled.ino.map",
+    "build-fast.log",
+    "resource-review.json",
+    "fast-candidate-summary.json",
+):
+    assert forbidden_upload_path not in upload_block, (
+        f"upload action escapes closed candidate directory: {forbidden_upload_path}"
+    )
 
 bootstrap_position = source.index("./tools/bootstrap-ci.sh --install")
 first_gate_position = min(
