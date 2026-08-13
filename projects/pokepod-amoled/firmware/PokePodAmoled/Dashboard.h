@@ -37,6 +37,8 @@ struct DashboardView {
   bool recorderReady = false;
   bool transcriptionReady = false;
   bool bleVoiceServiceReady = false;
+  bool bluetoothEnabled = false;
+  bool bleVoiceDisablePending = false;
   bool linkReady = false;
   bool wifiServiceReady = false;
   bool usbReady = false;
@@ -90,7 +92,7 @@ class Dashboard {
  public:
   void begin(Arduino_GFX *display, fs::FS *fs = nullptr);
   void draw(const DashboardView &view);
-  UiAction actionAt(int16_t x, int16_t y, bool voiceReady) const;
+  UiAction actionAt(int16_t x, int16_t y, bool bluetoothEnabled) const;
   void swipeHorizontal(int16_t deltaX, bool locked, int16_t startX);
   bool beginVerticalScroll(int16_t y, uint32_t nowMs,
                            const CapsuleLibrary &library);

@@ -8,6 +8,9 @@ namespace pokepod {
 constexpr size_t kMaximumRememberedWifiNetworks = 5;
 constexpr uint32_t kDeviceConfigMagic = 0x31434650;  // PFC1, little-endian.
 constexpr uint16_t kDeviceConfigVersion = 1;
+constexpr uint8_t kStoredBluetoothLegacyEnabled = 0;
+constexpr uint8_t kStoredBluetoothEnabled = 1;
+constexpr uint8_t kStoredBluetoothDisabled = 2;
 
 #pragma pack(push, 1)
 struct StoredWifiCredential {
@@ -58,11 +61,17 @@ inline void finalizeDeviceConfigBlob(StoredDeviceConfig &stored) {
       offsetof(StoredDeviceConfig, crc32));
 }
 
+inline bool storedDeviceConfigBluetoothEnabled(
+    const StoredDeviceConfig &stored) {
+  return stored.reserved[0] != kStoredBluetoothDisabled;
+}
+
 inline bool validateDeviceConfigBlob(const StoredDeviceConfig &stored) {
   if (stored.magic != kDeviceConfigMagic ||
       stored.version != kDeviceConfigVersion ||
       stored.wifiCount > kMaximumRememberedWifiNetworks ||
       stored.wifiEnabled > 1 || stored.raiseToWake > 1 ||
+      stored.reserved[0] > kStoredBluetoothDisabled ||
       stored.crc32 != deviceConfigCrc32(
           reinterpret_cast<const uint8_t *>(&stored),
           offsetof(StoredDeviceConfig, crc32)) ||

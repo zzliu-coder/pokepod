@@ -17,6 +17,27 @@ int main() {
   empty.raiseToWake = 1;
   finalizeDeviceConfigBlob(empty);
   assert(validateDeviceConfigBlob(empty));
+  // Existing v1 blobs used zero-filled reserved bytes. They migrate to the
+  // historical enabled behavior without changing blob size or version.
+  assert(empty.reserved[0] == kStoredBluetoothLegacyEnabled);
+  assert(storedDeviceConfigBluetoothEnabled(empty));
+
+  StoredDeviceConfig bluetoothOn = empty;
+  bluetoothOn.reserved[0] = kStoredBluetoothEnabled;
+  finalizeDeviceConfigBlob(bluetoothOn);
+  assert(validateDeviceConfigBlob(bluetoothOn));
+  assert(storedDeviceConfigBluetoothEnabled(bluetoothOn));
+
+  StoredDeviceConfig bluetoothOff = empty;
+  bluetoothOff.reserved[0] = kStoredBluetoothDisabled;
+  finalizeDeviceConfigBlob(bluetoothOff);
+  assert(validateDeviceConfigBlob(bluetoothOff));
+  assert(!storedDeviceConfigBluetoothEnabled(bluetoothOff));
+
+  StoredDeviceConfig invalidBluetooth = empty;
+  invalidBluetooth.reserved[0] = kStoredBluetoothDisabled + 1;
+  finalizeDeviceConfigBlob(invalidBluetooth);
+  assert(!validateDeviceConfigBlob(invalidBluetooth));
 
   StoredDeviceConfig one = empty;
   one.wifiCount = 1;

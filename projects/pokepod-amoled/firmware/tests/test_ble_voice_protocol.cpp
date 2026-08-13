@@ -90,6 +90,14 @@ int main() {
   assert(!queue.pop(popped));
 
   AudioCaptureRouter router;
+  const auto appStart = [&router]() {
+    assert(router.acquire(AudioCaptureOwner::wirelessVoice));
+  };
+  const auto appStop = [&router]() {
+    assert(router.wirelessStreaming());
+    router.release(AudioCaptureOwner::wirelessVoice);
+    assert(router.available());
+  };
   assert(router.acquire(AudioCaptureOwner::localCapsule));
   assert(!router.acquire(AudioCaptureOwner::wirelessVoice));
   router.release(AudioCaptureOwner::localCapsule);
@@ -98,13 +106,17 @@ int main() {
   assert(controller.error() == VoiceSessionError::notConnected);
   assert(!controller.begin(1, 0, true, 184, router));
   assert(controller.error() == VoiceSessionError::mtuTooSmall);
+  appStart();
   assert(controller.begin(6, 10, true, 185, router));
   assert(controller.state() == VoiceSessionState::waitingForReady);
   assert(!controller.markReady(7, 20));
   assert(controller.state() == VoiceSessionState::waitingForReady);
   assert(!controller.poll(410));
   assert(controller.error() == VoiceSessionError::readyTimeout);
+  assert(router.wirelessStreaming());
   controller.complete();
+  appStop();
+  appStart();
   assert(controller.begin(7, 10, true, 185, router));
   assert(router.wirelessStreaming());
   assert(controller.state() == VoiceSessionState::waitingForReady);
@@ -135,13 +147,15 @@ int main() {
   assert(controller.queuedFrames() > 0);
   controller.end();
   assert(controller.state() == VoiceSessionState::ending);
-  assert(router.available());
+  assert(router.wirelessStreaming());
+  appStop();
   while (controller.takeFrame(popped)) {}
   assert(controller.queuedFrames() == 0);
   controller.complete();
   assert(controller.state() == VoiceSessionState::idle);
 
   VoiceSessionController monoController;
+  appStart();
   assert(monoController.begin(67, 0, true, 185, router));
   assert(monoController.markReady(67, 1));
   int16_t monoSamples[kBleVoiceSamplesPerFrame] = {};
@@ -156,20 +170,24 @@ int main() {
   assert(readVoiceU32(monoFrame.bytes + 2) == 67);
   assert(readVoiceU32(monoFrame.bytes + 6) == 0);
   monoController.complete();
+  appStop();
 
   VoiceSessionController streamTimeout;
+  appStart();
   assert(streamTimeout.begin(68, 0, true, 185, router));
   assert(streamTimeout.markReady(68, 1));
   assert(streamTimeout.state() == VoiceSessionState::streaming);
   assert(streamTimeout.poll(400));
   assert(!streamTimeout.poll(401));
   assert(streamTimeout.error() == VoiceSessionError::streamTimeout);
-  assert(router.available());
+  assert(router.wirelessStreaming());
   streamTimeout.complete();
+  appStop();
 
   // A quick release before ready keeps buffered speech private until the
   // matching session is authorized, then drains it before session-end.
   VoiceSessionController quickRelease;
+  appStart();
   assert(quickRelease.begin(70, 0, true, 185, router));
   for (int chunk = 0; chunk < 25; ++chunk) {
     assert(quickRelease.appendStereo48(stereo, sizeof(stereo), 1 + chunk));
@@ -184,7 +202,8 @@ int main() {
   assert(quickRelease.queuedFrames() == quickReleaseQueue);
   assert(!quickRelease.appendStereo48(stereo, sizeof(stereo), 30));
   assert(quickRelease.queuedFrames() == quickReleaseQueue);
-  assert(router.available());
+  assert(router.wirelessStreaming());
+  appStop();
   assert(!quickRelease.takeFrame(popped));
   assert(!quickRelease.markReady(71, 30));
   assert(!quickRelease.takeFrame(popped));
@@ -210,6 +229,7 @@ int main() {
   assert(quickRelease.state() == VoiceSessionState::idle);
 
   VoiceSessionController endingSession;
+  appStart();
   assert(endingSession.begin(73, 0, true, 185, router));
   assert(endingSession.markReady(73, 1));
   for (int chunk = 0; chunk < 25; ++chunk) {
@@ -222,30 +242,38 @@ int main() {
   assert(endingSession.state() == VoiceSessionState::ending);
   assert(endingSession.sessionId() == 73);
   assert(endingSession.queuedFrames() == endingQueue);
-  assert(router.available());
+  assert(router.wirelessStreaming());
+  appStop();
   endingSession.complete();
 
   VoiceSessionController missingAck;
+  appStart();
   assert(missingAck.begin(75, 0, true, 185, router));
   assert(missingAck.markReady(75, 1));
   missingAck.end();
   assert(missingAck.state() == VoiceSessionState::ending);
+  assert(router.wirelessStreaming());
+  appStop();
   assert(missingAck.markSessionEndSent(10));
   assert(missingAck.state() == VoiceSessionState::awaitingStopAck);
   assert(missingAck.poll(1009));
   assert(!missingAck.poll(1010));
   assert(missingAck.state() == VoiceSessionState::idle);
   assert(missingAck.error() == VoiceSessionError::stopAckTimeout);
-  assert(router.available());
+  appStart();
   assert(missingAck.begin(76, 1011, true, 185, router));
   missingAck.complete();
+  appStop();
 
   VoiceSessionController quickTimeout;
+  appStart();
   assert(quickTimeout.begin(71, 0, true, 185, router));
   for (int chunk = 0; chunk < 25; ++chunk) {
     assert(quickTimeout.appendStereo48(stereo, sizeof(stereo), 1 + chunk));
   }
   quickTimeout.end();
+  assert(router.wirelessStreaming());
+  appStop();
   assert(!quickTimeout.takeFrame(popped));
   assert(!quickTimeout.poll(400));
   assert(quickTimeout.error() == VoiceSessionError::readyTimeout);
@@ -254,6 +282,7 @@ int main() {
   quickTimeout.complete();
 
   VoiceSessionController overflow;
+  appStart();
   assert(overflow.begin(8, 0, true, 185, router));
   assert(overflow.state() == VoiceSessionState::waitingForReady);
   // 24 independent 20 ms frames cover the full 400 ms ready timeout.
@@ -277,6 +306,7 @@ int main() {
   }
   assert(overflowed);
   assert(overflow.error() == VoiceSessionError::queueOverflow);
-  assert(router.available());
+  assert(router.wirelessStreaming());
+  appStop();
   return 0;
 }

@@ -15,6 +15,7 @@ struct DeviceSettings {
   String secretKey;
   String hotwordId;
   bool wifiEnabled = true;
+  bool bluetoothEnabled = true;
   bool raiseToWake = true;
 };
 
@@ -42,6 +43,7 @@ class DeviceConfig {
     return !settings_.secretId.isEmpty() && !settings_.secretKey.isEmpty();
   }
   bool setWifiEnabled(bool enabled, Print &log);
+  bool setBluetoothEnabled(bool enabled, Print &log);
   bool setRaiseToWake(bool enabled, Print &log);
 
  private:

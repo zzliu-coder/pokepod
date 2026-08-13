@@ -46,10 +46,11 @@ class VoiceSessionController {
     if (state_ == VoiceSessionState::failed) complete();
     if (!connected) return fail(VoiceSessionError::notConnected);
     if (!bleVoiceMtuReady(mtu)) return fail(VoiceSessionError::mtuTooSmall);
-    if (!router.acquire(AudioCaptureOwner::wirelessVoice)) {
+    // App capture lifecycle is the sole router owner. This controller only
+    // validates ownership; runtime stop + drain is the release boundary.
+    if (router.owner() != AudioCaptureOwner::wirelessVoice) {
       return fail(VoiceSessionError::microphoneBusy);
     }
-    router_ = &router;
     state_ = VoiceSessionState::waitingForReady;
     error_ = VoiceSessionError::none;
     sessionId_ = sessionId;
@@ -142,11 +143,9 @@ class VoiceSessionController {
     if (state_ == VoiceSessionState::streaming) {
       state_ = VoiceSessionState::ending;
     }
-    releaseCapture();
   }
 
   void complete() {
-    releaseCapture();
     state_ = VoiceSessionState::idle;
     error_ = VoiceSessionError::none;
     pcmUsed_ = 0;
@@ -226,7 +225,6 @@ class VoiceSessionController {
     pcmUsed_ = 0;
     stopRequested_ = false;
     queue_.clear();
-    releaseCapture();
     return false;
   }
 
@@ -244,16 +242,8 @@ class VoiceSessionController {
     return true;
   }
 
-  void releaseCapture() {
-    if (router_ != nullptr) {
-      router_->release(AudioCaptureOwner::wirelessVoice);
-      router_ = nullptr;
-    }
-  }
-
   VoiceSessionState state_ = VoiceSessionState::idle;
   VoiceSessionError error_ = VoiceSessionError::none;
-  AudioCaptureRouter *router_ = nullptr;
   AudioFrontEnd audioFrontEnd_;
   BleVoiceFrameQueue<kQueueFrames> queue_;
   int16_t pcm_[kBleVoiceSamplesPerFrame] = {};

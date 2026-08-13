@@ -758,11 +758,18 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  wifiColor(view.wifiPhase),
                  SettingAccessory::toggle,
                  wifiUiSwitchOn(view.wifiPhase));
+  const bool bluetoothEnabled = view.bluetoothEnabled;
   char pairingLabel[24];
   snprintf(pairingLabel, sizeof(pairingLabel), "配对码 %06lu",
            static_cast<unsigned long>(view.bleVoicePasskey));
   String voiceDetail;
-  if (view.bleVoicePairing) {
+  if (!view.bleVoiceServiceReady) {
+    voiceDetail = "蓝牙服务未就绪";
+  } else if (!bluetoothEnabled) {
+    voiceDetail = view.bleVoiceDisablePending ? "正在关闭" : "已关闭";
+  } else if (view.bleVoiceDisablePending) {
+    voiceDetail = "正在重新开启";
+  } else if (view.bleVoicePairing) {
     voiceDetail = pairingLabel;
   } else if (view.bleVoiceReady) {
     const uint32_t issues = view.bleVoiceNotifyFailures +
@@ -776,11 +783,11 @@ void Dashboard::drawDevice(const DashboardView &view) {
   } else {
     voiceDetail = view.bleVoiceBonded ? "等待 Mac" : "轻触配对";
   }
-  drawSettingRow(ui::kDeviceMacTop, UiIcon::bluetooth, "蓝牙配对",
+  drawSettingRow(ui::kDeviceMacTop, UiIcon::bluetooth, "蓝牙",
                  voiceDetail,
                  view.bleVoiceReady || view.bleVoicePairing
                      ? ui::kWireless : ui::kMuted,
-                 SettingAccessory::value);
+                 SettingAccessory::toggle, bluetoothEnabled);
   const WirelessSyncPresentationPhase syncPhase =
       wirelessSyncPresentationPhase(wirelessSyncInput(view));
   String syncDetail = syncPhaseTitle(syncPhase);
@@ -899,7 +906,13 @@ void Dashboard::drawBluetoothPairing(const DashboardView &view) {
 
   String status;
   uint16_t statusColor = ui::kMuted;
-  if (view.bleVoiceReady) {
+  const bool bluetoothEnabled = view.bluetoothEnabled;
+  if (!bluetoothEnabled) {
+    status = view.bleVoiceDisablePending ? "蓝牙正在关闭" : "蓝牙已关闭";
+  } else if (view.bleVoiceDisablePending) {
+    status = "蓝牙正在重新开启";
+    statusColor = ui::kWaiting;
+  } else if (view.bleVoiceReady) {
     status = "已连接 · 可以语音输入";
     statusColor = ui::kWireless;
   } else if (view.bleVoiceConnected) {
@@ -920,14 +933,20 @@ void Dashboard::drawBluetoothPairing(const DashboardView &view) {
                           20, ui::kSurfaceRaised);
   display_->drawRoundRect(20, ui::kBluetoothPairTop, 328,
                           ui::kBluetoothPairBottom - ui::kBluetoothPairTop,
-                          20, view.bleVoicePairing ? ui::kWaiting
-                                                   : ui::kWireless);
-  renderer_.drawText(view.bleVoicePairing ? "取消配对" : "开始配对",
-                     40, ui::kBluetoothPairTop + 15, 200, 1, ui::kInk,
+                          20, !bluetoothEnabled ? ui::kDisabled
+                              : (view.bleVoicePairing ? ui::kWaiting
+                                                      : ui::kWireless));
+  const String pairingTitle = !bluetoothEnabled ? "请先开启蓝牙"
+      : (view.bleVoicePairing ? "取消配对" : "开始配对");
+  renderer_.drawText(pairingTitle,
+                     40, ui::kBluetoothPairTop + 15, 200, 1,
+                     bluetoothEnabled ? ui::kInk : ui::kDisabled,
                      ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
-  const String pairingDetail = view.bleVoicePairing
+  const String pairingDetail = !bluetoothEnabled
+      ? String("返回设备页开启蓝牙")
+      : (view.bleVoicePairing
       ? String("配对码 ") + String(view.bleVoicePasskey)
-      : String("两分钟内连接 PokePod Voice");
+      : String("两分钟内连接 PokePod Voice"));
   renderer_.drawText(pairingDetail, 40, ui::kBluetoothPairTop + 48, 280, 1,
                      view.bleVoicePairing ? ui::kWaiting : ui::kMuted,
                      ui::kSurfaceRaised);
@@ -1404,6 +1423,8 @@ uint64_t Dashboard::signature(const DashboardView &view,
   value.add(view.bleVoiceReady);
   value.add(view.bleVoiceBonded);
   value.add(view.bleVoicePairing);
+  value.add(view.bluetoothEnabled);
+  value.add(view.bleVoiceDisablePending);
   value.add(view.bleVoicePasskey);
   value.add(view.bleVoiceMtu);
   value.add(view.bleVoiceNotifyFailures);
@@ -1524,8 +1545,8 @@ uint64_t Dashboard::topBarSignature(const DashboardView &view) const {
 }
 
 UiAction Dashboard::actionAt(int16_t x, int16_t y,
-                             bool voiceReady) const {
-  return uiActionAt(state_, x, y, voiceReady);
+                             bool bluetoothEnabled) const {
+  return uiActionAt(state_, x, y, bluetoothEnabled);
 }
 
 void Dashboard::swipeHorizontal(int16_t deltaX, bool locked, int16_t startX) {

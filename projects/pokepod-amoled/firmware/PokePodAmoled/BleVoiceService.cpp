@@ -251,9 +251,12 @@ void retainOnlyBond(const uint8_t *peerAddress) {
 
 }  // namespace
 
-bool BleVoiceService::begin(const String &deviceId, Print &log) {
+bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
+                            Print &log) {
   log_ = &log;
   deviceId_ = deviceId;
+  enablePolicy_.begin(userEnabled);
+  idlePaused_ = false;
   const String advertisedName = "PokePod-" + deviceId.substring(
       deviceId.length() > 4 ? deviceId.length() - 4 : 0);
   BLEDevice::init(advertisedName.c_str());
@@ -322,9 +325,53 @@ bool BleVoiceService::begin(const String &deviceId, Print &log) {
   // Macs still reconnect quickly without keeping the radio in a dense burst.
   advertising->setMinInterval(320);
   advertising->setMaxInterval(640);
-  advertising->start();
-  log.println("{\"event\":\"ble_voice\",\"ok\":true}");
+  if (userEnabled) advertising->start();
+  log.printf("{\"event\":\"ble_voice\",\"ok\":true,\"enabled\":%s}\n",
+             userEnabled ? "true" : "false");
   return true;
+}
+
+void BleVoiceService::requestEnable() {
+  applyEnableActions(enablePolicy_.requestEnable(connected_), millis());
+}
+
+void BleVoiceService::requestDisable(uint32_t nowMs) {
+  cancelPairingMode();
+  applyEnableActions(
+      enablePolicy_.requestDisable(controller_.active(), connected_, nowMs),
+      nowMs);
+}
+
+void BleVoiceService::applyEnableActions(
+    const BleServiceEnableActions &actions, uint32_t nowMs) {
+  if (actions.stopAdvertising) {
+    BLEAdvertising *advertising = BLEDevice::getAdvertising();
+    if (advertising != nullptr) advertising->stop();
+  }
+  if (actions.requestSessionStop) sessionStopRequested_ = true;
+  if (actions.disconnect && connected_ && server_ != nullptr) {
+    server_->disconnect(connectionPolicy_.currentConnectionId());
+  }
+  if (actions.clearRuntime) clearDisabledRuntime(nowMs);
+  if (actions.startAdvertising) restartAdvertising();
+}
+
+void BleVoiceService::clearDisabledRuntime(uint32_t nowMs) {
+  pairingUntilMs_ = 0;
+  connectionPolicy_.cancelPairingRequest();
+  controller_.complete();
+  clearControlNotify();
+  resetAudioNotify();
+  connected_ = authenticated_ = appReady_ = false;
+  peerPolicy_.disconnected();
+  mtu_ = 23;
+  connectionId_ = 0;
+  connectionGeneration_ = 0;
+  connectionPowerMode_ = BleConnectionPowerMode::idle;
+  currentPeerAddressValid_ = false;
+  memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
+  callbackSecurity_.clearConnection();
+  refreshCallbackSnapshot(nowMs);
 }
 
 void BleVoiceService::setBatteryPercent(int batteryPercent) {
@@ -463,6 +510,15 @@ void BleVoiceService::drainNotifyStatusEvents(uint32_t nowMs) {
 
 void BleVoiceService::processCallbackEvent(
     const BleVoiceCallbackEvent &event, uint32_t nowMs) {
+  if (!enablePolicy_.acceptsNewWork() &&
+      !bleCallbackAllowedDuringDisable(
+          event, connectionPolicy_.hasCurrent(),
+          connectionPolicy_.hasCurrent()
+              ? connectionPolicy_.currentConnectionId()
+              : kInvalidBleConnectionId,
+          connectionGeneration_)) {
+    return;
+  }
   const uint32_t eventAtMs = event.occurredAtMs == 0
       ? nowMs
       : event.occurredAtMs;
@@ -551,6 +607,8 @@ void BleVoiceService::processDeviceInfoRead() {
 
 void BleVoiceService::poll(uint32_t nowMs) {
   drainCallbackEvents(nowMs);
+  applyEnableActions(enablePolicy_.poll(controller_.active(), connected_,
+                                        nowMs), nowMs);
   if (pairingUntilMs_ != 0 && !pairingMode(nowMs)) pairingUntilMs_ = 0;
   refreshCallbackSnapshot(nowMs);
   if (controlNotifyPending_ &&
@@ -658,6 +716,7 @@ void BleVoiceService::poll(uint32_t nowMs) {
 }
 
 void BleVoiceService::enterPairingMode(uint32_t nowMs) {
+  if (!enablePolicy_.acceptsNewWork()) return;
   if (connectionPolicy_.hasCurrent()) {
     pairingUntilMs_ = 0;
     connectionPolicy_.requestPairingAfterDisconnect();
@@ -670,6 +729,7 @@ void BleVoiceService::enterPairingMode(uint32_t nowMs) {
 }
 
 void BleVoiceService::activatePairingMode(uint32_t nowMs) {
+  if (!enablePolicy_.acceptsNewWork()) return;
   pairingUntilMs_ = nowMs + 120000;
   passkey_ = BLESecurity::generateRandomPassKey();
   BLESecurity::setPassKey(true, passkey_);
@@ -702,7 +762,9 @@ void BleVoiceService::forgetMac() {
 }
 
 bool BleVoiceService::pauseForIdleSleep() {
-  if (controller_.active() || pairingUntilMs_ != 0) return false;
+  if (controller_.active() || pairingUntilMs_ != 0 || disablePending()) {
+    return false;
+  }
   idlePaused_ = true;
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   if (advertising != nullptr) advertising->stop();
@@ -736,7 +798,7 @@ void BleVoiceService::prepareForDeepSleep() {
 
 bool BleVoiceService::startSession(uint32_t sessionId, uint32_t nowMs,
                                    AudioCaptureRouter &router) {
-  if (!appReady() || !authenticated_ ||
+  if (!enablePolicy_.acceptsNewWork() || !appReady() || !authenticated_ ||
       !controller_.begin(sessionId, nowMs, connected_, mtu_, router)) {
     return false;
   }
@@ -795,6 +857,10 @@ void BleVoiceService::processConnect(uint16_t connectionId,
                                      uint32_t connectionGeneration,
                                      const uint8_t *peerAddress,
                                      bool peerBonded) {
+  if (!enablePolicy_.acceptsNewWork()) {
+    if (server_ != nullptr) server_->disconnect(connectionId);
+    return;
+  }
   const BleConnectDecision decision = connectionPolicy_.connect(connectionId);
   if (decision == BleConnectDecision::rejectSecondary) {
     if (log_ != nullptr) {
@@ -882,7 +948,7 @@ void BleVoiceService::processDisconnect(uint16_t connectionId,
   callbackSecurity_.clearConnection();
   refreshCallbackSnapshot(nowMs);
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_disconnected\"}");
-  if (startPairing) {
+  if (startPairing && enablePolicy_.acceptsNewWork()) {
     activatePairingMode(nowMs);
   } else if (!idlePaused_) {
     restartAdvertising();
@@ -1236,7 +1302,8 @@ void BleVoiceService::refreshCallbackSnapshot(uint32_t nowMs) {
 }
 
 void BleVoiceService::restartAdvertising() {
-  if (idlePaused_ || connectionPolicy_.hasCurrent()) return;
+  if (!enablePolicy_.acceptsNewWork() || idlePaused_ ||
+      connectionPolicy_.hasCurrent()) return;
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   if (advertising != nullptr) advertising->start();
 }

@@ -3,6 +3,7 @@
   "source": [
     "test-audio-capture-timeout-contract.py",
     "test-ble-thread-ownership.py",
+    "test-bluetooth-master-toggle-contract.py",
     "test-build-input-fingerprint.py",
     "test-build-portability.py",
     "test-capability-wiring.py",

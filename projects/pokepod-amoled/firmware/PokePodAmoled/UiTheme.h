@@ -76,6 +76,7 @@ constexpr int16_t kDeviceStorageTop = 216;
 constexpr int16_t kDeviceRaiseTop = 280;
 constexpr int16_t kDeviceProvisionTop = 344;
 constexpr int16_t kDeviceRowsBottom = 416;
+constexpr int16_t kDeviceBluetoothToggleLeft = 280;
 constexpr int16_t kBluetoothPairTop = 156;
 constexpr int16_t kBluetoothPairBottom = 240;
 constexpr int16_t kBluetoothForgetTop = 260;

@@ -39,6 +39,8 @@ StoredDeviceConfig encodeConfig(
   stored.wifiCount = static_cast<uint8_t>(networks.size());
   stored.wifiEnabled = settings.wifiEnabled ? 1 : 0;
   stored.raiseToWake = settings.raiseToWake ? 1 : 0;
+  stored.reserved[0] = settings.bluetoothEnabled
+      ? kStoredBluetoothEnabled : kStoredBluetoothDisabled;
   for (size_t index = 0; index < networks.size(); ++index) {
     copyString(stored.wifi[index].ssid, sizeof(stored.wifi[index].ssid),
                networks[index].ssid);
@@ -75,6 +77,8 @@ bool decodeConfig(const StoredDeviceConfig &stored, DeviceSettings &settings,
   decodedSettings.secretKey = stored.secretKey;
   decodedSettings.hotwordId = stored.hotwordId;
   decodedSettings.wifiEnabled = stored.wifiEnabled != 0;
+  decodedSettings.bluetoothEnabled =
+      storedDeviceConfigBluetoothEnabled(stored);
   decodedSettings.raiseToWake = stored.raiseToWake != 0;
   applyPreferredWifi(decodedSettings, decodedNetworks);
   settings = decodedSettings;
@@ -120,6 +124,7 @@ bool DeviceConfig::begin(Print &log) {
   migrated.secretKey = preferences_.getString("secret_key", "");
   migrated.hotwordId = preferences_.getString("hotword_id", "");
   migrated.wifiEnabled = preferences_.getBool("wifi_enabled", true);
+  migrated.bluetoothEnabled = preferences_.getBool("ble_enabled", true);
   migrated.raiseToWake = preferences_.getBool("raise_wake", true);
 
   std::vector<WifiCredential> migratedNetworks;
@@ -307,6 +312,17 @@ bool DeviceConfig::setWifiEnabled(bool enabled, Print &log) {
   if (!persistState(proposed, wifiNetworks_)) return false;
   settings_ = proposed;
   log.printf("{\"event\":\"wifi_manual\",\"enabled\":%s}\n",
+             enabled ? "true" : "false");
+  return true;
+}
+
+bool DeviceConfig::setBluetoothEnabled(bool enabled, Print &log) {
+  if (!open_) return false;
+  DeviceSettings proposed = settings_;
+  proposed.bluetoothEnabled = enabled;
+  if (!persistState(proposed, wifiNetworks_)) return false;
+  settings_ = proposed;
+  log.printf("{\"event\":\"bluetooth_manual\",\"enabled\":%s}\n",
              enabled ? "true" : "false");
   return true;
 }

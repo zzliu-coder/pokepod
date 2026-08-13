@@ -179,6 +179,7 @@ enum class UiAction : uint8_t {
   openProvisioning,
   openProvisioningLog,
   wifiToggle,
+  bluetoothToggle,
   openBluetoothPairing,
   toggleBluetoothPairing,
   forgetBluetoothMac,
@@ -258,7 +259,7 @@ inline void reconcileMissingCapsule(UiState &state) {
 }
 
 inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
-                           bool voiceReady) {
+                           bool bluetoothEnabled) {
   if (x < 0 || x >= kDisplayWidth || y < 0 || y >= kDisplayHeight) {
     return UiAction::none;
   }
@@ -278,7 +279,8 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return UiAction::back;
     }
     if (y >= ui::kBluetoothPairTop && y < ui::kBluetoothPairBottom) {
-      return UiAction::toggleBluetoothPairing;
+      return bluetoothEnabled ? UiAction::toggleBluetoothPairing
+                              : UiAction::none;
     }
     if (y >= ui::kBluetoothForgetTop && y < ui::kBluetoothForgetBottom) {
       return UiAction::forgetBluetoothMac;
@@ -362,7 +364,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     if (y >= ui::kHomeSecondaryTop &&
         y < ui::kHomeSecondaryBottom) return UiAction::wechatVoice;
-    (void)voiceReady;
+    (void)bluetoothEnabled;
     return UiAction::none;
   }
   if (screen == UiScreen::device) {
@@ -370,7 +372,8 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return UiAction::wifiToggle;
     }
     if (y >= ui::kDeviceMacTop && y < ui::kDeviceStorageTop) {
-      return UiAction::openBluetoothPairing;
+      return x >= ui::kDeviceBluetoothToggleLeft
+          ? UiAction::bluetoothToggle : UiAction::openBluetoothPairing;
     }
     if (y >= ui::kDeviceStorageTop && y < ui::kDeviceRaiseTop) {
       return UiAction::openComputerSync;

@@ -16,6 +16,8 @@
 #include "BleConnectionPowerPolicy.h"
 #include "BleVoiceCallbackMailbox.h"
 #include "BleSingleConnectionPolicy.h"
+#include "BleServiceEnablePolicy.h"
+#include "BleServiceCallbackGate.h"
 #include "BleVoiceProtocol.h"
 #include "BleVoiceQuality.h"
 #include "BleNotifyReliability.h"
@@ -25,8 +27,15 @@ namespace pokepod {
 
 class BleVoiceService {
  public:
-  bool begin(const String &deviceId, Print &log);
+  bool begin(const String &deviceId, bool userEnabled, Print &log);
   void poll(uint32_t nowMs);
+  void requestEnable();
+  void requestDisable(uint32_t nowMs);
+  bool takeSessionStopRequested() {
+    const bool requested = sessionStopRequested_;
+    sessionStopRequested_ = false;
+    return requested;
+  }
 
   bool startSession(uint32_t sessionId, uint32_t nowMs,
                     AudioCaptureRouter &router);
@@ -43,9 +52,16 @@ class BleVoiceService {
   void prepareForDeepSleep();
 
   bool connected() const { return connected_; }
+  bool userEnabled() const { return enablePolicy_.userEnabled(); }
+  bool disablePending() const { return enablePolicy_.transitionPending(); }
   bool idlePaused() const { return idlePaused_; }
-  bool radioActive() const { return connected_ || !idlePaused_; }
-  bool appReady() const { return connected_ && appReady_ && mtuReady(); }
+  bool radioActive() const {
+    return disablePending() || connected_ || (userEnabled() && !idlePaused_);
+  }
+  bool appReady() const {
+    return enablePolicy_.acceptsNewWork() && connected_ && appReady_ &&
+        mtuReady();
+  }
   bool mtuReady() const { return bleVoiceMtuReady(mtu_); }
   uint16_t mtu() const { return mtu_; }
   BleVoiceQualitySnapshot quality() const;
@@ -142,6 +158,9 @@ class BleVoiceService {
   BleVoiceNotifyIdentity nextNotifyIdentity(BleVoiceNotifyKind kind);
   bool beginNotifyCallback(const BleVoiceNotifyIdentity &identity);
   void endNotifyCallback();
+  void applyEnableActions(const BleServiceEnableActions &actions,
+                          uint32_t nowMs);
+  void clearDisabledRuntime(uint32_t nowMs);
 
   BLEServer *server_ = nullptr;
   BLECharacteristic *info_ = nullptr;
@@ -150,6 +169,7 @@ class BleVoiceService {
   BLECharacteristic *audio_ = nullptr;
   BlePeerPolicy peerPolicy_;
   BleSingleConnectionPolicy connectionPolicy_;
+  BleServiceEnablePolicy enablePolicy_;
   VoiceSessionController controller_;
   static constexpr size_t kCallbackEventCapacity = 16;
   static constexpr size_t kNotifyStatusEventCapacity = 4;
@@ -196,6 +216,7 @@ class BleVoiceService {
   BleConnectionPowerMode connectionPowerMode_ =
       BleConnectionPowerMode::idle;
   bool idlePaused_ = false;
+  bool sessionStopRequested_ = false;
 };
 
 }  // namespace pokepod

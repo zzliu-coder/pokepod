@@ -157,6 +157,8 @@ int main() {
   assert(uiActionAt(state, 180, 380, false) == UiAction::openProvisioning);
   assert(uiActionAt(state, 180, 200, false) ==
          UiAction::openBluetoothPairing);
+  assert(uiActionAt(state, 330, 200, false) ==
+         UiAction::bluetoothToggle);
   assert(uiActionAt(state, 180, 240, false) == UiAction::openComputerSync);
 
   assert(uiActionAt(state, 180, 20, false) == UiAction::none);
@@ -174,8 +176,10 @@ int main() {
   state.bluetoothPairing = true;
   assert(state.screen() == UiScreen::bluetoothPairing);
   assert(uiActionAt(state, 20, 20, false) == UiAction::back);
-  assert(uiActionAt(state, 180, ui::kBluetoothPairTop, false) ==
+  assert(uiActionAt(state, 180, ui::kBluetoothPairTop, true) ==
          UiAction::toggleBluetoothPairing);
+  assert(uiActionAt(state, 180, ui::kBluetoothPairTop, false) ==
+         UiAction::none);
   assert(uiActionAt(state, 180, ui::kBluetoothPairBottom, false) ==
          UiAction::none);
   assert(uiActionAt(state, 180, ui::kBluetoothForgetTop, false) ==

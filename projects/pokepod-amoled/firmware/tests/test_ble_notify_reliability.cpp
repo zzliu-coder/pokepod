@@ -114,6 +114,7 @@ int main() {
   // acceptance boundary. Rejections cannot advance its sequence head.
   AudioCaptureRouter router;
   VoiceSessionController controller;
+  assert(router.acquire(AudioCaptureOwner::wirelessVoice));
   assert(controller.begin(91, 0, true, 185, router));
   assert(controller.markReady(91, 1));
   queueVoiceFrame(controller, 2);
@@ -134,8 +135,10 @@ int main() {
   controller.abort(VoiceSessionError::notifyFailed);
   assert(controller.state() == VoiceSessionState::failed);
   assert(controller.error() == VoiceSessionError::notifyFailed);
-  assert(router.available());
+  assert(router.wirelessStreaming());
   controller.complete();
   assert(controller.state() == VoiceSessionState::idle);
+  router.release(AudioCaptureOwner::wirelessVoice);
+  assert(router.available());
   return 0;
 }

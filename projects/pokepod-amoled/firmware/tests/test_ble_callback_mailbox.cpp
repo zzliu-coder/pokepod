@@ -6,6 +6,7 @@
 #include "AudioCaptureRouter.h"
 #include "BleNotifyReliability.h"
 #include "BleVoiceCallbackMailbox.h"
+#include "BleServiceCallbackGate.h"
 #include "BleVoiceProtocol.h"
 #include "VoiceSessionController.h"
 
@@ -158,6 +159,24 @@ void drain(BleVoiceCallbackMailbox<Capacity> &mailbox, MainOwnerModel &owner,
 }  // namespace
 
 int main() {
+  BleVoiceCallbackEvent gated;
+  gated.type = BleVoiceCallbackEventType::connect;
+  gated.connectionId = 77;
+  gated.connectionGeneration = 9;
+  assert(bleCallbackAllowedDuringDisable(gated, false, 0xffff, 0));
+  gated.type = BleVoiceCallbackEventType::disconnect;
+  assert(bleCallbackAllowedDuringDisable(gated, true, 77, 9));
+  gated.type = BleVoiceCallbackEventType::command;
+  assert(bleCallbackAllowedDuringDisable(gated, true, 77, 9));
+  gated.type = BleVoiceCallbackEventType::controlNotifyStatus;
+  assert(bleCallbackAllowedDuringDisable(gated, true, 77, 9));
+  gated.type = BleVoiceCallbackEventType::authentication;
+  assert(!bleCallbackAllowedDuringDisable(gated, true, 77, 9));
+  gated.type = BleVoiceCallbackEventType::passkey;
+  assert(!bleCallbackAllowedDuringDisable(gated, true, 77, 9));
+  gated.type = BleVoiceCallbackEventType::command;
+  assert(!bleCallbackAllowedDuringDisable(gated, true, 77, 10));
+
   BleVoiceCallbackMailbox<16> mailbox;
   MainOwnerModel owner;
   std::atomic<int> phase{0};
@@ -209,6 +228,7 @@ int main() {
   assert(owner.connected && owner.authenticated && owner.appReady);
   assert(owner.mtu == 185);
 
+  assert(owner.router.acquire(AudioCaptureOwner::wirelessVoice));
   assert(owner.controller.begin(501, 11, owner.connected, owner.mtu,
                                 owner.router));
   int16_t pcm[kBleVoiceSamplesPerFrame] = {};
@@ -235,8 +255,11 @@ int main() {
   waitFor(phase, 8);
   drain(mailbox, owner, 17);
   assert(owner.controller.state() == VoiceSessionState::idle);
+  assert(owner.router.wirelessStreaming());
+  owner.router.release(AudioCaptureOwner::wirelessVoice);
   assert(owner.router.available());
 
+  assert(owner.router.acquire(AudioCaptureOwner::wirelessVoice));
   assert(owner.controller.begin(502, 18, owner.connected, owner.mtu,
                                 owner.router));
   phase.store(9, std::memory_order_release);
@@ -245,6 +268,8 @@ int main() {
   assert(!owner.connected);
   assert(owner.controller.state() == VoiceSessionState::failed);
   assert(owner.controller.error() == VoiceSessionError::disconnected);
+  assert(owner.router.wirelessStreaming());
+  owner.router.release(AudioCaptureOwner::wirelessVoice);
   assert(owner.router.available());
   callbackThread.join();
 

@@ -458,6 +458,8 @@ void drawDashboard() {
   view.transcriptionReady =
       capabilities.ready(DeviceCapability::transcription);
   view.bleVoiceServiceReady = capabilities.ready(DeviceCapability::bleVoice);
+  view.bluetoothEnabled = bleVoice.userEnabled();
+  view.bleVoiceDisablePending = bleVoice.disablePending();
   view.linkReady = capabilities.ready(DeviceCapability::link);
   view.wifiServiceReady = capabilities.ready(DeviceCapability::wifi);
   view.usbReady = usb.ready();
@@ -938,7 +940,7 @@ void pollTouch() {
     touchWirelessAttempted = false;
     touchCapsuleSelectionAttempted = false;
     touchVerticalScrolling = false;
-    touchAction = dashboard.actionAt(x, y, bleVoice.appReady());
+    touchAction = dashboard.actionAt(x, y, bleVoice.userEnabled());
   } else if (touched) {
     touchGesture.update(x, y);
     if (!touchVerticalScrolling && !touchWirelessHolding &&
@@ -1072,6 +1074,31 @@ void pollTouch() {
       }
       dashboard.invalidate();
       drawDashboard();
+    } else if (action == UiAction::bluetoothToggle) {
+      if (!capabilities.ready(DeviceCapability::bleVoice)) {
+        showMessage("蓝牙服务未就绪");
+        drawDashboard();
+        return;
+      }
+      const bool enabled = !bleVoice.userEnabled();
+      // Persisted user intent is the source of truth. Runtime state changes
+      // only after the complete atomic blob has committed.
+      if (!deviceConfig.setBluetoothEnabled(enabled, usb.log())) {
+        showMessage("蓝牙设置保存失败");
+        drawDashboard();
+        return;
+      }
+      if (enabled) {
+        bleVoice.requestEnable();
+        showMessage(bleVoice.disablePending() ? "蓝牙将在语音结束后开启"
+                                              : "蓝牙已开启");
+      } else {
+        bleVoice.requestDisable(now);
+        showMessage(bleVoice.disablePending() ? "蓝牙正在安全关闭"
+                                              : "蓝牙已关闭");
+      }
+      dashboard.invalidate();
+      drawDashboard();
     } else if (action == UiAction::openBluetoothPairing) {
       if (!capabilities.ready(DeviceCapability::bleVoice)) {
         showMessage("蓝牙服务未就绪");
@@ -1081,6 +1108,12 @@ void pollTouch() {
       dashboard.openBluetoothPairing();
       drawDashboard();
     } else if (action == UiAction::toggleBluetoothPairing) {
+      if (!bleVoice.userEnabled() ||
+          bleVoice.disablePending()) {
+        showMessage("请先开启蓝牙");
+        drawDashboard();
+        return;
+      }
       if (bleVoice.pairingMode(now)) {
         bleVoice.cancelPairingMode();
         showMessage("已取消配对");
@@ -1094,6 +1127,11 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::forgetBluetoothMac) {
+      if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice) {
+        showMessage("语音输入中，请先松开");
+        drawDashboard();
+        return;
+      }
       if (bleVoice.bonded()) {
         bleVoice.forgetMac();
         showMessage("已忘记 Mac");
@@ -1431,10 +1469,13 @@ void setup() {
       bootPower.lastWakeCause, bootPower.wakeCauses,
       bootPower.ext1WakeMask, bootPower.automaticPmSupported,
       bootPower.bleModemSleepSupported, board.status().batteryPercent);
-  const bool bleStarted = bleVoice.begin(deviceId(), usb.log());
+  const bool configStarted = deviceConfig.begin(usb.log());
+  const bool bleStarted = bleVoice.begin(
+      deviceId(), configStarted ? deviceConfig.settings().bluetoothEnabled
+                                : false,
+      usb.log());
   capabilities.record(DeviceCapability::bleVoice,
                       bleStarted && bootCaptureTaskStarted);
-  deviceConfig.begin(usb.log());
   bootSyncIdentityStarted =
       wirelessSyncIdentity.begin(ESP.getEfuseMac(), usb.log());
   storageBootAvailable = board.sdReady() &&
@@ -1603,6 +1644,11 @@ void loop() {
     }
   }
   bleVoice.poll(now);
+  if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice &&
+      bleVoice.takeSessionStopRequested()) {
+    (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                             RecorderStopReason::none, false, false);
+  }
   if (wirelessUiActive && !bleVoice.streaming()) {
     (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
                              RecorderStopReason::none, true, false);
