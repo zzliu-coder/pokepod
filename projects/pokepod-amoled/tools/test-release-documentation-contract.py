@@ -19,6 +19,12 @@ for required in (
     "完整 16 MiB Flash 双备份属于历史留档或特殊恢复流程",
     "不能混入标准发布步骤",
     "密钥迁移脚本只通过正在运行的固件执行 Link v2 `configure`",
+    "--identity-authority work/hardmac-authorities/my-pokepod.json",
+    "pokepod.flash-identity-authority",
+    "不能\n提交到仓库或从当前待刷设备临时自生成",
+    "--rom-port /dev/cu.usbmodemXXXX",
+    "不会自动选择“唯一的 usbmodem”",
+    "都会在设备备份和写入前终止",
 ):
     assert required in project_readme, f"release documentation contract missing: {required}"
 

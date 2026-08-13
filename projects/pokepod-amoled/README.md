@@ -259,18 +259,37 @@ python3 tools/package-source-audit.py \
 PokePod 路径存在任何 tracked 或 untracked 改动时，命令会拒绝生成，以免审查对象
 和后续构建候选脱节。
 
-设备正常运行并通过 USB 连接时，刷写只需一个命令：
+设备正常运行并通过 USB 连接时，刷写还必须提供之前只读验明并由使用者确认的
+私有设备身份授权文件。授权文件保存在 `work/` 或其他非 Git 目录，至少绑定 Link
+`deviceId`、板型、ESP32-S3 eFuse MAC 和 16 MiB Flash；刷写脚本会在备份和首次
+写入前重新读取 ROM 身份并逐项回绑：
 
 ```sh
-./flash.sh
+./flash.sh --identity-authority work/hardmac-authorities/my-pokepod.json
 ```
 
 默认命令只接受带有效清单的正式产物。日常迭代明确使用：
 
 ```sh
 ./firmware/build.sh --fast
-./flash.sh --fast
+./flash.sh --fast \
+  --identity-authority work/hardmac-authorities/my-pokepod.json
 ```
+
+授权文件使用 `pokepod.flash-identity-authority` v1，属于单台设备的私有证据，不能
+提交到仓库或从当前待刷设备临时自生成。首次建立该文件时，先在应用仍可运行的
+只读验明流程中保存 Link identity、板型和 eFuse MAC，再由使用者确认目标设备。
+应用已损坏、只能进入 ROM 的救援流程还必须显式传入已确认的端口，例如：
+
+```sh
+./flash.sh --release \
+  --identity-authority work/hardmac-authorities/my-pokepod.json \
+  --rom-port /dev/cu.usbmodemXXXX
+```
+
+救援流程不会自动选择“唯一的 usbmodem”，也不会把当前接入设备读到的 MAC 当成
+授权依据。缺少授权、MAC 不同、Flash 不是 16 MiB、板型不符或出现多个可读
+PokePod 时，都会在设备备份和写入前终止。
 
 脚本确认 ESP32-S3 身份后，每次刷写都会在任何写入前现场读取完整 3 MiB app0
 区域（偏移 `0x10000`），保存 `current-app0.bin`、SHA-256 和
