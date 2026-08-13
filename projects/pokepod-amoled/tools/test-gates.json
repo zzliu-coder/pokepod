@@ -37,6 +37,7 @@
     "test-recorder-async-finalize.py",
     "test-recorder-capture-metrics.py",
     "test-recorder-storage-admission.py",
+    "test-release-documentation-contract.py",
     "test-resource-review.py",
     "test-runtime-power-time-usb-contract.py",
     "test-scroll-contract.py",
