@@ -117,7 +117,13 @@ def main() -> int:
     internal_globals = parse_number(memory_match.group(1))
     internal_remaining = parse_number(memory_match.group(3))
     internal_maximum = parse_number(memory_match.group(4))
-    require(log_program_bytes == binary_evidence["bytes"], "build log program size mismatch")
+    image_packaging_bytes = int(binary_evidence["bytes"]) - log_program_bytes
+    require(image_packaging_bytes >= 0, "binary is smaller than linked program image")
+    # Arduino's summary measures linked program segments. The flashable ESP
+    # image adds its image header, segment headers, checksum and alignment.
+    # Keep both facts and reject an unexpectedly large packaging gap while
+    # continuing to apply release thresholds to the exact .bin byte count.
+    require(image_packaging_bytes <= 4096, "binary packaging overhead is unexpectedly large")
     require(internal_globals + internal_remaining == internal_maximum, "build log RAM arithmetic mismatch")
 
     summary = {
@@ -130,6 +136,10 @@ def main() -> int:
         "linkerMap": map_evidence,
         "toolchain": artifact.get("toolchain"),
         "flash": flash,
+        "linkedProgram": {
+            "bytes": log_program_bytes,
+            "imagePackagingBytes": image_packaging_bytes,
+        },
         "internalMemory": {
             "globalBytes": internal_globals,
             "remainingBytes": internal_remaining,

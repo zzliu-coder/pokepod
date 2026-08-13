@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix="pokepod-fast-candidate-") as raw:
     linker_map.write_bytes(b"map")
     build_log = root / "build-fast.log"
     build_log.write_text(
-        "Sketch uses 8 bytes (0%) of program storage space. Maximum is 3145728 bytes.\n"
+        "Sketch uses 7 bytes (0%) of program storage space. Maximum is 3145728 bytes.\n"
         "Global variables use 12 bytes (3%) of dynamic memory, leaving 388 bytes for local variables. Maximum is 400 bytes.\n",
         encoding="utf-8",
     )
@@ -96,6 +96,7 @@ with tempfile.TemporaryDirectory(prefix="pokepod-fast-candidate-") as raw:
     summary = json.loads(output.read_text(encoding="utf-8"))
     assert summary["delta"] == {"programBytes": 4, "internalGlobalBytes": 2}
     assert summary["internalMemory"]["maximumBytes"] == 400
+    assert summary["linkedProgram"] == {"bytes": 7, "imagePackagingBytes": 1}
     assert summary["binary"]["sha256"] == file_evidence(binary)["sha256"]
     assert summary["duplicateImplementationReview"]["status"] == "pass"
 
@@ -105,5 +106,29 @@ with tempfile.TemporaryDirectory(prefix="pokepod-fast-candidate-") as raw:
     rejected = subprocess.run(command, text=True, capture_output=True, check=False)
     assert rejected.returncode != 0
     assert "clean source tree" in rejected.stderr
+
+    binary.write_bytes(b"x" * 5000)
+    artifact["binary"] = {
+        "sizeBytes": 5000,
+        "sha256": file_evidence(binary)["sha256"],
+    }
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    flash["programBytes"] = 5000
+    flash["remainingBytes"] = flash["slotBytes"] - 5000
+    flash_path.write_text(json.dumps(flash), encoding="utf-8")
+    review["binarySha256"] = file_evidence(binary)["sha256"]
+    review["programBytes"] = 5000
+    review["elf"] = file_evidence(elf)
+    review["linkerMap"] = file_evidence(linker_map)
+    review["baseline"]["deltaBytes"] = 4996
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+    build_log.write_text(
+        "Sketch uses 2 bytes (0%) of program storage space. Maximum is 3145728 bytes.\n"
+        "Global variables use 12 bytes (3%) of dynamic memory, leaving 388 bytes for local variables. Maximum is 400 bytes.\n",
+        encoding="utf-8",
+    )
+    oversized = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert oversized.returncode != 0
+    assert "packaging overhead" in oversized.stderr, oversized.stderr
 
 print("PASS test-fast-candidate-summary")
