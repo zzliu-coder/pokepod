@@ -73,6 +73,16 @@ case "$BUILD_MODE" in
     exit 64
     ;;
 esac
+if [ "$BUILD_MODE" = release ]; then
+  for build_argument in "$@"; do
+    case "$build_argument" in
+      --build-property|--build-property=*)
+        echo "Release build rejects caller-supplied --build-property" >&2
+        exit 64
+        ;;
+    esac
+  done
+fi
 if [ "$BUILD_MODE" = release ] &&
    [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all -- . 2>/dev/null)" ]; then
   echo "Release build requires a clean PokePod tree" >&2

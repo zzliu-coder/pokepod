@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Release builds bind compiler date macros to the exact source commit."""
 
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -12,14 +13,6 @@ BOARD = (ROOT / "firmware/PokePodAmoled/BoardServices.cpp").read_text(
     encoding="utf-8"
 )
 
-revision = subprocess.check_output(
-    ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"], text=True
-).strip()
-commit_epoch = subprocess.check_output(
-    ["git", "-C", str(ROOT), "show", "-s", "--format=%ct", revision], text=True
-).strip()
-assert re.fullmatch(r"[0-9]+", commit_epoch) and int(commit_epoch) > 0
-
 assert "unset SOURCE_DATE_EPOCH" in BUILD
 assert 'git -C "$PROJECT_DIR" show -s --format=%ct "$SOURCE_REVISION"' in BUILD
 assert "Release build requires a positive Git commit timestamp" in BUILD
@@ -28,6 +21,9 @@ assert "export SOURCE_DATE_EPOCH" in BUILD
 assert "BUILD_EPOCH_CPP_FLAG=-DPOKEPOD_BUILD_EPOCH_UTC=$SOURCE_DATE_EPOCH_VALUE" in BUILD
 assert '--build-property "compiler.cpp.extra_flags=$BUILD_EPOCH_CPP_FLAG"' in BUILD
 assert '--literal "source-date-epoch=$SOURCE_DATE_EPOCH_VALUE"' in BUILD
+assert 'if [ "$BUILD_MODE" = release ]; then\n  for build_argument in "$@"' in BUILD
+assert "--build-property|--build-property=*)" in BUILD
+assert "Release build rejects caller-supplied --build-property" in BUILD
 assert "#if defined(POKEPOD_BUILD_EPOCH_UTC)" in BOARD
 assert "setUtcEpoch(static_cast<time_t>(POKEPOD_BUILD_EPOCH_UTC))" in BOARD
 assert "firmware_build_epoch_utc" in BOARD
@@ -40,7 +36,38 @@ epoch_export = BUILD.index("export SOURCE_DATE_EPOCH", epoch_lookup)
 compile_call = BUILD.index('"$ARDUINO_CLI" compile', epoch_export)
 assert epoch_lookup < epoch_export < compile_call
 
-print(
-    "PASS release_reproducibility_contract "
-    f"(source={revision[:12]}, source_date_epoch={commit_epoch})"
+for inherited_epoch, arguments in (
+    ("", ("--build-property", "compiler.cpp.extra_flags=-DPOKEPOD_BUILD_EPOCH_UTC=0")),
+    ("9999999999", ("--build-property=compiler.cpp.extra_flags=-DPOKEPOD_BUILD_EPOCH_UTC=1",)),
+):
+    environment = os.environ.copy()
+    environment["SOURCE_DATE_EPOCH"] = inherited_epoch
+    rejected = subprocess.run(
+        ["sh", str(ROOT / "firmware/build.sh"), "--release", "--", *arguments],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode == 64, rejected
+    assert "Release build rejects caller-supplied --build-property" in rejected.stderr
+
+git_root = subprocess.run(
+    ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+    text=True,
+    capture_output=True,
+    check=False,
 )
+if git_root.returncode == 0:
+    revision = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"], text=True
+    ).strip()
+    commit_epoch = subprocess.check_output(
+        ["git", "-C", str(ROOT), "show", "-s", "--format=%ct", revision], text=True
+    ).strip()
+    assert re.fullmatch(r"[0-9]+", commit_epoch) and int(commit_epoch) > 0
+    detail = f"source={revision[:12]}, source_date_epoch={commit_epoch}"
+else:
+    detail = "source-only-no-git"
+
+print(f"PASS release_reproducibility_contract ({detail})")
