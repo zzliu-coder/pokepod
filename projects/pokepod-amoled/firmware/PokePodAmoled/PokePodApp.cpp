@@ -574,12 +574,14 @@ void observeCaptureMetrics() {
 
 bool consumeRecorderTerminal(bool notifyUser);
 
-void finishLocalRecordingStartFailure(bool notifyUser) {
-  pendingRecorderFinalize = recorder.operationActive();
+void finishLocalRecordingStartFailure(bool notifyUser, bool ownsRouter) {
+  const bool ownsRecorder =
+      recorder.ownedBy(RecorderOperationOwner::localApp);
+  pendingRecorderFinalize = ownsRecorder && recorder.operationActive();
   pendingRecorderResultNotify = pendingRecorderResultNotify || notifyUser;
   if (pendingRecorderFinalize) return;
-  captureRouter.release(AudioCaptureOwner::localCapsule);
-  const bool terminalConsumed =
+  if (ownsRouter) captureRouter.release(AudioCaptureOwner::localCapsule);
+  const bool terminalConsumed = ownsRecorder &&
       consumeRecorderTerminal(pendingRecorderResultNotify);
   pendingRecorderResultNotify = false;
   if (notifyUser && !terminalConsumed) showMessage("录音启动失败");
@@ -605,7 +607,7 @@ void advanceLocalRecordingStart() {
     return;
   }
   if (recorder.recording()) recorder.abortCapture(usb.log());
-  finishLocalRecordingStartFailure(true);
+  finishLocalRecordingStartFailure(true, true);
   dashboard.invalidate();
 }
 
@@ -798,7 +800,8 @@ void toggleRecording() {
   } else {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
-    const bool acquired = captureRouter.acquire(AudioCaptureOwner::localCapsule);
+    const bool acquired = captureRouter.available() &&
+        captureRouter.acquire(AudioCaptureOwner::localCapsule);
     uint32_t captureSessionId = esp_random();
     if (captureSessionId == 0) captureSessionId = 1;
     lastLocalCaptureMetrics = {};
@@ -811,7 +814,7 @@ void toggleRecording() {
       showMessage("正在检查存储…", 3000);
     } else {
       localRecordingStart.reset();
-      finishLocalRecordingStartFailure(true);
+      finishLocalRecordingStartFailure(true, acquired);
     }
   }
   noteUserActivity();
