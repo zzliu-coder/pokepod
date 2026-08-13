@@ -64,4 +64,40 @@ with tempfile.TemporaryDirectory(prefix="pokepod-resource-review-") as raw:
     assert report["duplicateImplementationReview"]["status"] == "pass"
     assert report["duplicateImplementationReview"]["matchedSymbols"] == []
 
+
+    # Green candidates still need reproducible symbol and delta evidence in CI,
+    # even though a release review is not mandatory below the yellow threshold.
+    green_output = root / "green-review.json"
+    subprocess.check_call(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--output",
+            str(green_output),
+            "--source-revision",
+            "green",
+            "--binary",
+            str(binary),
+            "--tier",
+            "green",
+            "--baseline-commit",
+            "base",
+            "--baseline-bytes",
+            "4",
+            "--nm",
+            str(nm),
+            "--elf",
+            str(elf),
+            "--map",
+            str(linker_map),
+            "--duplicate-evidence",
+            "legacy Link symbols absent",
+            "--forbidden-symbol-regex",
+            "legacyDuplicate",
+        ]
+    )
+    green = json.loads(green_output.read_text(encoding="utf-8"))
+    assert green["tier"] == "green"
+    assert green["duplicateImplementationReview"]["status"] == "pass"
+
 print("PASS test-resource-review")

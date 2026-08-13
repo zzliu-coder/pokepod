@@ -59,7 +59,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--tier", choices=("yellow", "orange"), required=True)
+    parser.add_argument("--tier", choices=("green", "yellow", "orange"), required=True)
     parser.add_argument("--baseline-commit", required=True)
     parser.add_argument("--baseline-bytes", type=positive_integer, required=True)
     parser.add_argument("--nm", type=Path, required=True)
