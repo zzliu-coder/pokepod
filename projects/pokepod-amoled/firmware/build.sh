@@ -19,6 +19,7 @@ BUILD_ENV_TOOL="$PROJECT_DIR/tools/pokepod_build_env.py"
 PORTABLE_TOOL="$PROJECT_DIR/tools/portable_build_utils.py"
 BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
 FORCE_BUILD=0
+SOURCE_REVISION=$(git -C "$PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -73,6 +74,10 @@ if [ "$BUILD_MODE" = release ] &&
   git -C "$PROJECT_DIR" status --short --untracked-files=all -- . >&2
   exit 65
 fi
+if [ "$BUILD_MODE" = release ] && [ -z "$SOURCE_REVISION" ]; then
+  echo "Release build requires a Git commit" >&2
+  exit 65
+fi
 
 BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
 BUILD_LOG="$WORK_DIR/build-$BUILD_MODE.log"
@@ -111,6 +116,10 @@ if [ ! -f "$PORTABLE_TOOL" ]; then
 fi
 BUILD_ENV_ASSIGNMENTS=$(python3 "$BUILD_ENV_TOOL" --format shell)
 eval "$BUILD_ENV_ASSIGNMENTS"
+if [ "$BUILD_MODE" = release ] && [ "$POKEPOD_CORE_PROFILE" != production ]; then
+  echo "Release build requires the production ESP32 core profile" >&2
+  exit 66
+fi
 if [ ! -x "$ARDUINO_CLI" ]; then
   echo "Arduino CLI not found: $ARDUINO_CLI" >&2
   exit 1
@@ -288,8 +297,8 @@ printf '%s\n' "$BUILD_FINGERPRINT" > "$CURRENT_FINGERPRINT"
 
 write_artifact_manifest() {
   firmware_bin="$OUTPUT_DIR/PokePodAmoled.ino.bin"
-  source_revision=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || printf unknown)
-  if [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+  source_revision=${SOURCE_REVISION:-unknown}
+  if [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all -- . 2>/dev/null)" ]; then
     source_dirty=true
   else
     source_dirty=false

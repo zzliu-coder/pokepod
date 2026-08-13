@@ -17,6 +17,7 @@ import zipfile
 PROJECT_PATH = PurePosixPath("projects/pokepod-amoled")
 EXCLUDED_PARTS = {
     ".cache",
+    ".codeprinter",
     ".pio",
     "_audit",
     "__pycache__",

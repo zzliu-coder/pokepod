@@ -223,7 +223,8 @@ GFX_LIBRARY=/srv/arduino-user/libraries/GFX_Library_for_Arduino \
 ```
 
 产品构建只接受已经验证的 Arduino-ESP32 `3.3.8`。其他版本仅用于显式矩阵验证，
-必须同时给出开关和版本，产物清单会标记为 `matrix`，不能作为产品发布件：
+必须同时给出开关和版本，产物清单会标记为 `matrix`。Release 构建和烧录前门禁
+都会拒绝 `matrix` 产物：
 
 ```sh
 POKEPOD_CORE_MATRIX=1 POKEPOD_ESP32_CORE_VERSION=3.3.11 \
@@ -254,8 +255,9 @@ python3 tools/package-source-audit.py \
 ```
 
 打包器按 Git commit 读取源码和测试，写入逐文件 SHA-256 清单；固件、构建缓存、
-录音、设备备份、日志和二进制字库不会进入压缩包。PokePod 路径存在任何 tracked
-或 untracked 改动时，命令会拒绝生成，以免审查对象和后续构建候选脱节。
+录音、设备备份、日志、内部 `.codeprinter` 施工记录和二进制字库不会进入压缩包。
+PokePod 路径存在任何 tracked 或 untracked 改动时，命令会拒绝生成，以免审查对象
+和后续构建候选脱节。
 
 设备正常运行并通过 USB 连接时，刷写只需一个命令：
 
@@ -270,8 +272,12 @@ python3 tools/package-source-audit.py \
 ./flash.sh --fast
 ```
 
-整包写入遇到原生 USB 中断时，刷写脚本会自动退到 64 KB 分块和较低速率，
-每块最多尝试三次，最后仍对完整应用分区执行校验。项目本地的通用部署配置位于
+脚本确认 ESP32-S3 身份后，会在首次写入前读取并校验即将覆盖的完整 3 MiB app0
+区域，保存 `current-app0.bin`、SHA-256 和 `restore-plan.json`。备份或抽样复读失败
+会在任何写入前终止；恢复计划绑定设备身份，并要求重新确认同一设备的 ROM 端口。
+
+刷写固定使用 16 KiB 分块和 115200 波特率，每块最多尝试三次，最后仍对完整
+应用分区执行回读校验。项目本地的通用部署配置位于
 `.hardmac/workflow.json`；其中不保存当前串口、设备 ID、Wi-Fi 或密钥。
 
 应用 CDC 在线时，脚本会用 1200 波特率自动进入 ROM 下载器；写入和校验后使用

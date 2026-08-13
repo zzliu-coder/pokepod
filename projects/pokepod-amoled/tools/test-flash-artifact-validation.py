@@ -19,13 +19,22 @@ POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)
 
 
-def artifact(binary: Path, lane: str, dirty: bool, policy: dict[str, object]) -> dict[str, object]:
+def artifact(
+    binary: Path,
+    lane: str,
+    dirty: bool,
+    policy: dict[str, object],
+    *,
+    source_revision: str = "abc",
+    core_profile: str = "production",
+    core_version: str = "3.3.8",
+) -> dict[str, object]:
     payload = binary.read_bytes()
     return {
         "schemaVersion": 1,
         "kind": "hardmac.artifact",
         "lane": lane,
-        "sourceRevision": "abc",
+        "sourceRevision": source_revision,
         "sourceDirty": dirty,
         "binary": {
             "file": binary.name,
@@ -42,6 +51,10 @@ def artifact(binary: Path, lane: str, dirty: bool, policy: dict[str, object]) ->
             "required": policy["tier"] in ("yellow", "orange"),
             "approved": False,
             "evidenceFile": "../../resource-review.json",
+        },
+        "toolchain": {
+            "coreProfile": core_profile,
+            "esp32ArduinoCore": core_version,
         },
     }
 
@@ -126,5 +139,47 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-artifact-") as raw:
     dirty = validate(dirty_release, green_binary, "release")
     assert dirty.returncode != 0
     assert "source_dirty" in dirty.stderr
+
+    clean_release = output / "clean-release.json"
+    clean_release.write_text(
+        json.dumps(
+            artifact(
+                green_binary,
+                "release",
+                False,
+                green_policy,
+                source_revision="a" * 40,
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert validate(clean_release, green_binary, "release").returncode == 0
+
+    matrix_release = output / "matrix-release.json"
+    matrix_release.write_text(
+        json.dumps(
+            artifact(
+                green_binary,
+                "release",
+                False,
+                green_policy,
+                source_revision="a" * 40,
+                core_profile="matrix",
+                core_version="3.3.11",
+            )
+        ),
+        encoding="utf-8",
+    )
+    matrix = validate(matrix_release, green_binary, "release")
+    assert matrix.returncode != 0
+    assert "release_artifact_toolchain" in matrix.stderr
+
+    wrong_offset_payload = artifact(binary, "fast", True, policy)
+    wrong_offset_payload["binary"]["flashOffset"] = "0x0"
+    wrong_offset = output / "wrong-offset.json"
+    wrong_offset.write_text(json.dumps(wrong_offset_payload), encoding="utf-8")
+    offset = validate(wrong_offset, binary, "fast")
+    assert offset.returncode != 0
+    assert "artifact_flash_offset" in offset.stderr
 
 print("PASS test-flash-artifact-validation")

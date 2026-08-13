@@ -39,6 +39,8 @@ assert 'OUTPUT_DIR="$WORK_DIR/output/$BUILD_MODE"' in build
 assert 'FLASH_MODE=release' in flash
 assert 'validate-flash-artifact.py' in flash
 assert 'artifact_manifest_binary_sha256' in artifact_validator
+assert 'release_artifact_toolchain' in artifact_validator
+assert 'artifact_flash_offset' in artifact_validator
 transfer = profile["flash"]["transfer"]
 assert transfer == {
     "resetBefore": "usb-reset",
@@ -57,6 +59,13 @@ assert '--before usb-reset' in flash
 assert '--stub disabled' in flash
 assert '--max-size 0x300000' in flash
 assert 'work/hardmac-runs' in flash
+backup_call = 'python3 "$TRANSFER_SCRIPT" backup'
+flash_call = 'python3 "$TRANSFER_SCRIPT" flash'
+assert backup_call in flash
+assert flash.index(backup_call) < flash.index(flash_call)
+assert '--size 0x300000' in flash
+assert 'current-app0.bin' in flash
+assert 'restore-plan.json' in flash
 assert 'write_artifact_manifest' in build
 assert 'flash-size-policy.py' in build
 assert '--slot-bytes "$APP_SLOT_BYTES"' in build

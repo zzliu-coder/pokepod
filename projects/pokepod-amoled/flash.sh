@@ -179,6 +179,69 @@ PY
   exit 78
 }
 
+# Capture and verify the exact region that this operation can overwrite before
+# the first write.  A fresh backup avoids relying on stale device or deployed-
+# state assumptions, and the restore plan remains beside all other run evidence.
+BACKUP_DIR="$RUN_DIR/backup"
+BACKUP_BIN="$BACKUP_DIR/current-app0.bin"
+python3 "$TRANSFER_SCRIPT" backup \
+  --esptool "$ESPTOOL_BIN" \
+  --port "$ROM_PORT" \
+  --device-key "$DEVICE_KEY" \
+  --chip esp32s3 \
+  --offset 0x10000 \
+  --size 0x300000 \
+  --run-dir "$BACKUP_DIR" \
+  --output "$BACKUP_BIN" \
+  --chunk-size 16384 \
+  --attempts 3 \
+  --baud 115200 \
+  --before usb-reset \
+  --stub disabled
+python3 - "$RUN_DIR" "$BACKUP_BIN" "$DEVICE_KEY" "$ESPTOOL_BIN" \
+  "$TRANSFER_SCRIPT" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+run_dir = pathlib.Path(sys.argv[1])
+backup = pathlib.Path(sys.argv[2]).resolve()
+restore = {
+    "schemaVersion": 1,
+    "kind": "hardmac.restore-plan",
+    "deviceKey": sys.argv[3],
+    "region": {"name": "app0", "offset": "0x10000", "sizeBytes": 0x300000},
+    "backup": {
+        "path": str(backup),
+        "sizeBytes": backup.stat().st_size,
+        "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+        "verification": "sampled device reread plus assembled SHA-256",
+    },
+    "portAssumption": "replace <ROM_PORT> with the same verified device in ROM mode",
+    "command": [
+        "python3", sys.argv[5], "flash",
+        "--esptool", sys.argv[4],
+        "--port", "<ROM_PORT>",
+        "--device-key", sys.argv[3],
+        "--chip", "esp32s3",
+        "--offset", "0x10000",
+        "--run-dir", str((run_dir / "restore-transfer").resolve()),
+        "--artifact", str(backup),
+        "--max-size", "0x300000",
+        "--chunk-size", "16384",
+        "--attempts", "3",
+        "--baud", "115200",
+        "--before", "usb-reset",
+        "--stub", "disabled",
+    ],
+}
+(run_dir / "restore-plan.json").write_text(
+    json.dumps(restore, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
 python3 "$TRANSFER_SCRIPT" flash \
   --esptool "$ESPTOOL_BIN" \
   --port "$ROM_PORT" \

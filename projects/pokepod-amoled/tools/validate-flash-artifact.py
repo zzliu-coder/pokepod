@@ -8,9 +8,12 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 
 
 APP_SLOT_BYTES = 0x300000
+APP_FLASH_OFFSET = "0x10000"
+PRODUCTION_CORE_VERSION = "3.3.8"
 POLICY_SOURCE = Path(__file__).with_name("flash-size-policy.py")
 SPEC = importlib.util.spec_from_file_location("pokepod_flash_size_policy", POLICY_SOURCE)
 assert SPEC and SPEC.loader
@@ -45,10 +48,26 @@ def main() -> int:
     source_revision = manifest.get("sourceRevision")
     if not isinstance(source_revision, str) or not source_revision.strip():
         fail("artifact_source_revision")
+    if lane == "release" and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source_revision) is None:
+        fail("release_artifact_source_revision")
+
+    toolchain = manifest.get("toolchain")
+    if not isinstance(toolchain, dict):
+        fail("artifact_toolchain")
+    core_profile = toolchain.get("coreProfile")
+    core_version = toolchain.get("esp32ArduinoCore")
+    if core_profile not in {"production", "matrix"} or not isinstance(core_version, str):
+        fail("artifact_toolchain_profile")
+    if lane == "release" and (
+        core_profile != "production" or core_version != PRODUCTION_CORE_VERSION
+    ):
+        fail("release_artifact_toolchain")
 
     binary = manifest.get("binary")
     if not isinstance(binary, dict) or binary.get("file") != args.binary.name:
         fail("artifact_manifest_binary_name")
+    if binary.get("flashOffset") != APP_FLASH_OFFSET:
+        fail("artifact_flash_offset")
     payload = args.binary.read_bytes()
     if binary.get("sizeBytes") != len(payload):
         fail("artifact_manifest_binary_size")
@@ -79,6 +98,8 @@ def main() -> int:
     if resource_review.get("required") is not review_required:
         fail("artifact_resource_review_required")
     if review_required:
+        if lane == "release" and resource_review.get("approved") is not True:
+            fail("release_resource_review_not_approved")
         relative = resource_review.get("evidenceFile")
         if relative != "../../resource-review.json":
             fail("resource_review_path")

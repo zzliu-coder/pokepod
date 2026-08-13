@@ -84,6 +84,7 @@ def verify_extracted_package(extract_root: Path) -> Path:
     assert manifest["schema"] == "pokepod.source-audit.v1"
     assert manifest["sourceOnly"] is True
     assert manifest["sensitiveScan"]["status"] == "pass"
+    assert ".codeprinter" in manifest["excluded"]["directories"]
     records = manifest["files"]
     assert manifest["fileCount"] == len(records)
     expected_lines: list[str] = []
@@ -101,6 +102,7 @@ def verify_extracted_package(extract_root: Path) -> Path:
         expected_lines.append(f"{record['sha256']}  {relative.as_posix()}\n")
     assert checksums_path.read_text(encoding="utf-8") == "".join(expected_lines)
     assert not (project / "assets/cjk20.a4").exists()
+    assert not (project / ".codeprinter").exists()
     assert (project / "firmware/run-source-only-tests.sh").is_file()
     return project
 

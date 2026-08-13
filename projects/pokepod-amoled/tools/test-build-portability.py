@@ -172,6 +172,9 @@ forbidden_app_root = "/" + "Applications"
 assert forbidden_home not in combined
 assert forbidden_app_root not in combined
 assert "Release build requires a clean PokePod tree" in build
+assert "Release build requires a Git commit" in build
+assert "Release build requires the production ESP32 core profile" in build
+assert 'source_revision=${SOURCE_REVISION:-unknown}' in build
 assert "stat -f" not in build and "shasum" not in build
 assert "shasum" not in verify and "portable_build_utils.py" in verify
 assert "PRODUCTION_CORE_VERSION = \"3.3.8\"" in (
