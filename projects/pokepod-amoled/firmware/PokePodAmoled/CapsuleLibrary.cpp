@@ -163,8 +163,7 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
       const CapsuleScanState state = stepScan();
       if (state == CapsuleScanState::completed) {
         startupScanGeneration_ = false;
-        startupRequeueIndex_ = 0;
-        startupState_ = CapsuleLibraryStartupState::selectingInterrupted;
+        startupState_ = CapsuleLibraryStartupState::publishingIndex;
       } else if (state == CapsuleScanState::failed ||
                  state == CapsuleScanState::cancelled) {
         startupScanGeneration_ = false;
@@ -175,7 +174,7 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
     case CapsuleLibraryStartupState::selectingInterrupted:
       if (!startupRequeueInterrupted_ ||
           startupRequeueIndex_ >= locatorCount_) {
-        startupState_ = CapsuleLibraryStartupState::publishingIndex;
+        startupState_ = CapsuleLibraryStartupState::finishingStartup;
       } else if (selectStartupRequeue()) {
         startupState_ = CapsuleLibraryStartupState::openingProcessing;
       }
@@ -287,6 +286,10 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
     }
     case CapsuleLibraryStartupState::publishingIndex:
       publishRecords();
+      startupRequeueIndex_ = 0;
+      startupState_ = CapsuleLibraryStartupState::selectingInterrupted;
+      return startupState_;
+    case CapsuleLibraryStartupState::finishingStartup:
       startupAuthorityReservation_.release();
       startupState_ = CapsuleLibraryStartupState::ready;
       if (log_ != nullptr) {

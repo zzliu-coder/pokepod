@@ -15,6 +15,7 @@ required = {
     "single primitive assertion": "primitives) + enumerations <= 1",
     "full capacity fixture": "seedFixture(0, kCapsuleLocatorCapacity",
     "interrupted jobs": "const size_t interrupted[]",
+    "publish before requeue": "assert(reachedPublishPhase);",
     "unknown schema immutable": "state->text(records[7].directory",
     "quarantine": "bad-one.journal.blocked",
     "app poll": "capsuleLibrary.pollStartup(nowMs)",

@@ -41,6 +41,7 @@ enum class CapsuleLibraryStartupState : uint8_t {
   startingRequeueCommit,
   pollingRequeueCommit,
   publishingIndex,
+  finishingStartup,
   closingBlockedFile,
   ready,
   blocked,

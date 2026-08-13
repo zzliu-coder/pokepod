@@ -167,6 +167,8 @@ void finishScan(CapsuleLibrary &library) {
 void finishStartup(CapsuleLibrary &library,
                    const std::shared_ptr<fakefs::State> &filesystem) {
   size_t polls = 0;
+  bool reachedPublishPhase = false;
+  size_t publishPhaseTransitions = 0;
   while (library.startupActive()) {
     assert(library.indexedCount() == 0);
     assert(library.count() == 0);
@@ -175,6 +177,23 @@ void finishStartup(CapsuleLibrary &library,
     const uint64_t beforeNext = filesystem->openNextFileCalls;
     const CapsuleLibraryStartupState state = library.pollStartup(
         static_cast<uint32_t>(polls));
+    if (state == CapsuleLibraryStartupState::publishingIndex) {
+      assert(!reachedPublishPhase);
+      reachedPublishPhase = true;
+      ++publishPhaseTransitions;
+    }
+    if (state == CapsuleLibraryStartupState::selectingInterrupted ||
+        state == CapsuleLibraryStartupState::openingProcessing ||
+        state == CapsuleLibraryStartupState::readingProcessing ||
+        state == CapsuleLibraryStartupState::closingProcessing ||
+        state == CapsuleLibraryStartupState::preparingRequeue ||
+        state == CapsuleLibraryStartupState::startingRequeueCommit ||
+        state == CapsuleLibraryStartupState::pollingRequeueCommit ||
+        state == CapsuleLibraryStartupState::finishingStartup) {
+      // The startup index is assembled before any interrupted-transcription
+      // mutation begins. Public readers remain gated until ready below.
+      assert(reachedPublishPhase);
+    }
     const uint32_t primitives = filesystem->operations - before;
     const uint64_t enumerations =
         filesystem->openNextFileCalls - beforeNext;
@@ -190,6 +209,8 @@ void finishStartup(CapsuleLibrary &library,
     }
     assert(++polls < 200000);
   }
+  assert(reachedPublishPhase);
+  assert(publishPhaseTransitions == 1);
   assert(library.startupReady());
   assert(!library.startupBlocked());
   assert(filesystem->openHandles == 0);
