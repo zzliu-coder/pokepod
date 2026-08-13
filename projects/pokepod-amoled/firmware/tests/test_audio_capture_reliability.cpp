@@ -95,11 +95,21 @@ int main() {
   std::thread publisherOwner([&]() {
     for (uint32_t value = 1; value <= 50000U; ++value) {
       AudioFrontEndMetrics published;
+      published.profile = (value & 1U) != 0
+          ? AudioDspProfile::v1Measured
+          : AudioDspProfile::v2Baseline;
+      published.selectedChannel = (value & 1U) != 0
+          ? AudioInputChannel::left
+          : AudioInputChannel::right;
+      published.clippedInputSamples = value;
       published.leftPeak = static_cast<uint16_t>(value);
       published.rightPeak = static_cast<uint16_t>(value);
       published.outputPeak = static_cast<uint16_t>(value);
+      published.gatedSamples = value;
       published.suppressedSamples = value;
       published.limitedSamples = value;
+      published.estimatedNoiseFloor = static_cast<uint16_t>(value);
+      published.maximumGainQ12 = value;
       publisher.publish(91, true, published);
     }
     publisherDone.store(true, std::memory_order_release);
@@ -108,11 +118,21 @@ int main() {
     const AudioCaptureFrontEndSnapshot coherent = publisher.snapshot();
     if (coherent.generation == 0) continue;
     assert(coherent.sessionId == 91);
+    assert(coherent.active);
+    const bool odd = (coherent.clippedInputSamples & 1U) != 0;
+    assert(coherent.profile == (odd ? AudioDspProfile::v1Measured
+                                    : AudioDspProfile::v2Baseline));
+    assert(coherent.selectedChannel == (odd ? AudioInputChannel::left
+                                            : AudioInputChannel::right));
     assert(coherent.leftPeak == coherent.rightPeak);
     assert(coherent.leftPeak == coherent.outputPeak);
+    assert(coherent.gatedSamples == coherent.clippedInputSamples);
     assert(coherent.suppressedSamples == coherent.limitedSamples);
+    assert(coherent.suppressedSamples == coherent.clippedInputSamples);
     assert(static_cast<uint16_t>(coherent.suppressedSamples) ==
            coherent.leftPeak);
+    assert(coherent.estimatedNoiseFloor == coherent.leftPeak);
+    assert(coherent.maximumGainQ12 == coherent.clippedInputSamples);
   }
   publisherOwner.join();
   std::array<RecorderStorageFrame, kRecorderStorageQueueSlots> storageFrames{};

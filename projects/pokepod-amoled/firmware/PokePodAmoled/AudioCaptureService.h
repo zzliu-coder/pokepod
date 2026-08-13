@@ -157,6 +157,10 @@ class AudioCaptureFrontEndPublisher {
           estimatedNoiseFloor_.loadRelaxed());
       value.maximumGainQ12 =
           maximumGainQ12_.loadRelaxed();
+      // The validation load below must stay after every payload read.  Put a
+      // read barrier here so the reader cannot accept an unchanged even
+      // sequence while one payload load already comes from the next publish.
+      finishPayloadRead();
       const uint32_t after = sequence_.loadAcquire();
       if (before == after && (after & 1U) == 0) {
         value.generation = after / 2U;
@@ -166,6 +170,14 @@ class AudioCaptureFrontEndPublisher {
   }
 
  private:
+  static void finishPayloadRead() {
+#ifdef ARDUINO
+    __asm__ __volatile__("memw" ::: "memory");
+#else
+    std::atomic_thread_fence(std::memory_order_acquire);
+#endif
+  }
+
   AudioSpscCounter sequence_;
   AudioSpscCounter sessionId_;
   AudioSpscCounter active_;
