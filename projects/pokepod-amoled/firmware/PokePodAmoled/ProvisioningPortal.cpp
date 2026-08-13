@@ -27,6 +27,15 @@ bool fillProvisioningRandom(void *, uint8_t *destination, size_t length) {
   return true;
 }
 
+void secureClearString(String &secret) {
+  const size_t length = secret.length();
+  volatile char *const wipe = secret.begin();
+  if (wipe != nullptr) {
+    for (size_t index = 0; index < length; ++index) wipe[index] = '\0';
+  }
+  secret.clear();
+}
+
 std::string newProvisioningCsrfToken() {
   static constexpr char hex[] = "0123456789abcdef";
   uint8_t bytes[kProvisioningCsrfBytes];
@@ -74,10 +83,16 @@ String validationFailureMessage(uint16_t reason) {
 
 ProvisioningPortal::ProvisioningPortal() : server_(80) {}
 
+ProvisioningPortal::~ProvisioningPortal() {
+  clearProvisioningCredential();
+}
+
 bool ProvisioningPortal::prepare(DeviceConfig &config,
                                  ProvisioningDiagnostics &diagnostics,
                                  Print &log) {
   if (active_ || prepared_) return true;
+  // A fresh session must never inherit bytes from a previous terminal path.
+  clearProvisioningCredential();
   config_ = &config;
   diagnostics_ = &diagnostics;
   log_ = &log;
@@ -87,7 +102,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   snprintf(name, sizeof(name), "PokePod-%04lX", static_cast<unsigned long>(suffix));
   ssid_ = name;
   if (!credential_.begin(fillProvisioningRandom, nullptr)) {
-    password_ = "";
+    clearProvisioningCredential();
     statusMessage_ = "配网密码失败，请退出后重试";
     return false;
   }
@@ -118,7 +133,10 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
 
 bool ProvisioningPortal::switchToAccessPointMode() {
   if (active_) return true;
-  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) return false;
+  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) {
+    clearProvisioningCredential();
+    return false;
+  }
   const wifi_mode_t mode = WiFi.getMode();
   if ((mode != WIFI_OFF && mode != WIFI_STA) ||
       WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
@@ -127,6 +145,7 @@ bool ProvisioningPortal::switchToAccessPointMode() {
     diagnostics_->record(ProvisioningLogStage::failed,
                          ProvisioningLogOutcome::failure, ssid_, 0,
                          kProvisioningReasonRadioBusy, 0, 0, *log_);
+    clearProvisioningCredential();
     return false;
   }
   logProvisioningMemory(*log_, "before-mode-ap");
@@ -138,6 +157,7 @@ bool ProvisioningPortal::switchToAccessPointMode() {
                          kProvisioningReasonPortalFailed, 0, 0, *log_);
     log_->println(
         "{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"mode-ap\"}");
+    clearProvisioningCredential();
     return false;
   }
   diagnostics_->record(ProvisioningLogStage::radioModeStarted,
@@ -151,6 +171,7 @@ bool ProvisioningPortal::startAccessPoint() {
   if (active_) return true;
   if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr ||
       (WiFi.getMode() & WIFI_MODE_AP) == 0) {
+    clearProvisioningCredential();
     return false;
   }
   logProvisioningMemory(*log_, "before-softap");
@@ -162,6 +183,7 @@ bool ProvisioningPortal::startAccessPoint() {
                          kProvisioningReasonPortalFailed, 0, 0, *log_);
     log_->println(
         "{\"event\":\"provisioning\",\"ok\":false,\"stage\":\"softap\"}");
+    clearProvisioningCredential();
     return false;
   }
   esp_wifi_set_ps(WIFI_PS_NONE);
@@ -176,6 +198,7 @@ bool ProvisioningPortal::startServices() {
   if (active_) return true;
   if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr ||
       (WiFi.getMode() & WIFI_MODE_AP) == 0) {
+    clearProvisioningCredential();
     return false;
   }
   logProvisioningMemory(*log_, "before-services");
@@ -197,12 +220,16 @@ bool ProvisioningPortal::startServices() {
 }
 
 void ProvisioningPortal::failStartupTimeout() {
-  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) return;
+  if (!prepared_ || diagnostics_ == nullptr || log_ == nullptr) {
+    clearProvisioningCredential();
+    return;
+  }
   starting_ = false;
   statusMessage_ = "无线网络关闭超时，请退出后重试";
   diagnostics_->record(ProvisioningLogStage::failed,
                        ProvisioningLogOutcome::failure, ssid_, 0,
                        kProvisioningReasonStartupTimeout, 0, 0, *log_);
+  clearProvisioningCredential();
 }
 
 void ProvisioningPortal::loop(uint32_t nowMs) {
@@ -302,8 +329,7 @@ void ProvisioningPortal::stop() {
   csrf_.close();
   sensitiveConfirmation_.reset();
   candidate_ = DeviceSettings{};
-  credential_.close();
-  password_ = "";
+  clearProvisioningCredential();
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
     diagnostics_->record(ProvisioningLogStage::portalStopped,
                          ProvisioningLogOutcome::info, ssid_, 0, 0,
@@ -313,6 +339,11 @@ void ProvisioningPortal::stop() {
   if ((wasActive || wasPrepared) && log_ != nullptr) {
     log_->println("{\"event\":\"provisioning_stopped\"}");
   }
+}
+
+void ProvisioningPortal::clearProvisioningCredential() {
+  secureClearString(password_);
+  credential_.close();
 }
 
 bool ProvisioningPortal::takeConfigurationChanged() {

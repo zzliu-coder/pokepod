@@ -15,6 +15,7 @@ namespace pokepod {
 class ProvisioningPortal {
  public:
   ProvisioningPortal();
+  ~ProvisioningPortal();
   bool prepare(DeviceConfig &config, ProvisioningDiagnostics &diagnostics,
                Print &log);
   bool switchToAccessPointMode();
@@ -46,6 +47,7 @@ class ProvisioningPortal {
   };
 
   void installRoutes();
+  void clearProvisioningCredential();
   void startScan();
   void pollScan();
   void showNetworks();
