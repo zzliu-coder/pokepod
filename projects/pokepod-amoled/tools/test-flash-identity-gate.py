@@ -112,6 +112,29 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-identity-") as raw:
         "romFlashSizeBytes": 16 * 1024 * 1024,
     }
 
+    # The backup-to-write recheck must bind the fresh ROM evidence to the
+    # device key returned by the first evidence pass. A key mismatch closes
+    # the path before flash even when every other evidence field parses.
+    prewrite_verdict = temporary / "prewrite-verdict.json"
+    prewrite_passed = run(
+        "evidence",
+        "--authority", authority_path,
+        "--chip-log", chip_log,
+        "--flash-log", flash_log,
+        "--expected-device-key", "esp32s3-112233445566",
+        "--output", prewrite_verdict,
+    )
+    assert prewrite_passed.returncode == 0, prewrite_passed.stderr
+    expect_failure(
+        "flash_identity_prewrite_device_key_mismatch",
+        "evidence",
+        "--authority", authority_path,
+        "--chip-log", chip_log,
+        "--flash-log", flash_log,
+        "--expected-device-key", "esp32s3-aabbccddeeff",
+        "--output", prewrite_verdict,
+    )
+
     # A damaged/absent application is recoverable only through the shell's
     # explicit ROM-port lane. ROM still must bind to authorized chip/MAC/size;
     # the board variant remains pre-authorized evidence, not a ROM claim.
@@ -224,13 +247,26 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-identity-") as raw:
 # The complete live identity verdict must precede backup and the first write.
 evidence_call = 'DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence'
 backup_call = 'python3 "$TRANSFER_SCRIPT" backup'
+prewrite_evidence_call = 'PREWRITE_DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence'
 flash_call = 'python3 "$TRANSFER_SCRIPT" flash'
 assert 'FAIL identity_authority_required' in FLASH
 assert 'select-application' in FLASH
 assert 'recovery_requires_explicit_rom_port' in FLASH
 assert "CURRENT_PORTS=$(find_ports)" not in FLASH
-assert evidence_call in FLASH and backup_call in FLASH and flash_call in FLASH
-assert FLASH.index(evidence_call) < FLASH.index(backup_call) < FLASH.index(flash_call)
+assert all(
+    call in FLASH
+    for call in (evidence_call, backup_call, prewrite_evidence_call, flash_call)
+)
+assert (
+    FLASH.index(evidence_call)
+    < FLASH.index(backup_call)
+    < FLASH.index(prewrite_evidence_call)
+    < FLASH.index(flash_call)
+)
+assert '--expected-device-key "$DEVICE_KEY"' in FLASH
+assert 'PREWRITE_DEVICE_KEY" != "$DEVICE_KEY"' in FLASH
+assert 'FAIL prewrite_device_identity_mismatch' in FLASH
+assert 'prewrite-chip-id.log' in FLASH and 'prewrite-flash-id.log' in FLASH
 assert 'flash-id' in FLASH and 'chip-id' in FLASH
 
 print("PASS flash_identity_gate")

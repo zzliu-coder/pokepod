@@ -325,6 +325,64 @@ restore = {
 )
 PY
 
+# Close the backup-to-write identity gap. A cable reconnect or port reuse can
+# change which physical board is behind the same ROM path while the backup is
+# running. Re-read both ROM identity surfaces immediately before the first
+# write, bind them to the same authority, and require the original device key.
+PREWRITE_IDENTITY_LOG="$RUN_DIR/prewrite-chip-id.log"
+PREWRITE_IDENTITY_OK=0
+PREWRITE_IDENTITY_ATTEMPT=1
+while [ "$PREWRITE_IDENTITY_ATTEMPT" -le 3 ]; do
+  if "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
+    --before usb-reset --after no-reset --no-stub chip-id \
+    >"$PREWRITE_IDENTITY_LOG" 2>&1
+  then
+    PREWRITE_IDENTITY_OK=1
+    break
+  fi
+  printf 'WARN prewrite_chip_identity_retry attempt=%s\n' \
+    "$PREWRITE_IDENTITY_ATTEMPT" >&2
+  PREWRITE_IDENTITY_ATTEMPT=$((PREWRITE_IDENTITY_ATTEMPT + 1))
+done
+cat "$PREWRITE_IDENTITY_LOG"
+if [ "$PREWRITE_IDENTITY_OK" -ne 1 ]; then
+  printf 'FAIL prewrite_chip_identity_unavailable run_dir=%s\n' "$RUN_DIR" >&2
+  exit 78
+fi
+
+PREWRITE_FLASH_ID_LOG="$RUN_DIR/prewrite-flash-id.log"
+PREWRITE_FLASH_ID_OK=0
+PREWRITE_FLASH_ID_ATTEMPT=1
+while [ "$PREWRITE_FLASH_ID_ATTEMPT" -le 3 ]; do
+  if "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
+    --before usb-reset --after no-reset --no-stub flash-id \
+    >"$PREWRITE_FLASH_ID_LOG" 2>&1
+  then
+    PREWRITE_FLASH_ID_OK=1
+    break
+  fi
+  printf 'WARN prewrite_flash_identity_retry attempt=%s\n' \
+    "$PREWRITE_FLASH_ID_ATTEMPT" >&2
+  PREWRITE_FLASH_ID_ATTEMPT=$((PREWRITE_FLASH_ID_ATTEMPT + 1))
+done
+cat "$PREWRITE_FLASH_ID_LOG"
+if [ "$PREWRITE_FLASH_ID_OK" -ne 1 ]; then
+  printf 'FAIL prewrite_flash_identity_unavailable run_dir=%s\n' "$RUN_DIR" >&2
+  exit 78
+fi
+
+PREWRITE_IDENTITY_VERDICT="$RUN_DIR/prewrite-identity-verdict.json"
+PREWRITE_DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence \
+  --authority "$IDENTITY_AUTHORITY" \
+  --chip-log "$PREWRITE_IDENTITY_LOG" \
+  --flash-log "$PREWRITE_FLASH_ID_LOG" \
+  --expected-device-key "$DEVICE_KEY" \
+  --output "$PREWRITE_IDENTITY_VERDICT") || PREWRITE_DEVICE_KEY=
+if [ -z "$PREWRITE_DEVICE_KEY" ] || [ "$PREWRITE_DEVICE_KEY" != "$DEVICE_KEY" ]; then
+  printf 'FAIL prewrite_device_identity_mismatch run_dir=%s\n' "$RUN_DIR" >&2
+  exit 78
+fi
+
 python3 "$TRANSFER_SCRIPT" flash \
   --esptool "$ESPTOOL_BIN" \
   --port "$ROM_PORT" \

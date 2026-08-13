@@ -198,6 +198,12 @@ def validate_evidence(args: argparse.Namespace) -> int:
         and device_id_from_mac(observed_mac) != application["deviceId"]
     ):
         fail("application_rom_rebind")
+    observed_device_key = "esp32s3-" + observed_mac.replace(":", "")
+    if (
+        args.expected_device_key is not None
+        and observed_device_key != args.expected_device_key
+    ):
+        fail("prewrite_device_key_mismatch")
     verdict = {
         "schemaVersion": 1,
         "kind": "pokepod.flash-identity-verdict",
@@ -225,7 +231,7 @@ def validate_evidence(args: argparse.Namespace) -> int:
         json.dumps(verdict, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    print("esp32s3-" + observed_mac.replace(":", ""))
+    print(observed_device_key)
     return 0
 
 
@@ -262,6 +268,7 @@ def main() -> int:
     evidence.add_argument("--application", type=Path)
     evidence.add_argument("--chip-log", type=Path, required=True)
     evidence.add_argument("--flash-log", type=Path, required=True)
+    evidence.add_argument("--expected-device-key")
     evidence.add_argument("--output", type=Path, required=True)
     evidence.set_defaults(handler=validate_evidence)
 

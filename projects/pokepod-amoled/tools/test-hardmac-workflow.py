@@ -71,10 +71,18 @@ assert '--stub disabled' in flash
 assert '--max-size 0x300000' in flash
 assert 'work/hardmac-runs' in flash
 backup_call = 'python3 "$TRANSFER_SCRIPT" backup'
+prewrite_identity_call = 'PREWRITE_DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence'
 flash_call = 'python3 "$TRANSFER_SCRIPT" flash'
 identity_call = 'DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence'
 assert backup_call in flash
-assert flash.index(identity_call) < flash.index(backup_call) < flash.index(flash_call)
+assert (
+    flash.index(identity_call)
+    < flash.index(backup_call)
+    < flash.index(prewrite_identity_call)
+    < flash.index(flash_call)
+)
+assert '--expected-device-key "$DEVICE_KEY"' in flash
+assert 'PREWRITE_DEVICE_KEY" != "$DEVICE_KEY"' in flash
 assert '--size 0x300000' in flash
 assert 'current-app0.bin' in flash
 assert 'restore-plan.json' in flash
