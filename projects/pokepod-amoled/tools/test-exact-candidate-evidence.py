@@ -36,6 +36,10 @@ with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
     }
     for index, path in enumerate(sources.values()):
         path.write_bytes(f"evidence-{index}".encode())
+    sources["build.log"].write_text(
+        "Sketch uses 9 bytes (0%) of program storage space. Maximum is 3145728 bytes.\n"
+        "Global variables use 10 bytes (10%) of dynamic memory, leaving 90 bytes for local variables. Maximum is 100 bytes.\n",
+        encoding="utf-8")
     binary_bytes = sources["firmware.bin"].stat().st_size
     binary_sha = hashlib.sha256(sources["firmware.bin"].read_bytes()).hexdigest()
     flash = {
@@ -66,13 +70,18 @@ with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
         data = path.read_bytes()
         return {"file": path.name, "bytes": len(data),
                 "sha256": hashlib.sha256(data).hexdigest()}
+    def payload_evidence(path: Path, filename: str) -> dict[str, object]:
+        value = evidence(path)
+        value["file"] = filename
+        return value
     sources["resource-review.json"].write_text(json.dumps({
         "schema": "pokepod.resource-review.v1", "sourceRevision": REVISION,
         "binarySha256": binary_sha, "programBytes": binary_bytes,
         "tier": "green", "baseline": {"commit": "base",
         "programBytes": 1, "deltaBytes": binary_bytes - 1},
-        "elf": evidence(sources["firmware.elf"]),
-        "linkerMap": evidence(sources["firmware.map"]),
+        "elf": payload_evidence(sources["firmware.elf"], "PokePodAmoled.ino.elf"),
+        "linkerMap": payload_evidence(sources["firmware.map"], "PokePodAmoled.ino.map"),
+        "symbolSourceElfSha256": evidence(sources["firmware.elf"])["sha256"],
         "duplicateImplementationReview": {"status": "pass", "matchedSymbols": []},
     }), encoding="utf-8")
     sources["summary.json"].write_text(json.dumps({
@@ -80,7 +89,18 @@ with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
         "sourceRevision": REVISION, "sourceClean": True,
         "resourceReviewApproved": False,
         "binary": {"bytes": binary_bytes, "sha256": binary_sha},
-        "flash": flash, "delta": {"programBytes": binary_bytes - 1},
+        "elf": payload_evidence(sources["firmware.elf"], "PokePodAmoled.ino.elf"),
+        "linkerMap": payload_evidence(sources["firmware.map"], "PokePodAmoled.ino.map"),
+        "buildLog": payload_evidence(sources["build.log"], "build-fast.log"),
+        "flash": flash, "delta": {"programBytes": binary_bytes - 1,
+                                    "internalGlobalBytes": 2},
+        "linkedProgram": {"bytes": 9,
+                           "imagePackagingBytes": binary_bytes - 9},
+        "internalMemory": {"globalBytes": 10, "remainingBytes": 90,
+                            "maximumBytes": 100},
+        "baseline": {"commit": "base", "programBytes": 1,
+                      "deltaBytes": binary_bytes - 1,
+                      "internalGlobalBytes": 8},
         "artifactManifest": evidence(sources["artifact.json"]),
         "resourceReview": evidence(sources["resource-review.json"]),
     }), encoding="utf-8")
@@ -156,5 +176,40 @@ with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
     rejected_missing = verify(missing)
     assert rejected_missing.returncode != 0
     assert "file set mismatch" in rejected_missing.stderr
+
+    def resign(candidate: Path, filename: str) -> None:
+        manifest_path = candidate / "candidate-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload = candidate / filename
+        for entry in manifest["files"]:
+            if entry["file"] == filename:
+                entry["bytes"] = payload.stat().st_size
+                entry["sha256"] = hashlib.sha256(payload.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n",
+                                 encoding="utf-8")
+        (candidate / "candidate-sha256.txt").write_text(
+            "".join(
+                f"{hashlib.sha256((candidate / name).read_bytes()).hexdigest()}  {name}\n"
+                for name in (
+                    "PokePodAmoled.ino.bin", "PokePodAmoled.ino.elf",
+                    "PokePodAmoled.ino.map", "build-fast.log",
+                    "artifact.json", "flash-resource.json",
+                    "resource-review.json", "fast-candidate-summary.json",
+                    "candidate-manifest.json")),
+            encoding="utf-8")
+
+    for filename, needle in (
+        ("PokePodAmoled.ino.elf", "resource review ELF evidence"),
+        ("PokePodAmoled.ino.map", "resource review linker map evidence"),
+        ("build-fast.log", "summary build log evidence"),
+    ):
+        adversarial = root / ("replaced-" + filename.replace(".", "-"))
+        stage(adversarial)
+        with (adversarial / filename).open("ab") as stream:
+            stream.write(b"replacement")
+        resign(adversarial, filename)
+        rejected = verify(adversarial)
+        assert rejected.returncode != 0, filename
+        assert needle in rejected.stderr, rejected.stderr
 
 print("PASS test-exact-candidate-evidence")

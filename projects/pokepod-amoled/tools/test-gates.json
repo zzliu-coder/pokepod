@@ -31,6 +31,7 @@
     "test-link-operation-contract.py",
     "test-link-operation-production-contract.py",
     "test-link-recording-stop.py",
+    "test-link-reboot-lifecycle.py",
     "test-link-storage-lease-contract.py",
     "test-local-recording-start.py",
     "test-performance-architecture.py",

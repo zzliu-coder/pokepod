@@ -73,6 +73,18 @@ class PokePodLinkService : private LinkFileTransferHost {
              AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr);
   void poll(uint32_t nowMs);
+  // Device-lifecycle reboot state is independent of transport lifetime.
+  // App calls this every main-loop turn, including after USB/Wi-Fi teardown.
+  bool pollReboot(uint32_t nowMs);
+  bool rebootReady() const {
+    return rebootQuiescePhase_ == RebootQuiescePhase::ready;
+  }
+  bool rebootPending() const { return rebootAtMs_ != 0; }
+  void deferReboot(uint32_t nowMs) { rebootAtMs_ = nowMs + 20; }
+  void acknowledgeReboot() {
+    rebootQuiescePhase_ = RebootQuiescePhase::idle;
+    rebootAtMs_ = 0;
+  }
   // Finishes read-only handle cleanup after an immediate transport cancel.
   // This never reads frames or writes responses, so a Wi-Fi service can call
   // it before authentication and while its five-minute window is closed.
@@ -480,7 +492,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   String incomingTransactionId_;
   uint32_t incomingLastByteMs_ = 0;
   uint32_t rebootAtMs_ = 0;
-  enum class RebootQuiescePhase : uint8_t { idle, waiting };
+  enum class RebootQuiescePhase : uint8_t { idle, waiting, ready };
   RebootQuiescePhase rebootQuiescePhase_ = RebootQuiescePhase::idle;
   String activeMaintenance_;
   MaintenanceCompletionTracker maintenanceCompletion_;

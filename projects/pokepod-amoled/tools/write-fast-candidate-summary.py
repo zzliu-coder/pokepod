@@ -152,6 +152,7 @@ def main() -> int:
         "baseline": {
             "commit": args.baseline_commit,
             "programBytes": args.baseline_program_bytes,
+            "deltaBytes": int(binary_evidence["bytes"]) - args.baseline_program_bytes,
             "internalGlobalBytes": args.baseline_internal_globals,
         },
         "delta": {

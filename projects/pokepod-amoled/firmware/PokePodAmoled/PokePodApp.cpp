@@ -1580,6 +1580,36 @@ void loop() {
   }
   capsuleOperations.poll(now);
   consumeLocalOperationOutcome();
+  // Link reboot is a device-lifecycle request, not a transport operation.
+  // Advance it before any transport-specific early return so a client that
+  // closes USB/Wi-Fi immediately after reboot OK cannot cancel the intent.
+  if (linkService.rebootPending()) {
+    if (captureRuntime.running() && pendingCaptureStop == PendingCaptureStop::none) {
+      const PendingCaptureStop ownerStop =
+          captureRouter.owner() == AudioCaptureOwner::wirelessVoice
+              ? PendingCaptureStop::wirelessVoice
+              : PendingCaptureStop::localCapsule;
+      (void)requestCaptureStop(ownerStop, RecorderStopReason::none, true,
+                               ownerStop == PendingCaptureStop::localCapsule);
+    }
+    const bool quiesceReady = linkService.pollReboot(now);
+    const bool restartSafe = quiesceReady &&
+        captureRouter.owner() == AudioCaptureOwner::none &&
+        !captureRuntime.running() && !recorder.operationActive() &&
+        !localRecordingStart.active() && !linkService.receivingBinary() &&
+        !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
+        !capsuleLibrary.scanActive() && !capsuleOperations.busy() &&
+        !tencentWorker.working() && StorageCoordinator::instance().idle();
+    if (restartSafe) {
+      usb.log().println("{\"event\":\"link_reboot_execute\"}");
+      linkService.acknowledgeReboot();
+#if defined(ARDUINO_ARCH_ESP32)
+      ESP.restart();
+#endif
+      return;
+    }
+    if (quiesceReady) linkService.deferReboot(now);
+  }
   // These polls precede every transport/UI early return. Physical File close
   // and late capture finalization therefore always make bounded progress.
   pollDeferredServiceCleanup();
@@ -1792,14 +1822,16 @@ void loop() {
     lastCapsuleLibraryRevision = capsuleRevision;
     dashboard.invalidate();
   }
-  tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
-                     transcriptionDispatchBusy(recorder.operationActive(),
-                                               linkService.maintenanceActive() ||
-                                                   wirelessSync.linkBusy() ||
-                                                   capsuleLibrary.scanActive() ||
-                                                   capsuleOperations.busy()) ||
-                         lowBatteryShutdown.critical(),
-                     board.status().charging);
+  if (!linkService.rebootPending()) {
+    tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
+                       transcriptionDispatchBusy(recorder.operationActive(),
+                                                 linkService.maintenanceActive() ||
+                                                     wirelessSync.linkBusy() ||
+                                                     capsuleLibrary.scanActive() ||
+                                                     capsuleOperations.busy()) ||
+                           lowBatteryShutdown.critical(),
+                       board.status().charging);
+  }
   PowerInputs finalPowerInputs = currentPowerInputs(now);
   currentPowerDecision = runtimePower.apply(finalPowerInputs, usb.log());
   if (currentPowerDecision.requestIdleRadioPause) {

@@ -99,6 +99,10 @@ bool TencentWorker::quiesce(uint32_t nowMs, uint32_t timeoutMs,
                             TencentCancelReason reason) {
   TencentQuiesceStatus status = beginQuiesce(nowMs, timeoutMs, reason);
   while (status == TencentQuiesceStatus::waiting) {
+    // The legacy synchronous shutdown API retains its historical durable
+    // settlement semantics.  Link reboot uses pollQuiesce directly and never
+    // enters this path.
+    if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
     status = pollQuiesce(millis());
     if (status == TencentQuiesceStatus::waiting) delay(5);
   }
@@ -107,13 +111,26 @@ bool TencentWorker::quiesce(uint32_t nowMs, uint32_t timeoutMs,
 
 TencentQuiesceStatus TencentWorker::beginQuiesce(
     uint32_t nowMs, uint32_t timeoutMs, TencentCancelReason reason) {
-  if (resultReady_.load(std::memory_order_acquire)) finishAttempt(nowMs);
   return runtime_.beginQuiesce(nowMs, timeoutMs, reason);
 }
 
 TencentQuiesceStatus TencentWorker::pollQuiesce(uint32_t nowMs) {
-  if (resultReady_.load(std::memory_order_acquire)) finishAttempt(nowMs);
   return runtime_.pollQuiesce(nowMs);
+}
+
+bool TencentWorker::abandonResultForReboot() {
+  if (!resultReady_.exchange(false, std::memory_order_acq_rel)) return false;
+  const uint32_t generation =
+      resultGeneration_.load(std::memory_order_acquire);
+  clearTaskSecrets();
+  if (generation == 0 || !runtime_.matchesGeneration(generation)) return false;
+  const bool abandoned = runtime_.abandonForReboot(generation);
+  if (abandoned && log_ != nullptr) {
+    log_->printf(
+        "{\"event\":\"asr_result_abandoned_for_reboot\",\"generation\":%lu}\n",
+        static_cast<unsigned long>(generation));
+  }
+  return abandoned;
 }
 
 void TencentWorker::taskEntry(void *context) {

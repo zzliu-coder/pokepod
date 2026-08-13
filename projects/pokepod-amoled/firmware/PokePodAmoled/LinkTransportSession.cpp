@@ -135,8 +135,8 @@ void PokePodLinkService::advanceLinkOperationSettlement() {
 }
 
 void PokePodLinkService::disconnect() {
-  rebootQuiescePhase_ = RebootQuiescePhase::idle;
-  rebootAtMs_ = 0;
+  // An accepted reboot is a device-lifecycle intent.  Transport teardown may
+  // cancel frames and Link operations, but it must not cancel the reboot.
   cancelLinkOperation(quiesceRequested_
       ? LinkOperationCancelReason::quiesce
       : LinkOperationCancelReason::disconnect);
@@ -177,6 +177,44 @@ void PokePodLinkService::disconnect() {
       !operation_.ownsResource(LinkOperationResource::coordinator)) {
     connectionGeneration_ = 0;
   }
+}
+
+bool PokePodLinkService::pollReboot(uint32_t nowMs) {
+  if (rebootAtMs_ == 0 ||
+      static_cast<int32_t>(nowMs - rebootAtMs_) < 0) {
+    return false;
+  }
+  if (rebootQuiescePhase_ == RebootQuiescePhase::ready) return true;
+  if (rebootQuiescePhase_ == RebootQuiescePhase::idle) {
+    if (tencent_ != nullptr) {
+      (void)tencent_->beginQuiesce(
+          nowMs, 250, TencentCancelReason::shutdown);
+    }
+    rebootQuiescePhase_ = RebootQuiescePhase::waiting;
+  }
+  if (tencent_ != nullptr) {
+    // A published ASR result is intentionally abandoned for reboot without
+    // entering CapsuleLibrary.  Startup recovery owns the durable requeue.
+    (void)tencent_->abandonResultForReboot();
+  }
+  const TencentQuiesceStatus status = tencent_ == nullptr
+      ? TencentQuiesceStatus::complete
+      : tencent_->pollQuiesce(nowMs);
+  if (status == TencentQuiesceStatus::waiting) {
+    rebootAtMs_ = nowMs + 20;
+    return false;
+  }
+  if (status == TencentQuiesceStatus::timedOut) {
+    rebootQuiescePhase_ = RebootQuiescePhase::idle;
+    rebootAtMs_ = nowMs + 100;
+    return false;
+  }
+  // Preserve the original protocol guarantee for a still-live transport:
+  // accepted reboot's terminal OK is flushed before the device reset.  A
+  // disconnected transport simply has nothing to flush.
+  if (stream_ != nullptr) stream_->flush();
+  rebootQuiescePhase_ = RebootQuiescePhase::ready;
+  return true;
 }
 
 void PokePodLinkService::requestQuiesce() {
@@ -323,38 +361,6 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     if (!gate.run([&]() { failIncoming("binary transfer timed out"); })) {
       return;
     }
-  }
-  if (rebootAtMs_ != 0 && static_cast<int32_t>(nowMs - rebootAtMs_) >= 0) {
-    if (rebootQuiescePhase_ == RebootQuiescePhase::idle) {
-      if (!gate.run([&]() {
-            if (tencent_ != nullptr) {
-              (void)tencent_->beginQuiesce(
-                  nowMs, 250, TencentCancelReason::shutdown);
-            }
-            rebootQuiescePhase_ = RebootQuiescePhase::waiting;
-          })) return;
-    }
-    TencentQuiesceStatus tencentStatus = TencentQuiesceStatus::complete;
-    if (!gate.run([&]() {
-          tencentStatus = tencent_ == nullptr
-              ? TencentQuiesceStatus::complete
-              : tencent_->pollQuiesce(nowMs);
-        })) return;
-    if (tencentStatus == TencentQuiesceStatus::waiting) {
-      rebootAtMs_ = nowMs + 20;
-      return;
-    }
-    if (tencentStatus == TencentQuiesceStatus::timedOut) {
-      rebootQuiescePhase_ = RebootQuiescePhase::idle;
-      rebootAtMs_ = nowMs + 100;
-      return;
-    }
-    rebootQuiescePhase_ = RebootQuiescePhase::idle;
-    if (!gate.run([&]() {
-          if (stream_ != nullptr) stream_->flush();
-        })) return;
-    if (!gate.checkpoint()) return;
-    ESP.restart();
   }
 }
 

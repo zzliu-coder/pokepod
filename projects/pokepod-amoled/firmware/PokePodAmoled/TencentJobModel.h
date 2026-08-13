@@ -167,6 +167,17 @@ class TencentJobModel {
     return true;
   }
 
+  // A reboot is a device-lifecycle boundary.  Once the network task has
+  // published its result, reboot may deliberately abandon the not-yet-
+  // committed capsule result; startup recovery will requeue the durable
+  // transcribing record.  This transition touches only the in-memory job
+  // model and never performs filesystem work.
+  bool abandonForReboot(uint32_t generation) {
+    if (!matches(generation) || !tencentJobOwnsResources(state())) return false;
+    setState(TencentJobState::idle);
+    return true;
+  }
+
   TencentJobState state() const {
     return static_cast<TencentJobState>(
         state_.load(std::memory_order_acquire));
