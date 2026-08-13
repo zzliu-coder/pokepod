@@ -8,15 +8,21 @@ import subprocess
 import tempfile
 
 
-ROOT = Path(__file__).resolve().parents[3]
-GITIGNORE = ROOT / ".gitignore"
+PROJECT = Path(__file__).resolve().parents[1]
+REPOSITORY = PROJECT.parents[1]
+GITIGNORE = PROJECT / ".gitignore"
 
 
 def ignored(path: str) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(ROOT), "check-ignore", "--no-index", "-q", "--", path]
-    )
-    return result.returncode == 0
+    with tempfile.TemporaryDirectory(prefix="pokepod-ignore-contract-") as raw:
+        root = Path(raw)
+        (root / ".gitignore").write_text(source, encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        result = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--no-index", "-q",
+             "--", path]
+        )
+        return result.returncode == 0
 
 
 source = GITIGNORE.read_text(encoding="utf-8")
@@ -24,8 +30,8 @@ for forbidden in ("*secret*", "*token*", "*credential*", "*password*"):
     assert forbidden not in source
 
 for trackable in (
-    "projects/pokepod-amoled/firmware/PokePodAmoled/SecureWipe.h",
-    "projects/pokepod-amoled/firmware/tests/test_secure_wipe.cpp",
+    "firmware/PokePodAmoled/SecureWipe.h",
+    "firmware/tests/test_secure_wipe.cpp",
     "docs/security-token-lifecycle.md",
     "fixtures/credential-redaction.json",
     "fixtures/password-policy.txt",
@@ -39,10 +45,10 @@ for private in (
     "device.key",
     "secrets/cloud.txt",
     ".secrets/pairing.bin",
-    "projects/pokepod-amoled/local-secrets/tencent.txt",
-    "projects/pokepod-amoled/credentials.local.json",
-    "projects/pokepod-amoled/tokens.local.json",
-    "projects/pokepod-amoled/passwords.local.txt",
+    "local-secrets/tencent.txt",
+    "credentials.local.json",
+    "tokens.local.json",
+    "passwords.local.txt",
 ):
     assert ignored(private), private
 

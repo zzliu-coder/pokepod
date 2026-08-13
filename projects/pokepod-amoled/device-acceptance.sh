@@ -65,7 +65,20 @@ else
   printf '{"status":"unverified","deviceId":""}\n' >"$IDENTITY"
 fi
 
-SOURCE_COMMIT=$(git -C "$SCRIPT_DIR/../.." rev-parse HEAD)
+SOURCE_COMMIT=${POKEPOD_SOURCE_COMMIT:-}
+if [ -z "$SOURCE_COMMIT" ]; then
+  SOURCE_COMMIT=$(git -C "$SCRIPT_DIR/../.." rev-parse HEAD 2>/dev/null || true)
+fi
+case "$SOURCE_COMMIT" in
+  *[!0-9a-f]*|'')
+    printf 'FAIL source_commit_unavailable\n' >&2
+    exit 65
+    ;;
+esac
+[ "${#SOURCE_COMMIT}" -eq 40 ] || {
+  printf 'FAIL source_commit_invalid value=%s\n' "$SOURCE_COMMIT" >&2
+  exit 65
+}
 ARTIFACT_SHA256=
 if [ -n "$ARTIFACT" ]; then
   ARTIFACT_SHA256=$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')

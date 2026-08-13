@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,6 +13,21 @@ import tempfile
 PROJECT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT / "device-acceptance.sh"
 SOURCE = SCRIPT.read_text(encoding="utf-8")
+
+
+def source_commit() -> str:
+    audit_manifest = PROJECT / "_audit" / "SOURCE_MANIFEST.json"
+    if audit_manifest.is_file():
+        return str(json.loads(audit_manifest.read_text(encoding="utf-8"))["commit"])
+    result = subprocess.run(
+        ["git", "-C", str(PROJECT), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    )
+    return result.stdout.strip()
+
+
+TEST_ENV = os.environ.copy()
+TEST_ENV["POKEPOD_SOURCE_COMMIT"] = source_commit()
 
 assert "--expected-variant" in SOURCE
 assert "--evidence-root" in SOURCE
@@ -25,8 +41,8 @@ assert "pokepod.device-acceptance.evidence.v2" in SOURCE
 with tempfile.TemporaryDirectory(prefix="pokepod-device-acceptance-") as raw:
     root = Path(raw)
     missing = subprocess.run(
-        [str(SCRIPT), "--evidence-root", str(root)],
-        text=True, capture_output=True,
+        ["sh", str(SCRIPT), "--evidence-root", str(root)],
+        text=True, capture_output=True, env=TEST_ENV,
     )
     assert missing.returncode != 0
 
@@ -34,9 +50,10 @@ with tempfile.TemporaryDirectory(prefix="pokepod-device-acceptance-") as raw:
         fixture = root / f"{key}.json"
         fixture.write_text(json.dumps({"variant": name, "deviceId": "fixture-device"}))
         result = subprocess.run(
-            [str(SCRIPT), "--expected-variant", key, "--evidence-root", str(root),
+            ["sh", str(SCRIPT), "--expected-variant", key,
+             "--evidence-root", str(root),
              "--status-fixture", str(fixture), "--dry-run"],
-            text=True, capture_output=True,
+            text=True, capture_output=True, env=TEST_ENV,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         manifests = list((root / key).glob("*/evidence.json"))
@@ -56,9 +73,10 @@ with tempfile.TemporaryDirectory(prefix="pokepod-device-acceptance-") as raw:
     mismatch = root / "mismatch.json"
     mismatch.write_text(json.dumps({"variant": "V2 CO5300/CST820", "deviceId": "x"}))
     failed = subprocess.run(
-        [str(SCRIPT), "--expected-variant", "v1", "--evidence-root", str(root),
+        ["sh", str(SCRIPT), "--expected-variant", "v1",
+         "--evidence-root", str(root),
          "--status-fixture", str(mismatch), "--dry-run"],
-        text=True, capture_output=True,
+        text=True, capture_output=True, env=TEST_ENV,
     )
     assert failed.returncode != 0
 

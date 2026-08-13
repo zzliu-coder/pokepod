@@ -2,3 +2,15 @@
 /firmware/PokePodAmoled/build/
 __pycache__/
 *.py[cod]
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+/secrets/
+/.secrets/
+/local-secrets/
+/credentials.local.json
+/tokens.local.json
+/passwords.local.txt
