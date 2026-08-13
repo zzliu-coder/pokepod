@@ -7,7 +7,12 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 REPOSITORY = PROJECT.parents[1]
 project_readme = (PROJECT / "README.md").read_text(encoding="utf-8")
-root_readme = (REPOSITORY / "README.md").read_text(encoding="utf-8")
+root_readme_path = REPOSITORY / "README.md"
+root_readme = (
+    root_readme_path.read_text(encoding="utf-8")
+    if root_readme_path.is_file()
+    else None
+)
 
 for required in (
     "每次刷写都会在任何写入前现场读取完整 3 MiB app0",
@@ -36,20 +41,29 @@ for obsolete in (
 ):
     assert obsolete not in project_readme, f"obsolete release policy remains: {obsolete}"
 
-for required in (
-    "2278bb11af4c97f83e71e6e3529b440e80810419",
-    "feature/pokepod-amoled-1.8",
-    "codex/pokepod-audit-remediation-integration",
-    "590b549cb49b9a02064846673b51d26c585ee8a7",
-    "native Git\nhistory",
-):
-    assert required in root_readme, f"repository handoff contract missing: {required}"
+# The source-audit ZIP deliberately starts at projects/pokepod-amoled, so the
+# repository README is absent there. Validate the repository handoff whenever
+# the test runs from the complete checkout; the project recovery contract above
+# remains mandatory in both environments.
+if root_readme is not None:
+    for required in (
+        "2278bb11af4c97f83e71e6e3529b440e80810419",
+        "feature/pokepod-amoled-1.8",
+        "codex/pokepod-audit-remediation-integration",
+        "590b549cb49b9a02064846673b51d26c585ee8a7",
+        "native Git\nhistory",
+    ):
+        assert required in root_readme, (
+            f"repository handoff contract missing: {required}"
+        )
 
-for obsolete in (
-    "imported root",
-    "`main` branch preserves the imported audit baseline",
-    "agent/audit-remediation",
-):
-    assert obsolete not in root_readme, f"obsolete repository handoff remains: {obsolete}"
+    for obsolete in (
+        "imported root",
+        "`main` branch preserves the imported audit baseline",
+        "agent/audit-remediation",
+    ):
+        assert obsolete not in root_readme, (
+            f"obsolete repository handoff remains: {obsolete}"
+        )
 
 print("PASS release_documentation_contract")
