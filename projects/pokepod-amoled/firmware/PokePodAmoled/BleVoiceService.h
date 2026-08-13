@@ -12,6 +12,7 @@
 #endif
 
 #include "AudioCaptureRouter.h"
+#include "BleAppHandshakePolicy.h"
 #include "BlePeerPolicy.h"
 #include "BleConnectionPowerPolicy.h"
 #include "BleCallbackOverflowPolicy.h"
@@ -222,6 +223,7 @@ class BleVoiceService {
   BLECharacteristic *event_ = nullptr;
   BLECharacteristic *audio_ = nullptr;
   BlePeerPolicy peerPolicy_;
+  BleAppHandshakePolicy appHandshake_;
   BleSingleConnectionPolicy connectionPolicy_;
   BleServiceEnablePolicy enablePolicy_;
   VoiceSessionController controller_;

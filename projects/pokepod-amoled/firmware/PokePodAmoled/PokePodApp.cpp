@@ -401,6 +401,31 @@ void showMessage(const String &message, uint32_t durationMs = 1800) {
   transientUntilMs = millis() + durationMs;
 }
 
+String localCapsuleStatusMessage() {
+  if (!board.sdReady()) return "SD 卡不可用";
+  if (capsuleOperations.mutationCapabilityBlocked()) {
+    return "恢复记录失败 · 连接 Mac";
+  }
+  if (storageBootPhase == StorageBootPhase::localRecovery) {
+    return "正在恢复本地胶囊";
+  }
+  if (storageBootPhase == StorageBootPhase::recorder) {
+    return "正在启动录音存储";
+  }
+  if (storageBootPhase == StorageBootPhase::library ||
+      capsuleLibrary.startupActive()) {
+    return "正在恢复胶囊目录";
+  }
+  if (capsuleLibrary.startupBlocked()) return "胶囊目录恢复失败";
+  if (!capabilities.ready(DeviceCapability::capsuleLibrary)) {
+    return "胶囊目录不可用";
+  }
+  if (!capabilities.ready(DeviceCapability::recording)) {
+    return "录音存储不可用";
+  }
+  return "本地胶囊不可用";
+}
+
 void armTrashUndo(const std::vector<String> &ids) {
   std::vector<std::string> stableIds;
   stableIds.reserve(ids.size());
@@ -481,6 +506,9 @@ void drawDashboard() {
   view.settings = &deviceConfig.settings();
   view.audioReady = audio.ready();
   view.localCapsulesReady = capabilities.allows(kRecordingCapabilities);
+  if (!view.localCapsulesReady) {
+    view.localCapsuleStatus = localCapsuleStatusMessage();
+  }
   view.recorderReady = capabilities.ready(DeviceCapability::recording);
   view.transcriptionReady =
       capabilities.ready(DeviceCapability::transcription);
@@ -544,6 +572,11 @@ bool requestCaptureStop(PendingCaptureStop owner, RecorderStopReason reason,
                         bool forceAbort, bool notifyUser);
 
 bool startWirelessHold() {
+  if (storageBootPhase != StorageBootPhase::ready) {
+    showMessage("本地服务启动中，请稍候");
+    drawDashboard();
+    return false;
+  }
   if (!bleVoice.userEnabled()) {
     showMessage("蓝牙已关闭");
     drawDashboard();
@@ -555,7 +588,10 @@ bool startWirelessHold() {
     return false;
   }
   if (!bleVoice.appReady()) {
-    showMessage(bleVoice.connected() ? "蓝牙连接质量不足" : "等待 Mac 应用");
+    showMessage(bleVoice.connected()
+                    ? (bleVoice.mtuReady() ? "等待 Mac 应用"
+                                           : "等待蓝牙 MTU")
+                    : "等待 Mac 应用");
     drawDashboard();
     return false;
   }
@@ -1080,7 +1116,7 @@ void pollTouch() {
     const UiAction action = touchAction;
     if (uiActionRequiresCapsuleLibrary(action) &&
         !capabilities.allows(kCapsuleBrowsingCapabilities)) {
-      showMessage("本地胶囊不可用");
+      showMessage(localCapsuleStatusMessage(), 3000);
       drawDashboard();
       return;
     }
@@ -1574,6 +1610,20 @@ void loop() {
   // runs per turn; the initial library scan, ASR queue, Link and every local
   // mutation remain unopened until this phase reaches a terminal boundary.
   if (!advanceStorageBoot(now)) {
+    // Storage recovery owns its durable authority, but it must never own the
+    // whole product loop. Keep BLE, touch and provisioning responsive while
+    // the bounded recovery/scan advances one primitive per turn.
+    bleVoice.poll(now);
+    if (now - lastTouchMs >= 16) {
+      lastTouchMs = now;
+      pollTouch();
+    }
+    provisioningCoordinator.poll(now);
+    if (provisioningCoordinator.takeConfigurationChanged()) {
+      dashboard.invalidate();
+    }
+    wifi.loop(now, false, false, board.status().charging,
+              provisioningCoordinator.ownsWifi(), false);
     if (now - lastDashboardMs >= 1000) {
       lastDashboardMs = now;
       drawDashboard();
@@ -1812,6 +1862,12 @@ void loop() {
     return;
   }
 
+  // Touch has priority over captive-portal HTTP. A queued back/exit gesture is
+  // consumed before the phone can start another bounded request.
+  if (now - lastTouchMs >= currentPowerDecision.touchPollMs) {
+    lastTouchMs = now;
+    pollTouch();
+  }
   provisioningCoordinator.poll(now);
   if (provisioningCoordinator.takeConfigurationChanged()) {
     tencentWorker.wake();
@@ -1870,10 +1926,6 @@ void loop() {
       bleVoice.quiescedForSleep() &&
       !wifi.radioOn()) {
     enterDeepSleep(finalPowerInputs);
-  }
-  if (now - lastTouchMs >= currentPowerDecision.touchPollMs) {
-    lastTouchMs = now;
-    pollTouch();
   }
   if (dashboard.advanceVerticalScroll(now, capsuleLibrary)) {
     scrollRedrawPending = true;

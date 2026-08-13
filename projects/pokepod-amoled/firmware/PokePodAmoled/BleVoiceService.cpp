@@ -268,7 +268,11 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
   BLESecurity::setKeySize(16);
   passkey_ = BLESecurity::generateRandomPassKey();
   BLESecurity::setPassKey(true, passkey_);
-  BLESecurity::regenPassKeyOnConnect(true);
+  // One pairing attempt has exactly one product passkey. NimBLE's regenerated
+  // callback may arrive after the UI already rendered the code, which used to
+  // make the action card and toast disagree. The service owns the passkey and
+  // keeps it stable until the next explicit pairing attempt.
+  BLESecurity::regenPassKeyOnConnect(false);
   bonded_ = hasBond();
   refreshCallbackSnapshot(millis());
 
@@ -626,6 +630,24 @@ void BleVoiceService::poll(uint32_t nowMs) {
                      nowMs);
   if (pairingUntilMs_ != 0 && !pairingMode(nowMs)) pairingUntilMs_ = 0;
   refreshCallbackSnapshot(nowMs);
+  // A transport connection is only useful after the Mac app authenticates,
+  // negotiates MTU and sends READY. Reclaim a bonded system-only/stale link so
+  // the UI and the Mac can return to a clean reconnectable state.
+  if (connected_ && appHandshake_.requestDisconnect(
+                        nowMs, pairingMode(nowMs))) {
+    if (server_ != nullptr && connectionPolicy_.hasCurrent()) {
+      const uint16_t connectionId = connectionPolicy_.currentConnectionId();
+      const uint32_t generation = connectionGeneration_;
+      server_->disconnect(connectionId);
+      // The connection never reached an app session, so there is no capture
+      // owner to drain. Retire this exact epoch locally as well; a missing host
+      // callback must not leave the screen claiming a permanent connection.
+      processDisconnect(connectionId, generation, nowMs);
+      if (log_ != nullptr) {
+        log_->println("{\"event\":\"ble_voice_handshake_timeout_disconnect\"}");
+      }
+    }
+  }
   if (controlNotifyPending_ &&
       nowMs - controlNotifyStartedAtMs_ >= kControlNotifyTimeoutMs) {
     clearControlNotify();
@@ -901,6 +923,7 @@ void BleVoiceService::processConnect(uint16_t connectionId,
   appReady_ = false;
   connectionId_ = connectionId;
   connectionGeneration_ = connectionGeneration;
+  appHandshake_.connected(millis());
   connectionPowerMode_ = BleConnectionPowerMode::voice;
   requestConnectionPowerMode(BleConnectionPowerMode::idle);
   currentPeerAddressValid_ = peerAddress != nullptr;
@@ -963,6 +986,7 @@ void BleVoiceService::processDisconnect(uint16_t connectionId,
   mtu_ = 23;
   connectionId_ = 0;
   connectionGeneration_ = 0;
+  appHandshake_.disconnected();
   connectionPowerMode_ = BleConnectionPowerMode::idle;
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
@@ -1059,6 +1083,7 @@ void BleVoiceService::processCommand(uint16_t connectionId,
   if (type == BleVoiceCommandType::ready) {
     if (command.sessionId == 0) {
       appReady_ = authenticated_ && mtuReady();
+      if (appReady_) appHandshake_.ready();
       notifyControl(BleVoiceEventType::status, 0, appReady_ ? 1 : 2);
     } else {
       controller_.markReady(command.sessionId, nowMs);
@@ -1153,10 +1178,13 @@ void BleVoiceService::handlePasskey(uint32_t passkey) {
 }
 
 void BleVoiceService::processPasskey(uint32_t passkey) {
-  passkey_ = passkey;
-  refreshCallbackSnapshot(millis());
+  if (passkey == passkey_) return;
+  // A late stack callback belongs to a previous security attempt. Never let it
+  // replace the code already shown to the user; reassert the current attempt's
+  // value so both sides converge on the same six digits.
+  BLESecurity::setPassKey(true, passkey_);
   if (log_ != nullptr) {
-    log_->println("{\"event\":\"ble_voice_passkey_updated\"}");
+    log_->println("{\"event\":\"ble_voice_stale_passkey_ignored\"}");
   }
 }
 

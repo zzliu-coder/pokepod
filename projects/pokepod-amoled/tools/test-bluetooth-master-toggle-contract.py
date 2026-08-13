@@ -89,6 +89,16 @@ assert "callbackEvents_.resetAfterOverflow();" in overflow_finish
 assert "notifyStatusEvents_.resetAfterOverflow();" in overflow_finish
 
 assert 'UiIcon::bluetooth, "蓝牙"' in dashboard
+assert "BLESecurity::regenPassKeyOnConnect(false);" in service
+passkey_handler = service[
+    service.index("void BleVoiceService::processPasskey"):
+    service.index("bool BleVoiceService::notifyControl")
+]
+assert "passkey_ = passkey" not in passkey_handler
+assert "ble_voice_stale_passkey_ignored" in passkey_handler
+assert "ble_voice_handshake_timeout_disconnect" in service
+assert 'String("等待 Mac 应用")' in dashboard
+assert '"已连接 · 质量不足"' not in dashboard
 assert '"请先开启蓝牙"' in dashboard
 assert '"蓝牙已关闭"' in dashboard
 assert "view.bluetoothEnabled" in dashboard

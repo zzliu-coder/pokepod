@@ -46,7 +46,7 @@ assert deep_sleep.rindex("!bleVoice.quiescedForSleep()") > deep_sleep.index(
 )
 deep_sleep_gate_start = main.rindex("if (!safeShutdownQuiesce.pending() &&")
 deep_sleep_admission = main[deep_sleep_gate_start:
-                            main.index("if (now - lastTouchMs",
+                            main.index("if (dashboard.advanceVerticalScroll",
                                        deep_sleep_gate_start)]
 assert "bleVoice.quiescedForSleep()" in deep_sleep_admission
 assert "!bleVoice.connected()" not in deep_sleep_admission

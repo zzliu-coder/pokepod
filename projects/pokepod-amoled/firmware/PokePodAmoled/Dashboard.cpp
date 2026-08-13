@@ -4,6 +4,7 @@
 #include <esp_timer.h>
 #include <new>
 
+#include "BleVoiceProtocol.h"
 #include "TimePolicy.h"
 #include "WifiUiPolicy.h"
 
@@ -380,7 +381,8 @@ void Dashboard::drawHome(const DashboardView &view) {
     return;
   }
   drawHomeAction(ui::kHomePrimaryTop, ui::kHomePrimaryConnectedBottom,
-                 false, false, view.localCapsulesReady);
+                 false, false, view.localCapsulesReady, true,
+                 view.localCapsuleStatus);
   drawHomeAction(ui::kHomeSecondaryTop, ui::kHomeSecondaryBottom,
                  true, view.wirelessHolding, view.bleVoiceReady,
                  view.bluetoothEnabled);
@@ -388,7 +390,8 @@ void Dashboard::drawHome(const DashboardView &view) {
 
 void Dashboard::drawHomeAction(int16_t top, int16_t bottom, bool wireless,
                                bool holding, bool enabled,
-                               bool bluetoothEnabled) {
+                               bool bluetoothEnabled,
+                               const String &disabledDetail) {
   const uint16_t accent = enabled
       ? (wireless ? ui::kWireless : ui::kAccent) : ui::kMuted;
   const uint16_t dim = enabled
@@ -412,7 +415,10 @@ void Dashboard::drawHomeAction(int16_t top, int16_t bottom, bool wireless,
   renderer_.drawText(wireless ? (!bluetoothEnabled ? "蓝牙已关闭" :
                                   (holding ? "松开结束" :
                                    (enabled ? "按住说话" : "等待 Mac 应用"))) :
-                                  (enabled ? "轻触录音" : "本地胶囊不可用"),
+                                  (enabled ? "轻触录音" :
+                                   (disabledDetail.isEmpty()
+                                        ? "本地胶囊不可用"
+                                        : disabledDetail)),
                      132, centerY + 10, 190, 1,
                      accent, fill, 0, false, UiTextSize::body, true);
 }
@@ -432,7 +438,10 @@ void Dashboard::drawCapsules(const DashboardView &view) {
                      ui::kMuted, ui::kBackground);
   if (count == 0) {
     drawCapsuleOrb(230, ui::kDisabled, ui::kSurfaceRaised, 88);
-    drawCenteredText(view.capsuleLibraryReady ? "暂无胶囊" : "本地胶囊不可用",
+    drawCenteredText(view.capsuleLibraryReady ? "暂无胶囊" :
+                         (view.localCapsuleStatus.isEmpty()
+                              ? String("本地胶囊不可用")
+                              : view.localCapsuleStatus),
                      326, UiTextSize::body,
                      view.capsuleLibraryReady ? ui::kMuted : ui::kError,
                      true);
@@ -784,7 +793,9 @@ void Dashboard::drawDevice(const DashboardView &view) {
         ? String("就绪 · MTU") + String(view.bleVoiceMtu)
         : String("就绪 · 异常 ") + String(issues);
   } else if (view.bleVoiceConnected) {
-    voiceDetail = String("质量不足 · ") + String(view.bleVoiceMtu);
+    voiceDetail = view.bleVoiceMtu < kBleVoiceMinimumMtu
+        ? String("等待蓝牙 MTU") + String(view.bleVoiceMtu)
+        : String("等待 Mac 应用");
   } else {
     voiceDetail = view.bleVoiceBonded ? "等待 Mac" : "轻触配对";
   }
@@ -921,7 +932,9 @@ void Dashboard::drawBluetoothPairing(const DashboardView &view) {
     status = "已连接 · 可以语音输入";
     statusColor = ui::kWireless;
   } else if (view.bleVoiceConnected) {
-    status = "已连接 · 质量不足";
+    status = view.bleVoiceMtu < kBleVoiceMinimumMtu
+        ? "已连接 · 等待蓝牙 MTU"
+        : "已连接 · 等待 Mac 应用";
     statusColor = ui::kWaiting;
   } else if (view.bleVoiceBonded) {
     status = "已配对 · 等待 Mac";
@@ -1426,6 +1439,8 @@ uint64_t Dashboard::signature(const DashboardView &view,
   value.add(view.recording);
   value.add(view.transcribing);
   value.add(view.playing);
+  value.add(view.localCapsulesReady);
+  value.add(view.localCapsuleStatus);
   value.add(view.usbConnected);
   value.add(view.bleVoiceConnected);
   value.add(view.bleVoiceReady);
@@ -1519,7 +1534,6 @@ uint64_t Dashboard::signature(const DashboardView &view,
     value.add(view.board->pmu);
     value.add(view.audioReady);
     value.add(view.capsuleLibraryReady);
-    value.add(view.localCapsulesReady);
     value.add(view.recorderReady);
     value.add(view.transcriptionReady);
     value.add(view.usbReady);

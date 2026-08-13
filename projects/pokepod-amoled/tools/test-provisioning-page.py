@@ -290,15 +290,28 @@ assert "WiFi.mode(WIFI_OFF)" not in quiesce_handler
 assert "WiFi.status()" not in start_handler
 portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
-assert main_source.index(portal_loop) < main_source.index(
-    "wifi.loop(now", main_source.index(portal_loop))
+full_portal_poll = main_source.rindex(portal_loop)
+assert full_portal_poll < main_source.index("wifi.loop(now", full_portal_poll)
 network_section = main_source[
-    main_source.index(portal_loop):main_source.index(
-        "if (now - lastTouchMs", main_source.index(portal_loop)
-    )
+    full_portal_poll:main_source.index("PowerInputs finalPowerInputs",
+                                      full_portal_poll)
 ]
 assert "wifi.loop(now" in network_section
 assert "tencentWorker.loop(now" in network_section
+touch_before_portal = main_source[
+    main_source.rfind("if (now - lastTouchMs", 0, full_portal_poll):
+    full_portal_poll
+]
+assert "pollTouch();" in touch_before_portal
+assert "BoundedProvisioningWebServer" in portal_header
+assert "_currentClient.setTimeout(kIoSliceMs);" in source
+bounded_server = source[
+    source.index("void BoundedProvisioningWebServer::handleClient()"):
+    source.index("ProvisioningPortal::ProvisioningPortal()")
+]
+assert "HTTP_MAX_DATA_WAIT" not in bounded_server
+assert "HTTP_MAX_SEND_WAIT" not in bounded_server
+assert "kIdleClientLifetimeMs" in bounded_server
 assert "portal_->loop(millis())" in coordinator
 assert "nowMs = millis();" in source
 assert "if (validating_ && !transitionPending_)" in source

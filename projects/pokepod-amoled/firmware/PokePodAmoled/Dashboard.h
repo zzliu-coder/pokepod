@@ -34,6 +34,7 @@ struct DashboardView {
   bool audioReady = false;
   bool capsuleLibraryReady = false;
   bool localCapsulesReady = false;
+  String localCapsuleStatus;
   bool recorderReady = false;
   bool transcriptionReady = false;
   bool bleVoiceServiceReady = false;
@@ -174,7 +175,8 @@ class Dashboard {
                       uint16_t dimAccent, int16_t scale = 100);
   void drawHomeAction(int16_t top, int16_t bottom, bool wireless,
                       bool holding, bool enabled = true,
-                      bool bluetoothEnabled = true);
+                      bool bluetoothEnabled = true,
+                      const String &disabledDetail = String());
   void drawToast(const String &message);
   void drawCenteredText(const String &text, int16_t y, UiTextSize size,
                         uint16_t color, bool bold = false,

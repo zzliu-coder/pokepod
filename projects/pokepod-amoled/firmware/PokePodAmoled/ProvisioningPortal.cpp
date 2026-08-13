@@ -13,6 +13,55 @@
 #include "WifiFailurePolicy.h"
 
 namespace pokepod {
+
+void BoundedProvisioningWebServer::handleClient() {
+  if (_currentStatus == HC_NONE) {
+    _currentClient = _server.accept();
+    if (!_currentClient) return;
+    _currentClient.setTimeout(kIoSliceMs);
+    _currentStatus = HC_WAIT_READ;
+    _statusChange = millis();
+  }
+
+  bool keepCurrentClient = false;
+  if (_currentClient.connected()) {
+    if (_currentStatus == HC_WAIT_READ) {
+      if (_currentClient.available()) {
+        _currentClient.setTimeout(kIoSliceMs);
+        if (_parseRequest(_currentClient)) {
+          _contentLength = CONTENT_LENGTH_NOT_SET;
+          _responseCode = 0;
+          _clearResponseHeaders();
+          if (_chain != nullptr) {
+            _chain->runChain(*this, [this]() { return _handleRequest(); });
+          } else {
+            _handleRequest();
+          }
+          if (_currentClient.isSSE()) {
+            _currentStatus = HC_WAIT_CLOSE;
+            _statusChange = millis();
+            keepCurrentClient = true;
+          }
+        }
+      } else if (millis() - _statusChange <= kIdleClientLifetimeMs) {
+        keepCurrentClient = true;
+      }
+    } else if (_currentStatus == HC_WAIT_CLOSE &&
+               _currentClient.isSSE() &&
+               millis() - _statusChange <= kIdleClientLifetimeMs) {
+      keepCurrentClient = true;
+    }
+  }
+
+  if (!keepCurrentClient) {
+    _currentClient = NetworkClient();
+    _currentStatus = HC_NONE;
+    _currentUpload.reset();
+    _currentRaw.reset();
+  } else {
+    yield();
+  }
+}
 namespace {
 
 constexpr uint32_t kPortalLifetimeMs = 5UL * 60UL * 1000UL;
