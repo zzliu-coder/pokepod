@@ -4,7 +4,8 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 service = (root / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 transport = (root / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
-combined = service + transport
+wireless = (root / "firmware/PokePodAmoled/WirelessSyncService.cpp").read_text()
+combined = service + transport + wireless
 header = (root / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 helper = (root / "firmware/PokePodAmoled/DeferredFileCleanup.h").read_text()
 file_transfer = (root / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
@@ -12,7 +13,7 @@ file_header = (root / "firmware/PokePodAmoled/LinkFileTransfer.h").read_text()
 
 required_service = (
     "incomingCleanupPending_",
-    "pollDeferredCleanup();",
+    "WirelessLinkPollTurn<PokePodLinkService> linkTurn(link_);",
     "incomingCleanup_.poll()",
     "fileTransfer_.pollCleanup()",
     "linkFileResultFetched",
