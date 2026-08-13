@@ -1216,10 +1216,16 @@ void pollTouch() {
         showMessage("已取消配对");
       } else {
         bleVoice.enterPairingMode(now);
-        char pairMessage[48];
-        snprintf(pairMessage, sizeof(pairMessage), "配对码 %06lu · 长按忘记",
-                 static_cast<unsigned long>(bleVoice.passkey()));
-        showMessage(String(pairMessage), 5000);
+        if (bleVoice.pairingMode(now)) {
+          char pairMessage[48];
+          snprintf(pairMessage, sizeof(pairMessage), "配对码 %06lu · 长按忘记",
+                   static_cast<unsigned long>(bleVoice.passkey()));
+          showMessage(String(pairMessage), 5000);
+        } else {
+          // An existing physical connection must close before the pairing
+          // attempt owns its new passkey. Never snapshot the previous code.
+          showMessage("正在断开当前连接…", 3000);
+        }
       }
       dashboard.invalidate();
       drawDashboard();
