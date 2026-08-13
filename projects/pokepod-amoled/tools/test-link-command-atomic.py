@@ -57,6 +57,7 @@ assert ".concat(" not in read_text
 reset_text = body(SERVICE, "void PokePodLinkService::resetMetadataRead(",
                   "String PokePodLinkService::deviceId(")
 assert "metadataReadFile_.close()" in reset_text
+assert "metadataReadFile_ = File();" not in reset_text
 assert "memset(metadataReadBuffer_" in reset_text
 assert "resetMetadataRead();" in body(
     (ROOT / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text(),

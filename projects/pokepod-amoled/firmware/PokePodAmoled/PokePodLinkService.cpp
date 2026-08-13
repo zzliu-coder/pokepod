@@ -655,7 +655,6 @@ void PokePodLinkService::resetMetadataRead() {
     memset(metadataReadBuffer_, 0, metadataRead_.bytesRead());
   }
   metadataRead_.reset();
-  metadataReadFile_ = File();
   metadataReadPath_ = "";
 }
 
