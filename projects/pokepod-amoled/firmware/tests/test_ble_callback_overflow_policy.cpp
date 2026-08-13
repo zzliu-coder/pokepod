@@ -105,10 +105,16 @@ int main() {
   assert(!cleanup.disconnect);
   assert(cleanup.enteredHardFailed);
   assert(policy.hardFailed());
+  assert(policy.requiresProcessRecovery());
   assert(policy.physicalConnectionPending());
-  assert(!policy.confirm(deadlineEpoch));
+  assert(!policy.confirm(BleVoiceConnectionEpoch{11, 7}));
   assert(!policy.finish().valid());
   assert(policy.hardFailureCount() == 1);
+  // A delayed exact physical disconnect remains a valid recovery fact even
+  // after the absolute deadline; stale epochs still cannot rearm the queues.
+  assert(policy.confirm(deadlineEpoch));
+  assert(policy.finish().matches(deadlineEpoch));
+  assert(!policy.active());
 
   // uint32_t wrap does not move either the retry or deadline boundary.
   BleCallbackOverflowPolicy wrapped;
@@ -128,8 +134,12 @@ int main() {
   BleCallbackOverflowPolicy invalid;
   assert(invalid.begin({}, 10));
   assert(invalid.hardFailed());
+  assert(!invalid.requiresProcessRecovery());
   assert(!invalid.physicalConnectionPending());
   assert(invalid.hardFailureCount() == 1);
+  assert(invalid.recoverInvalidEpoch());
+  assert(!invalid.active());
+  assert(invalid.begin(BleVoiceConnectionEpoch{21, 1}, 20));
 
   // App deep-sleep admission reads these facts after logical connected has
   // already gone false. Both live cleanup and hard-failed overflow remain

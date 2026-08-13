@@ -131,6 +131,9 @@ def main() -> int:
         "sourceRevision": args.source_revision,
         "sourceClean": True,
         "lane": "fast",
+        "resourceReviewApproved": bool(
+            artifact.get("resourceReview", {}).get("approved", False)
+        ),
         "binary": binary_evidence,
         "elf": elf_evidence,
         "linkerMap": map_evidence,

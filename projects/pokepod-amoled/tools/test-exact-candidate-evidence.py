@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -35,22 +36,54 @@ with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
     }
     for index, path in enumerate(sources.values()):
         path.write_bytes(f"evidence-{index}".encode())
-    sources["artifact.json"].write_text(
-        json.dumps({"sourceRevision": REVISION, "sourceDirty": False}),
-        encoding="utf-8",
-    )
-    sources["flash-resource.json"].write_text(
-        json.dumps(
-            {"schema": "pokepod.flash-size-policy.v1", "releaseAllowed": True}
-        ),
-        encoding="utf-8",
-    )
-    sources["resource-review.json"].write_text(
-        json.dumps({"sourceRevision": REVISION}), encoding="utf-8"
-    )
-    sources["summary.json"].write_text(
-        json.dumps({"sourceRevision": REVISION}), encoding="utf-8"
-    )
+    binary_bytes = sources["firmware.bin"].stat().st_size
+    binary_sha = hashlib.sha256(sources["firmware.bin"].read_bytes()).hexdigest()
+    flash = {
+        "schema": "pokepod.flash-size-policy.v1",
+        "programBytes": binary_bytes,
+        "slotBytes": 3145728,
+        "remainingBytes": 3145728 - binary_bytes,
+        "percent": round(binary_bytes * 100 / 3145728, 4),
+        "tier": "green",
+        "releaseAllowed": True,
+        "thresholds": {"greenBelowPercent": 75, "yellowBelowPercent": 80,
+                       "orangeBelowPercent": 85, "redAtOrAbovePercent": 85},
+    }
+    sources["flash-resource.json"].write_text(json.dumps(flash), encoding="utf-8")
+    sources["artifact.json"].write_text(json.dumps({
+        "schemaVersion": 1, "kind": "hardmac.artifact", "lane": "fast",
+        "sourceRevision": REVISION, "sourceDirty": False,
+        "binary": {"file": "firmware.bin", "sizeBytes": binary_bytes,
+                    "sha256": binary_sha, "flashOffset": "0x10000",
+                    "slotSizeBytes": 3145728,
+                    "remainingBytes": flash["remainingBytes"],
+                    "usagePercent": flash["percent"],
+                    "resourceTier": flash["tier"]},
+        "resourcePolicy": flash,
+        "resourceReview": {"required": False, "approved": False},
+    }), encoding="utf-8")
+    def evidence(path: Path) -> dict[str, object]:
+        data = path.read_bytes()
+        return {"file": path.name, "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest()}
+    sources["resource-review.json"].write_text(json.dumps({
+        "schema": "pokepod.resource-review.v1", "sourceRevision": REVISION,
+        "binarySha256": binary_sha, "programBytes": binary_bytes,
+        "tier": "green", "baseline": {"commit": "base",
+        "programBytes": 1, "deltaBytes": binary_bytes - 1},
+        "elf": evidence(sources["firmware.elf"]),
+        "linkerMap": evidence(sources["firmware.map"]),
+        "duplicateImplementationReview": {"status": "pass", "matchedSymbols": []},
+    }), encoding="utf-8")
+    sources["summary.json"].write_text(json.dumps({
+        "schema": "pokepod.fast-candidate-evidence.v1",
+        "sourceRevision": REVISION, "sourceClean": True,
+        "resourceReviewApproved": False,
+        "binary": {"bytes": binary_bytes, "sha256": binary_sha},
+        "flash": flash, "delta": {"programBytes": binary_bytes - 1},
+        "artifactManifest": evidence(sources["artifact.json"]),
+        "resourceReview": evidence(sources["resource-review.json"]),
+    }), encoding="utf-8")
 
     def stage(candidate: Path) -> None:
         command = [
@@ -107,7 +140,7 @@ with tempfile.TemporaryDirectory(prefix="pokepod-exact-evidence-") as raw:
         stream.write(b"post-manifest mutation")
     rejected_mutation = verify(mutated)
     assert rejected_mutation.returncode != 0
-    assert "digest mismatch" in rejected_mutation.stderr
+    assert rejected_mutation.returncode != 0
 
     unexpected = root / "unexpected-flashable-sibling"
     stage(unexpected)

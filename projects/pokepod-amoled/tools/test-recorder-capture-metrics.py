@@ -76,9 +76,15 @@ assert "sessionTelemetry_.reset()" in wav
 assert wav.count("freezeSessionTelemetry(log);") == 2
 assert "sessionTelemetry_.recordStorageWrite" in wav
 assert "storageQueue_.dropped()" in wav
+assert wav.count("uxTaskGetStackHighWaterMark(storageTask_)") == 1
+assert "recorderTelemetryLastStackSampleMs_" in wav_h
+assert "forceStackSample" in wav
 assert "observeCaptureTelemetry" in wav_h
 assert "recorder.observeCaptureTelemetry(" in app
 assert "captureRuntime.taskStackHighWater()" in app
+assert app.count("captureRuntime.taskStackHighWater()") == 1
+assert "captureTelemetryLastStackSampleMs" in app
+assert "captureTelemetryStackSampled" in app
 assert "metrics_.sequenceFailures" in dispatcher
 assert "maximumIntervalUs" in dispatcher
 

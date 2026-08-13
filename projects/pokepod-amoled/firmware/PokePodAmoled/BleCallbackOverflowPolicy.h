@@ -63,6 +63,19 @@ class BleCallbackOverflowPolicy {
   bool hardFailed() const {
     return phase_ == BleCallbackOverflowPhase::hardFailed;
   }
+  bool requiresProcessRecovery() const {
+    return phase_ == BleCallbackOverflowPhase::hardFailed && epoch_.valid();
+  }
+  // An overflow without a trustworthy physical epoch cannot be confirmed
+  // against a controller connection. It is safe to clear that failed
+  // admission after the service has stopped accepting callback events.
+  bool recoverInvalidEpoch() {
+    if (phase_ != BleCallbackOverflowPhase::hardFailed || epoch_.valid()) {
+      return false;
+    }
+    clearState();
+    return true;
+  }
   bool physicalConnectionPending() const {
     return active() && epoch_.valid();
   }
@@ -92,7 +105,10 @@ class BleCallbackOverflowPolicy {
   }
 
   bool confirm(const BleVoiceConnectionEpoch &physicalDisconnect) {
-    if (phase_ != BleCallbackOverflowPhase::disconnecting ||
+    const bool waitingForDisconnect =
+        phase_ == BleCallbackOverflowPhase::disconnecting ||
+        (phase_ == BleCallbackOverflowPhase::hardFailed && epoch_.valid());
+    if (!waitingForDisconnect ||
         !physicalDisconnect.matches(epoch_)) {
       return false;
     }
@@ -103,16 +119,20 @@ class BleCallbackOverflowPolicy {
   BleVoiceConnectionEpoch finish() {
     if (phase_ != BleCallbackOverflowPhase::confirmed) return {};
     const BleVoiceConnectionEpoch closed = epoch_;
+    clearState();
+    return closed;
+  }
+
+ private:
+  void clearState() {
     phase_ = BleCallbackOverflowPhase::idle;
     epoch_ = {};
     startedAtMs_ = 0;
     nextRetryAtMs_ = 0;
     deadlineMs_ = 0;
     attempts_ = 0;
-    return closed;
   }
 
- private:
   static bool reached(uint32_t nowMs, uint32_t deadlineMs) {
     return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
   }

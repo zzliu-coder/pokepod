@@ -254,13 +254,27 @@ void WavRecorder::observeStorageWriteLatency(uint32_t elapsedUs) {
   sessionTelemetry_.recordStorageWrite(elapsedUs);
 }
 
-void WavRecorder::updateRecorderTelemetry() {
+void WavRecorder::updateRecorderTelemetry(bool forceStackSample) {
 #if defined(ARDUINO_ARCH_ESP32)
+  const uint32_t nowMs = millis();
+  const bool sampleStack = forceStackSample ||
+      !recorderTelemetryStackSampled_.load(std::memory_order_acquire) ||
+      static_cast<uint32_t>(nowMs -
+          recorderTelemetryLastStackSampleMs_.load(std::memory_order_acquire)) >=
+          1000U;
+  if (sampleStack && storageTask_ != nullptr) {
+    recorderTelemetryStackHighWaterWords_.store(
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(storageTask_)),
+        std::memory_order_release);
+    recorderTelemetryLastStackSampleMs_.store(nowMs,
+                                               std::memory_order_release);
+    recorderTelemetryStackSampled_.store(true, std::memory_order_release);
+  }
   sessionTelemetry_.observeRecorderQueue(
       static_cast<uint32_t>(storageQueue_.highWater()), storageQueue_.dropped(),
-      storageTask_ == nullptr ? 0U
-          : static_cast<uint32_t>(uxTaskGetStackHighWaterMark(storageTask_)));
+      recorderTelemetryStackHighWaterWords_.load(std::memory_order_acquire));
 #else
+  (void)forceStackSample;
   sessionTelemetry_.observeRecorderQueue(0, 0, 0);
 #endif
 }
@@ -559,6 +573,7 @@ bool WavRecorder::startStorageSession(Print &log) {
                          RecorderFailureStage::recoveryCheckpoint);
   }
   recording_ = true;
+  updateRecorderTelemetry(true);
   log.printf(
       "{\"event\":\"recording_started\",\"id\":\"%s\","
       "\"format\":\"16k_s16le_mono\"}\n",
@@ -832,7 +847,7 @@ void WavRecorder::completeFinalize(Print &log) {
     return;
   }
   finalizePhase_ = FinalizePhase::idle;
-  updateRecorderTelemetry();
+  updateRecorderTelemetry(true);
   freezeSessionTelemetry(log);
   terminalState_.complete(finalizeStopReason_, dataBytes_);
   const AudioFrontEndMetrics &audio = audioMetrics_;
@@ -850,7 +865,8 @@ void WavRecorder::completeFinalize(Print &log) {
       static_cast<unsigned>(storageQueue_.highWater()),
       static_cast<unsigned long>(storageQueue_.dropped()),
       static_cast<unsigned>(kRecorderStorageQueueFrames),
-      static_cast<unsigned>(uxTaskGetStackHighWaterMark(storageTask_)));
+      static_cast<unsigned>(recorderTelemetryStackHighWaterWords_.load(
+          std::memory_order_acquire)));
 #endif
   finalizeStopReason_ = RecorderStopReason::none;
   storageReservation_.release();
@@ -1570,6 +1586,11 @@ void WavRecorder::resetSessionState() {
   activeQualificationProbeEpoch_ = 0;
   sessionTelemetry_.reset();
   captureTelemetryProducer_ = {};
+#if defined(ARDUINO_ARCH_ESP32)
+  recorderTelemetryLastStackSampleMs_.store(0, std::memory_order_release);
+  recorderTelemetryStackHighWaterWords_.store(0, std::memory_order_release);
+  recorderTelemetryStackSampled_.store(false, std::memory_order_release);
+#endif
 }
 
 bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
@@ -1851,7 +1872,7 @@ bool WavRecorder::pollCleanup(Print &log, uint32_t nowMs,
   }
   storageReservation_.release();
   terminalState_.fail(cleanupTerminal_, cleanupStage_, dataBytes_);
-  updateRecorderTelemetry();
+  updateRecorderTelemetry(true);
   freezeSessionTelemetry(log);
   log.printf("{\"event\":\"recording_terminal\",\"ok\":false,\"stage\":\"%s\",\"bytes\":%lu}\n",
              recorderFailureStageName(cleanupStage_),

@@ -189,6 +189,13 @@ class BleVoicePhysicalDisconnectLatch {
     }
   }
 
+  void reset() {
+    version_.fetch_add(1, std::memory_order_acq_rel);
+    connectionId_.store(0xffff, std::memory_order_relaxed);
+    generation_.store(0, std::memory_order_relaxed);
+    version_.fetch_add(1, std::memory_order_release);
+  }
+
  private:
   std::atomic<uint32_t> version_{0};
   std::atomic<uint16_t> connectionId_{0xffff};

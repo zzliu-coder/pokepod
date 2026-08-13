@@ -37,6 +37,84 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def validate_payload_semantics(paths: dict[str, Path], revision: str) -> None:
+    """Check that every evidence document describes the same binary/policy."""
+    artifact = json.loads(paths["artifact.json"].read_text(encoding="utf-8"))
+    flash = json.loads(paths["flash-resource.json"].read_text(encoding="utf-8"))
+    review = json.loads(paths["resource-review.json"].read_text(encoding="utf-8"))
+    summary = json.loads(paths["fast-candidate-summary.json"].read_text(encoding="utf-8"))
+    binary_path = paths["PokePodAmoled.ino.bin"]
+    binary_bytes = binary_path.stat().st_size
+    binary_sha = sha256(binary_path)
+    artifact_binary = artifact.get("binary")
+    require(isinstance(artifact_binary, dict), "artifact binary object missing")
+    require(artifact.get("sourceRevision") == revision, "artifact SHA mismatch")
+    require(artifact.get("sourceDirty") is False, "artifact source is dirty")
+    require(artifact.get("resourcePolicy") == flash,
+            "artifact and flash policy differ")
+    require(artifact_binary.get("sizeBytes") == binary_bytes,
+            "artifact binary size differs from payload")
+    require(artifact_binary.get("sha256") == binary_sha,
+            "artifact binary SHA differs from payload")
+    require(artifact_binary.get("usagePercent") == flash.get("percent") and
+            artifact_binary.get("resourceTier") == flash.get("tier") and
+            artifact_binary.get("remainingBytes") == flash.get("remainingBytes"),
+            "artifact binary resource fields differ from flash policy")
+    require(flash.get("programBytes") == binary_bytes,
+            "flash policy program size differs from payload")
+    require(review.get("sourceRevision") == revision,
+            "resource review SHA mismatch")
+    require(review.get("binarySha256") == binary_sha,
+            "resource review binary SHA differs from payload")
+    require(review.get("programBytes") == binary_bytes,
+            "resource review program size differs from payload")
+    require(review.get("tier") == flash.get("tier"),
+            "resource review tier differs from flash policy")
+    duplicate = review.get("duplicateImplementationReview")
+    require(isinstance(duplicate, dict) and duplicate.get("status") == "pass",
+            "duplicate implementation review is not pass")
+    require(duplicate.get("matchedSymbols") == [],
+            "duplicate implementation review contains matches")
+    baseline = review.get("baseline")
+    require(isinstance(baseline, dict), "resource review baseline missing")
+    require(isinstance(baseline.get("programBytes"), int) and
+            isinstance(baseline.get("deltaBytes"), int),
+            "resource review baseline numbers missing")
+    require(baseline.get("deltaBytes") ==
+            review.get("programBytes") - baseline.get("programBytes"),
+            "resource review baseline delta mismatch")
+    summary_binary = summary.get("binary")
+    require(isinstance(summary_binary, dict), "summary binary object missing")
+    require(summary_binary.get("bytes") == binary_bytes and
+            summary_binary.get("sha256") == binary_sha,
+            "summary binary differs from payload")
+    require(summary.get("flash") == flash,
+            "summary and flash policy differ")
+    require(summary.get("sourceRevision") == revision and
+            summary.get("sourceClean") is True,
+            "summary source identity mismatch")
+    summary_delta = summary.get("delta")
+    require(isinstance(summary_delta, dict) and
+            summary_delta.get("programBytes") ==
+            binary_bytes - baseline.get("programBytes"),
+            "summary binary delta mismatch")
+    artifact_review = artifact.get("resourceReview")
+    require(isinstance(artifact_review, dict), "artifact resource review missing")
+    approved = artifact_review.get("approved")
+    require(isinstance(approved, bool), "artifact resource review approval missing")
+    require(summary.get("resourceReviewApproved") is approved,
+            "summary resource review approval differs from artifact")
+    for field, filename in (("artifactManifest", "artifact.json"),
+                            ("resourceReview", "resource-review.json")):
+        evidence = summary.get(field)
+        require(isinstance(evidence, dict), f"summary {field} missing")
+        target = paths[filename]
+        require(evidence.get("file") == filename and
+                evidence.get("bytes") == target.stat().st_size and
+                evidence.get("sha256") == sha256(target),
+                f"summary {field} evidence mismatch")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-revision", required=True)
@@ -60,25 +138,30 @@ def main() -> int:
         require(path.is_file() and not path.is_symlink() and path.stat().st_size > 0,
                 f"candidate evidence missing, empty, or non-regular: {path}")
 
+    candidate = json.loads(paths[MANIFEST_NAME].read_text(encoding="utf-8"))
+    validate_payload_semantics(paths, revision)
     artifact = json.loads(paths["artifact.json"].read_text(encoding="utf-8"))
     flash = json.loads(paths["flash-resource.json"].read_text(encoding="utf-8"))
     review = json.loads(paths["resource-review.json"].read_text(encoding="utf-8"))
     summary = json.loads(paths["fast-candidate-summary.json"].read_text(encoding="utf-8"))
-    candidate = json.loads(paths[MANIFEST_NAME].read_text(encoding="utf-8"))
-    require(artifact.get("sourceRevision") == revision, "artifact SHA mismatch")
-    require(artifact.get("sourceDirty") is False, "artifact source is dirty")
     require(flash.get("schema") == "pokepod.flash-size-policy.v1",
             "flash resource schema mismatch")
     require(flash.get("releaseAllowed") is True,
             "flash resource policy blocks this candidate")
-    require(review.get("sourceRevision") == revision, "resource review SHA mismatch")
-    require(summary.get("sourceRevision") == revision, "summary SHA mismatch")
     require(candidate.get("sourceRevision") == revision,
             "candidate manifest SHA mismatch")
     require(candidate.get("schema") == "pokepod.github-fast-candidate.v2",
             "candidate manifest schema mismatch")
     require(candidate.get("sourceClean") is True, "candidate manifest source is dirty")
-    require(candidate.get("status") == "verified", "candidate manifest is not verified")
+    status = candidate.get("status")
+    require(candidate.get("resourceReviewApproved") is
+            artifact.get("resourceReview", {}).get("approved"),
+            "candidate resource review approval differs from artifact")
+    require(status in {"pending", "verified"}, "candidate manifest status is invalid")
+    if status == "verified":
+        require(candidate.get("verifiedBy") ==
+                "verify-fast-candidate-evidence.v1",
+                "candidate verification provenance missing")
 
     expected_digests = {
         name: sha256(paths[name]) for name in (*PAYLOAD_NAMES, MANIFEST_NAME)
@@ -108,6 +191,23 @@ def main() -> int:
         require(isinstance(entry, dict), f"candidate manifest omits {name}")
         require(entry.get("bytes") == path.stat().st_size, f"size mismatch: {name}")
         require(entry.get("sha256") == sha256(path), f"digest mismatch: {name}")
+
+    # Staging deliberately creates an untrusted pending manifest. Only this
+    # verifier may promote it after all semantic checks above have passed.
+    if status == "pending":
+        candidate["status"] = "verified"
+        candidate["verifiedBy"] = "verify-fast-candidate-evidence.v1"
+        candidate["resourceReviewApproved"] = artifact.get("resourceReview", {}).get(
+            "approved"
+        )
+        paths[MANIFEST_NAME].write_text(
+            json.dumps(candidate, indent=2) + "\n", encoding="utf-8"
+        )
+        paths[CHECKSUM_NAME].write_text(
+            "".join(f"{sha256(paths[name])}  {name}\n"
+                    for name in (*PAYLOAD_NAMES, MANIFEST_NAME)),
+            encoding="utf-8",
+        )
 
     print(f"PASS exact_fast_candidate_evidence ({revision})")
     return 0

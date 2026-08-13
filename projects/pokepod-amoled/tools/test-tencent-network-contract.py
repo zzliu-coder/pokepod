@@ -117,7 +117,15 @@ if shutdown.index("board.endSdMount()") < shutdown.index(
 require(main, "if (!safeShutdownQuiesce.pending() &&\n"
               "      currentPowerDecision.requestDeepSleep",
         "a deferred safe shutdown can fall through into deep sleep")
-require(link + link_transport, "tencent_->quiesce(",
-        "Link reboot can restart while ASR still owns resources")
+require(link_transport, "tencent_->pollQuiesce(",
+        "Link reboot must retain ASR ownership until quiesced")
+require(link_transport, "tencent_->beginQuiesce(",
+        "Link reboot must begin ASR quiescence without blocking")
+require(link_transport, "tencent_->pollQuiesce(",
+        "Link reboot must poll ASR quiescence cooperatively")
+require(link_transport, "RebootQuiescePhase::waiting",
+        "Link reboot lacks a persistent nonblocking ASR phase")
+if "delay(5)" in link_transport:
+    raise SystemExit("FAIL tencent_network_contract: Link transport still sleeps in poll")
 
 print("PASS tencent_network_contract")

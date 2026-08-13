@@ -480,6 +480,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   String incomingTransactionId_;
   uint32_t incomingLastByteMs_ = 0;
   uint32_t rebootAtMs_ = 0;
+  enum class RebootQuiescePhase : uint8_t { idle, waiting };
+  RebootQuiescePhase rebootQuiescePhase_ = RebootQuiescePhase::idle;
   String activeMaintenance_;
   MaintenanceCompletionTracker maintenanceCompletion_;
 

@@ -67,6 +67,17 @@ class BleVoiceService {
   bool callbackOverflowHardFailed() const {
     return callbackOverflow_.hardFailed();
   }
+  bool callbackOverflowRecoveryRequired() const {
+    return callbackOverflow_.requiresProcessRecovery();
+  }
+  bool claimCallbackOverflowRecoveryRestart() {
+    if (!callbackOverflowRecoveryRequired() ||
+        callbackOverflowRecoveryRestartClaimed_) {
+      return false;
+    }
+    callbackOverflowRecoveryRestartClaimed_ = true;
+    return true;
+  }
   uint16_t callbackOverflowAttempts() const {
     return callbackOverflow_.attempts();
   }
@@ -163,6 +174,7 @@ class BleVoiceService {
                                   const BleVoiceConnectionEpoch &epoch);
   void advanceCallbackOverflow(uint32_t nowMs);
   bool finishCallbackOverflowIfDisconnected(uint32_t nowMs);
+  bool recoverInvalidCallbackOverflow(uint32_t nowMs);
   void refreshCallbackSnapshot(uint32_t nowMs);
   void clearControlNotify();
   void restartAdvertising();
@@ -258,6 +270,7 @@ class BleVoiceService {
       BleConnectionPowerMode::idle;
   bool idlePaused_ = false;
   BleSessionStopRequestLatch sessionStopRequest_;
+  bool callbackOverflowRecoveryRestartClaimed_ = false;
 };
 
 }  // namespace pokepod

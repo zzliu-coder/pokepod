@@ -168,7 +168,7 @@ class WavRecorder {
       RecordingQualificationInvalidReason reason);
   void consumeStorageQualificationInvalidations();
   void observeStorageWriteLatency(uint32_t elapsedUs);
-  void updateRecorderTelemetry();
+  void updateRecorderTelemetry(bool forceStackSample = false);
   void freezeSessionTelemetry(Print &log);
   bool storageStartCancelled() const;
   uint32_t storageReservationTimeoutMs() const;
@@ -421,6 +421,9 @@ class WavRecorder {
   RecorderStorageFrame *storageQueueSlots_ = nullptr;
   RecorderStorageFrame storageFrame_{};
   TaskHandle_t storageTask_ = nullptr;
+  std::atomic<uint32_t> recorderTelemetryLastStackSampleMs_{0};
+  std::atomic<uint32_t> recorderTelemetryStackHighWaterWords_{0};
+  std::atomic<bool> recorderTelemetryStackSampled_{false};
   SemaphoreHandle_t storageStartAck_ = nullptr;
   Print *storageLog_ = nullptr;
   std::atomic<bool> storageSessionActive_{false};

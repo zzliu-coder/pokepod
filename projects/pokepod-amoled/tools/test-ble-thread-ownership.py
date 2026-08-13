@@ -6,6 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVICE = (ROOT / "firmware/PokePodAmoled/BleVoiceService.cpp").read_text(
     encoding="utf-8"
 )
+MAIN = (ROOT / "firmware/PokePodAmoled/PokePodApp.cpp").read_text(
+    encoding="utf-8"
+)
 HEADER = (ROOT / "firmware/PokePodAmoled/BleVoiceService.h").read_text(
     encoding="utf-8"
 )
@@ -165,6 +168,8 @@ assert "physicalDisconnects_.observe" in disconnect_callback
 assert "kDisconnectRetryMs = 250" in OVERFLOW_POLICY
 assert "kCleanupDeadlineMs = 5000" in OVERFLOW_POLICY
 assert "BleCallbackOverflowPhase::hardFailed" in OVERFLOW_POLICY
+assert "requiresProcessRecovery()" in OVERFLOW_POLICY
+assert "recoverInvalidEpoch()" in OVERFLOW_POLICY
 assert "reached(nowMs, deadlineMs_)" in OVERFLOW_POLICY
 assert "reached(nowMs, nextRetryAtMs_)" in OVERFLOW_POLICY
 assert "physicalDisconnect.matches(epoch_)" in OVERFLOW_POLICY
@@ -177,6 +182,9 @@ assert "facts.notifyMailboxEmpty = notifyStatusEvents_.empty()" in HEADER
 pause = body("bool BleVoiceService::pauseForIdleSleep()")
 assert "physicalConnectionPending()" in pause
 assert "return quiescedForSleep();" in pause
+assert "callbackOverflowRecoveryRequired()" in HEADER
+assert "claimCallbackOverflowRecoveryRestart()" in HEADER
+assert "ESP.restart()" in MAIN
 
 # BLE Voice v1 UUIDs and wire sizes stay byte-for-byte compatible.
 for invariant in (

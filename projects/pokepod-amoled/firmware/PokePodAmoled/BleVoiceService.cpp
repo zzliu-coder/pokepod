@@ -1288,6 +1288,8 @@ void BleVoiceService::advanceCallbackOverflow(uint32_t nowMs) {
   if (!callbackOverflow_.active()) return;
   if (finishCallbackOverflowIfDisconnected(nowMs)) return;
 
+  if (recoverInvalidCallbackOverflow(nowMs)) return;
+
   const BleCallbackOverflowActions actions = callbackOverflow_.poll(nowMs);
   if (actions.enteredHardFailed) {
     if (log_ != nullptr) {
@@ -1312,9 +1314,30 @@ void BleVoiceService::advanceCallbackOverflow(uint32_t nowMs) {
   }
 }
 
+bool BleVoiceService::recoverInvalidCallbackOverflow(uint32_t nowMs) {
+  if (!callbackOverflow_.hardFailed() ||
+      callbackOverflow_.epoch().valid() ||
+      !callbackOverflow_.recoverInvalidEpoch()) {
+    return false;
+  }
+  callbackEvents_.resetAfterOverflow();
+  notifyStatusEvents_.resetAfterOverflow();
+  physicalDisconnects_.reset();
+  notifyCallbackBinding_.invalidate();
+  refreshCallbackSnapshot(nowMs);
+  if (log_ != nullptr) {
+    log_->println(
+        "{\"event\":\"ble_voice_callback_overflow_recovered\","
+        "\"mode\":\"invalid_epoch\"}");
+  }
+  if (enablePolicy_.acceptsNewWork() && !idlePaused_) restartAdvertising();
+  return true;
+}
+
 bool BleVoiceService::finishCallbackOverflowIfDisconnected(uint32_t nowMs) {
-  if (callbackOverflow_.phase() !=
-      BleCallbackOverflowPhase::disconnecting) return false;
+  const BleCallbackOverflowPhase phase = callbackOverflow_.phase();
+  if (phase != BleCallbackOverflowPhase::disconnecting &&
+      phase != BleCallbackOverflowPhase::hardFailed) return false;
   BleVoiceConnectionEpoch physicalDisconnect;
   if (!physicalDisconnects_.latest(physicalDisconnect) ||
       !callbackOverflow_.confirm(physicalDisconnect)) return false;

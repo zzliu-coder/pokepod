@@ -37,6 +37,9 @@ class TencentWorker {
     return runtime_.generation();
   }
   bool cancel(TencentCancelReason reason);
+  TencentQuiesceStatus beginQuiesce(uint32_t nowMs, uint32_t timeoutMs,
+                                    TencentCancelReason reason);
+  TencentQuiesceStatus pollQuiesce(uint32_t nowMs);
   bool quiesce(uint32_t nowMs, uint32_t timeoutMs,
                TencentCancelReason reason);
   bool waitingForWake() const { return waitingForWake_; }

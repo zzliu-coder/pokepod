@@ -78,7 +78,12 @@ def main() -> int:
                 "schema": "pokepod.github-fast-candidate.v2",
                 "sourceRevision": revision,
                 "sourceClean": True,
-                "status": "verified",
+                # The verifier derives the final status only after checking
+                # cross-file binary, policy and review semantics.
+                "status": "pending",
+                "resourceReviewApproved": json.loads(
+                    args.artifact.read_text(encoding="utf-8")
+                ).get("resourceReview", {}).get("approved"),
                 "files": records,
             },
             indent=2,

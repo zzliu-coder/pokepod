@@ -135,6 +135,8 @@ void PokePodLinkService::advanceLinkOperationSettlement() {
 }
 
 void PokePodLinkService::disconnect() {
+  rebootQuiescePhase_ = RebootQuiescePhase::idle;
+  rebootAtMs_ = 0;
   cancelLinkOperation(quiesceRequested_
       ? LinkOperationCancelReason::quiesce
       : LinkOperationCancelReason::disconnect);
@@ -323,16 +325,31 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     }
   }
   if (rebootAtMs_ != 0 && static_cast<int32_t>(nowMs - rebootAtMs_) >= 0) {
-    bool tencentQuiesced = true;
-    if (!gate.run([&]() {
-          tencentQuiesced = tencent_ == nullptr ||
-              tencent_->quiesce(
+    if (rebootQuiescePhase_ == RebootQuiescePhase::idle) {
+      if (!gate.run([&]() {
+            if (tencent_ != nullptr) {
+              (void)tencent_->beginQuiesce(
                   nowMs, 250, TencentCancelReason::shutdown);
+            }
+            rebootQuiescePhase_ = RebootQuiescePhase::waiting;
+          })) return;
+    }
+    TencentQuiesceStatus tencentStatus = TencentQuiesceStatus::complete;
+    if (!gate.run([&]() {
+          tencentStatus = tencent_ == nullptr
+              ? TencentQuiesceStatus::complete
+              : tencent_->pollQuiesce(nowMs);
         })) return;
-    if (!tencentQuiesced) {
-      rebootAtMs_ = millis() + 100;
+    if (tencentStatus == TencentQuiesceStatus::waiting) {
+      rebootAtMs_ = nowMs + 20;
       return;
     }
+    if (tencentStatus == TencentQuiesceStatus::timedOut) {
+      rebootQuiescePhase_ = RebootQuiescePhase::idle;
+      rebootAtMs_ = nowMs + 100;
+      return;
+    }
+    rebootQuiescePhase_ = RebootQuiescePhase::idle;
     if (!gate.run([&]() {
           if (stream_ != nullptr) stream_->flush();
         })) return;

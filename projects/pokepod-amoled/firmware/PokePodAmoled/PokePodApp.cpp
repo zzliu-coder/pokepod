@@ -127,6 +127,10 @@ uint32_t lastDashboardMs = 0;
 uint32_t lastScrollFrameMs = 0;
 uint32_t lastSensorMs = 0;
 AudioCaptureFrontEndSnapshot lastLocalCaptureMetrics;
+uint32_t captureTelemetrySampledSessionId = 0;
+uint32_t captureTelemetryLastStackSampleMs = 0;
+uint32_t captureTelemetryStackHighWaterWords = 0;
+bool captureTelemetryStackSampled = false;
 uint32_t bootPressedAtMs = 0;
 uint32_t lastNetworkTimeSyncRevision = 0;
 uint32_t lastCapsuleLibraryRevision = 0;
@@ -591,12 +595,30 @@ void observeCaptureMetrics() {
   const AudioCaptureFrontEndSnapshot snapshot =
       captureRuntime.frontEndSnapshot();
   if (snapshot.sessionId == 0 || snapshot.generation == 0) return;
+  if (captureTelemetrySampledSessionId != snapshot.sessionId) {
+    captureTelemetrySampledSessionId = snapshot.sessionId;
+    captureTelemetryLastStackSampleMs = 0;
+    captureTelemetryStackHighWaterWords = 0;
+    captureTelemetryStackSampled = false;
+  }
   if (recorder.operationActive() &&
       (captureRuntime.running() ||
        pendingCaptureStop != PendingCaptureStop::none)) {
+    const uint32_t nowMs = millis();
+    const bool terminalSample = !captureRuntime.running() &&
+        pendingCaptureStop != PendingCaptureStop::none;
+    const bool periodicSample = !captureTelemetryStackSampled ||
+        static_cast<uint32_t>(nowMs - captureTelemetryLastStackSampleMs) >=
+            1000U;
+    if (terminalSample || periodicSample) {
+      captureTelemetryStackHighWaterWords = static_cast<uint32_t>(
+          captureRuntime.taskStackHighWater());
+      captureTelemetryLastStackSampleMs = nowMs;
+      captureTelemetryStackSampled = true;
+    }
     recorder.observeCaptureTelemetry(
         captureRuntime.metrics(), captureDispatcher.metrics(),
-        static_cast<uint32_t>(captureRuntime.taskStackHighWater()));
+        captureTelemetryStackHighWaterWords);
   }
   // Recorder finalization runs on the storage task. Publish the final metrics
   // before stop() crosses that ownership boundary, then keep the snapshot
@@ -849,6 +871,10 @@ void toggleRecording() {
     uint32_t captureSessionId = esp_random();
     if (captureSessionId == 0) captureSessionId = 1;
     lastLocalCaptureMetrics = {};
+    captureTelemetrySampledSessionId = captureSessionId;
+    captureTelemetryLastStackSampleMs = 0;
+    captureTelemetryStackHighWaterWords = 0;
+    captureTelemetryStackSampled = false;
     const bool stateReady = acquired &&
         localRecordingStart.begin(captureSessionId);
     const bool requested = stateReady &&
@@ -1680,6 +1706,33 @@ void loop() {
     }
   }
   bleVoice.poll(now);
+  if (bleVoice.callbackOverflowRecoveryRequired()) {
+    // A valid frozen epoch reached the hard deadline without a physical
+    // disconnect confirmation. Do not fabricate confirmation or reopen the
+    // callback mailboxes. Finish the current capture first, then perform one
+    // controlled MCU restart after all durable work has become idle; boot
+    // restores the persisted Bluetooth intent.
+    if (captureRuntime.running() &&
+        captureRouter.owner() == AudioCaptureOwner::wirelessVoice &&
+        pendingCaptureStop == PendingCaptureStop::none) {
+      (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                               RecorderStopReason::none, true, false);
+    }
+    const bool restartSafe =
+        pendingCaptureStop == PendingCaptureStop::none &&
+        captureRouter.owner() == AudioCaptureOwner::none &&
+        !captureRuntime.running() && !recorder.operationActive() &&
+        !localRecordingStart.active() && !linkService.receivingBinary() &&
+        !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
+        !tencentWorker.working() && StorageCoordinator::instance().idle();
+    if (restartSafe && bleVoice.claimCallbackOverflowRecoveryRestart()) {
+      usb.log().println(
+          "{\"event\":\"ble_voice_callback_overflow_recovery_restart\"}");
+#if defined(ARDUINO_ARCH_ESP32)
+      ESP.restart();
+#endif
+    }
+  }
   if (bleVoice.sessionStopRequested()) {
     if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice) {
       (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,

@@ -97,15 +97,23 @@ bool TencentWorker::cancel(TencentCancelReason reason) {
 
 bool TencentWorker::quiesce(uint32_t nowMs, uint32_t timeoutMs,
                             TencentCancelReason reason) {
-  TencentQuiesceStatus status =
-      runtime_.beginQuiesce(nowMs, timeoutMs, reason);
+  TencentQuiesceStatus status = beginQuiesce(nowMs, timeoutMs, reason);
   while (status == TencentQuiesceStatus::waiting) {
-    if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
-    status = runtime_.pollQuiesce(millis());
+    status = pollQuiesce(millis());
     if (status == TencentQuiesceStatus::waiting) delay(5);
   }
-  if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
-  return runtime_.pollQuiesce(millis()) == TencentQuiesceStatus::complete;
+  return status == TencentQuiesceStatus::complete;
+}
+
+TencentQuiesceStatus TencentWorker::beginQuiesce(
+    uint32_t nowMs, uint32_t timeoutMs, TencentCancelReason reason) {
+  if (resultReady_.load(std::memory_order_acquire)) finishAttempt(nowMs);
+  return runtime_.beginQuiesce(nowMs, timeoutMs, reason);
+}
+
+TencentQuiesceStatus TencentWorker::pollQuiesce(uint32_t nowMs) {
+  if (resultReady_.load(std::memory_order_acquire)) finishAttempt(nowMs);
+  return runtime_.pollQuiesce(nowMs);
 }
 
 void TencentWorker::taskEntry(void *context) {
