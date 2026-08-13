@@ -276,6 +276,11 @@ bool pauseIdleRadios() {
 }
 
 void enterDeepSleep(const PowerInputs &inputs) {
+  if (!bleVoice.quiescedForSleep() || wifi.radioOn()) {
+    usb.log().println(
+        "{\"event\":\"deep_sleep_deferred\",\"reason\":\"radio_not_quiesced\"}");
+    return;
+  }
   if (!tencentWorker.quiesce(millis(), 2000,
                              TencentCancelReason::shutdown)) {
     usb.log().println(
@@ -304,6 +309,13 @@ void enterDeepSleep(const PowerInputs &inputs) {
       millis(), inputs, runtimePower.snapshot().deepSleepWakeMask,
       board.status().batteryPercent, usb.log());
   wifi.prepareForSleep();
+  // Re-read callback-owned BLE facts immediately before controller teardown.
+  // This prevents a caller or a late callback from bypassing the outer gate.
+  if (!bleVoice.quiescedForSleep() || wifi.radioOn()) {
+    usb.log().println(
+        "{\"event\":\"deep_sleep_deferred\",\"reason\":\"radio_reactivated\"}");
+    return;
+  }
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
   if (board.sdReady()) SD_MMC.end();
@@ -1731,7 +1743,8 @@ void loop() {
   if (currentPowerDecision.requestSafeShutdown) requestSafeShutdown(now);
   if (safeShutdownQuiesce.pending()) (void)advanceSafeShutdown(now);
   if (!safeShutdownQuiesce.pending() &&
-      currentPowerDecision.requestDeepSleep && !bleVoice.connected() &&
+      currentPowerDecision.requestDeepSleep &&
+      bleVoice.quiescedForSleep() &&
       !wifi.radioOn()) {
     enterDeepSleep(finalPowerInputs);
   }

@@ -131,6 +131,20 @@ int main() {
   assert(!invalid.physicalConnectionPending());
   assert(invalid.hardFailureCount() == 1);
 
+  // App deep-sleep admission reads these facts after logical connected has
+  // already gone false. Both live cleanup and hard-failed overflow remain
+  // blockers. Exact disconnect, mailbox reset and idle pause leave the clean
+  // all-false fact set that may proceed.
+  BleSleepQuiescenceFacts disconnectingSleep;
+  disconnectingSleep.overflowCleanupActive = true;
+  disconnectingSleep.physicalConnectionPending = true;
+  assert(!bleVoiceQuiescedForSleep(disconnectingSleep));
+  BleSleepQuiescenceFacts hardFailedSleep;
+  hardFailedSleep.overflowCleanupActive = true;
+  assert(!bleVoiceQuiescedForSleep(hardFailedSleep));
+  BleSleepQuiescenceFacts exactDisconnectResetAndPaused;
+  assert(bleVoiceQuiescedForSleep(exactDisconnectResetAndPaused));
+
   assertNotQuiescedByEachBlocker();
   return 0;
 }

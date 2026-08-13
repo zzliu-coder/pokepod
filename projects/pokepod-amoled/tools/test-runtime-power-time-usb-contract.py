@@ -45,5 +45,8 @@ assert "StorageCoordinator::instance().mutationActive()," in main
 assert "StorageCoordinator::instance().readActive()," in main
 assert "board.lowPowerWakeSourcesReady(),\n      recorder.recording()," not in main
 assert "input = powerInputsWithFacts(input, facts)" in main
+assert "bleVoice.quiescedForSleep()" in main
+assert "radio_not_quiesced" in main
+assert "radio_reactivated" in main
 
 print("PASS test_runtime_power_time_usb_contract")
