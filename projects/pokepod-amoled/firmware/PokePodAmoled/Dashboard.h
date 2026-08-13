@@ -77,7 +77,9 @@ struct DashboardView {
   WifiPhase wifiPhase = WifiPhase::disabled;
   int32_t wifiRssi = 0;
   String portalSsid;
-  String portalPassword;
+  // Non-owning and valid only for the synchronous draw() call. The producer
+  // leaves this null whenever provisioning is no longer visible.
+  const String *portalPassword = nullptr;
   String portalStatus;
   ProvisioningState portalState = ProvisioningState::ready;
   const ProvisioningDiagnostics *provisioningDiagnostics = nullptr;

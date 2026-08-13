@@ -967,9 +967,11 @@ void Dashboard::drawProvisioning(const DashboardView &view) {
   renderer_.drawText("密码", 20, 214, 100, 1,
                      ui::kMuted, ui::kBackground);
   display_->fillRoundRect(20, 238, 328, 88, 20, ui::kSurface);
-  renderer_.drawText(view.portalPassword, 38, 266, 292, 1,
-                     ui::kWaiting, ui::kSurface, 0, false,
-                     UiTextSize::display, true);
+  if (view.portalPassword != nullptr) {
+    renderer_.drawText(*view.portalPassword, 38, 266, 292, 1,
+                       ui::kWaiting, ui::kSurface, 0, false,
+                       UiTextSize::display, true);
+  }
   display_->fillRoundRect(20, ui::kProvisionExitTop, 154,
                           ui::kProvisionExitBottom - ui::kProvisionExitTop,
                           18, ui::kSurfaceRaised);
@@ -1468,7 +1470,13 @@ uint64_t Dashboard::signature(const DashboardView &view,
     value.add(view.wifiSyncLastCompletedAtMs);
     value.add(view.wifiSyncLastError);
     value.add(view.portalSsid);
-    value.add(view.portalPassword);
+    // A missing borrow represents the same empty value that the former owned
+    // String carried outside a provisioning session.
+    if (view.portalPassword == nullptr) {
+      value.add("");
+    } else {
+      value.add(*view.portalPassword);
+    }
     value.add(view.portalState);
     value.add(view.portalStatus);
     value.add(view.settings == nullptr ? false : view.settings->wifiEnabled);

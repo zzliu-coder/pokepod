@@ -500,7 +500,10 @@ void drawDashboard() {
       ? WifiPhase::provisioning : wifi.phase();
   view.wifiRssi = wifi.rssi();
   view.portalSsid = provisioningPortal.ssid();
-  view.portalPassword = provisioningPortal.password();
+  // Dashboard consumes this borrow synchronously below; it never owns or
+  // retains credential bytes after drawDashboard() returns.
+  view.portalPassword =
+      view.provisioning ? &provisioningPortal.password() : nullptr;
   view.portalStatus = provisioningPortal.statusMessage();
   view.portalState = provisioningPortal.state();
   view.provisioningDiagnostics = &provisioningDiagnostics;

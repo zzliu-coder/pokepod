@@ -17,6 +17,9 @@ dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
 portal_header = (firmware_dir / "ProvisioningPortal.h").read_text(encoding="utf-8")
 coordinator_header = (firmware_dir / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
 policy_source = (firmware_dir / "ProvisioningPolicy.h").read_text(encoding="utf-8")
+startup_policy_source = (firmware_dir / "ProvisioningStartupPolicy.h").read_text(
+    encoding="utf-8"
+)
 all_firmware_source = "\n".join(
     path.read_text(encoding="utf-8")
     for path in sorted(firmware_dir.iterdir())
@@ -104,8 +107,45 @@ assert "statusMessage_ = \"正在连接 \" + next.wifiSsid;" not in source
 assert "statusMessage_ = \"Wi-Fi 已连接\";" in source
 assert "view.portalStatus = provisioningPortal.statusMessage();" in main_source
 assert "view.portalState = provisioningPortal.state();" in main_source
-assert "view.portalPassword = provisioningPortal.password();" in main_source
-assert "renderer_.drawText(view.portalPassword" in dashboard_source
+assert "String portalPassword;" not in dashboard_header
+assert "const String *portalPassword = nullptr;" in dashboard_header
+assert "view.portalPassword = provisioningPortal.password();" not in main_source
+assert (
+    "view.provisioning ? &provisioningPortal.password() : nullptr;"
+    in main_source
+)
+assert "if (view.portalPassword != nullptr)" in dashboard_source
+assert "renderer_.drawText(*view.portalPassword" in dashboard_source
+assert "renderer_.drawText(view.portalPassword" not in dashboard_source
+assert "void draw(const DashboardView &view);" in dashboard_header
+assert "DashboardView *" not in dashboard_header
+draw_dashboard = main_source[
+    main_source.index("void drawDashboard()"):
+    main_source.index("bool requestCaptureStop")
+]
+assert draw_dashboard.count("&provisioningPortal.password()") == 1
+assert draw_dashboard.index("view.portalPassword =") < draw_dashboard.index(
+    "dashboard.draw(view);"
+)
+assert "view.provisioning = provisioningCoordinator.visible();" in draw_dashboard
+
+# stop() resets the visibility state before the next DashboardView is built.
+# The ternary above therefore publishes null after stop instead of retaining a
+# pointer across portal credential wiping or across frames.
+coordinator_stop = coordinator[
+    coordinator.index("void ProvisioningCoordinator::stop()"):
+    coordinator.index("bool ProvisioningCoordinator::active() const")
+]
+assert "portal_->stop();" in coordinator_stop
+assert coordinator_stop.index("portal_->stop();") < coordinator_stop.index(
+    "startup_.reset();"
+)
+assert "bool visible() const { return startup_.visible(); }" in coordinator_header
+startup_reset = startup_policy_source[
+    startup_policy_source.index("void reset()"):
+    startup_policy_source.index("ProvisioningStartupPhase phase() const")
+]
+assert "phase_ = ProvisioningStartupPhase::idle;" in startup_reset
 assert "String portalStatus;" in dashboard_header
 assert "ProvisioningState portalState" in dashboard_header
 assert "const ProvisioningDiagnostics *provisioningDiagnostics" in dashboard_header
@@ -126,6 +166,9 @@ signature = dashboard_source[
 ]
 assert "view.portalStatus" in signature
 assert "view.portalState" in signature
+assert "if (view.portalPassword == nullptr)" in signature
+assert 'value.add("");' in signature
+assert "value.add(*view.portalPassword);" in signature
 save_handler = source[source.index("void ProvisioningPortal::saveRequest()"):
                       source.index("void ProvisioningPortal::beginStationValidation()")]
 assert "showPortal();" not in save_handler
