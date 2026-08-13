@@ -223,6 +223,9 @@ LinkRecordingEvent LinkRecordingSession::advanceStop(
     recorder_->observeAudioMetrics(finalMetrics.sessionId,
                                    finalMetrics.generation,
                                    finalMetrics.asMetrics());
+    recorder_->observeCaptureTelemetry(
+        captureRuntime_->metrics(), captureDispatcher_->metrics(),
+        static_cast<uint32_t>(captureRuntime_->taskStackHighWater()));
     if (recorder_->recording()) {
       if (complete) {
         (void)recorder_->stop(*log_, recorder_->stopRequested()

@@ -61,10 +61,11 @@ assert "releaseRequestLease" not in advance
 final_drain = advance.index("captureDispatcher_->drain(")
 final_snapshot = advance.index("captureRuntime_->frontEndSnapshot()", final_drain)
 final_observe = advance.index("recorder_->observeAudioMetrics(", final_snapshot)
-recorder_stop = advance.index("recorder_->stop(*log_", final_observe)
-recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_observe)
-assert final_drain < final_snapshot < final_observe < recorder_stop
-assert final_observe < recorder_abort
+final_telemetry = advance.index("recorder_->observeCaptureTelemetry(", final_observe)
+recorder_stop = advance.index("recorder_->stop(*log_", final_telemetry)
+recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_telemetry)
+assert final_drain < final_snapshot < final_observe < final_telemetry < recorder_stop
+assert final_telemetry < recorder_abort
 assert "!recorder_->captureFailureLatched()" in advance
 assert "drainLinkCapture" not in IMPLEMENTATION + SESSION
 assert "while (source.pop(frame))" in CAPTURE_DISPATCHER
