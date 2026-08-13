@@ -173,7 +173,8 @@ class Dashboard {
   void drawCapsuleOrb(int16_t centerY, uint16_t accent,
                       uint16_t dimAccent, int16_t scale = 100);
   void drawHomeAction(int16_t top, int16_t bottom, bool wireless,
-                      bool holding, bool enabled = true);
+                      bool holding, bool enabled = true,
+                      bool bluetoothEnabled = true);
   void drawToast(const String &message);
   void drawCenteredText(const String &text, int16_t y, UiTextSize size,
                         uint16_t color, bool bold = false,
@@ -223,6 +224,7 @@ class Dashboard {
   bool lastSignatureValid_ = false;
   bool lastTopBarSignatureValid_ = false;
   bool lastWirelessHolding_ = false;
+  bool lastBluetoothEnabled_ = false;
   bool lastRecording_ = false;
   uint16_t smoothedPeak_ = 0;
   uint16_t envelopeCeiling_ = 1200;

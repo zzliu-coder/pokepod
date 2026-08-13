@@ -278,6 +278,7 @@ void Dashboard::draw(const DashboardView &view) {
     lastSignatureValid_ = true;
     lastTopBarSignatureValid_ = true;
     lastWirelessHolding_ = view.wirelessHolding;
+    lastBluetoothEnabled_ = view.bluetoothEnabled;
     invalidated_ = false;
     scrollFramePending_ = false;
   } else if (currentSignature != lastSignature_) {
@@ -300,6 +301,7 @@ void Dashboard::draw(const DashboardView &view) {
     lastSignatureValid_ = true;
     lastTopBarSignatureValid_ = true;
     lastWirelessHolding_ = view.wirelessHolding;
+    lastBluetoothEnabled_ = view.bluetoothEnabled;
   }
   drawDynamicRegions(view);
   const UiRenderPlan plan = uiRenderPlan(view.recording, bodyRepainted);
@@ -380,11 +382,13 @@ void Dashboard::drawHome(const DashboardView &view) {
   drawHomeAction(ui::kHomePrimaryTop, ui::kHomePrimaryConnectedBottom,
                  false, false, view.localCapsulesReady);
   drawHomeAction(ui::kHomeSecondaryTop, ui::kHomeSecondaryBottom,
-                 true, view.wirelessHolding, view.bleVoiceReady);
+                 true, view.wirelessHolding, view.bleVoiceReady,
+                 view.bluetoothEnabled);
 }
 
 void Dashboard::drawHomeAction(int16_t top, int16_t bottom, bool wireless,
-                               bool holding, bool enabled) {
+                               bool holding, bool enabled,
+                               bool bluetoothEnabled) {
   const uint16_t accent = enabled
       ? (wireless ? ui::kWireless : ui::kAccent) : ui::kMuted;
   const uint16_t dim = enabled
@@ -405,8 +409,9 @@ void Dashboard::drawHomeAction(int16_t top, int16_t bottom, bool wireless,
   renderer_.drawText(wireless ? "微信语音输入" : "语音胶囊",
                      132, centerY - 34, 196, 1,
                      ui::kInk, fill, 0, false, UiTextSize::display, true);
-  renderer_.drawText(wireless ? (holding ? "松开结束" :
-                                  (enabled ? "按住说话" : "等待 Mac 应用")) :
+  renderer_.drawText(wireless ? (!bluetoothEnabled ? "蓝牙已关闭" :
+                                  (holding ? "松开结束" :
+                                   (enabled ? "按住说话" : "等待 Mac 应用"))) :
                                   (enabled ? "轻触录音" : "本地胶囊不可用"),
                      132, centerY + 10, 190, 1,
                      accent, fill, 0, false, UiTextSize::body, true);
@@ -1260,12 +1265,15 @@ void Dashboard::drawDynamicRegions(const DashboardView &view) {
     ++partialRedrawCount_;
   }
   if (screen == UiScreen::home && state_.homeMode != HomeMode::recording &&
-      view.wirelessHolding != lastWirelessHolding_) {
+      (view.wirelessHolding != lastWirelessHolding_ ||
+       view.bluetoothEnabled != lastBluetoothEnabled_)) {
     drawHomeAction(ui::kHomeSecondaryTop, ui::kHomeSecondaryBottom,
-                   true, view.wirelessHolding, view.bleVoiceReady);
+                   true, view.wirelessHolding, view.bleVoiceReady,
+                   view.bluetoothEnabled);
     presentRegion(20, ui::kHomeSecondaryTop, 328,
                   ui::kHomeSecondaryBottom - ui::kHomeSecondaryTop);
     lastWirelessHolding_ = view.wirelessHolding;
+    lastBluetoothEnabled_ = view.bluetoothEnabled;
     ++partialRedrawCount_;
   }
 }

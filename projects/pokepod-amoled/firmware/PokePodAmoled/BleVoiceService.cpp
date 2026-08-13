@@ -332,14 +332,16 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
 }
 
 void BleVoiceService::requestEnable() {
-  applyEnableActions(enablePolicy_.requestEnable(connected_), millis());
+  applyEnableActions(
+      enablePolicy_.requestEnable(physicalConnectionPending()), millis());
 }
 
 void BleVoiceService::requestDisable(uint32_t nowMs) {
   cancelPairingMode();
   sessionStopRequest_.beginTransition(enablePolicy_.transitionPending());
   applyEnableActions(
-      enablePolicy_.requestDisable(controller_.active(), connected_, nowMs),
+      enablePolicy_.requestDisable(controller_.active(),
+                                   physicalConnectionPending(), nowMs),
       nowMs);
 }
 
@@ -466,18 +468,19 @@ void BleVoiceService::drainCallbackEvents(uint32_t nowMs) {
   if (callbackEvents_.overflowed() || notifyStatusEvents_.overflowed()) {
     callbackEvents_.closeAdmission();
     notifyStatusEvents_.closeAdmission();
-    if (!callbackOverflowHandled_) {
-      callbackOverflowHandled_ = true;
+    if (!callbackOverflow_.pending()) {
+      BleVoiceConnectionEpoch overflowEpoch;
       if (connectionPolicy_.hasCurrent()) {
-        callbackOverflowEpoch_.connectionId =
+        overflowEpoch.connectionId =
             connectionPolicy_.currentConnectionId();
-        callbackOverflowEpoch_.generation = connectionGeneration_;
+        overflowEpoch.generation = connectionGeneration_;
       } else {
-        callbackOverflowEpoch_.connectionId = callbackSecurity_.connectionId();
-        callbackOverflowEpoch_.generation =
+        overflowEpoch.connectionId = callbackSecurity_.connectionId();
+        overflowEpoch.generation =
             callbackSecurity_.connectionGeneration();
       }
-      failClosedCallbackOverflow(nowMs, callbackOverflowEpoch_);
+      callbackOverflow_.begin(overflowEpoch);
+      failClosedCallbackOverflow(nowMs, callbackOverflow_.epoch());
     }
     finishCallbackOverflowIfDisconnected(nowMs);
     return;
@@ -608,8 +611,9 @@ void BleVoiceService::processDeviceInfoRead() {
 
 void BleVoiceService::poll(uint32_t nowMs) {
   drainCallbackEvents(nowMs);
-  applyEnableActions(enablePolicy_.poll(controller_.active(), connected_,
-                                        nowMs), nowMs);
+  applyEnableActions(enablePolicy_.poll(controller_.active(),
+                                        physicalConnectionPending(), nowMs),
+                     nowMs);
   if (pairingUntilMs_ != 0 && !pairingMode(nowMs)) pairingUntilMs_ = 0;
   refreshCallbackSnapshot(nowMs);
   if (controlNotifyPending_ &&
@@ -1267,19 +1271,17 @@ void BleVoiceService::failClosedCallbackOverflow(
 }
 
 bool BleVoiceService::finishCallbackOverflowIfDisconnected(uint32_t nowMs) {
-  if (!callbackOverflowHandled_) return false;
-  bool confirmed = !callbackOverflowEpoch_.valid();
+  if (!callbackOverflow_.pending()) return false;
+  bool confirmed = !callbackOverflow_.physicalConnectionPending();
   BleVoiceConnectionEpoch physicalDisconnect;
   if (!confirmed && physicalDisconnects_.latest(physicalDisconnect)) {
-    confirmed = physicalDisconnect.matches(callbackOverflowEpoch_);
+    confirmed = callbackOverflow_.confirm(physicalDisconnect);
   }
   if (!confirmed) return false;
 
-  const BleVoiceConnectionEpoch closedEpoch = callbackOverflowEpoch_;
+  const BleVoiceConnectionEpoch closedEpoch = callbackOverflow_.finish();
   callbackEvents_.resetAfterOverflow();
   notifyStatusEvents_.resetAfterOverflow();
-  callbackOverflowHandled_ = false;
-  callbackOverflowEpoch_ = {};
 
   if (closedEpoch.valid() && connectionPolicy_.hasCurrent() &&
       connectionPolicy_.currentConnectionId() == closedEpoch.connectionId &&

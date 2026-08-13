@@ -517,6 +517,11 @@ bool requestCaptureStop(PendingCaptureStop owner, RecorderStopReason reason,
                         bool forceAbort, bool notifyUser);
 
 bool startWirelessHold() {
+  if (!bleVoice.userEnabled()) {
+    showMessage("蓝牙已关闭");
+    drawDashboard();
+    return false;
+  }
   if (!capabilities.allows(kBleVoiceCapabilities)) {
     showMessage("无线语音服务未就绪");
     drawDashboard();
@@ -1595,7 +1600,10 @@ void loop() {
         stopWirelessHold();
         return;
       }
-      if (bleVoice.appReady() && !recorder.recording()) {
+      if (!bleVoice.userEnabled()) {
+        showMessage("蓝牙已关闭");
+        drawDashboard();
+      } else if (bleVoice.appReady() && !recorder.recording()) {
         showMessage("请按住说话");
         drawDashboard();
       } else {

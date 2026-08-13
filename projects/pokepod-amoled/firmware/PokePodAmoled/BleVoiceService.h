@@ -14,6 +14,7 @@
 #include "AudioCaptureRouter.h"
 #include "BlePeerPolicy.h"
 #include "BleConnectionPowerPolicy.h"
+#include "BleCallbackOverflowPolicy.h"
 #include "BleVoiceCallbackMailbox.h"
 #include "BleSingleConnectionPolicy.h"
 #include "BleServiceEnablePolicy.h"
@@ -57,7 +58,8 @@ class BleVoiceService {
   bool disablePending() const { return enablePolicy_.transitionPending(); }
   bool idlePaused() const { return idlePaused_; }
   bool radioActive() const {
-    return disablePending() || connected_ || (userEnabled() && !idlePaused_);
+    return disablePending() || physicalConnectionPending() ||
+        (userEnabled() && !idlePaused_);
   }
   bool appReady() const {
     return enablePolicy_.acceptsNewWork() && connected_ && appReady_ &&
@@ -162,6 +164,9 @@ class BleVoiceService {
   void applyEnableActions(const BleServiceEnableActions &actions,
                           uint32_t nowMs);
   void clearDisabledRuntime(uint32_t nowMs);
+  bool physicalConnectionPending() const {
+    return connected_ || callbackOverflow_.physicalConnectionPending();
+  }
 
   BLEServer *server_ = nullptr;
   BLECharacteristic *info_ = nullptr;
@@ -181,8 +186,7 @@ class BleVoiceService {
   BleVoiceCallbackMailbox<kNotifyStatusEventCapacity> notifyStatusEvents_;
   BleVoiceNotifyCallbackBinding notifyCallbackBinding_;
   BleVoicePhysicalDisconnectLatch physicalDisconnects_;
-  bool callbackOverflowHandled_ = false;
-  BleVoiceConnectionEpoch callbackOverflowEpoch_;
+  BleCallbackOverflowPolicy callbackOverflow_;
   BleVoiceCallbackSecuritySnapshot callbackSecurity_;
   mutable portMUX_TYPE qualityMux_ = portMUX_INITIALIZER_UNLOCKED;
   mutable portMUX_TYPE notifyMux_ = portMUX_INITIALIZER_UNLOCKED;

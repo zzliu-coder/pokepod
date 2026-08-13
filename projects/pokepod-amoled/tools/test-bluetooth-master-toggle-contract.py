@@ -56,13 +56,42 @@ assert "router.owner() != AudioCaptureOwner::wirelessVoice" in controller
 assert "!enablePolicy_.acceptsNewWork()" in service
 assert "enablePolicy_.transitionPending()" in service_h
 assert "if (!enablePolicy_.acceptsNewWork() || idlePaused_" in service
+assert "bool physicalConnectionPending() const" in service_h
+for entrypoint in (
+    "enablePolicy_.requestEnable(physicalConnectionPending())",
+    "enablePolicy_.requestDisable(controller_.active(),\n"
+    "                                   physicalConnectionPending(), nowMs)",
+    "enablePolicy_.poll(controller_.active(),\n"
+    "                                        physicalConnectionPending(), nowMs)",
+):
+    assert entrypoint in service
+overflow_finish = service[service.index(
+    "bool BleVoiceService::finishCallbackOverflowIfDisconnected("
+):service.index("void BleVoiceService::refreshCallbackSnapshot(")]
+assert overflow_finish.index("callbackOverflow_.confirm") < overflow_finish.index(
+    "processDisconnect("
+)
+assert "callbackEvents_.resetAfterOverflow();" in overflow_finish
+assert "notifyStatusEvents_.resetAfterOverflow();" in overflow_finish
 
 assert 'UiIcon::bluetooth, "蓝牙"' in dashboard
 assert '"请先开启蓝牙"' in dashboard
+assert '"蓝牙已关闭"' in dashboard
 assert "view.bluetoothEnabled" in dashboard
 assert "UiAction::bluetoothToggle" in ui
 assert "kDeviceBluetoothToggleLeft" in ui
 assert "configStarted ? deviceConfig.settings().bluetoothEnabled" in app
 assert ": false," in app
+start_hold = app[app.index("bool startWirelessHold()"):
+                 app.index("AudioCaptureDispatchResult drainCapturedAudio")]
+assert start_hold.index("!bleVoice.userEnabled()") < start_hold.index(
+    "!bleVoice.appReady()"
+)
+assert 'showMessage("蓝牙已关闭")' in start_hold
+boot_button = app.index("if (bootButton.update(")
+boot_release = app[app.index("if (bootWirelessHolding)", boot_button):
+                   app.index("if (audio.playing())", boot_button)]
+assert "!bleVoice.userEnabled()" in boot_release
+assert 'showMessage("蓝牙已关闭")' in boot_release
 
 print("PASS bluetooth_master_toggle_contract")

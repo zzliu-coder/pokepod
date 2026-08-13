@@ -1,6 +1,7 @@
 #include <cassert>
 
 #include "AudioCaptureRouter.h"
+#include "BleCallbackOverflowPolicy.h"
 #include "BleServiceEnablePolicy.h"
 #include "VoiceSessionController.h"
 
@@ -64,6 +65,35 @@ int main() {
   actions = enable.poll(session.active(), false, 2004);
   assert(actions.clearRuntime);
   assert(router.available());
+
+  // active session -> disable -> callback overflow -> late exact physical
+  // disconnect -> re-enable. Advertising is allowed only after the overflow
+  // epoch has physically closed and the old connection policy can be cleared.
+  enable.begin(true);
+  assert(router.acquire(AudioCaptureOwner::wirelessVoice));
+  assert(session.begin(43, 3000, true, 185, router));
+  assert(session.markReady(43, 3001));
+  actions = enable.requestDisable(session.active(), true, 3002);
+  assert(actions.requestSessionStop);
+  BleCallbackOverflowPolicy overflowPolicy;
+  const BleVoiceConnectionEpoch overflowEpoch{9, 4};
+  overflowPolicy.begin(overflowEpoch);
+  session.abort(VoiceSessionError::disconnected);
+  router.release(AudioCaptureOwner::wirelessVoice);
+  actions = enable.poll(session.active(),
+                        overflowPolicy.physicalConnectionPending(), 3003);
+  assert(actions.disconnect);
+  enable.requestEnable(true);
+  assert(enable.transitionPending());
+  assert(!enable.acceptsNewWork());
+  assert(!overflowPolicy.confirm(BleVoiceConnectionEpoch{9, 3}));
+  assert(overflowPolicy.confirm(BleVoiceConnectionEpoch{9, 4}));
+  assert(overflowPolicy.finish().matches(overflowEpoch));
+  actions = enable.poll(session.active(),
+                        overflowPolicy.physicalConnectionPending(), 3004);
+  assert(actions.clearRuntime);
+  assert(actions.startAdvertising);
+  assert(enable.acceptsNewWork());
 
   return 0;
 }

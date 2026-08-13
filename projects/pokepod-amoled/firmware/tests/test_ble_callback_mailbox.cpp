@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "AudioCaptureRouter.h"
+#include "BleCallbackOverflowPolicy.h"
 #include "BleNotifyReliability.h"
 #include "BleVoiceCallbackMailbox.h"
 #include "BleServiceCallbackGate.h"
@@ -442,5 +443,19 @@ int main() {
   assert(overflow.resetAfterOverflow());
   assert(!overflow.overflowed() && overflow.accepting());
   assert(overflow.publish(event(BleVoiceCallbackEventType::connect, 8)));
+
+  // Disable may change the desired intent while overflow teardown is waiting.
+  // The physical connection remains a blocker until the exact epoch arrives;
+  // a stale generation cannot complete teardown or authorize re-advertising.
+  BleCallbackOverflowPolicy overflowPolicy;
+  overflowPolicy.begin(overflowingEpoch);
+  assert(overflowPolicy.pending());
+  assert(overflowPolicy.physicalConnectionPending());
+  assert(!overflowPolicy.confirm(BleVoiceConnectionEpoch{7, 69}));
+  assert(overflowPolicy.confirm(BleVoiceConnectionEpoch{7, 70}));
+  const BleVoiceConnectionEpoch closedEpoch = overflowPolicy.finish();
+  assert(closedEpoch.matches(overflowingEpoch));
+  assert(!overflowPolicy.pending());
+  assert(!overflowPolicy.physicalConnectionPending());
   return 0;
 }

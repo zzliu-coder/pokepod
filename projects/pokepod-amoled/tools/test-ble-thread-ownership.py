@@ -148,8 +148,8 @@ assert "resetAfterOverflow" not in overflow
 overflow_finish = body(
     "bool BleVoiceService::finishCallbackOverflowIfDisconnected("
 )
-assert "physicalDisconnect.matches(callbackOverflowEpoch_)" in overflow_finish
-assert overflow_finish.index("physicalDisconnect.matches") < overflow_finish.index(
+assert "callbackOverflow_.confirm(physicalDisconnect)" in overflow_finish
+assert overflow_finish.index("callbackOverflow_.confirm") < overflow_finish.index(
     "resetAfterOverflow"
 )
 assert "physicalDisconnects_.observe" in disconnect_callback
