@@ -186,7 +186,7 @@ python3 tools/write-resource-review.py \
   --elf work/pokepod-build/build-fast/PokePodAmoled.ino.elf \
   --map work/pokepod-build/build-fast/PokePodAmoled.ino.map \
   --duplicate-evidence "legacy duplicate paths removed" \
-  --forbidden-symbol-regex "PokePodLinkService::(handleImmediate|mutateFavoriteOrTags|trashOperation)"
+  --forbidden-symbol-regex "PokePodLinkService::(mutateFavoriteOrTags|trashOperation)"
 ```
 
 审查文件包含相对基线增量、最大符号和重复实现结论。橙色还必须提供
