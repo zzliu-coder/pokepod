@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 COMMANDS = (ROOT / "firmware/PokePodAmoled/LinkCapsuleCommands.cpp").read_text()
 DISPATCHER = (ROOT / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp").read_text()
-CPP = SERVICE + COMMANDS + DISPATCHER
+TRANSPORT = (ROOT / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
+CPP = SERVICE + COMMANDS + DISPATCHER + TRANSPORT
 FILE_TRANSFER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
 
 
@@ -78,7 +79,7 @@ assert "return ok;" in finish_files
 assert "getWriteError()" in step_files
 assert "deferredCommandFileFailed_ = true" in step_files
 
-poll = dict(methods(SERVICE))["poll"]
+poll = dict(methods(TRANSPORT))["poll"]
 assert "!deferredCommandFiles_.empty()" in poll
 assert "!deferredTreeCleanupStack_.empty()" in poll
 

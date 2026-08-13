@@ -22,6 +22,7 @@ worker_header = source("TencentWorker.h")
 job_runtime = source("TencentJobRuntime.h")
 asr = source("TencentAsr.cpp")
 link = source("PokePodLinkService.cpp")
+link_transport = source("LinkTransportSession.cpp")
 link_diagnostics = source("LinkDiagnostics.cpp")
 dashboard = source("Dashboard.cpp")
 main = source("PokePodApp.cpp")
@@ -108,7 +109,7 @@ if shutdown.index("SD_MMC.end()") < shutdown.index(
 require(main, "if (!safeShutdownQuiesce.pending() &&\n"
               "      currentPowerDecision.requestDeepSleep",
         "a deferred safe shutdown can fall through into deep sleep")
-require(link, "tencent_->quiesce(",
+require(link + link_transport, "tencent_->quiesce(",
         "Link reboot can restart while ASR still owns resources")
 
 print("PASS tencent_network_contract")

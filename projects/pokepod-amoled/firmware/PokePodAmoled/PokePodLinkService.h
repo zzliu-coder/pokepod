@@ -145,6 +145,8 @@ class PokePodLinkService : private LinkFileTransferHost {
     uint8_t depth = 0;
   };
 
+  // LinkTransportSession.cpp owns connection generations, request admission,
+  // frame parsing/transmit, terminal response draining and disconnect settlement.
   void consumeByte(uint8_t value);
   uint32_t activateConnectionGeneration();
   LinkOperationAdmission admitLinkOperation(uint32_t requestId);

@@ -7,6 +7,8 @@ root = Path(__file__).parents[1]
 source = root / "firmware" / "PokePodAmoled"
 link_header = (source / "PokePodLinkService.h").read_text()
 link_source = (source / "PokePodLinkService.cpp").read_text()
+link_transport = (source / "LinkTransportSession.cpp").read_text()
+link_implementation = link_source + link_transport
 command_source = (source / "LinkCapsuleCommands.cpp").read_text()
 sync_source = (source / "WirelessSyncService.cpp").read_text()
 app_source = (source / "PokePodApp.cpp").read_text()
@@ -17,7 +19,7 @@ file_transfer = (source / "LinkFileTransfer.cpp").read_text()
 assert "maintenanceCompletionRevision() const" in link_header
 assert 'strcmp(operation, "endMaintenance") == 0' in command_source
 assert "maintenanceCompletion_.endResultPersisted" in command_source
-assert "maintenanceCompletion_.resultFetched(" in link_source
+assert "maintenanceCompletion_.resultFetched(" in link_transport
 finish_function = file_transfer.index("void LinkFileTransfer::finish(bool success)")
 cleanup_poll = file_transfer.index("if (!cleanup_.poll()) return false;")
 result_fetched = file_transfer.index("linkFileResultFetched(")
@@ -50,8 +52,8 @@ assert "!batchExecutor_.responseAllowed()) return" not in command_source
 assert "applyCompletedCommandSideEffects(root);" in command_source
 assert "if (persisted) applyBatchResultSideEffects();" in command_source
 assert "persisted && beganMaintenance" not in command_source
-assert "maintenanceCompletion_.disconnect();" in link_source
-assert "++maintenanceCompletionRevision_" not in link_source
+assert "maintenanceCompletion_.disconnect();" in link_transport
+assert "++maintenanceCompletionRevision_" not in link_implementation
 assert "link_.maintenanceCompletionRevision()" in sync_source
 assert "link_.maintenanceStartRevision()" in sync_source
 assert "link_.maintenanceCompletedStartRevision() == startRevision" in sync_source

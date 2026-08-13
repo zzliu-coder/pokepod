@@ -5,6 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIRMWARE = ROOT / "firmware/PokePodAmoled"
 SERVICE = (FIRMWARE / "PokePodLinkService.cpp").read_text()
+TRANSPORT = (FIRMWARE / "LinkTransportSession.cpp").read_text()
+IMPLEMENTATION = SERVICE + TRANSPORT
 HEADER = (FIRMWARE / "PokePodLinkService.h").read_text()
 LINK_DISPATCHER = (FIRMWARE / "LinkCommandDispatcher.cpp").read_text()
 SESSION_H = (FIRMWARE / "LinkRecordingSession.h").read_text()
@@ -22,14 +24,14 @@ for legacy in (
     "LinkRecordingStart linkRecordingStart_", "linkOwnedRecording_",
 ):
     assert legacy not in HEADER
-    assert legacy not in SERVICE
+    assert legacy not in IMPLEMENTATION
 
 begin = SERVICE[SERVICE.index("bool PokePodLinkService::begin("):
-                SERVICE.index("uint32_t PokePodLinkService::activateConnectionGeneration")]
+                SERVICE.index("bool PokePodLinkService::beginIncoming(")]
 assert "recordingSession_.begin(" in begin
 
-disconnect = SERVICE[SERVICE.index("void PokePodLinkService::disconnect()"):
-                     SERVICE.index("void PokePodLinkService::requestQuiesce()")]
+disconnect = TRANSPORT[TRANSPORT.index("void PokePodLinkService::disconnect()"):
+                       TRANSPORT.index("void PokePodLinkService::requestQuiesce()")]
 assert "recordingSession_.disconnect(operation_, transactionGate_)" in disconnect
 assert "captureRouter_->release" not in disconnect
 session_disconnect = SESSION[SESSION.index("void LinkRecordingSession::disconnect("):
@@ -64,7 +66,7 @@ recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_observe)
 assert final_drain < final_snapshot < final_observe < recorder_stop
 assert final_observe < recorder_abort
 assert "!recorder_->captureFailureLatched()" in advance
-assert "drainLinkCapture" not in SERVICE + SESSION
+assert "drainLinkCapture" not in IMPLEMENTATION + SESSION
 assert "while (source.pop(frame))" in CAPTURE_DISPATCHER
 
 assert "awaitCaptureFinalize" in STATE
@@ -105,8 +107,8 @@ assert process.index("admitLinkOperation(requestId)") < process.index("cJSON_Par
 assert process.index("handleImmediate(requestId, root)") < process.rindex(
     "recordingSession_.ownsRequest(requestId)")
 
-poll = SERVICE[SERVICE.index("void PokePodLinkService::pollDeferredCleanup()"):
-               SERVICE.index("void PokePodLinkService::poll(uint32_t nowMs)")]
+poll = TRANSPORT[TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()"):
+                 TRANSPORT.index("void PokePodLinkService::poll(uint32_t nowMs)")]
 assert "recordingSession_.poll(" in poll
 assert "handleLinkRecordingEvent" in poll
 

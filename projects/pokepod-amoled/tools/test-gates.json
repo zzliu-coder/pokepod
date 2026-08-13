@@ -20,6 +20,7 @@
     "test-link-capsule-commands-module.py",
     "test-link-command-atomic.py",
     "test-link-command-dispatcher-module.py",
+    "test-link-transport-session-module.py",
     "test-link-deferred-cleanup.py",
     "test-link-incoming-transaction-contract.py",
     "test-link-manifest-contract.py",

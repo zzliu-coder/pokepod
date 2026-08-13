@@ -6,7 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 DISPATCHER = (ROOT / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp").read_text()
-COMBINED = SERVICE + DISPATCHER
+TRANSPORT = (ROOT / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
+COMBINED = SERVICE + DISPATCHER + TRANSPORT
 HEADER = (ROOT / "firmware/PokePodAmoled/LinkManifestStepper.h").read_text()
 
 
@@ -16,7 +17,7 @@ def body(source: str, signature: str, following: str) -> str:
     return source[start:end]
 
 
-poll = body(SERVICE, "void PokePodLinkService::poll", "void PokePodLinkService::consumeByte")
+poll = body(TRANSPORT, "void PokePodLinkService::poll", "void PokePodLinkService::consumeByte")
 advance = body(
     DISPATCHER, "void PokePodLinkService::advanceManifest",
     "void PokePodLinkService::advanceManifestScan",
@@ -38,11 +39,11 @@ cleanup = body(
     "void PokePodLinkService::finishPendingManifestResponse",
 )
 disconnect = body(
-    SERVICE, "void PokePodLinkService::disconnect",
+    TRANSPORT, "void PokePodLinkService::disconnect",
     "void PokePodLinkService::pollDeferredCleanup",
 )
 deferred_cleanup = body(
-    SERVICE, "void PokePodLinkService::pollDeferredCleanup",
+    TRANSPORT, "void PokePodLinkService::pollDeferredCleanup",
     "void PokePodLinkService::poll(uint32_t",
 )
 

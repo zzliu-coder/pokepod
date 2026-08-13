@@ -3,6 +3,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 service = (root / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+transport = (root / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
 header = (root / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 
 for path in (
@@ -15,8 +16,8 @@ for path in (
 assert "transactionId + \".json.part\"" not in service
 assert "TransactionPurpose::startupRecovery" in service
 assert "transactionRunner_.startRecovery(StorageOwner::capsuleTransaction)" in service
-assert "if (!startupReady_) return;" in service
-assert "advanceStartupPartCleanup();" in service
+assert "if (!startupReady_) return;" in transport
+assert "advanceStartupPartCleanup();" in transport
 assert "transactionPreparedPath_ = temporary;" in service
 assert "preparedPath, incomingStorageReservation_" in service
 assert service.index("incomingCleanup_.begin(") < service.index(
