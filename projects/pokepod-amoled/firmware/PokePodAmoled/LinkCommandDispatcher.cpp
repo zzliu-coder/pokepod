@@ -10,6 +10,7 @@
 #include "CapsuleLibrary.h"
 #include "CapabilityRegistry.h"
 #include "DeviceConfig.h"
+#include "DeviceRebootCoordinator.h"
 #include "FontPolicy.h"
 #include "ProvisioningCoordinator.h"
 #include "TencentWorker.h"
@@ -340,8 +341,13 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendBusy(requestId);
     }
   } else if (strcmp(operation, "reboot") == 0) {
-    sendOk(requestId);
-    rebootAtMs_ = millis() + 100;
+    if (rebootCoordinator_ == nullptr) {
+      sendError(requestId, "reboot coordinator is unavailable");
+    } else if (rebootCoordinator_->pending()) {
+      sendBusy(requestId);
+    } else if (sendOk(requestId)) {
+      (void)rebootCoordinator_->request(millis(), transport_);
+    }
   } else {
     sendError(requestId, "unsupported Link v2 operation");
   }

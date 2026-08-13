@@ -179,44 +179,6 @@ void PokePodLinkService::disconnect() {
   }
 }
 
-bool PokePodLinkService::pollReboot(uint32_t nowMs) {
-  if (rebootAtMs_ == 0 ||
-      static_cast<int32_t>(nowMs - rebootAtMs_) < 0) {
-    return false;
-  }
-  if (rebootQuiescePhase_ == RebootQuiescePhase::ready) return true;
-  if (rebootQuiescePhase_ == RebootQuiescePhase::idle) {
-    if (tencent_ != nullptr) {
-      (void)tencent_->beginQuiesce(
-          nowMs, 250, TencentCancelReason::shutdown);
-    }
-    rebootQuiescePhase_ = RebootQuiescePhase::waiting;
-  }
-  if (tencent_ != nullptr) {
-    // A published ASR result is intentionally abandoned for reboot without
-    // entering CapsuleLibrary.  Startup recovery owns the durable requeue.
-    (void)tencent_->abandonResultForReboot();
-  }
-  const TencentQuiesceStatus status = tencent_ == nullptr
-      ? TencentQuiesceStatus::complete
-      : tencent_->pollQuiesce(nowMs);
-  if (status == TencentQuiesceStatus::waiting) {
-    rebootAtMs_ = nowMs + 20;
-    return false;
-  }
-  if (status == TencentQuiesceStatus::timedOut) {
-    rebootQuiescePhase_ = RebootQuiescePhase::idle;
-    rebootAtMs_ = nowMs + 100;
-    return false;
-  }
-  // Preserve the original protocol guarantee for a still-live transport:
-  // accepted reboot's terminal OK is flushed before the device reset.  A
-  // disconnected transport simply has nothing to flush.
-  if (stream_ != nullptr) stream_->flush();
-  rebootQuiescePhase_ = RebootQuiescePhase::ready;
-  return true;
-}
-
 void PokePodLinkService::requestQuiesce() {
   if (quiesceRequested_) return;
   quiesceRequested_ = true;

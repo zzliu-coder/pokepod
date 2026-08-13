@@ -21,6 +21,7 @@
 #include "CapabilityRegistry.h"
 #include "Dashboard.h"
 #include "DeviceConfig.h"
+#include "DeviceRebootCoordinator.h"
 #include "ProvisioningPortal.h"
 #include "ProvisioningDiagnostics.h"
 #include "ProvisioningCoordinator.h"
@@ -91,6 +92,7 @@ PowerDiagnostics powerDiagnostics;
 ProvisioningCoordinator provisioningCoordinator;
 PokePodLinkService linkService;
 LinkServiceCoordinator linkCoordinator;
+DeviceRebootCoordinator deviceReboot;
 WirelessSyncIdentity wirelessSyncIdentity;
 WirelessSyncService wirelessSync;
 RaiseToWakePolicy raiseToWake;
@@ -1456,7 +1458,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
           runtimePower, usb.log(), &linkCoordinator,
           LinkTransport::usb, &wirelessSync,
                     nullptr, &provisioningCoordinator, nullptr,
-          &captureRuntime, &captureDispatcher, &capabilities);
+          &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot);
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
@@ -1464,8 +1466,8 @@ bool advanceStorageBoot(uint32_t nowMs) {
           SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
           capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
           provisioningDiagnostics, powerDiagnostics, runtimePower,
-          wirelessSyncIdentity, linkCoordinator, usb.log(), &captureRuntime,
-          &captureDispatcher, &capabilities);
+          wirelessSyncIdentity, linkCoordinator, deviceReboot, usb.log(),
+          &captureRuntime, &captureDispatcher, &capabilities);
       capabilities.record(
           DeviceCapability::link,
           bootUsbStarted && bootUsbLinkStarted && bootSyncIdentityStarted &&
@@ -1583,7 +1585,7 @@ void loop() {
   // Link reboot is a device-lifecycle request, not a transport operation.
   // Advance it before any transport-specific early return so a client that
   // closes USB/Wi-Fi immediately after reboot OK cannot cancel the intent.
-  if (linkService.rebootPending()) {
+  if (deviceReboot.pending()) {
     if (captureRuntime.running() && pendingCaptureStop == PendingCaptureStop::none) {
       const PendingCaptureStop ownerStop =
           captureRouter.owner() == AudioCaptureOwner::wirelessVoice
@@ -1592,7 +1594,27 @@ void loop() {
       (void)requestCaptureStop(ownerStop, RecorderStopReason::none, true,
                                ownerStop == PendingCaptureStop::localCapsule);
     }
-    const bool quiesceReady = linkService.pollReboot(now);
+    if (deviceReboot.due(now) &&
+        deviceReboot.phase() == DeviceRebootPhase::accepted) {
+      (void)tencentWorker.beginQuiesce(
+          now, 250, TencentCancelReason::shutdown);
+      (void)deviceReboot.beginServiceQuiesce();
+    }
+    if (deviceReboot.due(now) &&
+        deviceReboot.phase() == DeviceRebootPhase::waitingForServices) {
+      // Do not commit a just-finished cloud result from the Link poll. Startup
+      // recovery will requeue the durable transcribing capsule after restart.
+      (void)tencentWorker.abandonResultForReboot();
+      const TencentQuiesceStatus status = tencentWorker.pollQuiesce(now);
+      if (status == TencentQuiesceStatus::waiting) {
+        deviceReboot.defer(now);
+      } else if (status == TencentQuiesceStatus::timedOut) {
+        deviceReboot.retryServiceQuiesce(now);
+      } else {
+        (void)deviceReboot.markReady();
+      }
+    }
+    const bool quiesceReady = deviceReboot.ready();
     const bool restartSafe = quiesceReady &&
         captureRouter.owner() == AudioCaptureOwner::none &&
         !captureRuntime.running() && !recorder.operationActive() &&
@@ -1602,13 +1624,13 @@ void loop() {
         !tencentWorker.working() && StorageCoordinator::instance().idle();
     if (restartSafe) {
       usb.log().println("{\"event\":\"link_reboot_execute\"}");
-      linkService.acknowledgeReboot();
+      deviceReboot.acknowledgeRestart();
 #if defined(ARDUINO_ARCH_ESP32)
       ESP.restart();
 #endif
       return;
     }
-    if (quiesceReady) linkService.deferReboot(now);
+    if (quiesceReady) deviceReboot.defer(now);
   }
   // These polls precede every transport/UI early return. Physical File close
   // and late capture finalization therefore always make bounded progress.
@@ -1822,7 +1844,7 @@ void loop() {
     lastCapsuleLibraryRevision = capsuleRevision;
     dashboard.invalidate();
   }
-  if (!linkService.rebootPending()) {
+  if (!deviceReboot.pending()) {
     tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                        transcriptionDispatchBusy(recorder.operationActive(),
                                                  linkService.maintenanceActive() ||

@@ -11,6 +11,7 @@
 #include "CapsuleLibrary.h"
 #include "Dashboard.h"
 #include "DeviceConfig.h"
+#include "DeviceRebootCoordinator.h"
 #include "ProvisioningDiagnostics.h"
 #include "PowerDiagnostics.h"
 #include "RuntimePowerManager.h"
@@ -31,7 +32,8 @@ bool WirelessSyncService::begin(
     ProvisioningDiagnostics &provisioningDiagnostics,
     PowerDiagnostics &powerDiagnostics,
     RuntimePowerManager &power, WirelessSyncIdentity &identity,
-    LinkServiceCoordinator &coordinator, Print &log,
+    LinkServiceCoordinator &coordinator,
+    DeviceRebootCoordinator &rebootCoordinator, Print &log,
     AudioCaptureRuntime *captureRuntime,
     AudioCaptureDispatcher *captureDispatcher,
     const CapabilityRegistry *capabilities) {
@@ -44,7 +46,8 @@ bool WirelessSyncService::begin(
                        &coordinator,
                        LinkTransport::wifi, nullptr,
                        &window_.transferGate(), nullptr, &tls_,
-                       captureRuntime, captureDispatcher, capabilities);
+                       captureRuntime, captureDispatcher, capabilities,
+                       &rebootCoordinator);
   observedMaintenanceStartRevision_ = link_.maintenanceStartRevision();
   observedMaintenanceCompletionRevision_ =
       link_.maintenanceCompletionRevision();
