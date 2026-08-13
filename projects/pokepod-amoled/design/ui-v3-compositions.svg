@@ -66,7 +66,8 @@
   <g transform="translate(1592 54)"><rect width="368" height="448" rx="54" fill="#000"/>
     <g class="ui"><path d="M33 19l-10 9 10 9" fill="none" stroke="#69e0b6" stroke-width="2"/><text class="body" x="64" y="35">连接手机</text>
       <text class="compact" x="20" y="108">热点名称</text><rect x="20" y="120" width="328" height="82" rx="20" fill="#0b1311"/><text class="body" x="38" y="169">PokePod-A994</text>
-      <text class="compact" x="20" y="248">密码</text><rect x="20" y="260" width="328" height="82" rx="20" fill="#0b1311"/><text class="display" x="38" y="314" fill="#f0c45b">88888888</text>
-      <text class="compact" x="184" y="398" text-anchor="middle">手机连接热点后打开配置页</text></g>
+      <text class="compact" x="20" y="248">随机密码 · 每次更新</text><rect x="20" y="260" width="328" height="82" rx="20" fill="#0b1311"/><text class="display" x="38" y="314" fill="#f0c45b">7K9M2QH5TX</text>
+      <text class="compact" x="184" y="382" text-anchor="middle">5 分钟内有效 · 只显示在设备上</text>
+      <text class="compact" x="184" y="410" text-anchor="middle">腾讯密钥变更需按实体键</text></g>
   </g>
 </svg>
