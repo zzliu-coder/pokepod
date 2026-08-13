@@ -29,6 +29,7 @@
     "test-link-operation-production-contract.py",
     "test-link-recording-stop.py",
     "test-link-storage-lease-contract.py",
+    "test-local-recording-start.py",
     "test-performance-architecture.py",
     "test-power-diagnostics-contract.py",
     "test-provisioning-page.py",

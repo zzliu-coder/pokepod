@@ -83,6 +83,11 @@ assert "reportCaptureFailure(" in dispatcher
 
 
 assert "RecorderOperationOwner::localApp" in app
+assert "recorder.requestStart(" in app
+assert "recorder.start(" not in app[
+    app.index("void toggleRecording() {"):app.index("void emitStatus() {")
+]
+assert "recorder.pollStart(" in app
 assert "recorder.ownedBy(RecorderOperationOwner::localApp)" in app
 assert "pendingRecorderFinalize && !recorder.operationActive()" in app
 assert "captureRouter.release(AudioCaptureOwner::localCapsule)" in app

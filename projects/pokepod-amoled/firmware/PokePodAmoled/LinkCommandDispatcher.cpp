@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "AudioPipeline.h"
 #include "BoardServices.h"
 #include "CapsuleLibrary.h"
 #include "CapabilityRegistry.h"

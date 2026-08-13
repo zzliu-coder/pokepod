@@ -26,6 +26,7 @@
 #include "ProvisioningCoordinator.h"
 #include "PokePodLinkService.h"
 #include "LinkServiceCoordinator.h"
+#include "LocalRecordingStart.h"
 #include "PowerPolicy.h"
 #include "PowerDiagnostics.h"
 #include "RaiseToWakePolicy.h"
@@ -89,6 +90,16 @@ AutoScreenOffPolicy autoScreenOff;
 LowBatteryShutdownPolicy lowBatteryShutdown;
 SafeShutdownQuiescePolicy safeShutdownQuiesce;
 CapabilityRegistry capabilities;
+LocalRecordingStartState localRecordingStart;
+
+class LocalRecordingStartGate final : public CapsuleTransactionGate {
+ public:
+  bool permits(uint32_t) override {
+    return localRecordingStart.gatePermitted();
+  }
+};
+
+LocalRecordingStartGate localRecordingStartGate;
 
 TouchGestureTracker touchGesture;
 bool touchWirelessHolding = false;
@@ -179,7 +190,7 @@ ServiceQuiescenceFacts serviceQuiescenceFacts(bool asrQuiesced) {
       asrQuiesced,
       captureRuntime.running(),
       pendingCaptureStop != PendingCaptureStop::none,
-      recorder.operationActive() || pendingRecorderFinalize,
+      localRecordingStart.active() || recorder.operationActive() || pendingRecorderFinalize,
       audio.playbackCleanupPending(),
       !StorageCoordinator::instance().idle(),
   };
@@ -223,7 +234,8 @@ void setScreenState(bool enabled) {
 PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
   PowerInputs input;
   input.screenOn = board.status().screenOn;
-  input.audioActive = audio.active() || recorder.operationActive() ||
+  input.audioActive = audio.active() || localRecordingStart.active() ||
+      recorder.operationActive() ||
       audio.playing() || captureRuntime.running() ||
       audio.playbackCleanupPending();
   const bool linkLeaseActive = linkService.receivingBinary() ||
@@ -301,6 +313,7 @@ void enterDeepSleep(const PowerInputs &inputs) {
 }
 
 void requestSafeShutdown(uint32_t nowMs = millis()) {
+  localRecordingStart.requestCancel();
   safeShutdownQuiesce.request();
   if (nextSafeShutdownAttemptMs == 0) nextSafeShutdownAttemptMs = nowMs;
 }
@@ -561,6 +574,41 @@ void observeCaptureMetrics() {
 
 bool consumeRecorderTerminal(bool notifyUser);
 
+void finishLocalRecordingStartFailure(bool notifyUser) {
+  pendingRecorderFinalize = recorder.operationActive();
+  pendingRecorderResultNotify = pendingRecorderResultNotify || notifyUser;
+  if (pendingRecorderFinalize) return;
+  captureRouter.release(AudioCaptureOwner::localCapsule);
+  const bool terminalConsumed =
+      consumeRecorderTerminal(pendingRecorderResultNotify);
+  pendingRecorderResultNotify = false;
+  if (notifyUser && !terminalConsumed) showMessage("录音启动失败");
+}
+
+void advanceLocalRecordingStart() {
+  if (!localRecordingStart.active()) return;
+  const RecorderStartPollResult result = recorder.pollStart(
+      usb.log(), millis(), &localRecordingStartGate);
+  uint32_t captureSessionId = 0;
+  const LocalRecordingStartAction action =
+      localRecordingStart.observe(result, captureSessionId);
+  if (action == LocalRecordingStartAction::idle ||
+      action == LocalRecordingStartAction::waiting) {
+    return;
+  }
+  if (action == LocalRecordingStartAction::startCapture &&
+      captureRuntime.start(audio, captureSessionId, usb.log())) {
+    audio.resetPeakWindow();
+    transientMessage = "";
+    transientUntilMs = 0;
+    dashboard.invalidate();
+    return;
+  }
+  if (recorder.recording()) recorder.abortCapture(usb.log());
+  finishLocalRecordingStartFailure(true);
+  dashboard.invalidate();
+}
+
 bool finishPendingCaptureStop() {
   if (pendingCaptureStop == PendingCaptureStop::none ||
       captureRuntime.running()) {
@@ -621,6 +669,7 @@ void pollDeferredServiceCleanup() {
   // Publish the realtime owner's coherent diagnostics before Link/UI status
   // handling. This also feeds Link-owned recordings without duplicating DSP.
   observeCaptureMetrics();
+  advanceLocalRecordingStart();
   if (recorder.recoveryPending()) {
     (void)recorder.pollFinalize(usb.log(), millis(), nullptr);
   }
@@ -703,6 +752,11 @@ bool consumeRecorderTerminal(bool notifyUser) {
     } else if (outcome.failureStage == RecorderFailureStage::capacityUnknown ||
                outcome.failureStage == RecorderFailureStage::capacityInvalid) {
       message = "无法读取存储容量";
+    } else if (outcome.failureStage == RecorderFailureStage::storageTooSlow) {
+      message = "存储卡性能不足";
+    } else if (outcome.failureStage == RecorderFailureStage::storageBusy) {
+      message = outcome.terminal == RecorderTerminal::cancelled
+          ? "录音启动已取消" : "存储服务忙，请稍后再试";
     }
     showMessage(message);
   }
@@ -725,7 +779,10 @@ bool consumeRecorderTerminal(bool notifyUser) {
 }
 
 void toggleRecording() {
-  if (recorder.recording() &&
+  if (localRecordingStart.active()) {
+    localRecordingStart.requestCancel();
+    showMessage("正在取消录音…");
+  } else if (recorder.recording() &&
       recorder.ownedBy(RecorderOperationOwner::localApp)) {
     stopLocalCapture(RecorderStopReason::user);
   } else if (recorder.operationActive() || pendingRecorderFinalize) {
@@ -745,30 +802,16 @@ void toggleRecording() {
     uint32_t captureSessionId = esp_random();
     if (captureSessionId == 0) captureSessionId = 1;
     lastLocalCaptureMetrics = {};
-    const bool recorderOk = acquired &&
-        recorder.start(usb.log(), recordingId(), board.utcNow(),
-                       RecorderOperationOwner::localApp);
-    const bool ok = recorderOk &&
-        captureRuntime.start(audio, captureSessionId, usb.log());
-    if (ok) {
-      audio.resetPeakWindow();
-      transientMessage = "";
-      transientUntilMs = 0;
+    const bool stateReady = acquired &&
+        localRecordingStart.begin(captureSessionId);
+    const bool requested = stateReady &&
+        recorder.requestStart(usb.log(), recordingId(), board.utcNow(),
+                              RecorderOperationOwner::localApp);
+    if (requested) {
+      showMessage("正在检查存储…", 3000);
     } else {
-      if (recorder.recording()) recorder.abortCapture(usb.log());
-      captureRuntime.stop(usb.log());
-      pendingRecorderFinalize = recorder.operationActive();
-      if (pendingRecorderFinalize) {
-        pendingRecorderResultNotify = true;
-      } else {
-        captureRouter.release(AudioCaptureOwner::localCapsule);
-        if (!consumeRecorderTerminal(true)) {
-          showMessage("录音启动失败");
-        }
-      }
-      if (!pendingRecorderFinalize && !recorder.terminalResult().pending()) {
-        showMessage("录音启动失败");
-      }
+      localRecordingStart.reset();
+      finishLocalRecordingStartFailure(true);
     }
   }
   noteUserActivity();
@@ -1684,7 +1727,8 @@ void loop() {
       (void)advanceSafeShutdown(now);
     }
   }
-  const bool keepScreenAwake = recorder.operationActive() || wirelessUiActive ||
+  const bool keepScreenAwake = localRecordingStart.active() ||
+      recorder.operationActive() || wirelessUiActive ||
       audio.playing() || provisioningCoordinator.visible() ||
       capsuleOperations.busy() ||
       touchVerticalScrolling || dashboard.scrollActive() ||
@@ -1702,7 +1746,8 @@ void loop() {
                                                usb.log());
   }
   const uint32_t dashboardIntervalMs =
-      (recorder.operationActive() || wirelessUiActive)
+      (localRecordingStart.active() || recorder.operationActive() ||
+       wirelessUiActive)
           ? ui::kRecordingFrameIntervalMs : 1000;
   if (now - lastDashboardMs >= dashboardIntervalMs) {
     lastDashboardMs = now;
