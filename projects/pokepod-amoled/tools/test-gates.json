@@ -54,6 +54,7 @@
     "test-usb-toolchain-contract.py"
   ],
   "repository": [
+    "test-audit-candidate-workflow.py",
     "test-source-audit-package.py"
   ]
 }

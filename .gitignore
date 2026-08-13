@@ -57,3 +57,4 @@ local.properties
 *.app/
 artifacts/models/*.bin
 /evidence/
+/.ci/

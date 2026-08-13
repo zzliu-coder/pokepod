@@ -1,0 +1,198 @@
+name: PokePod audit candidate
+
+on:
+  push:
+    branches:
+      - main
+      - agent/audit-remediation
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pokepod-audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-gates:
+    name: Source, asset, sanitizer, audit package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+
+      - name: Verify required host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 --version
+          clang++ --version
+          rg --version
+
+      - name: Run source-only gate
+        working-directory: projects/pokepod-amoled
+        run: ./firmware/run-source-only-tests.sh
+
+      - name: Run binary asset gate
+        working-directory: projects/pokepod-amoled
+        run: ./firmware/run-asset-tests.sh
+
+      - name: Run all C++ host tests under ASan and UBSan
+        working-directory: projects/pokepod-amoled
+        env:
+          CXX: clang++ -fsanitize=address,undefined -fno-omit-frame-pointer -g
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          POKEPOD_TEST_JOBS: "2"
+        run: python3 tools/run-cpp-host-tests.py
+
+      - name: Round-trip source audit package
+        working-directory: projects/pokepod-amoled
+        run: python3 tools/run-python-test-gate.py repository
+
+  fast-candidate:
+    name: Locked toolchain and clean forced Fast build
+    needs: source-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ARDUINO_DATA_DIR: ${{ github.workspace }}/.ci/arduino-data
+      ARDUINO_USER_DIR: ${{ github.workspace }}/.ci/arduino-user
+      ARDUINO_DIRECTORIES_DATA: ${{ github.workspace }}/.ci/arduino-data
+      ARDUINO_DIRECTORIES_USER: ${{ github.workspace }}/.ci/arduino-user
+      GFX_LIBRARY: ${{ github.workspace }}/.ci/arduino-user/libraries/GFX_Library_for_Arduino
+      POKEPOD_VENDOR_DIR: ${{ github.workspace }}/.ci/waveshare
+      POKEPOD_BUILD_ROOT: ${{ github.workspace }}/projects/pokepod-amoled/work/pokepod-build
+      ESP32_PACKAGE_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      GFX_COMMIT: 4c1d0a6b3a4ea7999c2e607a8c306d30eb7c2ac2
+      WAVESHARE_COMMIT: ba32b5cbca96f0e04b0736d04959b6e832268d3f
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI 1.5.0
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.0
+
+      - name: Restore locked toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci/arduino-data
+            .ci/arduino-user
+            .ci/waveshare
+          key: pokepod-${{ runner.os }}-cli-1.5.0-esp32-3.3.8-gfx-4c1d0a6-waveshare-ba32b5c
+
+      - name: Install and verify locked Arduino inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ARDUINO_DATA_DIR" "$ARDUINO_USER_DIR/libraries" "$(dirname "$POKEPOD_VENDOR_DIR")"
+          arduino-cli version
+          if ! arduino-cli core list | awk '$1 == "esp32:esp32" && $2 == "3.3.8" { found=1 } END { exit !found }'; then
+            arduino-cli core update-index --additional-urls "$ESP32_PACKAGE_INDEX"
+            arduino-cli core install esp32:esp32@3.3.8 \
+              --additional-urls "$ESP32_PACKAGE_INDEX" \
+              --run-post-install
+          fi
+          arduino-cli core list
+
+          if [ ! -d "$GFX_LIBRARY/.git" ] || \
+             [ "$(git -C "$GFX_LIBRARY" rev-parse HEAD 2>/dev/null || true)" != "$GFX_COMMIT" ]; then
+            rm -rf "$GFX_LIBRARY"
+            git init -q "$GFX_LIBRARY"
+            git -C "$GFX_LIBRARY" remote add origin https://github.com/moononournation/Arduino_GFX.git
+            git -C "$GFX_LIBRARY" fetch --depth 1 origin "$GFX_COMMIT"
+            git -C "$GFX_LIBRARY" checkout -q --detach FETCH_HEAD
+          fi
+          test "$(git -C "$GFX_LIBRARY" rev-parse HEAD)" = "$GFX_COMMIT"
+          test -z "$(git -C "$GFX_LIBRARY" status --porcelain --untracked-files=no)"
+          grep -qx 'version=1.6.5' "$GFX_LIBRARY/library.properties"
+
+      - name: Verify locked Arduino-ESP32 and TinyUSB contract
+        working-directory: projects/pokepod-amoled
+        run: ./firmware/run-toolchain-tests.sh
+
+      - name: Build clean forced Fast candidate
+        working-directory: projects/pokepod-amoled
+        run: ./firmware/build.sh --fast --force
+
+      - name: Generate Flash, RAM, map and symbol evidence
+        shell: bash
+        working-directory: projects/pokepod-amoled
+        run: |
+          set -euo pipefail
+          OUTPUT="$POKEPOD_BUILD_ROOT/output/fast"
+          BUILD="$POKEPOD_BUILD_ROOT/build-fast"
+          BIN="$OUTPUT/PokePodAmoled.ino.bin"
+          ELF="$BUILD/PokePodAmoled.ino.elf"
+          MAP="$BUILD/PokePodAmoled.ino.map"
+          BUILD_LOG="$POKEPOD_BUILD_ROOT/build-fast.log"
+          REVIEW="$POKEPOD_BUILD_ROOT/resource-review.json"
+          SUMMARY="$POKEPOD_BUILD_ROOT/fast-candidate-summary.json"
+          for path in "$BIN" "$ELF" "$MAP" "$BUILD_LOG" "$OUTPUT/artifact.json" "$OUTPUT/flash-resource.json"; do
+            test -s "$path"
+          done
+          NM=$(find "$ARDUINO_DATA_DIR/packages/esp32/tools" -type f \
+            -name 'xtensa-esp32s3-elf-nm' -perm -111 -print -quit)
+          test -n "$NM"
+          TIER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tier"])' \
+            "$OUTPUT/flash-resource.json")
+          review_args=(
+            --output "$REVIEW"
+            --source-revision "$GITHUB_SHA"
+            --binary "$BIN"
+            --tier "$TIER"
+            --baseline-commit 2278bb11af4c97f83e71e6e3529b440e80810419
+            --baseline-bytes 2401888
+            --nm "$NM"
+            --elf "$ELF"
+            --map "$MAP"
+            --duplicate-evidence "Link recording, diagnostics, file transfer, capsule commands, command dispatch and transport each have one implementation"
+            --forbidden-symbol-regex 'PokePodLinkService::(mutateFavoriteOrTags|trashOperation)'
+          )
+          if [ "$TIER" = orange ]; then
+            review_args+=(
+              --nonessential-features-frozen
+              --size-reduction-evidence "Audit candidate adds no nonessential product feature"
+            )
+          fi
+          python3 tools/write-resource-review.py "${review_args[@]}"
+          python3 tools/write-fast-candidate-summary.py \
+            --output "$SUMMARY" \
+            --source-revision "$GITHUB_SHA" \
+            --artifact "$OUTPUT/artifact.json" \
+            --flash-resource "$OUTPUT/flash-resource.json" \
+            --resource-review "$REVIEW" \
+            --build-log "$BUILD_LOG" \
+            --binary "$BIN" \
+            --elf "$ELF" \
+            --map "$MAP" \
+            --baseline-commit 2278bb11af4c97f83e71e6e3529b440e80810419 \
+            --baseline-program-bytes 2401888 \
+            --baseline-internal-globals 168060
+          sha256sum \
+            "$BIN" "$ELF" "$MAP" \
+            "$OUTPUT/artifact.json" "$OUTPUT/flash-resource.json" \
+            "$REVIEW" "$SUMMARY" > "$POKEPOD_BUILD_ROOT/candidate-sha256.txt"
+          cat "$SUMMARY"
+
+      - name: Upload Fast candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pokepod-fast-candidate-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            projects/pokepod-amoled/work/pokepod-build/output/fast/
+            projects/pokepod-amoled/work/pokepod-build/build-fast/PokePodAmoled.ino.elf
+            projects/pokepod-amoled/work/pokepod-build/build-fast/PokePodAmoled.ino.map
+            projects/pokepod-amoled/work/pokepod-build/build-fast.log
+            projects/pokepod-amoled/work/pokepod-build/resource-review.json
+            projects/pokepod-amoled/work/pokepod-build/fast-candidate-summary.json
+            projects/pokepod-amoled/work/pokepod-build/candidate-sha256.txt
