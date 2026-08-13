@@ -45,6 +45,10 @@ assert "kRecordingProbeBytes" in policy
 assert "kRecordingProbeMaximumTailUs" in policy
 assert "* 60ULL /" in policy
 assert "kRecordingQualificationMaximumAgeUs" in qualification
+assert "pendingInvalidations_.fetch_or" in qualification
+assert "invalidationEpoch_.fetch_add" in qualification
+assert "publishedSequence_" in qualification
+assert "RecordingQualificationSnapshot snapshot() const" in qualification
 assert "RecordingQualificationInvalidReason::queueHighWater" in wav
 assert "RecordingQualificationInvalidReason::shortWrite" in wav
 assert "RecordingQualificationInvalidReason::lowSpace" in wav

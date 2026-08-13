@@ -241,9 +241,13 @@ uint32_t WavRecorder::storageIoTimeoutMs() const {
       : 1000U;
 }
 
-void WavRecorder::invalidateStorageQualification(
+void WavRecorder::requestStorageQualificationInvalidation(
     RecordingQualificationInvalidReason reason) {
-  storageQualification_.invalidate(reason);
+  storageQualification_.requestInvalidation(reason);
+}
+
+void WavRecorder::consumeStorageQualificationInvalidations() {
+  (void)storageQualification_.consumeInvalidationRequests();
 }
 
 void WavRecorder::observeStorageWriteLatency(uint32_t elapsedUs) {
@@ -272,7 +276,8 @@ void WavRecorder::freezeSessionTelemetry(Print &log) {
       "\"recorder_queue_high_water_frames\":%lu,"
       "\"recorder_queue_dropped_frames\":%lu,"
       "\"dispatcher_max_us\":%lu,\"dispatcher_p99_us\":%lu,"
-      "\"i2s_timeouts\":%lu,\"zero_byte_reads\":%lu,"
+      "\"i2s_timeouts\":%lu,\"i2s_longest_read_us\":%lu,"
+      "\"zero_byte_reads\":%lu,"
       "\"early_zero_reads\":%lu,\"source_overruns\":%lu,"
       "\"source_failures\":%lu,\"sequence_gaps\":%lu,"
       "\"storage_write_p99_us\":%lu,\"storage_write_p999_us\":%lu,"
@@ -288,6 +293,7 @@ void WavRecorder::freezeSessionTelemetry(Print &log) {
       static_cast<unsigned long>(value.dispatcherMaximumIntervalUs),
       static_cast<unsigned long>(value.dispatcherP99IntervalUs),
       static_cast<unsigned long>(value.i2sTimeouts),
+      static_cast<unsigned long>(value.i2sLongestReadUs),
       static_cast<unsigned long>(value.zeroByteReads),
       static_cast<unsigned long>(value.earlyZeroReads),
       static_cast<unsigned long>(value.sourceOverruns),
@@ -301,6 +307,8 @@ void WavRecorder::freezeSessionTelemetry(Print &log) {
 }
 
 bool WavRecorder::runStoragePerformanceProbe(Print &log) {
+  consumeStorageQualificationInvalidations();
+  activeQualificationProbeEpoch_ = storageQualification_.invalidationEpoch();
   if (capacitySource_ == nullptr || recordingProbeBuffer_ == nullptr) {
     return finishFailure(log, RecorderTerminal::admissionFailure,
                          RecorderFailureStage::capacityUnknown);
@@ -329,6 +337,7 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
   uint64_t probeFinishedUs = probeStartedUs;
 
   for (uint8_t index = 0; index < kRecordingProbeChunkCount; ++index) {
+    consumeStorageQualificationInvalidations();
     if (storageStartCancelled()) {
       failureTerminal = RecorderTerminal::cancelled;
       failureStage = RecorderFailureStage::storageBusy;
@@ -396,15 +405,21 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
       static_cast<unsigned long long>(maximumTailUs));
 
   if (failureStage != RecorderFailureStage::none) {
-    storageQualification_.recordProbeFailure(activeMountGeneration_);
+    storageQualification_.recordProbeFailure(activeMountGeneration_,
+                                              activeQualificationProbeEpoch_);
     return finishFailure(log, failureTerminal, failureStage);
   }
-  storageQualification_.recordSuccess(activeMountGeneration_, probeFinishedUs,
-                                      totalUs, maximumTailUs);
+  if (!storageQualification_.recordSuccess(
+          activeMountGeneration_, probeFinishedUs, totalUs, maximumTailUs,
+          activeQualificationProbeEpoch_)) {
+    return finishFailure(log, RecorderTerminal::admissionFailure,
+                         RecorderFailureStage::storageTooSlow);
+  }
   return true;
 }
 
 bool WavRecorder::startStorageSession(Print &log) {
+  consumeStorageQualificationInvalidations();
   storageReservation_ = StorageCoordinator::instance().reserve(
       StorageOwner::recorder, StorageAccess::mutation,
       storageReservationTimeoutMs());
@@ -435,14 +450,14 @@ bool WavRecorder::startStorageSession(Print &log) {
     RecorderFailureStage stage = RecorderFailureStage::insufficientSpace;
     if (admission.reason == RecordingAdmissionReason::capacityUnknown) {
       stage = RecorderFailureStage::capacityUnknown;
-      invalidateStorageQualification(
+      storageQualification_.invalidateOwned(
           RecordingQualificationInvalidReason::capacityUnknown);
     } else if (admission.reason == RecordingAdmissionReason::invalidCapacity) {
       stage = RecorderFailureStage::capacityInvalid;
-      invalidateStorageQualification(
+      storageQualification_.invalidateOwned(
           RecordingQualificationInvalidReason::capacityInvalid);
     } else {
-      invalidateStorageQualification(
+      storageQualification_.invalidateOwned(
           RecordingQualificationInvalidReason::lowSpace);
     }
     log.printf(
@@ -589,7 +604,7 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
       kMaximumRecordingAudioBytes - accepted);
   if (length > remaining) length = remaining & ~static_cast<size_t>(1U);
   if (length == 0 || !storageQueue_.push(data, length)) {
-    invalidateStorageQualification(
+    requestStorageQualificationInvalidation(
         RecordingQualificationInvalidReason::queueHighWater);
     updateRecorderTelemetry();
     reportCaptureFailure(log, RecorderTerminal::storageFailure,
@@ -601,7 +616,7 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
   updateRecorderTelemetry();
   if (storageQueue_.highWater() >=
       kRecorderQualificationHighWaterFrames) {
-    invalidateStorageQualification(
+    requestStorageQualificationInvalidation(
         RecordingQualificationInvalidReason::queueHighWater);
   }
   xTaskNotifyGive(storageTask_);
@@ -613,6 +628,7 @@ bool WavRecorder::appendMonoBytes(const uint8_t *data, size_t length,
 
 bool WavRecorder::storageAppendMonoBytes(const uint8_t *data, size_t length,
                                          Print &log) {
+  consumeStorageQualificationInvalidations();
   if (!file_ || data == nullptr || length == 0 || (length & 1U) != 0) {
     return false;
   }
@@ -636,7 +652,7 @@ bool WavRecorder::storageAppendMonoBytes(const uint8_t *data, size_t length,
   checkpointCrcState_ = recorderAudioCrc32Update(
       checkpointCrcState_, data, written);
   if (written != length) {
-    invalidateStorageQualification(
+    storageQualification_.invalidateOwned(
         RecordingQualificationInvalidReason::shortWrite);
     log.printf("{\"event\":\"recording_error\",\"stage\":\"short_write\",\"expected\":%u,\"actual\":%u}\n",
                static_cast<unsigned>(length), static_cast<unsigned>(written));
@@ -1312,6 +1328,7 @@ bool WavRecorder::pollStorage(Print &log, uint32_t nowMs,
   }
   if (cleanupPending_) return pollCleanup(log, nowMs, gate);
   if (!finalizePending_) return true;
+  consumeStorageQualificationInvalidations();
 
   switch (finalizePhase_) {
     case FinalizePhase::flushAudio: {
@@ -1550,7 +1567,9 @@ void WavRecorder::resetSessionState() {
   audioMetricsSessionId_ = 0;
   audioMetricsGeneration_ = 0;
   activeMountGeneration_ = 0;
+  activeQualificationProbeEpoch_ = 0;
   sessionTelemetry_.reset();
+  captureTelemetryProducer_ = {};
 }
 
 bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
@@ -1566,7 +1585,7 @@ bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
       stage == RecorderFailureStage::openAudio ||
       stage == RecorderFailureStage::initialHeader ||
       stage == RecorderFailureStage::finalHeader) {
-    invalidateStorageQualification(
+    storageQualification_.invalidateOwned(
         stage == RecorderFailureStage::shortWrite
             ? RecordingQualificationInvalidReason::shortWrite
             : RecordingQualificationInvalidReason::ioError);
@@ -1576,7 +1595,7 @@ bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
       terminal == RecorderTerminal::metadataFailure ||
       terminal == RecorderTerminal::commitFailure ||
       terminal == RecorderTerminal::cleanupBlocked) {
-    invalidateStorageQualification(
+    storageQualification_.invalidateOwned(
         RecordingQualificationInvalidReason::ioError);
   }
   if (!cleanupPending_) {
@@ -2002,6 +2021,7 @@ void WavRecorder::storageTaskMain() {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
     while (storageSessionActive_.load(std::memory_order_acquire)) {
+      consumeStorageQualificationInvalidations();
       Print *log = storageLog_;
       if (log == nullptr) {
         vTaskDelay(pdMS_TO_TICKS(1));

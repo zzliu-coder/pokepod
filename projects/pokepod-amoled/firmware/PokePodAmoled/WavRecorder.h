@@ -125,13 +125,18 @@ class WavRecorder {
       const AudioCaptureServiceMetrics &capture,
       const AudioCaptureDispatcherMetrics &dispatcher,
       uint32_t captureTaskStackHighWaterWords) {
-    sessionTelemetry_.observeCapture(capture, dispatcher,
+    if (capture.ring.sessionId != captureTelemetryProducer_.sessionId) {
+      captureTelemetryProducer_ =
+          sessionTelemetry_.bindCaptureSession(capture.ring.sessionId);
+    }
+    sessionTelemetry_.observeCapture(captureTelemetryProducer_, capture,
+                                     dispatcher,
                                      captureTaskStackHighWaterWords);
   }
   AudioSessionTelemetrySnapshot telemetrySnapshot() const {
     return sessionTelemetry_.snapshot();
   }
-  const RecordingQualificationSnapshot &qualificationSnapshot() const {
+  RecordingQualificationSnapshot qualificationSnapshot() const {
     return storageQualification_.snapshot();
   }
   bool takeTerminalResult(RecorderOutcome &outcome) {
@@ -159,8 +164,9 @@ class WavRecorder {
   bool storageAppendMonoBytes(const uint8_t *data, size_t length, Print &log);
   bool startStorageSession(Print &log);
   bool runStoragePerformanceProbe(Print &log);
-  void invalidateStorageQualification(
+  void requestStorageQualificationInvalidation(
       RecordingQualificationInvalidReason reason);
+  void consumeStorageQualificationInvalidations();
   void observeStorageWriteLatency(uint32_t elapsedUs);
   void updateRecorderTelemetry();
   void freezeSessionTelemetry(Print &log);
@@ -359,7 +365,9 @@ class WavRecorder {
   uint32_t audioMetricsGeneration_ = 0;
   RecordingStorageQualification storageQualification_;
   AudioSessionTelemetry sessionTelemetry_;
+  AudioSessionTelemetryProducer captureTelemetryProducer_{};
   uint32_t activeMountGeneration_ = 0;
+  uint32_t activeQualificationProbeEpoch_ = 0;
   FinalizePhase finalizePhase_ = FinalizePhase::idle;
   std::atomic<bool> finalizePending_{false};
   RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;

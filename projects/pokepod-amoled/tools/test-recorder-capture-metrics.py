@@ -58,7 +58,8 @@ for fact in (
     "captureRingHighWaterFrames", "captureRingDroppedFrames",
     "recorderQueueHighWaterFrames", "recorderQueueDroppedFrames",
     "dispatcherMaximumIntervalUs", "dispatcherP99IntervalUs",
-    "i2sTimeouts", "zeroByteReads", "earlyZeroReads", "sourceOverruns",
+    "i2sTimeouts", "i2sLongestReadUs", "zeroByteReads", "earlyZeroReads",
+    "sourceOverruns",
     "sourceFailures", "sequenceGaps", "storageWriteP99Us",
     "storageWriteP999Us", "captureTaskStackHighWaterWords",
     "recorderTaskStackHighWaterWords", "sourceOverrunObservable", "frozen",
@@ -68,6 +69,9 @@ assert "std::atomic<uint32_t>" in telemetry
 assert "std::vector" not in telemetry
 assert "std::map" not in telemetry
 assert "kAudioLatencyHistogramBuckets = 12" in telemetry
+assert "sequence_.load(std::memory_order_acquire)" in telemetry
+assert "before != after" in telemetry
+assert "i2s_longest_read_us" in wav
 assert "sessionTelemetry_.reset()" in wav
 assert wav.count("freezeSessionTelemetry(log);") == 2
 assert "sessionTelemetry_.recordStorageWrite" in wav
