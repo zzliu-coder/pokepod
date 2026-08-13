@@ -219,22 +219,19 @@ assert "const bool wasPrepared = prepared_;" in stop_handler
 assert "wasActive || wasPrepared" in stop_handler
 assert "clearProvisioningCredential();" in stop_handler
 
-# Arduino-ESP32 String::clear() only resets its logical length. Provisioning
-# credentials must be overwritten through the writable buffer before clear,
-# including startup failures, normal stop, object destruction, and the start of
-# a later session.
-clear_helper = source[source.index("void secureClearString"):
-                      source.index("String validationFailureMessage")]
-assert "const size_t length = secret.length();" in clear_helper
-assert "volatile char *const wipe = secret.begin();" in clear_helper
-assert "wipe[index] = '\\0';" in clear_helper
-assert clear_helper.index("wipe[index] = '\\0';") < clear_helper.index(
-    "secret.clear();")
+# The common volatile wipe helper overwrites every live secret byte before
+# logical reset. Portal secrets use that helper on every terminal path.
+secure_wipe = (firmware_dir / "SecureWipe.h").read_text()
+assert "volatile uint8_t *cursor" in secure_wipe
+assert "secureWipeBytes(secret.begin(), secret.length())" in secure_wipe
+assert secure_wipe.index("secureWipeBytes(secret.begin(), secret.length())") < (
+    secure_wipe.index('secret = "";'))
 clear_credential = source[source.index(
     "void ProvisioningPortal::clearProvisioningCredential"):
     source.index("bool ProvisioningPortal::takeConfigurationChanged")]
-assert clear_credential.index("secureClearString(password_);") < (
+assert clear_credential.index("secureWipe(password_);") < (
     clear_credential.index("credential_.close();"))
+assert "clearCandidateSecrets();" in stop_handler
 destructor = source[source.index("ProvisioningPortal::~ProvisioningPortal"):
                     source.index("bool ProvisioningPortal::prepare")]
 assert "clearProvisioningCredential();" in destructor

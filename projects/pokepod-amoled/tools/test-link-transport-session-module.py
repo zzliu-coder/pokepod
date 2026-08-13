@@ -51,8 +51,13 @@ assert "extendDeadline" not in TRANSPORT
 assert "restartDeadline" not in TRANSPORT
 
 # Receive and transmit work remain bounded/cooperative.
-assert "size_t budget = 32768" in TRANSPORT
-assert "budget-- > 0" in TRANSPORT
+assert '#include "LinkPollBudget.h"' in HEADER
+assert "kLinkReadBudgetBytes = 32768" in TRANSPORT
+assert "kLinkReadBudgetUs = 2000" in TRANSPORT
+assert "LinkPollBudget budget(" in TRANSPORT
+assert "budget.permits(budgetNowUs)" in TRANSPORT
+assert "budget.consume();" in TRANSPORT
+assert "esp_timer_get_time()" in TRANSPORT
 assert "kLinkWriteSliceBytes = 512" in TRANSPORT
 assert "while (true)" not in TRANSPORT
 

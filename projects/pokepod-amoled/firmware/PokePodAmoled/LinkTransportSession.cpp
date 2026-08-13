@@ -2,6 +2,7 @@
 
 #include <cJSON.h>
 #include <algorithm>
+#include <esp_timer.h>
 
 #include "TencentWorker.h"
 
@@ -9,6 +10,9 @@ namespace pokepod {
 namespace {
 
 constexpr size_t kLinkWriteSliceBytes = 512;
+constexpr size_t kLinkReadSliceBytes = 128;
+constexpr size_t kLinkReadBudgetBytes = 32768;
+constexpr uint64_t kLinkReadBudgetUs = 2000;
 constexpr const char *kTerminalQueueError =
     "{\"status\":\"error\",\"version\":2,"
     "\"message\":\"response unavailable\"}";
@@ -253,11 +257,19 @@ void PokePodLinkService::poll(uint32_t nowMs) {
     return;
   }
   frameProcessedThisPoll_ = false;
-  size_t budget = 32768;
+  uint64_t budgetNowUs = static_cast<uint64_t>(esp_timer_get_time());
+  LinkPollBudget budget(kLinkReadBudgetBytes, kLinkReadBudgetUs, budgetNowUs);
+  size_t sliceBytes = 0;
   while (!frameProcessedThisPoll_ && !txStepper_.active() && transferPermitted() &&
-         stream_->available() > 0 && budget-- > 0) {
+         stream_->available() > 0 && budget.permits(budgetNowUs)) {
     const int value = stream_->read();
-    if (value >= 0) consumeByte(static_cast<uint8_t>(value));
+    if (value < 0) break;
+    consumeByte(static_cast<uint8_t>(value));
+    budget.consume();
+    if (++sliceBytes == kLinkReadSliceBytes) {
+      sliceBytes = 0;
+      budgetNowUs = static_cast<uint64_t>(esp_timer_get_time());
+    }
   }
   // A request can start after the caller captured nowMs. Subtracting that
   // older timestamp from the freshly recorded byte time underflows uint32_t

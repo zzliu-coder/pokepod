@@ -108,8 +108,13 @@ bool LinkRecordingSession::requestStop(
   if (!stop_.begin(requestId, commit, respond)) return false;
   if (requestId != 0 && operationOwnsRequest) {
     (void)operation.advance(LinkOperationState::processing);
-    operation.ownResource(LinkOperationResource::router);
-    operation.ownResource(LinkOperationResource::transaction);
+    if (ownsTransferredResources()) {
+      operation.ownResource(LinkOperationResource::recordingSession);
+      stopOperationTracksSession_ = true;
+    } else {
+      operation.ownResource(LinkOperationResource::router);
+      operation.ownResource(LinkOperationResource::transaction);
+    }
   }
   // stop() may time out while the task completes its bounded I2S read.
   // Ownership remains in this session until poll() observes both terminals.
@@ -144,8 +149,13 @@ LinkRecordingEvent LinkRecordingSession::advanceStart(
       linkTransferPermitted(transferGate, millis());
   if (result == RecorderStartPollResult::started && transportAlive &&
       captureRuntime_->start(*audio_, captureSessionId, *log_)) {
-    operation.releaseResource(LinkOperationResource::transaction);
-    operation.releaseResource(LinkOperationResource::router);
+    if (!operation.transferResourcesToRecordingSession()) {
+      (void)requestStop(requestId, false, transportAlive, true, operation,
+                        transactionGate);
+      return {};
+    }
+    routerOwned_ = true;
+    transactionOwned_ = true;
     LinkRecordingEvent event;
     event.kind = LinkRecordingEventKind::startReady;
     event.requestId = requestId;
@@ -237,11 +247,18 @@ LinkRecordingEvent LinkRecordingSession::advanceStop(
       linkTransferPermitted(transferGate, millis());
   const bool committed = outcome.success();
   captureRouter_->release(AudioCaptureOwner::localCapsule);
+  routerOwned_ = false;
   owned_ = false;
-  operation.releaseResource(LinkOperationResource::router);
-  operation.releaseResource(LinkOperationResource::transaction);
-  stop_.finish();
   transactionGate.reset();
+  transactionOwned_ = false;
+  if (stopOperationTracksSession_) {
+    operation.releaseResource(LinkOperationResource::recordingSession);
+  } else {
+    operation.releaseResource(LinkOperationResource::router);
+    operation.releaseResource(LinkOperationResource::transaction);
+  }
+  stopOperationTracksSession_ = false;
+  stop_.finish();
 
   LinkRecordingEvent event;
   event.requestId = requestId;

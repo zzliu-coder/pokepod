@@ -576,21 +576,36 @@ bool PokePodLinkService::validFontFile(const String &path) const {
 }
 
 String PokePodLinkService::readText(const String &path, size_t limit) const {
+  static constexpr size_t kReadChunkBytes = 1024;
   if (fs_ == nullptr) return String();
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
       storageOwner(), StorageAccess::read, storageIoTimeout());
   if (!lease) return String();
   File file = fs_->open(path, FILE_READ);
-  if (!file || file.isDirectory() || file.size() > limit) {
+  const size_t bytes = file ? file.size() : 0;
+  if (!file || file.isDirectory() || bytes > limit) {
     if (file) file.close();
     return String();
   }
   String value;
-  if (!value.reserve(file.size() + 1)) {
+  if (!value.reserve(bytes + 1)) {
     file.close();
     return String();
   }
-  while (file.available()) value += static_cast<char>(file.read());
+  uint8_t chunk[kReadChunkBytes];
+  size_t total = 0;
+  while (total < bytes) {
+    const size_t wanted = std::min(kReadChunkBytes, bytes - total);
+    const int received = file.read(chunk, wanted);
+    if (received <= 0 || static_cast<size_t>(received) > wanted ||
+        total + static_cast<size_t>(received) > limit ||
+        !value.concat(reinterpret_cast<const char *>(chunk),
+                      static_cast<unsigned int>(received))) {
+      file.close();
+      return String();
+    }
+    total += static_cast<size_t>(received);
+  }
   file.close();
   return value;
 }

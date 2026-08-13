@@ -7,6 +7,7 @@
 #include <esp_wifi.h>
 
 #include "ProvisioningPolicy.h"
+#include "DeviceSecretWipe.h"
 #include "MonotonicTime.h"
 #include "WifiDisconnectDiagnostics.h"
 #include "WifiFailurePolicy.h"
@@ -27,15 +28,6 @@ bool fillProvisioningRandom(void *, uint8_t *destination, size_t length) {
   return true;
 }
 
-void secureClearString(String &secret) {
-  const size_t length = secret.length();
-  volatile char *const wipe = secret.begin();
-  if (wipe != nullptr) {
-    for (size_t index = 0; index < length; ++index) wipe[index] = '\0';
-  }
-  secret.clear();
-}
-
 std::string newProvisioningCsrfToken() {
   static constexpr char hex[] = "0123456789abcdef";
   uint8_t bytes[kProvisioningCsrfBytes];
@@ -45,6 +37,7 @@ std::string newProvisioningCsrfToken() {
     token[index * 2] = hex[bytes[index] >> 4];
     token[index * 2 + 1] = hex[bytes[index] & 0x0f];
   }
+  secureWipeBytes(bytes, sizeof(bytes));
   return token;
 }
 
@@ -97,6 +90,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   diagnostics_ = &diagnostics;
   log_ = &log;
   candidate_ = config.settings();
+  clearCandidateSecrets();
   const uint32_t suffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xffff);
   char name[24];
   snprintf(name, sizeof(name), "PokePod-%04lX", static_cast<unsigned long>(suffix));
@@ -269,6 +263,7 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
                              ProvisioningLogOutcome::success,
                              candidate_.wifiSsid, WiFi.RSSI(), 0, elapsed,
                              validationAttempt_, *log_);
+        clearCandidateSecrets();
       } else {
         saved_ = false;
         statusMessage_ = "写入配置失败，请重试";
@@ -328,6 +323,7 @@ void ProvisioningPortal::stop() {
   closeAtMs_ = 0;
   csrf_.close();
   sensitiveConfirmation_.reset();
+  clearCandidateSecrets();
   candidate_ = DeviceSettings{};
   clearProvisioningCredential();
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
@@ -342,8 +338,14 @@ void ProvisioningPortal::stop() {
 }
 
 void ProvisioningPortal::clearProvisioningCredential() {
-  secureClearString(password_);
+  clearCandidateSecrets();
+  csrf_.close();
+  secureWipe(password_);
   credential_.close();
+}
+
+void ProvisioningPortal::clearCandidateSecrets() {
+  secureWipeSecrets(candidate_);
 }
 
 bool ProvisioningPortal::takeConfigurationChanged() {
@@ -527,8 +529,13 @@ void ProvisioningPortal::saveRequest() {
   }
   next.hotwordId = server_.arg("hotwordId");
   next.wifiEnabled = true;
-  const String secretId = server_.arg("secretId");
-  const String secretKey = server_.arg("secretKey");
+  String secretId = server_.arg("secretId");
+  String secretKey = server_.arg("secretKey");
+  const auto clearRequestSecrets = [&]() {
+    secureWipe(secretId);
+    secureWipe(secretKey);
+    secureWipeSecrets(next);
+  };
   ProvisioningSensitiveAction sensitiveAction =
       ProvisioningSensitiveAction::none;
   if (server_.hasArg("clearTencent")) {
@@ -546,6 +553,7 @@ void ProvisioningPortal::saveRequest() {
                            -127, kProvisioningReasonInvalidInput, 0,
                            validationAttempt_, *log_);
       sendSaveJson(400, false);
+      clearRequestSecrets();
       return;
     }
     const DeviceSettings &current = config_->settings();
@@ -564,9 +572,12 @@ void ProvisioningPortal::saveRequest() {
                          -127, kProvisioningReasonInvalidInput, 0,
                          validationAttempt_, *log_);
     sendSaveJson(400, false);
+    clearRequestSecrets();
     return;
   }
+  clearCandidateSecrets();
   candidate_ = next;
+  clearRequestSecrets();
   candidateRssi_ = -127;
   const auto scanned = std::find_if(
       networks_.begin(), networks_.end(),
@@ -622,11 +633,13 @@ bool ProvisioningPortal::confirmSensitiveChange(uint32_t nowMs) {
 
 void ProvisioningPortal::discardSensitiveCandidate() {
   sensitiveConfirmation_.reset();
+  clearCandidateSecrets();
   if (config_ != nullptr) {
     candidate_ = config_->settings();
   } else {
     candidate_ = DeviceSettings{};
   }
+  clearCandidateSecrets();
 }
 
 void ProvisioningPortal::beginStationValidation() {
@@ -654,6 +667,7 @@ void ProvisioningPortal::restorePortalForRetry() {
   if (WiFi.softAP(ssid_.c_str(), password_.c_str())) {
     dns_.start(53, "*", WiFi.softAPIP());
   }
+  discardSensitiveCandidate();
 }
 
 void ProvisioningPortal::forgetRequest() {
@@ -677,14 +691,19 @@ void ProvisioningPortal::forgetRequest() {
     return;
   }
   candidate_ = config_->settings();
+  clearCandidateSecrets();
   changed_ = true;
   statusMessage_ = "已忘记所选网络";
   showNetworks();
 }
 
 bool ProvisioningPortal::authorizeMutation() {
-  const String candidate = server_.header(kProvisioningCsrfHeader);
-  if (csrf_.accepts(std::string(candidate.c_str()), millis())) return true;
+  String candidate = server_.header(kProvisioningCsrfHeader);
+  std::string token(candidate.c_str());
+  const bool accepted = csrf_.accepts(token, millis());
+  secureWipe(token);
+  secureWipe(candidate);
+  if (accepted) return true;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(403, "application/json; charset=utf-8",
                "{\"error\":\"配网页无法使用，请重新进入手机配网\"}");

@@ -48,6 +48,7 @@ class ProvisioningPortal {
 
   void installRoutes();
   void clearProvisioningCredential();
+  void clearCandidateSecrets();
   void startScan();
   void pollScan();
   void showNetworks();

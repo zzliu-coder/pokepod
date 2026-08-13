@@ -327,13 +327,17 @@ BOOT` 作为救援入口，然后重新运行同一个脚本。
 真机连接后，CDC 与板载外设验收：
 
 ```sh
-./device-acceptance.sh
+./device-acceptance.sh \
+  --expected-variant v1 \
+  --evidence-root /path/to/evidence \
+  --port /dev/cu.usbmodemXXXXXXXX \
+  --artifact /path/to/PokePodAmoled.ino.bin
 ```
 
-`cdc-status.py` 使用真实 Link v2 帧读取设备状态。真机门检查 V1 显示、触摸、
-IO 扩展器、RTC、IMU、PMU、SD、音频和 USB CDC 状态。BLE 音频、BlackHole、
-Option+Z 与微信输入法的端到端验收由 PokePod Voice.app 的验收流程完成；最终
-文字进入真实输入框仍保留一次人工确认。
+必须显式指定 V1 或 V2、证据目录和串口；脚本不会自动选择串口，也不会刷机。
+`cdc-status.py` 使用真实 Link v2 帧读取组件预检状态。预检只证明组件存在，行为
+场景继续记录为 `unverified`，直到对应 V1/V2 完成本地录音、Link USB/Wi-Fi、
+BLE、SD 故障、启动恢复、功耗、显示和触摸证据。两个板型保存独立 evidence。
 
 ## 无线语音
 

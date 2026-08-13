@@ -49,6 +49,7 @@ enum class LinkOperationResource : uint16_t {
   file = 1U << 3,
   router = 1U << 4,
   transaction = 1U << 5,
+  recordingSession = 1U << 6,
 };
 
 constexpr uint16_t linkOperationResourceBit(LinkOperationResource resource) {
@@ -270,6 +271,23 @@ class LinkOperation {
     resources_ &= ~linkOperationResourceBit(resource);
   }
 
+  // Recording continues after the start response.  Make the ownership move
+  // explicit so the start request can settle without pretending that the
+  // router/transaction were physically released.  The recording session
+  // becomes the sole real owner and a later stop request tracks it through
+  // recordingSession until physical cleanup is complete.
+  bool transferResourcesToRecordingSession() {
+    constexpr uint16_t moved =
+        linkOperationResourceBit(LinkOperationResource::router) |
+        linkOperationResourceBit(LinkOperationResource::transaction);
+    if ((resources_ & moved) != moved ||
+        ownsResource(LinkOperationResource::recordingSession)) {
+      return false;
+    }
+    resources_ &= ~moved;
+    return true;
+  }
+
   bool ownsResource(LinkOperationResource resource) const {
     return (resources_ & linkOperationResourceBit(resource)) != 0;
   }
@@ -279,7 +297,8 @@ class LinkOperation {
         linkOperationResourceBit(LinkOperationResource::storageReservation) |
         linkOperationResourceBit(LinkOperationResource::file) |
         linkOperationResourceBit(LinkOperationResource::router) |
-        linkOperationResourceBit(LinkOperationResource::transaction);
+        linkOperationResourceBit(LinkOperationResource::transaction) |
+        linkOperationResourceBit(LinkOperationResource::recordingSession);
     return (resources_ & lifecycleResources) == 0;
   }
 

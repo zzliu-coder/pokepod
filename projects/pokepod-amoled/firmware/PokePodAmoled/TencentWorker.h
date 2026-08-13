@@ -61,6 +61,7 @@ class TencentWorker {
   void taskLoop();
   void runAttempt(uint32_t generation);
   void finishAttempt(uint32_t nowMs);
+  void clearTaskSecrets();
   void logState(const char *event, TencentJobState state,
                 uint32_t generation) const;
 

@@ -25,10 +25,12 @@ id_rsa
 id_dsa
 id_ecdsa
 id_ed25519
-*secret*
-*token*
-*credential*
-*password*
+/secrets/
+/.secrets/
+/**/local-secrets/
+/**/credentials.local.json
+/**/tokens.local.json
+/**/passwords.local.txt
 
 # Existing device artifacts and downloaded toolchains stay local.
 outputs/AndroidFileSyncBuild/

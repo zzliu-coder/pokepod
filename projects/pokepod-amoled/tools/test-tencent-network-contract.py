@@ -43,6 +43,14 @@ require(worker, "TencentCancelReason::watchdog",
         "ASR worker watchdog cancellation is missing")
 require(worker, "TencentJobState::committing",
         "ASR success is not separated from atomic commit")
+require(worker, "clearTaskSecrets();",
+        "ASR task-local credentials are not erased on terminal paths")
+require(worker, "secureWipeSecrets(taskSettings_);",
+        "ASR task-local settings do not use the shared wipe helper")
+require(asr, "SecureWipeGuard secretDateWipe",
+        "TC3 date key is not erased on every authorization exit")
+require(asr, "SecureStringWipeGuard initialKeyWipe",
+        "TC3 initial key is not erased on every authorization exit")
 require(worker_header, "TencentJobRuntime runtime_;",
         "production worker does not own the host-tested lifecycle runtime")
 for lifecycle_call in (
