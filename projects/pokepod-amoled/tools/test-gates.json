@@ -62,6 +62,9 @@
   ],
   "repository": [
     "test-audit-candidate-workflow.py",
+    "test-ci-bootstrap.py",
+    "test-exact-candidate-evidence.py",
+    "test-test-runner-timeouts.py",
     "test-source-audit-package.py"
   ]
 }

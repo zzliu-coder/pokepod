@@ -22,15 +22,13 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Check out candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Verify required host tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 --version
-          clang++ --version
-          rg --version
+      - name: Bootstrap and verify required host tools
+        working-directory: projects/pokepod-amoled
+        run: ./tools/bootstrap-ci.sh --install
 
       - name: Run source-only gate
         working-directory: projects/pokepod-amoled
@@ -47,10 +45,14 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           POKEPOD_TEST_JOBS: "2"
+          POKEPOD_CPP_COMPILE_TIMEOUT_SECONDS: "60"
+          POKEPOD_CPP_RUN_TIMEOUT_SECONDS: "60"
         run: python3 tools/run-cpp-host-tests.py
 
       - name: Round-trip source audit package
         working-directory: projects/pokepod-amoled
+        env:
+          POKEPOD_PYTHON_TEST_TIMEOUT_SECONDS: "60"
         run: python3 tools/run-python-test-gate.py repository
 
   fast-candidate:
@@ -63,6 +65,8 @@ jobs:
       ARDUINO_USER_DIR: ${{ github.workspace }}/.ci/arduino-user
       ARDUINO_DIRECTORIES_DATA: ${{ github.workspace }}/.ci/arduino-data
       ARDUINO_DIRECTORIES_USER: ${{ github.workspace }}/.ci/arduino-user
+      ARDUINO_CLI_INSTALL_DIR: ${{ github.workspace }}/.ci/bin
+      ARDUINO_CLI_VERSION: 1.5.0
       GFX_LIBRARY: ${{ github.workspace }}/.ci/arduino-user/libraries/GFX_Library_for_Arduino
       POKEPOD_VENDOR_DIR: ${{ github.workspace }}/.ci/waveshare
       POKEPOD_BUILD_ROOT: ${{ github.workspace }}/projects/pokepod-amoled/work/pokepod-build
@@ -71,15 +75,22 @@ jobs:
       WAVESHARE_COMMIT: ba32b5cbca96f0e04b0736d04959b6e832268d3f
     steps:
       - name: Check out candidate
-        uses: actions/checkout@v4
-
-      - name: Install Arduino CLI 1.5.0
-        uses: arduino/setup-arduino-cli@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: 1.5.0
+          persist-credentials: false
+
+      - name: Bootstrap and verify required host tools
+        working-directory: projects/pokepod-amoled
+        run: ./tools/bootstrap-ci.sh --install
+
+      - name: Install checksum-locked Arduino CLI 1.5.0
+        working-directory: projects/pokepod-amoled
+        run: |
+          ./tools/install-arduino-cli.sh
+          echo "$ARDUINO_CLI_INSTALL_DIR" >> "$GITHUB_PATH"
 
       - name: Restore locked toolchain cache
-        uses: actions/cache@v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             .ci/arduino-data
@@ -134,9 +145,16 @@ jobs:
           BUILD_LOG="$POKEPOD_BUILD_ROOT/build-fast.log"
           REVIEW="$POKEPOD_BUILD_ROOT/resource-review.json"
           SUMMARY="$POKEPOD_BUILD_ROOT/fast-candidate-summary.json"
+          CANDIDATE_MANIFEST="$POKEPOD_BUILD_ROOT/candidate-manifest.json"
+          HASH_MANIFEST="$POKEPOD_BUILD_ROOT/candidate-sha256.txt"
           for path in "$BIN" "$ELF" "$MAP" "$BUILD_LOG" "$OUTPUT/artifact.json" "$OUTPUT/flash-resource.json"; do
             test -s "$path"
           done
+          test -s "$BUILD/sketch/BleVoiceService.cpp.o"
+          test -s "$BUILD/sketch/CapsuleLibrary.cpp.o"
+          file "$ELF" | grep -q 'ELF '
+          rg -q 'BleVoiceService\.cpp\.o' "$MAP"
+          rg -q 'CapsuleLibrary\.cpp\.o' "$MAP"
           NM=$(find "$ARDUINO_DATA_DIR/packages/esp32/tools" -type f \
             -name 'xtensa-esp32s3-elf-nm' -perm -111 -print -quit)
           test -n "$NM"
@@ -176,14 +194,29 @@ jobs:
             --baseline-program-bytes 2401888 \
             --baseline-internal-globals 168060
           sha256sum \
-            "$BIN" "$ELF" "$MAP" \
+            "$BIN" "$ELF" "$MAP" "$BUILD_LOG" \
             "$OUTPUT/artifact.json" "$OUTPUT/flash-resource.json" \
-            "$REVIEW" "$SUMMARY" > "$POKEPOD_BUILD_ROOT/candidate-sha256.txt"
+            "$REVIEW" "$SUMMARY" > "$HASH_MANIFEST"
+          python3 tools/write-github-candidate-manifest.py \
+            --output "$CANDIDATE_MANIFEST" \
+            --source-revision "$GITHUB_SHA" \
+            --file "$BIN" --file "$ELF" --file "$MAP" \
+            --file "$BUILD_LOG" --file "$OUTPUT/artifact.json" \
+            --file "$OUTPUT/flash-resource.json" \
+            --file "$REVIEW" --file "$SUMMARY"
+          python3 tools/verify-fast-candidate-evidence.py \
+            --source-revision "$GITHUB_SHA" \
+            --binary "$BIN" --elf "$ELF" --map "$MAP" \
+            --build-log "$BUILD_LOG" \
+            --artifact "$OUTPUT/artifact.json" \
+            --flash-resource "$OUTPUT/flash-resource.json" \
+            --resource-review "$REVIEW" --summary "$SUMMARY" \
+            --sha256-manifest "$HASH_MANIFEST" \
+            --candidate-manifest "$CANDIDATE_MANIFEST"
           cat "$SUMMARY"
 
       - name: Upload Fast candidate evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pokepod-fast-candidate-${{ github.sha }}
           if-no-files-found: error
@@ -195,4 +228,5 @@ jobs:
             projects/pokepod-amoled/work/pokepod-build/build-fast.log
             projects/pokepod-amoled/work/pokepod-build/resource-review.json
             projects/pokepod-amoled/work/pokepod-build/fast-candidate-summary.json
+            projects/pokepod-amoled/work/pokepod-build/candidate-manifest.json
             projects/pokepod-amoled/work/pokepod-build/candidate-sha256.txt
