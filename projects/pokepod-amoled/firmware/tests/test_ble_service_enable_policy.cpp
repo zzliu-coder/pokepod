@@ -5,6 +5,18 @@
 using namespace pokepod;
 
 int main() {
+  BleSessionStopRequestLatch stopRequest;
+  stopRequest.beginTransition(false);
+  stopRequest.request();
+  assert(stopRequest.requested());
+  stopRequest.acknowledge();
+  assert(!stopRequest.requested());
+  stopRequest.request();
+  assert(!stopRequest.requested());
+  stopRequest.beginTransition(false);
+  stopRequest.request();
+  assert(stopRequest.requested());
+
   BleServiceEnablePolicy policy;
 
   // A persisted-off boot never asks the runtime to advertise.

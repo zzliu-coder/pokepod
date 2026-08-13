@@ -31,20 +31,21 @@ assert toggle.index("setBluetoothEnabled(enabled") < toggle.index(
 )
 assert "蓝牙设置保存失败" in toggle
 
-assert "takeSessionStopRequested()" in service_h
+assert "sessionStopRequested()" in service_h
+assert "acknowledgeSessionStopRequest()" in service_h
 assert "bleCallbackAllowedDuringDisable" in service
-assert "if (actions.requestSessionStop) sessionStopRequested_ = true;" in service
-assert "sessionStopRequested_ = false;" not in service
-assert "bleVoice.takeSessionStopRequested()" in app
+assert "if (actions.requestSessionStop) sessionStopRequest_.request();" in service
+assert "bleVoice.sessionStopRequested()" in app
+assert "bleVoice.acknowledgeSessionStopRequest()" in app
 assert "captureRouter.owner() == AudioCaptureOwner::wirelessVoice" in app
-stop_adapter = app[app.index(
-    "if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice &&"
-):app.index(
-    "if (wirelessUiActive && !bleVoice.streaming())"
-)]
-assert stop_adapter.index("captureRouter.owner()") < stop_adapter.index(
-    "takeSessionStopRequested()"
+loop_poll = app.index("bleVoice.poll(now);")
+stop_adapter = app[app.index("if (bleVoice.sessionStopRequested())", loop_poll):
+                   app.index("if (wirelessUiActive && !bleVoice.streaming())",
+                             loop_poll)]
+assert stop_adapter.index("requestCaptureStop(") < stop_adapter.index(
+    "acknowledgeSessionStopRequest()"
 )
+assert "} else {\n      bleVoice.acknowledgeSessionStopRequest();" in stop_adapter
 assert "requestCaptureStop(PendingCaptureStop::wirelessVoice" in app
 assert "captureRouter.acquire(AudioCaptureOwner::wirelessVoice)" in app
 assert "captureRouter.release(AudioCaptureOwner::wirelessVoice)" in app

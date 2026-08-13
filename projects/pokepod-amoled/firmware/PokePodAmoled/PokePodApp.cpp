@@ -1644,10 +1644,17 @@ void loop() {
     }
   }
   bleVoice.poll(now);
-  if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice &&
-      bleVoice.takeSessionStopRequested()) {
-    (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
-                             RecorderStopReason::none, false, false);
+  if (bleVoice.sessionStopRequested()) {
+    if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice) {
+      (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
+                               RecorderStopReason::none, false, false);
+      if (pendingCaptureStop == PendingCaptureStop::wirelessVoice ||
+          captureRouter.owner() != AudioCaptureOwner::wirelessVoice) {
+        bleVoice.acknowledgeSessionStopRequest();
+      }
+    } else {
+      bleVoice.acknowledgeSessionStopRequest();
+    }
   }
   if (wirelessUiActive && !bleVoice.streaming()) {
     (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,

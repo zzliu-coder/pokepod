@@ -19,6 +19,31 @@ struct BleServiceEnableActions {
   bool startAdvertising = false;
 };
 
+// Bridges a level-triggered teardown policy to the App's asynchronous capture
+// stop. Acknowledgement means the App accepted ownership of that stop; later
+// policy polls must not enqueue it again while the same transition drains.
+class BleSessionStopRequestLatch {
+ public:
+  void beginTransition(bool alreadyPending) {
+    if (!alreadyPending) acknowledged_ = false;
+  }
+
+  void request() {
+    if (!acknowledged_) requested_ = true;
+  }
+
+  bool requested() const { return requested_; }
+
+  void acknowledge() {
+    requested_ = false;
+    acknowledged_ = true;
+  }
+
+ private:
+  bool requested_ = false;
+  bool acknowledged_ = false;
+};
+
 // Pure policy for the persistent BLE Voice user intent. The transport keeps
 // its GATT objects alive while disabled so enabling is safe and inexpensive.
 // A disable never skips an active session or fabricates a disconnect; it

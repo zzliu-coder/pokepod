@@ -31,10 +31,11 @@ class BleVoiceService {
   void poll(uint32_t nowMs);
   void requestEnable();
   void requestDisable(uint32_t nowMs);
-  bool takeSessionStopRequested() {
-    const bool requested = sessionStopRequested_;
-    sessionStopRequested_ = false;
-    return requested;
+  bool sessionStopRequested() const {
+    return sessionStopRequest_.requested();
+  }
+  void acknowledgeSessionStopRequest() {
+    sessionStopRequest_.acknowledge();
   }
 
   bool startSession(uint32_t sessionId, uint32_t nowMs,
@@ -216,7 +217,7 @@ class BleVoiceService {
   BleConnectionPowerMode connectionPowerMode_ =
       BleConnectionPowerMode::idle;
   bool idlePaused_ = false;
-  bool sessionStopRequested_ = false;
+  BleSessionStopRequestLatch sessionStopRequest_;
 };
 
 }  // namespace pokepod

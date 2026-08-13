@@ -337,6 +337,7 @@ void BleVoiceService::requestEnable() {
 
 void BleVoiceService::requestDisable(uint32_t nowMs) {
   cancelPairingMode();
+  sessionStopRequest_.beginTransition(enablePolicy_.transitionPending());
   applyEnableActions(
       enablePolicy_.requestDisable(controller_.active(), connected_, nowMs),
       nowMs);
@@ -348,7 +349,7 @@ void BleVoiceService::applyEnableActions(
     BLEAdvertising *advertising = BLEDevice::getAdvertising();
     if (advertising != nullptr) advertising->stop();
   }
-  if (actions.requestSessionStop) sessionStopRequested_ = true;
+  if (actions.requestSessionStop) sessionStopRequest_.request();
   if (actions.disconnect && connected_ && server_ != nullptr) {
     server_->disconnect(connectionPolicy_.currentConnectionId());
   }
