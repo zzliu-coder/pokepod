@@ -3,17 +3,19 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CPP = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+COMMANDS = (ROOT / "firmware/PokePodAmoled/LinkCapsuleCommands.cpp").read_text()
+CPP = SERVICE + COMMANDS
 HEADER = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 EXECUTOR = (ROOT / "firmware/PokePodAmoled/LinkCommandExecutor.h").read_text()
 TREE = (ROOT / "firmware/PokePodAmoled/LinkTreeStepper.cpp").read_text()
 TREE_HEADER = (ROOT / "firmware/PokePodAmoled/LinkTreeStepper.h").read_text()
 
 
-def body(start: str, end: str) -> str:
-    left = CPP.index(start)
-    right = CPP.index(end, left + len(start))
-    return CPP[left:right]
+def body(source: str, start: str, end: str) -> str:
+    left = source.index(start)
+    right = source.index(end, left + len(start))
+    return source[left:right]
 
 
 # Mutating commands have one durable, cooperative execution path.  The old
@@ -29,13 +31,13 @@ for legacy in (
 ):
     assert legacy not in CPP
 
-handle = body("void PokePodLinkService::handleCommandFile(",
+handle = body(COMMANDS, "void PokePodLinkService::handleCommandFile(",
               "bool PokePodLinkService::tryStartTextCommand(")
-advance = body("void PokePodLinkService::advanceBatchCommand(",
+advance = body(COMMANDS, "void PokePodLinkService::advanceBatchCommand(",
                "bool PokePodLinkService::startBatchWork(")
-work = body("bool PokePodLinkService::startBatchWork(",
+work = body(COMMANDS, "bool PokePodLinkService::startBatchWork(",
             "void PokePodLinkService::finishBatchWork(")
-cleanup = body("void PokePodLinkService::finishCommandStorageCleanup(",
+cleanup = body(COMMANDS, "void PokePodLinkService::finishCommandStorageCleanup(",
                "bool PokePodLinkService::safeFolder(")
 
 assert "BatchStart::started" in handle
@@ -53,7 +55,7 @@ assert "!batchExecutor_.responseAllowed()) return" not in CPP
 assert "batchNextIdItem_" in CPP
 assert "rememberBatchId(rawId)" in CPP
 assert "cJSON_GetArrayItem(ids, static_cast<int>(prior))" not in CPP
-loader = body("void PokePodLinkService::advanceCommandLoad(",
+loader = body(COMMANDS, "void PokePodLinkService::advanceCommandLoad(",
               "void PokePodLinkService::finishCommandLoad(")
 assert "kCommandReadBytesPerPoll" in loader
 assert "StorageAccess::read, 0" in loader
@@ -90,7 +92,7 @@ assert "sourceLength_" in TREE and "targetLength_" in TREE
 assert "FileCopyPhase::verify" in TREE
 
 # Wi-Fi never waits in storage arbitration; USB may use its bounded timeout.
-storage_exists = body("bool PokePodLinkService::storageExists(",
+storage_exists = body(SERVICE, "bool PokePodLinkService::storageExists(",
                       "bool PokePodLinkService::storageRename(")
 assert "storageIoTimeout()" in storage_exists
 assert "1000" not in storage_exists

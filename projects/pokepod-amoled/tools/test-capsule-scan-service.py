@@ -7,7 +7,9 @@ header = (root / "firmware/PokePodAmoled/CapsuleLibrary.h").read_text()
 coordinator = (root / "firmware/PokePodAmoled/StorageCoordinator.h").read_text()
 host_test = (root / "firmware/tests/test_capsule_scan_stepper.cpp").read_text()
 app = (root / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
-link = (root / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+link_service = (root / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+link_commands = (root / "firmware/PokePodAmoled/LinkCapsuleCommands.cpp").read_text()
+link = link_service + link_commands
 
 required = {
     "public start": "bool startScan(",

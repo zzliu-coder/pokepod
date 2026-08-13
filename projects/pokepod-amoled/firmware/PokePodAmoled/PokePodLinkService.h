@@ -183,6 +183,9 @@ class PokePodLinkService : private LinkFileTransferHost {
   void finishPendingManifestResponse();
   void finishPendingManifestFailure();
   void handleConfigure(uint32_t requestId, void *jsonRoot);
+  // LinkCapsuleCommands.cpp owns command loading, durable batch execution,
+  // boot recovery and command-scoped cleanup. LinkOperation and storage-owner
+  // authority deliberately remain members of this single service instance.
   void handleCommandFile(uint32_t requestId, const String &path,
                          const String &transactionId);
   bool beginCommandLoad(uint32_t requestId, const String &path,

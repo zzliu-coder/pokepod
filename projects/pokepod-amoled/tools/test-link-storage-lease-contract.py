@@ -4,7 +4,9 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CPP = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+COMMANDS = (ROOT / "firmware/PokePodAmoled/LinkCapsuleCommands.cpp").read_text()
+CPP = SERVICE + COMMANDS
 FILE_TRANSFER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
 
 
@@ -75,7 +77,7 @@ assert "return ok;" in finish_files
 assert "getWriteError()" in step_files
 assert "deferredCommandFileFailed_ = true" in step_files
 
-poll = dict(methods(CPP))["poll"]
+poll = dict(methods(SERVICE))["poll"]
 assert "!deferredCommandFiles_.empty()" in poll
 assert "!deferredTreeCleanupStack_.empty()" in poll
 
