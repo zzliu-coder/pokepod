@@ -21,6 +21,7 @@ BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
 FORCE_BUILD=0
 SOURCE_REVISION=$(git -C "$PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)
 SOURCE_DATE_EPOCH_VALUE=interactive
+BUILD_EPOCH_CPP_FLAG=
 # Do not let an inherited value change a binary without appearing in the build
 # fingerprint. Release builds replace this with the exact Git commit time.
 unset SOURCE_DATE_EPOCH
@@ -98,6 +99,7 @@ if [ "$BUILD_MODE" = release ]; then
   fi
   SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE
   export SOURCE_DATE_EPOCH
+  BUILD_EPOCH_CPP_FLAG=-DPOKEPOD_BUILD_EPOCH_UTC=$SOURCE_DATE_EPOCH_VALUE
 fi
 
 BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
@@ -386,6 +388,7 @@ if ! "$ARDUINO_CLI" compile $CLEAN_FLAG \
   --jobs 0 \
   --warnings all \
   --fqbn "$FQBN" \
+  --build-property "compiler.cpp.extra_flags=$BUILD_EPOCH_CPP_FLAG" \
   --build-property "compiler.sdk.path=$SDK_OVERLAY_DIR" \
   --library "$GFX_MINIMAL_LIBRARY" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Arduino_DriveBus" \

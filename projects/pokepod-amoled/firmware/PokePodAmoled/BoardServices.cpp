@@ -422,6 +422,17 @@ void BoardServices::ensureRtcTime(Print &log) {
     }
     return;
   }
+#if defined(POKEPOD_BUILD_EPOCH_UTC)
+  static_assert(POKEPOD_BUILD_EPOCH_UTC > 0,
+                "POKEPOD_BUILD_EPOCH_UTC must be a positive Unix epoch");
+  if (setUtcEpoch(static_cast<time_t>(POKEPOD_BUILD_EPOCH_UTC))) {
+    log.println(
+        "{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_epoch_utc\"}");
+  } else {
+    log.println(
+        "{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_epoch_utc\",\"ok\":false}");
+  }
+#else
   int64_t utcEpoch = 0;
   if (buildLocalDateTimeToUtcEpoch(__DATE__, __TIME__,
                                    kChinaStandardTimeOffsetMinutes,
@@ -433,6 +444,7 @@ void BoardServices::ensureRtcTime(Print &log) {
     log.println(
         "{\"event\":\"rtc_bootstrap\",\"source\":\"firmware_build_time_local\",\"ok\":false}");
   }
+#endif
 }
 
 }  // namespace pokepod

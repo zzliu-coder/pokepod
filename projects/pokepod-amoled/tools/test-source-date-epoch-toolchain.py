@@ -34,7 +34,9 @@ expected_value = f'"{expected_date}" "{expected:%H:%M:%S}"'
 
 with tempfile.TemporaryDirectory(prefix="pokepod-source-date-epoch-") as raw:
     fixture = Path(raw) / "date-macros.cpp"
-    fixture.write_text("__DATE__ __TIME__\n", encoding="utf-8")
+    fixture.write_text(
+        "POKEPOD_BUILD_EPOCH_UTC __DATE__ __TIME__\n", encoding="utf-8"
+    )
 
     outputs: list[str] = []
     for ambient_tz in ("UTC0", "JST-9"):
@@ -42,13 +44,17 @@ with tempfile.TemporaryDirectory(prefix="pokepod-source-date-epoch-") as raw:
         process_environment["SOURCE_DATE_EPOCH"] = str(epoch)
         process_environment["TZ"] = ambient_tz
         output = subprocess.check_output(
-            [str(compiler), "-E", "-P", "-x", "c++", str(fixture)],
+            [
+                str(compiler), "-E", "-P", "-x", "c++",
+                f"-DPOKEPOD_BUILD_EPOCH_UTC={epoch}", str(fixture),
+            ],
             env=process_environment,
             text=True,
         ).strip()
         outputs.append(output)
 
-assert outputs == [expected_value, expected_value], (outputs, expected_value)
+expected_output = f"{epoch} {expected_value}"
+assert outputs == [expected_output, expected_output], (outputs, expected_output)
 print(
     "PASS source_date_epoch_toolchain "
     f"(compiler={compiler.name}, value={expected_value})"

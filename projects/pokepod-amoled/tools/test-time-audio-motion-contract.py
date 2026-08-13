@@ -27,6 +27,8 @@ assert "formatUtcOffsetShort(record.createdAt.c_str()" in dashboard
 assert "kChinaStandardTimeOffsetMinutes" in dashboard
 assert "buildLocalDateTimeToUtcEpoch(__DATE__, __TIME__" in board
 assert "setUtcEpoch(static_cast<time_t>(utcEpoch))" in board
+assert "#if defined(POKEPOD_BUILD_EPOCH_UTC)" in board
+assert "setUtcEpoch(static_cast<time_t>(POKEPOD_BUILD_EPOCH_UTC))" in board
 assert "board.setUtcEpoch(synchronizedEpoch)" in main
 
 assert "AudioFrontEnd audioFrontEnd_" not in recorder
