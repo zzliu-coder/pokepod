@@ -153,10 +153,19 @@ bool BoardServices::beginTouch(Print &log) {
 bool BoardServices::beginSd(Print &log) {
   SD_MMC.setPins(kSdClock, kSdCommand, kSdData0);
   const bool ok = SD_MMC.begin("/sdcard", true);
+  if (ok) {
+    ++sdMountGeneration_;
+    if (sdMountGeneration_ == 0) ++sdMountGeneration_;
+  }
   log.printf("{\"event\":\"sd\",\"ok\":%s,\"size_mb\":%llu}\n",
              ok ? "true" : "false",
              ok ? static_cast<unsigned long long>(SD_MMC.cardSize() / (1024ULL * 1024ULL)) : 0ULL);
   return ok;
+}
+
+void BoardServices::endSdMount() {
+  if (status_.sdCard) SD_MMC.end();
+  status_.sdCard = false;
 }
 
 void BoardServices::beginSensors(Print &log) {

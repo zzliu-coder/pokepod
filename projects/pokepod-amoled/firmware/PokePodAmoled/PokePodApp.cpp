@@ -49,6 +49,8 @@ namespace {
 
 class SdMmcRecordingCapacitySource final : public RecordingCapacitySource {
  public:
+  explicit SdMmcRecordingCapacitySource(const BoardServices &board)
+      : board_(board) {}
   RecordingSpaceSnapshot query() override {
     const uint64_t totalBytes = SD_MMC.totalBytes();
     const uint64_t usedBytes = SD_MMC.usedBytes();
@@ -58,10 +60,17 @@ class SdMmcRecordingCapacitySource final : public RecordingCapacitySource {
   uint64_t monotonicMicros() override {
     return static_cast<uint64_t>(esp_timer_get_time());
   }
+
+  uint32_t mountGeneration() const override {
+    return board_.sdMountGeneration();
+  }
+
+ private:
+  const BoardServices &board_;
 };
 
-SdMmcRecordingCapacitySource recordingCapacitySource;
 BoardServices board;
+SdMmcRecordingCapacitySource recordingCapacitySource(board);
 AudioPipeline audio;
 AudioCaptureRouter captureRouter;
 AudioCaptureRuntime captureRuntime;
@@ -318,7 +327,7 @@ void enterDeepSleep(const PowerInputs &inputs) {
   }
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
-  if (board.sdReady()) SD_MMC.end();
+  board.endSdMount();
   board.prepareForDeepSleep(
       runtimePower.snapshot().deepSleepTouchWakeArmed, usb.log());
   runtimePower.startDeepSleep(usb.log());
@@ -359,7 +368,7 @@ bool advanceSafeShutdown(uint32_t nowMs) {
   wifi.prepareForSleep();
   bleVoice.prepareForDeepSleep();
   audio.stopHardware(usb.log());
-  if (board.sdReady()) SD_MMC.end();
+  board.endSdMount();
   board.safeShutdown(usb.log());
   return true;
 }
@@ -582,6 +591,13 @@ void observeCaptureMetrics() {
   const AudioCaptureFrontEndSnapshot snapshot =
       captureRuntime.frontEndSnapshot();
   if (snapshot.sessionId == 0 || snapshot.generation == 0) return;
+  if (recorder.operationActive() &&
+      (captureRuntime.running() ||
+       pendingCaptureStop != PendingCaptureStop::none)) {
+    recorder.observeCaptureTelemetry(
+        captureRuntime.metrics(), captureDispatcher.metrics(),
+        static_cast<uint32_t>(captureRuntime.taskStackHighWater()));
+  }
   // Recorder finalization runs on the storage task. Publish the final metrics
   // before stop() crosses that ownership boundary, then keep the snapshot
   // immutable until the terminal outcome is consumed.

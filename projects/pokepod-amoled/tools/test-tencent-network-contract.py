@@ -102,7 +102,7 @@ shutdown = main[main.index("bool advanceSafeShutdown("):
                 main.index("String recordingId()")]
 require(shutdown, "if (progress != SafeShutdownProgress::ready)",
         "safe shutdown does not gate teardown on actual ASR quiescence")
-if shutdown.index("SD_MMC.end()") < shutdown.index(
+if shutdown.index("board.endSdMount()") < shutdown.index(
         "if (progress != SafeShutdownProgress::ready)"):
     raise SystemExit(
         "FAIL tencent_network_contract: SD is unmounted before ASR quiescence")

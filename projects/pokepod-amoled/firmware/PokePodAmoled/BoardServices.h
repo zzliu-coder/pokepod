@@ -54,6 +54,7 @@ class BoardServices {
   void prepareForDeepSleep(bool keepTouchPowered, Print &log);
   [[noreturn]] void safeShutdown();
   [[noreturn]] void safeShutdown(Print &log);
+  void endSdMount();
   String utcNow();
   bool setUtcEpoch(time_t epoch);
 
@@ -64,6 +65,9 @@ class BoardServices {
   Arduino_GFX *display() const { return display_; }
   const BoardStatus &status() const { return status_; }
   bool sdReady() const { return status_.sdCard; }
+  uint32_t sdMountGeneration() const {
+    return status_.sdCard ? sdMountGeneration_ : 0U;
+  }
 
  private:
   bool beginIoExpander(Print &log);
@@ -87,6 +91,7 @@ class BoardServices {
   XPowersAXP2101 pmu_;
   bool imuLowPower_ = false;
   int imuInterruptBaseline_ = HIGH;
+  uint32_t sdMountGeneration_ = 0;
 };
 
 }  // namespace pokepod

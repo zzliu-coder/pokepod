@@ -16,6 +16,7 @@ class TestRecordingCapacitySource final : public RecordingCapacitySource {
   uint64_t normalStepUs = 100;
   uint32_t delayedCall = 0;
   uint64_t delayedStepUs = 0;
+  uint32_t generation = 1;
 
   RecordingSpaceSnapshot query() override {
     ++queryCalls;
@@ -27,6 +28,8 @@ class TestRecordingCapacitySource final : public RecordingCapacitySource {
     currentUs += monotonicCalls == delayedCall ? delayedStepUs : normalStepUs;
     return currentUs;
   }
+
+  uint32_t mountGeneration() const override { return generation; }
 
   void resetTiming() {
     monotonicCalls = 0;

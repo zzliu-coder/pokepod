@@ -132,11 +132,13 @@ void AudioCaptureRuntime::taskMain() {
       const AudioCaptureCycleResult cycle = service_.captureOnce(millis());
       if (cycle == AudioCaptureCycleResult::frameDropped ||
           cycle == AudioCaptureCycleResult::sourceTimeout ||
+          cycle == AudioCaptureCycleResult::sourceEarlyZero ||
           cycle == AudioCaptureCycleResult::sourceOverrun ||
           cycle == AudioCaptureCycleResult::sourceFailure) {
         incomplete_.store(true, std::memory_order_release);
       }
-      if (cycle == AudioCaptureCycleResult::sourceFailure) taskYIELD();
+      if (cycle == AudioCaptureCycleResult::sourceFailure ||
+          cycle == AudioCaptureCycleResult::sourceEarlyZero) taskYIELD();
     }
     if (sessionState_.taskStopped()) {
       xSemaphoreGive(stopped_);

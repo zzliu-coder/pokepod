@@ -9,6 +9,7 @@
 #endif
 
 #include "AudioFrontEnd.h"
+#include "AudioSessionTelemetry.h"
 #include "BoardConfig.h"
 #include "CapsuleTransaction.h"
 #include "RecorderCheckpoint.h"
@@ -17,6 +18,7 @@
 #include "RecorderStorageQueue.h"
 #include "RecordingAdmissionPolicy.h"
 #include "RecordingCapacitySource.h"
+#include "RecordingStorageQualification.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
@@ -119,6 +121,19 @@ class WavRecorder {
   const RecorderOutcome &terminalResult() const {
     return terminalState_.peek();
   }
+  void observeCaptureTelemetry(
+      const AudioCaptureServiceMetrics &capture,
+      const AudioCaptureDispatcherMetrics &dispatcher,
+      uint32_t captureTaskStackHighWaterWords) {
+    sessionTelemetry_.observeCapture(capture, dispatcher,
+                                     captureTaskStackHighWaterWords);
+  }
+  AudioSessionTelemetrySnapshot telemetrySnapshot() const {
+    return sessionTelemetry_.snapshot();
+  }
+  const RecordingQualificationSnapshot &qualificationSnapshot() const {
+    return storageQualification_.snapshot();
+  }
   bool takeTerminalResult(RecorderOutcome &outcome) {
     return terminalState_.take(outcome);
   }
@@ -144,6 +159,11 @@ class WavRecorder {
   bool storageAppendMonoBytes(const uint8_t *data, size_t length, Print &log);
   bool startStorageSession(Print &log);
   bool runStoragePerformanceProbe(Print &log);
+  void invalidateStorageQualification(
+      RecordingQualificationInvalidReason reason);
+  void observeStorageWriteLatency(uint32_t elapsedUs);
+  void updateRecorderTelemetry();
+  void freezeSessionTelemetry(Print &log);
   bool storageStartCancelled() const;
   uint32_t storageReservationTimeoutMs() const;
   uint32_t storageIoTimeoutMs() const;
@@ -337,6 +357,9 @@ class WavRecorder {
   AudioFrontEndMetrics audioMetrics_{};
   uint32_t audioMetricsSessionId_ = 0;
   uint32_t audioMetricsGeneration_ = 0;
+  RecordingStorageQualification storageQualification_;
+  AudioSessionTelemetry sessionTelemetry_;
+  uint32_t activeMountGeneration_ = 0;
   FinalizePhase finalizePhase_ = FinalizePhase::idle;
   std::atomic<bool> finalizePending_{false};
   RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;

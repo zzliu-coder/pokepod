@@ -52,8 +52,8 @@ assert "bleVoice.quiescedForSleep()" in deep_sleep_admission
 assert "!bleVoice.connected()" not in deep_sleep_admission
 assert "requestSafeShutdown" in main
 assert "advanceSafeShutdown" in main
-assert main.index("tencentWorker.quiesce") < main.index("SD_MMC.end()")
-assert "SD_MMC.end()" in main
+assert main.index("tencentWorker.quiesce") < main.index("board.endSdMount()")
+assert "board.endSdMount()" in main
 assert "lowBatteryShutdown.critical()" in main
 
 assert "pauseForIdleSleep" in ble
