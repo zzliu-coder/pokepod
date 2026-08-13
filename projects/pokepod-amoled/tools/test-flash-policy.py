@@ -22,6 +22,9 @@ assert 'release_artifact_source_dirty' in validator
 assert 'validate_release_review' in validator
 assert 'esp32_region_transfer.py' in source
 assert 'hardmac.esp32-region-transfer.v1' in source
+assert '--identity-authority' in source
+assert 'validate-flash-identity.py' in source
+assert 'flash-id' in source
 assert '--chunk-size 16384' in source
 assert '--before usb-reset' in source
 assert '--stub disabled' in source

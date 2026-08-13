@@ -11,6 +11,7 @@ build = (ROOT / "firmware/build.sh").read_text(encoding="utf-8")
 flash = (ROOT / "flash.sh").read_text(encoding="utf-8")
 manifest_writer = (ROOT / "tools/write-artifact-manifest.py").read_text(encoding="utf-8")
 artifact_validator = (ROOT / "tools/validate-flash-artifact.py").read_text(encoding="utf-8")
+identity_validator = (ROOT / "tools/validate-flash-identity.py").read_text(encoding="utf-8")
 
 assert profile["schemaVersion"] == 1
 assert profile["kind"] == "hardmac.workflow"
@@ -41,6 +42,16 @@ assert 'validate-flash-artifact.py' in flash
 assert 'artifact_manifest_binary_sha256' in artifact_validator
 assert 'release_artifact_toolchain' in artifact_validator
 assert 'artifact_flash_offset' in artifact_validator
+identity_authority = profile["discovery"]["identityAuthority"]
+assert identity_authority["requiredBeforeDeviceAccess"] is True
+assert identity_authority["argument"] == "--identity-authority"
+assert "16777216 bytes" in identity_authority["expected"][-1]
+assert "--identity-authority {identity_authority}" in fast["flashCommand"]
+assert "--identity-authority {identity_authority}" in release["flashCommand"]
+assert 'FAIL identity_authority_required' in flash
+assert 'CHIP = "ESP32-S3"' in identity_validator
+assert 'FLASH_BYTES = 16 * 1024 * 1024' in identity_validator
+assert 'device_id_from_mac(observed_mac)' in identity_validator
 transfer = profile["flash"]["transfer"]
 assert transfer == {
     "resetBefore": "usb-reset",
@@ -61,8 +72,9 @@ assert '--max-size 0x300000' in flash
 assert 'work/hardmac-runs' in flash
 backup_call = 'python3 "$TRANSFER_SCRIPT" backup'
 flash_call = 'python3 "$TRANSFER_SCRIPT" flash'
+identity_call = 'DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence'
 assert backup_call in flash
-assert flash.index(backup_call) < flash.index(flash_call)
+assert flash.index(identity_call) < flash.index(backup_call) < flash.index(flash_call)
 assert '--size 0x300000' in flash
 assert 'current-app0.bin' in flash
 assert 'restore-plan.json' in flash

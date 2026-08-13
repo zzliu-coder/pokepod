@@ -20,8 +20,21 @@
     ],
     "runtimeValues": [
       "port",
-      "deviceIdentity"
-    ]
+      "deviceIdentity",
+      "identityAuthorityPath"
+    ],
+    "identityAuthority": {
+      "argument": "--identity-authority",
+      "storage": "private per-device evidence outside tracked source",
+      "requiredBeforeDeviceAccess": true,
+      "expected": [
+        "Link deviceId derived from the exact eFuse MAC",
+        "Link model is an allowed AMOLED board variant",
+        "ROM chip is ESP32-S3",
+        "ROM eFuse MAC matches the authorized target",
+        "detected SPI flash size is 16777216 bytes"
+      ]
+    }
   },
   "lanes": {
     "fast": {
@@ -30,7 +43,7 @@
       "artifactPath": "work/pokepod-build/output/fast/PokePodAmoled.ino.bin",
       "manifestPath": "work/pokepod-build/output/fast/artifact.json",
       "resourceReportPath": "work/pokepod-build/output/fast/flash-resource.json",
-      "flashCommand": "./flash.sh --fast",
+      "flashCommand": "./flash.sh --fast --identity-authority {identity_authority}",
       "verification": [
         "application CDC returns with the expected Link identity",
         "device acceptance checks the changed subsystem"
@@ -42,7 +55,7 @@
       "artifactPath": "work/pokepod-build/output/release/PokePodAmoled.ino.bin",
       "manifestPath": "work/pokepod-build/output/release/artifact.json",
       "resourceReportPath": "work/pokepod-build/output/release/flash-resource.json",
-      "flashCommand": "./flash.sh --release",
+      "flashCommand": "./flash.sh --release --identity-authority {identity_authority}",
       "verification": [
         "host checks and clean build pass",
         "application partition readback matches the release artifact",

@@ -14,6 +14,7 @@
     "test-fixed-font-rle.py",
     "test-flash-artifact-validation.py",
     "test-fast-candidate-summary.py",
+    "test-flash-identity-gate.py",
     "test-flash-policy.py",
     "test-flash-size-policy.py",
     "test-hardmac-workflow.py",

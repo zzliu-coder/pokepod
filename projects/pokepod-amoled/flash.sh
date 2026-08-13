@@ -5,6 +5,13 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 FLASH_MODE=release
 MODE_EXPLICIT=0
 FIRMWARE_BIN=
+IDENTITY_AUTHORITY=
+ROM_PORT=${POKEPOD_ROM_PORT:-}
+if [ -n "$ROM_PORT" ]; then
+  ROM_PORT_EXPLICIT=1
+else
+  ROM_PORT_EXPLICIT=0
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -23,13 +30,30 @@ while [ "$#" -gt 0 ]; do
       FIRMWARE_BIN=$2
       shift 2
       ;;
+    --identity-authority)
+      [ "$#" -ge 2 ] || { printf 'FAIL identity_authority_argument_missing\n' >&2; exit 64; }
+      IDENTITY_AUTHORITY=$2
+      shift 2
+      ;;
+    --rom-port)
+      [ "$#" -ge 2 ] || { printf 'FAIL rom_port_argument_missing\n' >&2; exit 64; }
+      ROM_PORT=$2
+      ROM_PORT_EXPLICIT=1
+      shift 2
+      ;;
     --help)
       cat <<'EOF'
-Usage: ./flash.sh [--release|--fast] [--firmware PATH]
+Usage: ./flash.sh [--release|--fast] [--firmware PATH] --identity-authority PATH [--rom-port PATH]
 
   --release   Flash the separately built release artifact (default).
   --fast      Explicitly flash the fast iteration artifact.
   --firmware  Use a manifest-backed artifact at an explicit path.
+  --identity-authority
+              Required private JSON authority for one expected PokePod.
+              It binds the Link deviceId and board variant to the ROM eFuse
+              MAC, ESP32-S3 chip family and 16 MiB flash before backup/write.
+  --rom-port  Explicit ROM port for recovery when no application identity
+              answers. Required in recovery; the script never guesses a ROM.
 EOF
       exit 0
       ;;
@@ -45,6 +69,15 @@ EOF
   esac
 done
 
+if [ -z "$IDENTITY_AUTHORITY" ]; then
+  printf 'FAIL identity_authority_required\n' >&2
+  exit 64
+fi
+if [ ! -s "$IDENTITY_AUTHORITY" ]; then
+  printf 'FAIL identity_authority_missing path=%s\n' "$IDENTITY_AUTHORITY" >&2
+  exit 76
+fi
+
 if [ -z "$FIRMWARE_BIN" ]; then
   FIRMWARE_BIN="$SCRIPT_DIR/work/pokepod-build/output/$FLASH_MODE/PokePodAmoled.ino.bin"
   MODE_EXPLICIT=1
@@ -55,6 +88,7 @@ ESPTOOL_BIN=${ESPTOOL_BIN:-$(find "$HOME/Library/Arduino15/packages/esp32/tools/
 HARDMAC_SKILL_DIR=${HARDMAC_SKILL_DIR:-"${CODEX_HOME:-$HOME/.codex}/skills/hardmac"}
 TRANSFER_SCRIPT=${HARDMAC_ESP32_TRANSFER:-"$HARDMAC_SKILL_DIR/scripts/esp32_region_transfer.py"}
 ARTIFACT_VALIDATOR="$SCRIPT_DIR/tools/validate-flash-artifact.py"
+IDENTITY_VALIDATOR="$SCRIPT_DIR/tools/validate-flash-identity.py"
 
 if [ ! -s "$FIRMWARE_BIN" ]; then
   printf 'FAIL firmware_binary_missing path=%s\n' "$FIRMWARE_BIN" >&2
@@ -82,6 +116,10 @@ if [ ! -s "$ARTIFACT_VALIDATOR" ]; then
   printf 'FAIL artifact_validator_missing path=%s\n' "$ARTIFACT_VALIDATOR" >&2
   exit 75
 fi
+if [ ! -s "$IDENTITY_VALIDATOR" ]; then
+  printf 'FAIL identity_validator_missing path=%s\n' "$IDENTITY_VALIDATOR" >&2
+  exit 76
+fi
 EXPECTED_MODE=
 if [ "$MODE_EXPLICIT" -eq 1 ]; then
   EXPECTED_MODE=$FLASH_MODE
@@ -95,18 +133,51 @@ else
 fi
 FLASH_STARTED_AT=$(date +%s)
 
+RUN_ROOT="$SCRIPT_DIR/work/hardmac-runs"
+mkdir -p "$RUN_ROOT"
+RUN_DIR=$(mktemp -d "$RUN_ROOT/$(date +%Y%m%d-%H%M%S)-flash.XXXXXX")
+umask 077
+AUTHORITY_SUMMARY="$RUN_DIR/identity-authority-summary.json"
+python3 "$IDENTITY_VALIDATOR" authority \
+  --authority "$IDENTITY_AUTHORITY" --output "$AUTHORITY_SUMMARY"
+
 find_ports() {
   find /dev -maxdepth 1 -name 'cu.usbmodem*' -print 2>/dev/null | sort
 }
 
 APP_PORT=""
 PORTS_BEFORE=$(find_ports)
+APP_IDENTITY="$RUN_DIR/application-identity.json"
+APP_IDENTITY_RESPONSES=0
+APP_IDENTITY_CANDIDATE=0
 for port in $PORTS_BEFORE; do
-  if "$SCRIPT_DIR/cdc-status.py" "$port" --timeout 1 >/dev/null 2>&1; then
+  APP_IDENTITY_CANDIDATE=$((APP_IDENTITY_CANDIDATE + 1))
+  CANDIDATE_PATH="$RUN_DIR/application-identity-candidate-$APP_IDENTITY_CANDIDATE.json"
+  if python3 "$IDENTITY_VALIDATOR" capture-application \
+    --probe "$SCRIPT_DIR/cdc-status.py" --port "$port" \
+    --output "$CANDIDATE_PATH" --timeout 2 \
+    >/dev/null 2>&1
+  then
+    APP_IDENTITY_RESPONSES=$((APP_IDENTITY_RESPONSES + 1))
     APP_PORT=$port
-    break
   fi
 done
+
+if [ "$APP_IDENTITY_RESPONSES" -gt 0 ]; then
+  if ! python3 "$IDENTITY_VALIDATOR" select-application \
+    --authority "$IDENTITY_AUTHORITY" --output "$APP_IDENTITY" \
+    "$RUN_DIR"/application-identity-candidate-*.json >/dev/null
+  then
+    printf 'FAIL expected_application_identity_match responses=%s run_dir=%s\n' \
+      "$APP_IDENTITY_RESPONSES" "$RUN_DIR" >&2
+    exit 78
+  fi
+else
+  if [ "$ROM_PORT_EXPLICIT" -ne 1 ] || [ -z "$ROM_PORT" ]; then
+    printf 'FAIL recovery_requires_explicit_rom_port run_dir=%s\n' "$RUN_DIR" >&2
+    exit 73
+  fi
+fi
 
 if [ -n "$APP_PORT" ]; then
   # Arduino-ESP32 USBCDC recognizes 1200 baud as a request to enter the ROM
@@ -114,7 +185,6 @@ if [ -n "$APP_PORT" ]; then
   stty -f "$APP_PORT" 1200
 fi
 
-ROM_PORT=${POKEPOD_ROM_PORT:-}
 DEADLINE=$(( $(date +%s) + 8 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   [ -n "$ROM_PORT" ] && break
@@ -125,12 +195,6 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
       break
     fi
   done
-  if [ -z "$APP_PORT" ] && [ -z "$ROM_PORT" ]; then
-    CURRENT_PORTS=$(find_ports)
-    if [ "$(printf '%s\n' "$CURRENT_PORTS" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ]; then
-      ROM_PORT=$CURRENT_PORTS
-    fi
-  fi
   [ -n "$ROM_PORT" ] && break
   sleep 0.25
 done
@@ -141,9 +205,6 @@ if [ -z "$ROM_PORT" ]; then
   exit 73
 fi
 
-RUN_ROOT="$SCRIPT_DIR/work/hardmac-runs"
-mkdir -p "$RUN_ROOT"
-RUN_DIR=$(mktemp -d "$RUN_ROOT/$(date +%Y%m%d-%H%M%S)-flash.XXXXXX")
 IDENTITY_LOG="$RUN_DIR/chip-id.log"
 IDENTITY_OK=0
 IDENTITY_ATTEMPT=1
@@ -163,21 +224,43 @@ if [ "$IDENTITY_OK" -ne 1 ]; then
   printf 'FAIL chip_identity_unavailable run_dir=%s\n' "$RUN_DIR" >&2
   exit 78
 fi
-DEVICE_KEY=$(python3 - "$IDENTITY_LOG" <<'PY'
-import pathlib
-import re
-import sys
 
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-match = re.search(r"(?im)^MAC:\s*((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\s*$", text)
-if not match:
-    raise SystemExit(1)
-print("esp32s3-" + match.group(1).lower().replace(":", ""))
-PY
-) || {
-  printf 'FAIL chip_identity_parse run_dir=%s\n' "$RUN_DIR" >&2
+FLASH_ID_LOG="$RUN_DIR/flash-id.log"
+FLASH_ID_OK=0
+FLASH_ID_ATTEMPT=1
+while [ "$FLASH_ID_ATTEMPT" -le 3 ]; do
+  if "$ESPTOOL_BIN" --chip esp32s3 --port "$ROM_PORT" --baud 115200 \
+    --before usb-reset --after no-reset --no-stub flash-id \
+    >"$FLASH_ID_LOG" 2>&1
+  then
+    FLASH_ID_OK=1
+    break
+  fi
+  printf 'WARN flash_identity_retry attempt=%s\n' "$FLASH_ID_ATTEMPT" >&2
+  FLASH_ID_ATTEMPT=$((FLASH_ID_ATTEMPT + 1))
+done
+cat "$FLASH_ID_LOG"
+if [ "$FLASH_ID_OK" -ne 1 ]; then
+  printf 'FAIL flash_identity_unavailable run_dir=%s\n' "$RUN_DIR" >&2
   exit 78
-}
+fi
+
+IDENTITY_VERDICT="$RUN_DIR/identity-verdict.json"
+if [ -n "$APP_PORT" ]; then
+  DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence \
+    --authority "$IDENTITY_AUTHORITY" --application "$APP_IDENTITY" \
+    --chip-log "$IDENTITY_LOG" --flash-log "$FLASH_ID_LOG" \
+    --output "$IDENTITY_VERDICT") || DEVICE_KEY=
+else
+  DEVICE_KEY=$(python3 "$IDENTITY_VALIDATOR" evidence \
+    --authority "$IDENTITY_AUTHORITY" \
+    --chip-log "$IDENTITY_LOG" --flash-log "$FLASH_ID_LOG" \
+    --output "$IDENTITY_VERDICT") || DEVICE_KEY=
+fi
+if [ -z "$DEVICE_KEY" ]; then
+  printf 'FAIL expected_device_identity_mismatch run_dir=%s\n' "$RUN_DIR" >&2
+  exit 78
+fi
 
 # Capture and verify the exact region that this operation can overwrite before
 # the first write.  A fresh backup avoids relying on stale device or deployed-
@@ -282,9 +365,14 @@ DEADLINE=$(( $(date +%s) + 10 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 0.5
   for port in $(find_ports); do
-    if "$SCRIPT_DIR/cdc-status.py" "$port" --timeout 1 >/dev/null 2>&1; then
+    POST_IDENTITY="$RUN_DIR/application-identity-after.json"
+    if python3 "$IDENTITY_VALIDATOR" capture-application \
+      --authority "$IDENTITY_AUTHORITY" --probe "$SCRIPT_DIR/cdc-status.py" \
+      --port "$port" --output "$POST_IDENTITY" --timeout 2 \
+      >/dev/null 2>&1
+    then
       python3 - "$RUN_DIR" "$MANIFEST_PATH" "$FIRMWARE_BIN" "$DEVICE_KEY" \
-        "$APP_PORT" "$ROM_PORT" "$port" <<'PY'
+        "$APP_PORT" "$ROM_PORT" "$port" "$IDENTITY_VERDICT" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -294,6 +382,7 @@ from datetime import datetime, timezone
 run_dir = pathlib.Path(sys.argv[1])
 manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 transfer = json.loads((run_dir / "transfer/result.json").read_text(encoding="utf-8"))
+identity = json.loads(pathlib.Path(sys.argv[8]).read_text(encoding="utf-8"))
 record = {
     "schemaVersion": 1,
     "kind": "hardmac.run",
@@ -301,6 +390,7 @@ record = {
     "profile": ".hardmac/workflow.json",
     "lane": manifest["lane"],
     "deviceKey": sys.argv[4],
+    "identity": identity,
     "applicationPortBefore": sys.argv[5],
     "romPort": sys.argv[6],
     "applicationPortAfter": sys.argv[7],
