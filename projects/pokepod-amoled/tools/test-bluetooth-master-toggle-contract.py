@@ -57,6 +57,7 @@ assert "!enablePolicy_.acceptsNewWork()" in service
 assert "enablePolicy_.transitionPending()" in service_h
 assert "if (!enablePolicy_.acceptsNewWork() || idlePaused_" in service
 assert "bool physicalConnectionPending() const" in service_h
+assert "uint16_t physicalConnectionId() const" in service_h
 for entrypoint in (
     "enablePolicy_.requestEnable(physicalConnectionPending())",
     "enablePolicy_.requestDisable(controller_.active(),\n"
@@ -65,6 +66,18 @@ for entrypoint in (
     "                                        physicalConnectionPending(), nowMs)",
 ):
     assert entrypoint in service
+enable_actions = service[service.index(
+    "void BleVoiceService::applyEnableActions("
+):service.index("void BleVoiceService::clearDisabledRuntime(")]
+assert "actions.disconnect && physicalConnectionPending()" in enable_actions
+assert "const uint16_t connectionId = physicalConnectionId();" in enable_actions
+assert "server_->disconnect(connectionId);" in enable_actions
+assert "actions.disconnect && connected_" not in enable_actions
+physical_id = service_h[service_h.index("uint16_t physicalConnectionId() const"):
+                        service_h.index("BLEServer *server_")]
+assert physical_id.index("callbackOverflow_.physicalConnectionPending()") < \
+    physical_id.index("connectionPolicy_.hasCurrent()")
+assert "callbackOverflow_.epoch().connectionId" in physical_id
 overflow_finish = service[service.index(
     "bool BleVoiceService::finishCallbackOverflowIfDisconnected("
 ):service.index("void BleVoiceService::refreshCallbackSnapshot(")]

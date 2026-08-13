@@ -352,8 +352,12 @@ void BleVoiceService::applyEnableActions(
     if (advertising != nullptr) advertising->stop();
   }
   if (actions.requestSessionStop) sessionStopRequest_.request();
-  if (actions.disconnect && connected_ && server_ != nullptr) {
-    server_->disconnect(connectionPolicy_.currentConnectionId());
+  if (actions.disconnect && physicalConnectionPending() &&
+      server_ != nullptr) {
+    const uint16_t connectionId = physicalConnectionId();
+    if (connectionId != kInvalidBleConnectionId) {
+      server_->disconnect(connectionId);
+    }
   }
   if (actions.clearRuntime) clearDisabledRuntime(nowMs);
   if (actions.startAdvertising) restartAdvertising();

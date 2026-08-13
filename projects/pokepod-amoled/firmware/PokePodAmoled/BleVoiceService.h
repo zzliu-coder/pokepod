@@ -167,6 +167,14 @@ class BleVoiceService {
   bool physicalConnectionPending() const {
     return connected_ || callbackOverflow_.physicalConnectionPending();
   }
+  uint16_t physicalConnectionId() const {
+    if (callbackOverflow_.physicalConnectionPending()) {
+      return callbackOverflow_.epoch().connectionId;
+    }
+    return connectionPolicy_.hasCurrent()
+        ? connectionPolicy_.currentConnectionId()
+        : kInvalidBleConnectionId;
+  }
 
   BLEServer *server_ = nullptr;
   BLECharacteristic *info_ = nullptr;

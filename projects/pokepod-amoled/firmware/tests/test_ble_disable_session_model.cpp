@@ -83,10 +83,21 @@ int main() {
   actions = enable.poll(session.active(),
                         overflowPolicy.physicalConnectionPending(), 3003);
   assert(actions.disconnect);
+  // The first controller terminate may produce no callback. Keep the frozen
+  // epoch physically pending and retry it on the bounded cadence.
+  actions = enable.poll(session.active(),
+                        overflowPolicy.physicalConnectionPending(), 3252);
+  assert(!actions.disconnect);
+  actions = enable.poll(session.active(),
+                        overflowPolicy.physicalConnectionPending(), 3253);
+  assert(actions.disconnect);
   enable.requestEnable(true);
   assert(enable.transitionPending());
   assert(!enable.acceptsNewWork());
   assert(!overflowPolicy.confirm(BleVoiceConnectionEpoch{9, 3}));
+  actions = enable.poll(session.active(),
+                        overflowPolicy.physicalConnectionPending(), 3503);
+  assert(actions.disconnect);
   assert(overflowPolicy.confirm(BleVoiceConnectionEpoch{9, 4}));
   assert(overflowPolicy.finish().matches(overflowEpoch));
   actions = enable.poll(session.active(),
