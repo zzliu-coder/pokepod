@@ -10,6 +10,8 @@ blob = (firmware / "DeviceConfigBlob.h").read_text(encoding="utf-8")
 wifi = (firmware / "WifiController.cpp").read_text(encoding="utf-8")
 portal = (firmware / "ProvisioningPortal.cpp").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
+link_dispatcher = (firmware / "LinkCommandDispatcher.cpp").read_text(encoding="utf-8")
+link_surface = link + link_dispatcher
 
 # Every live mutation commits one CRC-protected NVS blob. Legacy keys are only
 # read for migration or removed best-effort after a committed clear.
@@ -37,7 +39,7 @@ assert clear_wifi.index("persistState(proposed, empty)") < clear_wifi.index(
 
 # Link null retains its v2 rescue meaning: it becomes an empty String and the
 # atomic save path clears all remembered networks.
-assert "else if (cJSON_IsNull(item)) *field.target = \"\";" in link
+assert "else if (cJSON_IsNull(item)) *field.target = \"\";" in link_surface
 assert "settings.wifiSsid.isEmpty()" in save
 
 # Failed MRU writes remain retryable, and portal distinguishes missing entries

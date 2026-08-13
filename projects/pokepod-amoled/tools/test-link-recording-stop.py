@@ -6,10 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FIRMWARE = ROOT / "firmware/PokePodAmoled"
 SERVICE = (FIRMWARE / "PokePodLinkService.cpp").read_text()
 HEADER = (FIRMWARE / "PokePodLinkService.h").read_text()
+LINK_DISPATCHER = (FIRMWARE / "LinkCommandDispatcher.cpp").read_text()
 SESSION_H = (FIRMWARE / "LinkRecordingSession.h").read_text()
 SESSION = (FIRMWARE / "LinkRecordingSession.cpp").read_text()
 STATE = (FIRMWARE / "LinkRecordingStop.h").read_text()
-DISPATCHER = (FIRMWARE / "AudioCaptureDispatcher.h").read_text()
+CAPTURE_DISPATCHER = (FIRMWARE / "AudioCaptureDispatcher.h").read_text()
 
 # The service owns exactly one extracted session; the old parallel state and
 # old service-local implementations must not survive the extraction.
@@ -64,14 +65,14 @@ assert final_drain < final_snapshot < final_observe < recorder_stop
 assert final_observe < recorder_abort
 assert "!recorder_->captureFailureLatched()" in advance
 assert "drainLinkCapture" not in SERVICE + SESSION
-assert "while (source.pop(frame))" in DISPATCHER
+assert "while (source.pop(frame))" in CAPTURE_DISPATCHER
 
 assert "awaitCaptureFinalize" in STATE
 assert "awaitRecorderTerminal" in STATE
 assert "suppressResponseAndAbort" in STATE
 
-start_dispatch = SERVICE[SERVICE.index('} else if (strcmp(operation, "record") == 0)'):
-                           SERVICE.index('} else if (strcmp(operation, "stop") == 0)')]
+start_dispatch = LINK_DISPATCHER[LINK_DISPATCHER.index('} else if (strcmp(operation, "record") == 0)'):
+                                    LINK_DISPATCHER.index('} else if (strcmp(operation, "stop") == 0)')]
 assert "RecorderOperationOwner::linkWifi" in start_dispatch
 assert "RecorderOperationOwner::linkUsb" in start_dispatch
 assert "recordingSession_.requestStart(" in start_dispatch
@@ -96,8 +97,7 @@ assert "LinkRecordingEventKind::startReady" in start_advance
 assert "operation.releaseResource(LinkOperationResource::router)" in start_advance
 assert "operation.releaseResource(LinkOperationResource::transaction)" in start_advance
 
-process = SERVICE[SERVICE.index("void PokePodLinkService::processRequest("):
-                  SERVICE.index("bool PokePodLinkService::beginIncoming(")]
+process = LINK_DISPATCHER[LINK_DISPATCHER.index("void PokePodLinkService::processRequest("): ]
 assert "recordingSession_.ownsRequest(requestId)" in process
 assert "admitLinkOperation(requestId)" in process
 assert "sendBusy(requestId);" in process

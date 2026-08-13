@@ -6,7 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
 COMMANDS = (ROOT / "firmware/PokePodAmoled/LinkCapsuleCommands.cpp").read_text()
-CPP = SERVICE + COMMANDS
+DISPATCHER = (ROOT / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp").read_text()
+CPP = SERVICE + COMMANDS + DISPATCHER
 FILE_TRANSFER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
 
 

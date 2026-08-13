@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.h").read_text()
 SOURCE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+DISPATCHER = (ROOT / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp").read_text()
 DIAGNOSTICS = (ROOT / "firmware/PokePodAmoled/LinkDiagnostics.cpp").read_text()
 FILE_TRANSFER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.cpp").read_text()
 FILE_TRANSFER_HEADER = (ROOT / "firmware/PokePodAmoled/LinkFileTransfer.h").read_text()
@@ -107,10 +108,10 @@ assert "StorageAccess::read, 250" not in FILE_TRANSFER
 assert "LinkOperation operation_" not in FILE_TRANSFER_HEADER
 assert "LinkTransferGate" not in FILE_TRANSFER_HEADER
 
-status_start = SOURCE.index('if (strcmp(operation, "status") == 0)')
-status_end = SOURCE.index('} else if (strcmp(operation, "provisioning-start")',
+status_start = DISPATCHER.index('if (strcmp(operation, "status") == 0)')
+status_end = DISPATCHER.index('} else if (strcmp(operation, "provisioning-start")',
                           status_start)
-status_dispatch = SOURCE[status_start:status_end]
+status_dispatch = DISPATCHER[status_start:status_end]
 assert "requestLinkRecordingStop" not in status_dispatch
 assert "diagnostics_.statusJson()" in status_dispatch
 assert "sendTerminalOrDisconnect(requestId" in status_dispatch

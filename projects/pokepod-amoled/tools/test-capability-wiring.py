@@ -5,7 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
-LINK = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+LINK_SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+LINK_DISPATCHER = (ROOT / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp").read_text()
+LINK = LINK_SERVICE + LINK_DISPATCHER
 DASHBOARD = (ROOT / "firmware/PokePodAmoled/Dashboard.cpp").read_text()
 
 

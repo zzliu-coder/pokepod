@@ -5,42 +5,44 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = (ROOT / "firmware/PokePodAmoled/PokePodLinkService.cpp").read_text()
+DISPATCHER = (ROOT / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp").read_text()
+COMBINED = SERVICE + DISPATCHER
 HEADER = (ROOT / "firmware/PokePodAmoled/LinkManifestStepper.h").read_text()
 
 
-def body(signature: str, following: str) -> str:
-    start = SERVICE.index(signature)
-    end = SERVICE.index(following, start)
-    return SERVICE[start:end]
+def body(source: str, signature: str, following: str) -> str:
+    start = source.index(signature)
+    end = source.index(following, start)
+    return source[start:end]
 
 
-poll = body("void PokePodLinkService::poll", "void PokePodLinkService::consumeByte")
+poll = body(SERVICE, "void PokePodLinkService::poll", "void PokePodLinkService::consumeByte")
 advance = body(
-    "void PokePodLinkService::advanceManifest",
+    DISPATCHER, "void PokePodLinkService::advanceManifest",
     "void PokePodLinkService::advanceManifestScan",
 )
 hash_step = body(
-    "void PokePodLinkService::advanceManifestHash",
+    DISPATCHER, "void PokePodLinkService::advanceManifestHash",
     "void PokePodLinkService::finishManifestResponse",
 )
 response = body(
-    "void PokePodLinkService::finishManifestResponse",
+    DISPATCHER, "void PokePodLinkService::finishManifestResponse",
     "void PokePodLinkService::failManifest",
 )
 pending_response = body(
-    "void PokePodLinkService::finishPendingManifestResponse",
+    DISPATCHER, "void PokePodLinkService::finishPendingManifestResponse",
     "void PokePodLinkService::finishPendingManifestFailure",
 )
 cleanup = body(
-    "bool PokePodLinkService::cleanupManifestStorage",
+    DISPATCHER, "bool PokePodLinkService::cleanupManifestStorage",
     "void PokePodLinkService::finishPendingManifestResponse",
 )
 disconnect = body(
-    "void PokePodLinkService::disconnect",
+    SERVICE, "void PokePodLinkService::disconnect",
     "void PokePodLinkService::pollDeferredCleanup",
 )
 deferred_cleanup = body(
-    "void PokePodLinkService::pollDeferredCleanup",
+    SERVICE, "void PokePodLinkService::pollDeferredCleanup",
     "void PokePodLinkService::poll(uint32_t",
 )
 
@@ -53,12 +55,12 @@ assert "kLinkMaxDataBytes" in hash_step
 assert "acquireIo(" in hash_step
 assert "StorageAccess::read, 0" in hash_step
 assert "if (!transferPermitted()) return" in hash_step
-assert "finishManifestResponse" in SERVICE
+assert "finishManifestResponse" in COMBINED
 assert response.index("manifestStepper_.items()") < response.index(
     "manifestResponseJson_ = response"
 )
 assert "sendJson(requestId, response)" in pending_response
-assert "cleanupManifestStorage()" in SERVICE
+assert "cleanupManifestStorage()" in COMBINED
 assert "StorageAccess::read, 0" in cleanup
 assert "if (!lease)" in cleanup
 assert cleanup.index("if (!lease)") < cleanup.index("manifestFile_.close()")
@@ -68,12 +70,12 @@ wireless_service = (ROOT / "firmware/PokePodAmoled/WirelessSyncService.cpp").rea
 wireless_poll_start = wireless_service.index("void WirelessSyncService::poll")
 wireless_deadline = wireless_service.index("enforceDeadline(nowMs);", wireless_poll_start)
 assert wireless_service.index("link_.pollDeferredCleanup();", wireless_poll_start) < wireless_deadline
-assert "manifestRequestId_ == requestId && manifestStepper_.active()" in SERVICE
+assert "manifestRequestId_ == requestId && manifestStepper_.active()" in COMBINED
 assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in HEADER
 assert "kLinkManifestMaximumReadBytes = 16U * 1024U" in HEADER
 assert "kLinkManifestMaximumFiles = 2048" in HEADER
-assert 'manifestError_ = "manifest file limit exceeded"' in SERVICE
-assert "metadataFingerprint()" not in SERVICE
-assert "sha256File(" not in SERVICE
+assert 'manifestError_ = "manifest file limit exceeded"' in COMBINED
+assert "metadataFingerprint()" not in COMBINED
+assert "sha256File(" not in COMBINED
 
 print("PASS test_link_manifest_contract")

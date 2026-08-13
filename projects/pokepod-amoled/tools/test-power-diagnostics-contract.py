@@ -17,6 +17,8 @@ diagnostics = (firmware / "ProvisioningDiagnostics.cpp").read_text(encoding="utf
 power_diagnostics = (firmware / "PowerDiagnostics.cpp").read_text(encoding="utf-8")
 power_codec = (firmware / "PowerDiagnosticsCodec.h").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
+link_dispatcher = (firmware / "LinkCommandDispatcher.cpp").read_text(encoding="utf-8")
+link_surface = link + link_dispatcher
 link_diagnostics = (firmware / "LinkDiagnostics.cpp").read_text(encoding="utf-8")
 dashboard = (firmware / "Dashboard.cpp").read_text(encoding="utf-8")
 cdc_status = (root / "cdc-status.py").read_text(encoding="utf-8")
@@ -55,15 +57,15 @@ assert "esp_pm_configure" not in power
 assert "esp_wifi_set_ps" in wifi
 assert "WIFI_PS_MIN_MODEM" in wifi
 assert "WIFI_PS_NONE" in portal
-assert "provisioning-diagnostics" in link
-assert "get-provisioning-diagnostics" in link
-assert "clear-provisioning-diagnostics" in link
-assert "power-diagnostics" in link
-assert "get-power-diagnostics" in link
-assert "clear-power-diagnostics" in link
-assert "diagnostics_.powerJson()" in link
-assert "provisioning-start" in link
-assert "provisioning-stop" in link
+assert "provisioning-diagnostics" in link_surface
+assert "get-provisioning-diagnostics" in link_surface
+assert "clear-provisioning-diagnostics" in link_surface
+assert "power-diagnostics" in link_surface
+assert "get-power-diagnostics" in link_surface
+assert "clear-power-diagnostics" in link_surface
+assert "diagnostics_.powerJson()" in link_surface
+assert "provisioning-start" in link_dispatcher
+assert "provisioning-stop" in link_surface
 assert "resetReason" in link_diagnostics
 assert "provisioningStartupPhase" in link_diagnostics
 assert "internalHeapFree" in link_diagnostics

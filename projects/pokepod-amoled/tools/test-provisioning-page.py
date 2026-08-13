@@ -10,6 +10,7 @@ source = (firmware_dir / "ProvisioningPortal.cpp").read_text(encoding="utf-8")
 coordinator = (firmware_dir / "ProvisioningCoordinator.cpp").read_text(encoding="utf-8")
 wifi_source = (firmware_dir / "WifiController.cpp").read_text(encoding="utf-8")
 link_source = (firmware_dir / "PokePodLinkService.cpp").read_text(encoding="utf-8")
+link_dispatcher = (firmware_dir / "LinkCommandDispatcher.cpp").read_text(encoding="utf-8")
 main_source = (firmware_dir / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
@@ -217,9 +218,9 @@ assert "validatingSinceMs_ = millis();" in source[source.index(
 assert "monotonicElapsedAtLeast(nowMs, validatingSinceMs_" in source
 assert "monotonicElapsedOrZero(nowMs, validatingSinceMs_)" in source
 assert "monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)" in source
-assert 'strcmp(operation, "provisioning-start") == 0' in link_source
-assert 'strcmp(operation, "provisioning-stop") == 0' in link_source
-assert "only available over USB" in link_source
+assert 'strcmp(operation, "provisioning-start") == 0' in link_dispatcher
+assert 'strcmp(operation, "provisioning-stop") == 0' in link_dispatcher
+assert "only available over USB" in link_dispatcher
 assert source.index("id='wifi-step'") < source.index("id='tencent-step'")
 for handler_name, next_declaration in (
     ("scanRequest", "void ProvisioningPortal::showPortal()"),

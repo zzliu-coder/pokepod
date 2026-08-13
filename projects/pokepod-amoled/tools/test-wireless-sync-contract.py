@@ -80,33 +80,35 @@ assert main.index("wirelessSync.enforceDeadline(now);") < main.index(
 )
 
 link = read("PokePodLinkService.cpp")
+dispatcher = read("LinkCommandDispatcher.cpp")
 link_recording = read("LinkRecordingSession.cpp")
-assert 'strcmp(operation, "pairing-export") == 0' in link
-assert "transport_ != LinkTransport::usb" in link
-assert "transport_ == LinkTransport::usb" in link
-assert "base64UrlEncode(" in link
-assert '\\"bundle\\"' in link
-assert "wireless-pairing-bundle" not in link
+link_surface = link + dispatcher
+assert 'strcmp(operation, "pairing-export") == 0' in dispatcher
+assert "transport_ != LinkTransport::usb" in dispatcher
+assert "transport_ == LinkTransport::usb" in dispatcher
+assert "base64UrlEncode(" in dispatcher
+assert '\\"bundle\\"' in dispatcher
+assert "wireless-pairing-bundle" not in link_surface
 assert 'strcmp(basename, "audio.m4a") == 0' in read("LinkPolicy.h")
 assert 'strcmp(basename, "audio.wav") == 0' in read("LinkPolicy.h")
-assert 'cJSON_AddStringToObject(item, "sha256",' in link
-assert "manifestItem.sha256.c_str()" in link
-assert "mbedtls_sha256_starts" in link
-assert "mbedtls_sha256_update" in link
-assert "mbedtls_sha256_finish" in link
-assert 'static constexpr char kHex[] = "0123456789abcdef"' in link
-assert "char hex[65] = {}" in link
-assert link.count("transferPermitted()") >= 12
+assert 'cJSON_AddStringToObject(item, "sha256",' in dispatcher
+assert "manifestItem.sha256.c_str()" in dispatcher
+assert "mbedtls_sha256_starts" in dispatcher
+assert "mbedtls_sha256_update" in dispatcher
+assert "mbedtls_sha256_finish" in dispatcher
+assert 'static constexpr char kHex[] = "0123456789abcdef"' in dispatcher
+assert "char hex[65] = {}" in dispatcher
+assert link_surface.count("transferPermitted()") >= 12
 assert "AudioCaptureRuntime *captureRuntime" in read("PokePodLinkService.h")
 assert "recorder_->requestStart(" in link_recording
 assert "recorderOwner);" in link_recording
-assert "RecordingSpaceSnapshot" not in link
-assert "RecorderOperationOwner::linkWifi" in link
-assert "RecorderOperationOwner::linkUsb" in link
+assert "RecordingSpaceSnapshot" not in link_surface
+assert "RecorderOperationOwner::linkWifi" in dispatcher
+assert "RecorderOperationOwner::linkUsb" in dispatcher
 assert "recorder_->pollStart" in link_recording
 assert "captureRuntime_->start(*audio_, captureSessionId, *log_)" in link_recording
-assert "recorder_->start(*log_, id, board_->utcNow())" not in link
-assert "audio_->startCapture(*log_)" not in link
+assert "recorder_->start(*log_, id, board_->utcNow())" not in link_surface
+assert "audio_->startCapture(*log_)" not in link_surface
 assert "captureRuntime_->stop(*log_)" in link_recording
 
 main = read("PokePodApp.cpp")
