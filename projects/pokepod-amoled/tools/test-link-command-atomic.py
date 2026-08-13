@@ -44,15 +44,26 @@ assert "BatchStart::started" in handle
 assert "BatchStart::rejected" in handle
 assert "beginCommandLoad" in handle
 assert "executeCommand" not in CPP
-assert "readText(path, 128U * 1024U)" not in CPP
-# Remaining metadata reads use a bounded 1 KiB buffer and a checked total;
-# they never grow an Arduino String one character at a time while holding SD.
-read_text = body(SERVICE, "String PokePodLinkService::readText(",
-                 "String PokePodLinkService::deviceId(")
-assert "kReadChunkBytes = 1024" in read_text
-assert "file.read(chunk, wanted)" in read_text
-assert "total + static_cast<size_t>(received) > limit" in read_text
-assert "value += static_cast<char>" not in read_text
+assert "readText(" not in COMMANDS
+# Metadata reads own one capped PSRAM slot and advance exactly one <=1 KiB
+# read per poll; no Arduino String reserve/concat path remains.
+read_text = body(SERVICE, "PokePodLinkService::readMetadataStep(",
+                 "void PokePodLinkService::resetMetadataRead(")
+assert "LinkBoundedTextRead::kMaximumBytes" in read_text
+assert "metadataRead_.nextReadBytes()" in read_text
+assert "metadataReadFile_.read(metadataReadBuffer_ + offset, wanted)" in read_text
+assert read_text.count("metadataReadFile_.read(") == 1
+assert ".concat(" not in read_text
+reset_text = body(SERVICE, "void PokePodLinkService::resetMetadataRead(",
+                  "String PokePodLinkService::deviceId(")
+assert "metadataReadFile_.close()" in reset_text
+assert "memset(metadataReadBuffer_" in reset_text
+assert "resetMetadataRead();" in body(
+    (ROOT / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text(),
+    "void PokePodLinkService::disconnect()",
+    "void PokePodLinkService::consumeByte(")
+assert "batchPending_ = BatchPending::metadataRead;\n        return false;" in CPP
+assert "metadataCommit\n        ? startBatchMetadataCommit(batchPlan_, false)" in CPP
 assert "loadStatus(transactionId, owner, state)" in CPP
 assert "startupBatchCandidateInvalid_" in CPP
 assert "mutationRecoveryBlocked_ && !alreadyComplete" in CPP

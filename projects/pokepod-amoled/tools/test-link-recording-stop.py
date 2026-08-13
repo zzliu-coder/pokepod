@@ -108,8 +108,8 @@ assert process.index("admitLinkOperation(requestId)") < process.index("cJSON_Par
 assert process.index("handleImmediate(requestId, root)") < process.rindex(
     "recordingSession_.ownsRequest(requestId)")
 
-poll = TRANSPORT[TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()"):
-                 TRANSPORT.index("void PokePodLinkService::poll(uint32_t nowMs)")]
+poll = TRANSPORT[TRANSPORT.index("bool PokePodLinkService::pollDeferredCleanup("):
+                 TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()")]
 assert "recordingSession_.poll(" in poll
 assert "handleLinkRecordingEvent" in poll
 

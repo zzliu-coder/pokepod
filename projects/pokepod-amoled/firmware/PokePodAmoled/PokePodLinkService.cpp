@@ -33,6 +33,8 @@ namespace {
 constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
 constexpr size_t kLinkPendingControlBytes =
     kLinkHeaderBytes + kLinkMaxControlBytes;
+constexpr size_t kLinkMetadataBufferBytes =
+    LinkBoundedTextRead::kMaximumBytes + 1U;
 constexpr const char *kLinkCommandUploadPart =
     "/PokeCapsule/.system/commands/incoming/upload.part";
 constexpr const char *kLinkStagedUploadPart =
@@ -120,8 +122,13 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
         kLinkPendingControlBytes, sizeof(uint8_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   }
+  if (metadataReadBuffer_ == nullptr) {
+    metadataReadBuffer_ = static_cast<uint8_t *>(heap_caps_calloc(
+        kLinkMetadataBufferBytes, sizeof(uint8_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
   if (payload_ == nullptr || txFrame_ == nullptr ||
-      pendingControlFrame_ == nullptr) {
+      pendingControlFrame_ == nullptr || metadataReadBuffer_ == nullptr) {
     stream_ = nullptr;
     log_->println(
         "{\"event\":\"link_buffer\",\"ok\":false,\"memory\":\"psram\"}");
@@ -130,7 +137,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   log_->printf(
       "{\"event\":\"link_buffer\",\"ok\":true,\"memory\":\"psram\",\"bytes\":%u}\n",
       static_cast<unsigned>(kLinkMaxDataBytes + kLinkTxFrameBytes +
-                            kLinkPendingControlBytes));
+                            kLinkPendingControlBytes +
+                            kLinkMetadataBufferBytes));
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming") ||
       !ensureDirectoryTree(CapsuleBatchJournalStore::kDirectory)) {
@@ -575,39 +583,80 @@ bool PokePodLinkService::validFontFile(const String &path) const {
   return ok;
 }
 
-String PokePodLinkService::readText(const String &path, size_t limit) const {
-  static constexpr size_t kReadChunkBytes = 1024;
-  if (fs_ == nullptr) return String();
-  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      storageOwner(), StorageAccess::read, storageIoTimeout());
-  if (!lease) return String();
-  File file = fs_->open(path, FILE_READ);
-  const size_t bytes = file ? file.size() : 0;
-  if (!file || file.isDirectory() || bytes > limit) {
-    if (file) file.close();
-    return String();
+PokePodLinkService::MetadataReadResult
+PokePodLinkService::readMetadataStep(const String &path, size_t limit,
+                                     const uint8_t *&data, size_t &bytes) {
+  data = nullptr;
+  bytes = 0;
+  if (fs_ == nullptr || metadataReadBuffer_ == nullptr || path.isEmpty() ||
+      limit == 0 || limit > LinkBoundedTextRead::kMaximumBytes) {
+    resetMetadataRead();
+    return MetadataReadResult::failed;
   }
-  String value;
-  if (!value.reserve(bytes + 1)) {
-    file.close();
-    return String();
+  if (!transferPermitted()) {
+    metadataRead_.cancel();
+    resetMetadataRead();
+    return MetadataReadResult::failed;
   }
-  uint8_t chunk[kReadChunkBytes];
-  size_t total = 0;
-  while (total < bytes) {
-    const size_t wanted = std::min(kReadChunkBytes, bytes - total);
-    const int received = file.read(chunk, wanted);
-    if (received <= 0 || static_cast<size_t>(received) > wanted ||
-        total + static_cast<size_t>(received) > limit ||
-        !value.concat(reinterpret_cast<const char *>(chunk),
-                      static_cast<unsigned int>(received))) {
-      file.close();
-      return String();
+  if (metadataRead_.ready()) {
+    if (metadataReadPath_ != path) {
+      resetMetadataRead();
+      return MetadataReadResult::failed;
     }
-    total += static_cast<size_t>(received);
+    data = metadataReadBuffer_;
+    bytes = metadataRead_.bytesRead();
+    return MetadataReadResult::ready;
   }
-  file.close();
-  return value;
+  if (!metadataRead_.active()) {
+    if (!metadataReadPath_.isEmpty() && metadataReadPath_ != path) {
+      resetMetadataRead();
+      return MetadataReadResult::failed;
+    }
+    // Preserve a waiting continuation even when storage arbitration cannot
+    // grant this poll's zero-wait lease.
+    metadataReadPath_ = path;
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 0);
+    if (!lease) return MetadataReadResult::pending;
+    File file = fs_->open(path, FILE_READ);
+    const size_t expected = file ? file.size() : 0;
+    if (!file || file.isDirectory() || !metadataRead_.begin(expected, limit)) {
+      if (file) file.close();
+      resetMetadataRead();
+      return MetadataReadResult::failed;
+    }
+    metadataReadFile_ = file;
+  } else if (metadataReadPath_ != path) {
+    resetMetadataRead();
+    return MetadataReadResult::failed;
+  }
+  StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+      storageOwner(), StorageAccess::read, 0);
+  if (!lease) return MetadataReadResult::pending;
+  const size_t wanted = metadataRead_.nextReadBytes();
+  const size_t offset = metadataRead_.bytesRead();
+  const int received = wanted == 0 ? 0 :
+      metadataReadFile_.read(metadataReadBuffer_ + offset, wanted);
+  if (received <= 0 || !metadataRead_.acceptRead(received)) {
+    resetMetadataRead();
+    return MetadataReadResult::failed;
+  }
+  if (!metadataRead_.ready()) return MetadataReadResult::pending;
+  metadataReadFile_.close();
+  metadataReadBuffer_[metadataRead_.bytesRead()] = 0;
+  data = metadataReadBuffer_;
+  bytes = metadataRead_.bytesRead();
+  return MetadataReadResult::ready;
+}
+
+void PokePodLinkService::resetMetadataRead() {
+  if (metadataReadFile_) metadataReadFile_.close();
+  if (metadataReadBuffer_ != nullptr && metadataRead_.bytesRead() > 0) {
+    memset(metadataReadBuffer_, 0, metadataRead_.bytesRead());
+  }
+  metadataRead_.reset();
+  metadataReadFile_ = File();
+  metadataReadPath_ = "";
 }
 
 String PokePodLinkService::deviceId() const {

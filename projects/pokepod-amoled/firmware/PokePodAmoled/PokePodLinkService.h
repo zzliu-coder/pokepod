@@ -10,6 +10,7 @@
 #include "LinkFrame.h"
 #include "LinkFileTransfer.h"
 #include "LinkCapsuleTransactionGate.h"
+#include "LinkBoundedTextRead.h"
 #include "LinkRecordingSession.h"
 #include "LinkDiagnostics.h"
 #include "LinkPolicy.h"
@@ -116,9 +117,17 @@ class PokePodLinkService : private LinkFileTransferHost {
     persistResult,
     cleanupTree,
     cleanupArtifacts,
+    metadataRead,
   };
   enum class BatchStart : uint8_t { notApplicable, started, rejected };
   enum class CommandLoadState : uint8_t { none, reading, dispatch };
+  enum class BatchReadContinuation : uint8_t {
+    none,
+    importCapsule,
+    importProcessing,
+    metadataCapsule,
+    metadataProcessing,
+  };
 
   class StringByteSource final : public CapsuleTransactionByteSource {
    public:
@@ -148,14 +157,15 @@ class PokePodLinkService : private LinkFileTransferHost {
 
   // LinkTransportSession.cpp owns connection generations, request admission,
   // frame parsing/transmit, terminal response draining and disconnect settlement.
-  void consumeByte(uint8_t value);
+  void consumeByte(uint8_t value, LinkPollPhaseGate *gate = nullptr);
   uint32_t activateConnectionGeneration();
   LinkOperationAdmission admitLinkOperation(uint32_t requestId);
   bool operationOwns(uint32_t requestId) const;
   void cancelLinkOperation(LinkOperationCancelReason reason);
   void advanceLinkOperationSettlement();
   void resetFrame();
-  void processFrame();
+  void processFrame(LinkPollPhaseGate *gate = nullptr);
+  enum class MetadataReadResult : uint8_t { pending, ready, failed };
   void processRequest(uint32_t requestId, const uint8_t *payload, size_t size);
   void processData(uint32_t requestId, uint16_t flags,
                    const uint8_t *payload, size_t size);
@@ -231,6 +241,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool buildBatchMetadata(const StoredCapsuleBatchPlan &plan,
                           String &value, String &message);
   bool startBatchResultPersistence();
+  MetadataReadResult parseMetadataStep(const String &path, void *&root);
+  void clearBatchReadContinuation();
   void applyBatchResultSideEffects();
   bool cleanupBatchArtifacts();
   void finishBatchCommand();
@@ -290,6 +302,7 @@ class PokePodLinkService : private LinkFileTransferHost {
                              bool fullySent) override;
 
   void handleLinkRecordingEvent(const LinkRecordingEvent &event);
+  bool pollDeferredCleanup(LinkPollPhaseGate &gate);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
                      uint32_t expectedBytes, const String &temporaryPath,
@@ -298,7 +311,9 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool ensureDirectoryTree(const String &path);
   bool writeTextAtomic(const String &path, const String &text);
   bool validFontFile(const String &path) const;
-  String readText(const String &path, size_t limit) const;
+  MetadataReadResult readMetadataStep(const String &path, size_t limit,
+                                      const uint8_t *&data, size_t &bytes);
+  void resetMetadataRead();
   String deviceId() const;
   bool foregroundBusy() const;
   bool safeFolder(const char *value, bool allowBuiltIn = true) const;
@@ -410,6 +425,10 @@ class PokePodLinkService : private LinkFileTransferHost {
   LinkCommandExecutor::Work batchWork_{};
   BatchPending batchPending_ = BatchPending::none;
   uint8_t batchPendingStep_ = 0;
+  BatchReadContinuation batchReadContinuation_ =
+      BatchReadContinuation::none;
+  void *batchReadJson_ = nullptr;
+  String batchMetadataFirstPendingValue_;
   size_t batchCleanupIndex_ = 0;
   uint32_t batchRequestId_ = 0;
   String batchCommandPath_;
@@ -436,9 +455,14 @@ class PokePodLinkService : private LinkFileTransferHost {
   // Wi-Fi driver of large contiguous blocks when the provisioning AP starts.
   // The board has mandatory PSRAM, so allocate these long-lived buffers there.
   uint8_t *payload_ = nullptr;
+  uint8_t *metadataReadBuffer_ = nullptr;
+  LinkBoundedTextRead metadataRead_;
+  File metadataReadFile_;
+  String metadataReadPath_;
   uint8_t *txFrame_ = nullptr;
   uint8_t *pendingControlFrame_ = nullptr;
   size_t payloadUsed_ = 0;
+  int16_t deferredRxByte_ = -1;
   uint8_t magicMatched_ = 0;
   bool frameProcessedThisPoll_ = false;
   bool sessionActive_ = false;

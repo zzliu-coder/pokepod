@@ -43,6 +43,10 @@ disconnect = body(
     "void PokePodLinkService::pollDeferredCleanup",
 )
 deferred_cleanup = body(
+    TRANSPORT, "bool PokePodLinkService::pollDeferredCleanup",
+    "void PokePodLinkService::pollDeferredCleanup",
+)
+deferred_cleanup_wrapper = body(
     TRANSPORT, "void PokePodLinkService::pollDeferredCleanup",
     "void PokePodLinkService::poll(uint32_t",
 )
@@ -66,7 +70,9 @@ assert "StorageAccess::read, 0" in cleanup
 assert "if (!lease)" in cleanup
 assert cleanup.index("if (!lease)") < cleanup.index("manifestFile_.close()")
 assert "abortManifest();" in disconnect
-assert "if (manifestCleanupPending_) cleanupManifestStorage()" in deferred_cleanup
+assert "manifestCleanupPending_" in deferred_cleanup
+assert "cleanupManifestStorage()" in deferred_cleanup
+assert "LinkPollPhaseGate gate(" in deferred_cleanup_wrapper
 wireless_service = (ROOT / "firmware/PokePodAmoled/WirelessSyncService.cpp").read_text()
 wireless_poll_start = wireless_service.index("void WirelessSyncService::poll")
 wireless_deadline = wireless_service.index("enforceDeadline(nowMs);", wireless_poll_start)
