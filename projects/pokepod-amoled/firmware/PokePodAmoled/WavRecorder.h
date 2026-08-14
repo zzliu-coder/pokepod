@@ -19,14 +19,20 @@
 #include "RecordingAdmissionPolicy.h"
 #include "RecordingCapacitySource.h"
 #include "RecordingStorageQualification.h"
+#include "RuntimeDiagnosticsCodec.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
+
+class RuntimeDiagnostics;
 
 class WavRecorder {
  public:
   bool begin(fs::FS &fs, RecordingCapacitySource &capacitySource,
              Print &log);
+  void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
+    runtimeDiagnostics_ = &diagnostics;
+  }
   bool start(Print &log, const String &recordingId, const String &createdAt);
   bool start(Print &log, const String &recordingId, const String &createdAt,
              RecorderOperationOwner owner);
@@ -182,6 +188,9 @@ class WavRecorder {
   bool pollBootRecovery(Print &log, uint32_t nowMs);
   bool pollStorage(Print &log, uint32_t nowMs,
                    CapsuleTransactionGate *gate);
+  void recordRuntime(RuntimeDiagnosticStage stage,
+                     RuntimeDiagnosticOutcome outcome,
+                     uint32_t detail0, uint32_t detail1, Print &log);
 
 #if defined(ARDUINO_ARCH_ESP32)
   static void storageTaskThunk(void *context);
@@ -364,6 +373,7 @@ class WavRecorder {
   uint32_t audioMetricsSessionId_ = 0;
   uint32_t audioMetricsGeneration_ = 0;
   RecordingStorageQualification storageQualification_;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
   AudioSessionTelemetry sessionTelemetry_;
   AudioSessionTelemetryProducer captureTelemetryProducer_{};
   uint32_t activeMountGeneration_ = 0;

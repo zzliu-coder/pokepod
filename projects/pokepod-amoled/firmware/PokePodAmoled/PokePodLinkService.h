@@ -50,6 +50,7 @@ class ProvisioningCoordinator;
 class RuntimePowerManager;
 class WirelessSyncPairingProvider;
 class DeviceRebootCoordinator;
+class RuntimeDiagnostics;
 
 class PokePodLinkService : private LinkFileTransferHost {
  public:
@@ -73,7 +74,8 @@ class PokePodLinkService : private LinkFileTransferHost {
              AudioCaptureRuntime *captureRuntime = nullptr,
              AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr,
-             DeviceRebootCoordinator *rebootCoordinator = nullptr);
+             DeviceRebootCoordinator *rebootCoordinator = nullptr,
+             RuntimeDiagnostics *runtimeDiagnostics = nullptr);
   void poll(uint32_t nowMs);
   // Finishes read-only handle cleanup after an immediate transport cancel.
   // This never reads frames or writes responses, so a Wi-Fi service can call

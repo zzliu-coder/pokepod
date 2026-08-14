@@ -3,12 +3,14 @@
 #include <Arduino.h>
 
 #include "ProvisioningStartupPolicy.h"
+#include "RuntimeDiagnosticsCodec.h"
 
 namespace pokepod {
 
 class DeviceConfig;
 class ProvisioningDiagnostics;
 class ProvisioningPortal;
+class RuntimeDiagnostics;
 class WifiController;
 
 class ProvisioningCoordinator {
@@ -16,6 +18,9 @@ class ProvisioningCoordinator {
   bool begin(ProvisioningPortal &portal, WifiController &wifi,
              DeviceConfig &config, ProvisioningDiagnostics &diagnostics,
              Print &log);
+  void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
+    runtimeDiagnostics_ = &diagnostics;
+  }
   bool request(uint32_t nowMs);
   void poll(uint32_t nowMs);
   void stop();
@@ -34,12 +39,16 @@ class ProvisioningCoordinator {
 
  private:
   void resumeNormalWifi();
+  void recordRuntime(RuntimeDiagnosticStage stage,
+                     RuntimeDiagnosticOutcome outcome,
+                     uint32_t detail0, uint32_t detail1);
 
   ProvisioningPortal *portal_ = nullptr;
   WifiController *wifi_ = nullptr;
   DeviceConfig *config_ = nullptr;
   ProvisioningDiagnostics *diagnostics_ = nullptr;
   Print *log_ = nullptr;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
   ProvisioningStartupPolicy startup_;
   bool normalWifiResumed_ = true;
 };

@@ -78,6 +78,22 @@ PokePod 本机“连接手机”页直接显示扫描、连接、验证、保存
 VBUS、音频、同步、配网、UI 动画、自动亮屏或等待超时中的真实阻塞项。确认已保存
 诊断后可用 `--command clear-power-diagnostics` 清空。
 
+录音、手机配网和无线麦克风还会写入一份独立的跨重启运行诊断环形记录。
+它保存最近 12 个阶段快照：阶段开始/完成或失败、关键错误码、内部堆、最大
+连续块、PSRAM、运行时间和重启原因；不保存音频、Wi-Fi 密码、腾讯密钥或请求正文。
+插回 USB 后可读取：
+
+```sh
+./cdc-status.py --command get-runtime-diagnostics
+```
+
+确认记录已导出后可用 `--command clear-runtime-diagnostics` 清空。录音故障重点看
+`recording_storage_reserve`、`recording_capacity`、`recording_probe_*`、
+`recording_metadata` 和 `recording_audio_open`；配网故障重点看
+`provisioning_quiesce_*`、`provisioning_mode_*`、`provisioning_softap_*`；
+“无线麦克风暂时不可用”重点看 `wireless_router_acquire`、
+`wireless_capture_start` 和 `wireless_session_start`。
+
 腾讯请求使用 TLS 证书校验和 TC3-HMAC-SHA256。WAV 以两遍流式方式完成
 签名与 Base64 上传，不在内存中保存完整音频或完整请求体。转写在后台任务中
 运行，屏幕、按键、BLE 和 Link 主循环保持响应；本地录音占用麦克风或文件提交

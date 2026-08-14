@@ -199,6 +199,8 @@ def main() -> int:
                                  "provisioning-start", "provisioning-stop",
                                  "get-power-diagnostics",
                                  "clear-power-diagnostics",
+                                 "get-runtime-diagnostics",
+                                 "clear-runtime-diagnostics",
                                  "get-provisioning-diagnostics",
                                  "clear-provisioning-diagnostics", "reboot"))
     parser.add_argument(

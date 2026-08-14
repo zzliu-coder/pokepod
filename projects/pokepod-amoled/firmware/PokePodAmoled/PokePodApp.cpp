@@ -33,6 +33,7 @@
 #include "PowerDiagnostics.h"
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
+#include "RuntimeDiagnostics.h"
 #include "ServiceQuiescencePolicy.h"
 #include "StorageCoordinator.h"
 #include "TencentWorker.h"
@@ -135,6 +136,7 @@ TencentWorker tencentWorker;
 ProvisioningPortal provisioningPortal;
 ProvisioningDiagnostics provisioningDiagnostics;
 PowerDiagnostics powerDiagnostics;
+RuntimeDiagnostics runtimeDiagnostics;
 ProvisioningCoordinator provisioningCoordinator;
 PsramService<PokePodLinkService> linkService;
 LinkServiceCoordinator linkCoordinator;
@@ -619,23 +621,50 @@ void drawDashboard() {
 bool requestCaptureStop(PendingCaptureStop owner, RecorderStopReason reason,
                         bool forceAbort, bool notifyUser);
 
+void recordWirelessRuntime(RuntimeDiagnosticStage stage,
+                           RuntimeDiagnosticOutcome outcome,
+                           uint32_t detail0, uint32_t detail1) {
+  (void)runtimeDiagnostics.record(RuntimeDiagnosticSubsystem::wirelessVoice,
+                                  stage, outcome, detail0, detail1, usb.log());
+}
+
 bool startWirelessHold() {
+  const uint32_t readiness =
+      (bleVoice.connected() ? 1U : 0U) |
+      (bleVoice.mtuReady() ? 2U : 0U) |
+      (bleVoice.appReady() ? 4U : 0U) |
+      (bleVoice.userEnabled() ? 8U : 0U);
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessAttempt,
+                        RuntimeDiagnosticOutcome::started, readiness,
+                        static_cast<uint32_t>(bleVoice.sessionState()));
   if (storageBootPhase != StorageBootPhase::ready) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
+                          RuntimeDiagnosticOutcome::failure, 1,
+                          static_cast<uint32_t>(storageBootPhase));
     showMessage("本地服务启动中，请稍候");
     drawDashboard();
     return false;
   }
   if (!bleVoice.userEnabled()) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
+                          RuntimeDiagnosticOutcome::failure, 2, readiness);
     showMessage("蓝牙已关闭");
     drawDashboard();
     return false;
   }
   if (!capabilities.allows(kBleVoiceCapabilities)) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
+                          RuntimeDiagnosticOutcome::failure, 3,
+                          capabilities.readyMask());
     showMessage("无线语音服务未就绪");
     drawDashboard();
     return false;
   }
   if (!bleVoice.appReady()) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
+                          RuntimeDiagnosticOutcome::failure, 4,
+                          (static_cast<uint32_t>(bleVoice.mtu()) << 16) |
+                              static_cast<uint32_t>(bleVoice.sessionError()));
     showMessage(bleVoice.connected()
                     ? (bleVoice.mtuReady() ? "等待 Mac 应用"
                                            : "等待蓝牙 MTU")
@@ -644,26 +673,52 @@ bool startWirelessHold() {
     return false;
   }
   if (audio.playing()) audio.stopPlayback(usb.log());
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessRouterAcquire,
+                        RuntimeDiagnosticOutcome::started,
+                        static_cast<uint32_t>(captureRouter.owner()), 0);
   if (!captureRouter.acquire(AudioCaptureOwner::wirelessVoice)) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessRouterAcquire,
+                          RuntimeDiagnosticOutcome::failure,
+                          static_cast<uint32_t>(captureRouter.owner()), 0);
     showMessage("无线麦克风暂时不可用");
     drawDashboard();
     return false;
   }
   uint32_t sessionId = esp_random();
   if (sessionId == 0) sessionId = 1;
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
+                        RuntimeDiagnosticOutcome::started, sessionId, 0);
   if (!captureRuntime.start(audio, sessionId, usb.log())) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
+                          RuntimeDiagnosticOutcome::failure, sessionId,
+                          static_cast<uint32_t>(captureRuntime.incomplete()));
     captureRouter.release(AudioCaptureOwner::wirelessVoice);
     showMessage("无线麦克风暂时不可用");
     drawDashboard();
     return false;
   }
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
+                        RuntimeDiagnosticOutcome::success, sessionId, 0);
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessSessionStart,
+                        RuntimeDiagnosticOutcome::started, sessionId,
+                        static_cast<uint32_t>(bleVoice.mtu()));
   if (!bleVoice.startSession(sessionId, millis(), captureRouter)) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessSessionStart,
+                          RuntimeDiagnosticOutcome::failure, sessionId,
+                          static_cast<uint32_t>(bleVoice.sessionError()));
     (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
                              RecorderStopReason::none, true, false);
     showMessage("无线麦克风暂时不可用");
     drawDashboard();
     return false;
   }
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessSessionStart,
+                        RuntimeDiagnosticOutcome::success, sessionId,
+                        static_cast<uint32_t>(bleVoice.sessionState()));
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessReady,
+                        RuntimeDiagnosticOutcome::success, sessionId,
+                        (static_cast<uint32_t>(bleVoice.mtu()) << 16) |
+                            static_cast<uint32_t>(bleVoice.appReady()));
   wirelessUiActive = true;
   noteUserActivity();
   transientMessage = "";
@@ -778,6 +833,11 @@ bool finishPendingCaptureStop() {
   pendingRecorderStopReason = RecorderStopReason::none;
 
   if (owner == PendingCaptureStop::wirelessVoice) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessStop,
+                          complete ? RuntimeDiagnosticOutcome::success
+                                   : RuntimeDiagnosticOutcome::failure,
+                          static_cast<uint32_t>(dispatch.ok),
+                          static_cast<uint32_t>(captureRuntime.incomplete()));
     if (complete) bleVoice.endSession();
     else bleVoice.abortSession(VoiceSessionError::notifyFailed);
     captureRouter.release(AudioCaptureOwner::wirelessVoice);
@@ -1556,7 +1616,8 @@ bool advanceStorageBoot(uint32_t nowMs) {
           runtimePower, usb.log(), &linkCoordinator,
           LinkTransport::usb, &wirelessSync.get(),
                     nullptr, &provisioningCoordinator, nullptr,
-          &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot);
+          &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot,
+          &runtimeDiagnostics);
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
@@ -1631,6 +1692,9 @@ void setup() {
   bootCaptureTaskStarted = audioStarted &&
       captureRuntime.begin(board.status().variant, Serial);
   bootUsbStarted = usb.begin(board.status().variant);
+  runtimeDiagnostics.begin(usb.log(),
+                          static_cast<uint16_t>(esp_reset_reason()));
+  recorder.bindRuntimeDiagnostics(runtimeDiagnostics);
   runtimePower.begin(usb.log());
   const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();
   powerDiagnostics.begin(
@@ -1662,6 +1726,7 @@ void setup() {
   capabilities.record(DeviceCapability::wifi, bootWifiStarted);
   provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
                                 provisioningDiagnostics, usb.log());
+  provisioningCoordinator.bindRuntimeDiagnostics(runtimeDiagnostics);
   const StartupCapabilityPresentation startup =
       startupCapabilityPresentation(capabilities);
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);

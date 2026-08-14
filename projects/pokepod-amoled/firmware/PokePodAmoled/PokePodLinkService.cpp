@@ -64,7 +64,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                AudioCaptureRuntime *captureRuntime,
                                AudioCaptureDispatcher *captureDispatcher,
                                const CapabilityRegistry *capabilities,
-                               DeviceRebootCoordinator *rebootCoordinator) {
+                               DeviceRebootCoordinator *rebootCoordinator,
+                               RuntimeDiagnostics *runtimeDiagnostics) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
@@ -86,7 +87,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   diagnostics_.bind(board, audio, usb, bleVoice, dashboard, library, recorder,
                     config, wifi, tencent, provisioningDiagnostics,
                     powerDiagnostics, power, provisioningCoordinator,
-                    capabilities);
+                    capabilities, runtimeDiagnostics);
   fileTransfer_.bind(*this);
   coordinator_ = coordinator;
   rebootCoordinator_ = rebootCoordinator;

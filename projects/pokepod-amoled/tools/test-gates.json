@@ -54,7 +54,8 @@
     "test-time-audio-motion-contract.py",
     "test-usb-connection-contract.py",
     "test-wireless-sync-contract.py",
-    "test-wireless-sync-ui-contract.py"
+    "test-wireless-sync-ui-contract.py",
+    "test-runtime-diagnostics.py"
   ],
   "asset": [
     "test-cjk-font.py"

@@ -205,8 +205,8 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
-        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"reboot\"]";
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
+        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"clear-runtime-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
     (void)sendTerminalOrDisconnect(requestId, diagnostics_.statusJson());
@@ -245,6 +245,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     if (foregroundBusy()) sendBusy(requestId);
     else if (diagnostics_.clearPower(*log_)) sendOk(requestId);
     else sendError(requestId, "power diagnostics clear failed");
+  } else if (strcmp(operation, "get-runtime-diagnostics") == 0) {
+    sendJson(requestId, diagnostics_.runtimeJson());
+  } else if (strcmp(operation, "clear-runtime-diagnostics") == 0) {
+    if (foregroundBusy()) sendBusy(requestId);
+    else if (diagnostics_.clearRuntime(*log_)) sendOk(requestId);
+    else sendError(requestId, "runtime diagnostics clear failed");
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
         "\",\"displayName\":\"PokePod\",\"platform\":\"pokepod\",\"manufacturer\":\"PokeCapsule\",\"model\":\"" +

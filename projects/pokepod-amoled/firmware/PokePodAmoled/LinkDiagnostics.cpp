@@ -16,6 +16,7 @@
 #include "ProvisioningCoordinator.h"
 #include "ProvisioningDiagnostics.h"
 #include "RuntimePowerManager.h"
+#include "RuntimeDiagnostics.h"
 #include "TencentWorker.h"
 #include "UsbLinkBridge.h"
 #include "WavRecorder.h"
@@ -119,7 +120,8 @@ void LinkDiagnostics::bind(
     ProvisioningDiagnostics &provisioningDiagnostics,
     PowerDiagnostics &powerDiagnostics, RuntimePowerManager &power,
     ProvisioningCoordinator *provisioningCoordinator,
-    const CapabilityRegistry *capabilities) {
+    const CapabilityRegistry *capabilities,
+    RuntimeDiagnostics *runtimeDiagnostics) {
   board_ = &board;
   audio_ = &audio;
   usb_ = &usb;
@@ -135,6 +137,7 @@ void LinkDiagnostics::bind(
   power_ = &power;
   provisioningCoordinator_ = provisioningCoordinator;
   capabilities_ = capabilities;
+  runtimeDiagnostics_ = runtimeDiagnostics;
 }
 
 String LinkDiagnostics::statusJson() const {
@@ -314,6 +317,9 @@ String LinkDiagnostics::statusJson() const {
                  power.bleModemSleepSupported);
   appendJsonNumber(extra, "provisioningDiagnosticCount",
                    provisioningDiagnostics_->count());
+  appendJsonNumber(extra, "runtimeDiagnosticCount",
+                   runtimeDiagnostics_ == nullptr ? 0
+                                                   : runtimeDiagnostics_->count());
   appendJsonString(extra, "provisioningStartupPhase",
                    provisioningCoordinator_ == nullptr
                        ? "unavailable"
@@ -409,6 +415,13 @@ String LinkDiagnostics::powerJson() const {
   return result;
 }
 
+String LinkDiagnostics::runtimeJson() const {
+  if (runtimeDiagnostics_ == nullptr) {
+    return "{\"status\":\"unavailable\",\"version\":1,\"records\":[]}";
+  }
+  return runtimeDiagnostics_->json();
+}
+
 bool LinkDiagnostics::clearProvisioning(Print &log) const {
   return provisioningDiagnostics_ != nullptr &&
       provisioningDiagnostics_->clear(log);
@@ -416,6 +429,10 @@ bool LinkDiagnostics::clearProvisioning(Print &log) const {
 
 bool LinkDiagnostics::clearPower(Print &log) const {
   return powerDiagnostics_ != nullptr && powerDiagnostics_->clear(log);
+}
+
+bool LinkDiagnostics::clearRuntime(Print &log) const {
+  return runtimeDiagnostics_ != nullptr && runtimeDiagnostics_->clear(log);
 }
 
 }  // namespace pokepod

@@ -1,6 +1,7 @@
 #include "WavRecorder.h"
 
 #include "CapsulePolicy.h"
+#include "RuntimeDiagnostics.h"
 #include "WavFormat.h"
 
 #include <unistd.h>
@@ -94,6 +95,24 @@ bool WavRecorder::begin(fs::FS &fs,
          ensureDirectory(kCapsuleSystem, log);
 }
 
+void WavRecorder::recordRuntime(RuntimeDiagnosticStage stage,
+                                RuntimeDiagnosticOutcome outcome,
+                                uint32_t detail0, uint32_t detail1,
+                                Print &log) {
+#if !defined(ARDUINO)
+  (void)stage;
+  (void)outcome;
+  (void)detail0;
+  (void)detail1;
+  (void)log;
+  return;
+#else
+  if (runtimeDiagnostics_ == nullptr) return;
+  (void)runtimeDiagnostics_->record(RuntimeDiagnosticSubsystem::recording,
+                                    stage, outcome, detail0, detail1, log);
+#endif
+}
+
 bool WavRecorder::start(Print &log, const String &recordingId,
                         const String &createdAt) {
   return startInternal(log, recordingId, createdAt,
@@ -134,9 +153,17 @@ bool WavRecorder::requestStartInternal(Print &log,
                                        const String &recordingId,
                                        const String &createdAt,
                                        RecorderOperationOwner owner) {
+  recordRuntime(RuntimeDiagnosticStage::recordingRequest,
+                RuntimeDiagnosticOutcome::started,
+                static_cast<uint32_t>(owner), recordingId.length(), log);
   if (operationActive() || bootRecoveryFailed_ || file_ ||
       terminalState_.peek().pending()) {
     log.println("{\"event\":\"recording_error\",\"stage\":\"invalid_start\"}");
+    recordRuntime(RuntimeDiagnosticStage::recordingFailure,
+                  RuntimeDiagnosticOutcome::failure,
+                  static_cast<uint32_t>(RecorderFailureStage::invalidStart),
+                  static_cast<uint32_t>(RecorderTerminal::admissionFailure),
+                  log);
     return false;
   }
   resetSessionState();
@@ -329,6 +356,8 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
   }
   const String probePath = directory_ + "/.recording-probe.tmp";
   File probe;
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeOpen,
+                RuntimeDiagnosticOutcome::started, 0, 0, log);
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         StorageOwner::recorder, StorageAccess::mutation,
@@ -340,9 +369,15 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
     probe = fs_->open(probePath, FILE_WRITE);
   }
   if (!probe) {
+    recordRuntime(RuntimeDiagnosticStage::recordingProbeOpen,
+                  RuntimeDiagnosticOutcome::failure,
+                  static_cast<uint32_t>(RecorderFailureStage::storageProbeOpen),
+                  0, log);
     return finishFailure(log, RecorderTerminal::storageFailure,
                          RecorderFailureStage::storageProbeOpen);
   }
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeOpen,
+                RuntimeDiagnosticOutcome::success, 0, 0, log);
 
   RecorderTerminal failureTerminal = RecorderTerminal::none;
   RecorderFailureStage failureStage = RecorderFailureStage::none;
@@ -366,12 +401,23 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
       break;
     }
     const uint64_t primitiveStartedUs = capacitySource_->monotonicMicros();
+    recordRuntime(RuntimeDiagnosticStage::recordingProbeWrite,
+                  RuntimeDiagnosticOutcome::started, index,
+                  kRecordingProbeChunkBytes, log);
     const size_t written = probe.write(recordingProbeBuffer_,
                                        kRecordingProbeChunkBytes);
+    recordRuntime(RuntimeDiagnosticStage::recordingProbeFlush,
+                  RuntimeDiagnosticOutcome::started, index,
+                  static_cast<uint32_t>(written), log);
     probe.flush();
     const uint64_t primitiveFinishedUs = capacitySource_->monotonicMicros();
     probeFinishedUs = primitiveFinishedUs;
     const uint64_t tailUs = primitiveFinishedUs - primitiveStartedUs;
+    recordRuntime(RuntimeDiagnosticStage::recordingProbeFlush,
+                  probe.getWriteError() == 0
+                      ? RuntimeDiagnosticOutcome::success
+                      : RuntimeDiagnosticOutcome::failure,
+                  index, static_cast<uint32_t>(tailUs / 1000ULL), log);
     if (tailUs > maximumTailUs) maximumTailUs = tailUs;
     if (written != kRecordingProbeChunkBytes || probe.getWriteError() != 0) {
       failureTerminal = RecorderTerminal::storageFailure;
@@ -393,6 +439,8 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
   }
 
   bool cleanupOk = false;
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeClose,
+                RuntimeDiagnosticOutcome::started, 0, 0, log);
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
         StorageOwner::recorder, StorageAccess::mutation,
@@ -405,6 +453,14 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
       cleanupOk = errorBefore == 0 && errorAfter == 0 && removed;
     }
   }
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeClose,
+                cleanupOk ? RuntimeDiagnosticOutcome::success
+                          : RuntimeDiagnosticOutcome::failure,
+                cleanupOk ? 0U : 1U, 0, log);
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeRemove,
+                cleanupOk ? RuntimeDiagnosticOutcome::success
+                          : RuntimeDiagnosticOutcome::failure,
+                cleanupOk ? 0U : 1U, 0, log);
   if (!cleanupOk && failureStage == RecorderFailureStage::none) {
     failureTerminal = RecorderTerminal::storageFailure;
     failureStage = RecorderFailureStage::storageProbeCleanup;
@@ -434,13 +490,22 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
 
 bool WavRecorder::startStorageSession(Print &log) {
   consumeStorageQualificationInvalidations();
+  recordRuntime(RuntimeDiagnosticStage::recordingStorageReserve,
+                RuntimeDiagnosticOutcome::started, 0, 0, log);
   storageReservation_ = StorageCoordinator::instance().reserve(
       StorageOwner::recorder, StorageAccess::mutation,
       storageReservationTimeoutMs());
   if (!storageReservation_) {
+    recordRuntime(RuntimeDiagnosticStage::recordingStorageReserve,
+                  RuntimeDiagnosticOutcome::failure,
+                  static_cast<uint32_t>(RecorderFailureStage::storageBusy), 0,
+                  log);
     return finishFailure(log, RecorderTerminal::storageFailure,
                          RecorderFailureStage::storageBusy);
   }
+  recordRuntime(RuntimeDiagnosticStage::recordingStorageReserve,
+                RuntimeDiagnosticOutcome::success,
+                static_cast<uint32_t>(storageReservation_.owner()), 0, log);
   if (storageStartCancelled()) {
     return finishFailure(log, RecorderTerminal::cancelled,
                          RecorderFailureStage::storageBusy);
@@ -449,16 +514,27 @@ bool WavRecorder::startStorageSession(Print &log) {
   // Capacity is read exactly once, inside both ownership layers, immediately
   // before staging creation. App and Link never obtain a stale snapshot.
   RecordingSpaceSnapshot space{};
+  recordRuntime(RuntimeDiagnosticStage::recordingCapacity,
+                RuntimeDiagnosticOutcome::started, 0, 0, log);
   {
     StorageIoLease capacityIo = StorageCoordinator::instance().acquireIo(
         StorageOwner::recorder, StorageAccess::mutation,
         storageIoTimeoutMs());
     if (!capacityIo) {
+      recordRuntime(RuntimeDiagnosticStage::recordingCapacity,
+                    RuntimeDiagnosticOutcome::failure,
+                    static_cast<uint32_t>(RecorderFailureStage::storageBusy), 0,
+                    log);
       return finishFailure(log, RecorderTerminal::storageFailure,
                            RecorderFailureStage::storageBusy);
     }
     space = capacitySource_->query();
   }
+  recordRuntime(RuntimeDiagnosticStage::recordingCapacity,
+                RuntimeDiagnosticOutcome::success,
+                static_cast<uint32_t>((space.totalBytes - space.usedBytes) /
+                                      1024ULL),
+                static_cast<uint32_t>(space.totalBytes / 1024ULL), log);
   const RecordingAdmission admission = evaluateRecordingAdmission(space);
   if (!admission.allowed()) {
     RecorderFailureStage stage = RecorderFailureStage::insufficientSpace;
@@ -540,9 +616,15 @@ bool WavRecorder::startStorageSession(Print &log) {
                          RecorderFailureStage::recoveryCheckpoint);
   }
   if (!writeProcessingMetadata(log, "recording", 1, nullptr, nullptr)) {
+    recordRuntime(RuntimeDiagnosticStage::recordingMetadata,
+                  RuntimeDiagnosticOutcome::failure,
+                  static_cast<uint32_t>(RecorderFailureStage::initialMetadata),
+                  0, log);
     return finishFailure(log, RecorderTerminal::metadataFailure,
                          RecorderFailureStage::initialMetadata);
   }
+  recordRuntime(RuntimeDiagnosticStage::recordingMetadata,
+                RuntimeDiagnosticOutcome::success, 0, 0, log);
   if (storageStartCancelled()) {
     return finishFailure(log, RecorderTerminal::cancelled,
                          RecorderFailureStage::initialMetadata);
@@ -556,9 +638,15 @@ bool WavRecorder::startStorageSession(Print &log) {
   }
   file_ = fs_->open(partialPath_, FILE_WRITE);
   if (!file_) {
+    recordRuntime(RuntimeDiagnosticStage::recordingAudioOpen,
+                  RuntimeDiagnosticOutcome::failure,
+                  static_cast<uint32_t>(RecorderFailureStage::openAudio), 0,
+                  log);
     return finishFailure(log, RecorderTerminal::storageFailure,
                          RecorderFailureStage::openAudio);
   }
+  recordRuntime(RuntimeDiagnosticStage::recordingAudioOpen,
+                RuntimeDiagnosticOutcome::success, 0, 0, log);
   if (!writeHeader(0)) {
     return finishFailure(log, RecorderTerminal::headerFailure,
                          RecorderFailureStage::initialHeader);
@@ -573,6 +661,9 @@ bool WavRecorder::startStorageSession(Print &log) {
                          RecorderFailureStage::recoveryCheckpoint);
   }
   recording_ = true;
+  recordRuntime(RuntimeDiagnosticStage::recordingStarted,
+                RuntimeDiagnosticOutcome::success, dataBytes_,
+                activeMountGeneration_, log);
   updateRecorderTelemetry(true);
   log.printf(
       "{\"event\":\"recording_started\",\"id\":\"%s\","
@@ -1595,7 +1686,10 @@ void WavRecorder::resetSessionState() {
 
 bool WavRecorder::finishFailure(Print &log, RecorderTerminal terminal,
                                 RecorderFailureStage stage) {
-  (void)log;
+  recordRuntime(RuntimeDiagnosticStage::recordingFailure,
+                RuntimeDiagnosticOutcome::failure,
+                static_cast<uint32_t>(stage), static_cast<uint32_t>(terminal),
+                log);
   recording_ = false;
   automaticStopRequested_ = false;
   automaticStopReason_ = RecorderStopReason::none;
