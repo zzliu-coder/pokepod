@@ -97,6 +97,7 @@ passkey_handler = service[
 assert "passkey_ = passkey" not in passkey_handler
 assert "ble_voice_stale_passkey_ignored" in passkey_handler
 assert "ble_voice_handshake_timeout_disconnect" in service
+assert "appHandshake_.connected(nowMs);" in service
 handshake_timeout = service[
     service.index("if (connected_ && appHandshake_.requestDisconnect("):
     service.index("if (controlNotifyPending_", service.index(

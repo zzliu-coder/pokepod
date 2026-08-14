@@ -303,6 +303,7 @@ touch_before_portal = main_source[
     full_portal_poll
 ]
 assert "pollTouch();" in touch_before_portal
+assert portal_loop not in touch_before_portal
 assert "BoundedProvisioningWebServer" in portal_header
 assert "_currentClient.setTimeout(kIoSliceMs);" in source
 bounded_server = source[

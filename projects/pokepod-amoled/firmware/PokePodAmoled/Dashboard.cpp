@@ -796,7 +796,7 @@ void Dashboard::drawDevice(const DashboardView &view) {
     voiceDetail = "正在断开 Mac";
   } else if (view.bleVoiceConnected) {
     voiceDetail = view.bleVoiceMtu < kBleVoiceMinimumMtu
-        ? String("等待蓝牙 MTU") + String(view.bleVoiceMtu)
+        ? String("等待蓝牙 MTU · ") + String(view.bleVoiceMtu)
         : String("等待 Mac 应用");
   } else {
     voiceDetail = view.bleVoiceBonded ? "等待 Mac" : "轻触配对";

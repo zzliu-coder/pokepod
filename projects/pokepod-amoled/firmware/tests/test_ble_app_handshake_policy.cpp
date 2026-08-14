@@ -42,5 +42,13 @@ int main() {
                                  false));
   assert(wrap.requestDisconnect(start + BleAppHandshakePolicy::kTimeoutMs,
                                 false));
+
+  BleAppHandshakePolicy zeroTimestamp;
+  zeroTimestamp.connected(UINT32_MAX - BleAppHandshakePolicy::kTimeoutMs + 1);
+  assert(zeroTimestamp.requestDisconnect(0, false));
+  assert(!zeroTimestamp.requestDisconnect(
+      BleAppHandshakePolicy::kRetryMs - 1, false));
+  assert(zeroTimestamp.requestDisconnect(BleAppHandshakePolicy::kRetryMs,
+                                         false));
   return 0;
 }

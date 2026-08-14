@@ -15,6 +15,7 @@ class BleAppHandshakePolicy {
     ready_ = false;
     connectedAtMs_ = nowMs;
     lastDisconnectRequestAtMs_ = 0;
+    disconnectRequested_ = false;
     disconnectStartedAtMs_ = 0;
     disconnectPending_ = false;
     hardFailed_ = false;
@@ -29,6 +30,7 @@ class BleAppHandshakePolicy {
     ready_ = false;
     connectedAtMs_ = 0;
     lastDisconnectRequestAtMs_ = 0;
+    disconnectRequested_ = false;
     disconnectStartedAtMs_ = 0;
     disconnectPending_ = false;
     hardFailed_ = false;
@@ -50,10 +52,11 @@ class BleAppHandshakePolicy {
       hardFailed_ = true;
       return false;
     }
-    if (lastDisconnectRequestAtMs_ != 0 &&
+    if (disconnectRequested_ &&
         nowMs - lastDisconnectRequestAtMs_ < kRetryMs) {
       return false;
     }
+    disconnectRequested_ = true;
     lastDisconnectRequestAtMs_ = nowMs;
     return true;
   }
@@ -63,6 +66,7 @@ class BleAppHandshakePolicy {
   bool ready_ = false;
   uint32_t connectedAtMs_ = 0;
   uint32_t lastDisconnectRequestAtMs_ = 0;
+  bool disconnectRequested_ = false;
   uint32_t disconnectStartedAtMs_ = 0;
   bool disconnectPending_ = false;
   bool hardFailed_ = false;

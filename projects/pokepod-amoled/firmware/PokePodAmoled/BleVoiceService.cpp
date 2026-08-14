@@ -543,7 +543,7 @@ void BleVoiceService::processCallbackEvent(
     case BleVoiceCallbackEventType::connect:
       processConnect(event.connectionId, event.connectionGeneration,
                      event.peerAddressValid ? event.peerAddress : nullptr,
-                     event.flag);
+                     event.flag, eventAtMs);
       break;
     case BleVoiceCallbackEventType::disconnect:
       processDisconnect(event.connectionId,
@@ -894,7 +894,8 @@ void BleVoiceService::handleConnect(uint16_t connectionId,
 void BleVoiceService::processConnect(uint16_t connectionId,
                                      uint32_t connectionGeneration,
                                      const uint8_t *peerAddress,
-                                     bool peerBonded) {
+                                     bool peerBonded,
+                                     uint32_t nowMs) {
   if (!enablePolicy_.acceptsNewWork() || callbackOverflow_.active()) {
     if (server_ != nullptr) server_->disconnect(connectionId);
     return;
@@ -918,7 +919,7 @@ void BleVoiceService::processConnect(uint16_t connectionId,
   appReady_ = false;
   connectionId_ = connectionId;
   connectionGeneration_ = connectionGeneration;
-  appHandshake_.connected(millis());
+  appHandshake_.connected(nowMs);
   appHandshakeRecoveryRestartClaimed_ = false;
   connectionPowerMode_ = BleConnectionPowerMode::voice;
   requestConnectionPowerMode(BleConnectionPowerMode::idle);
@@ -930,7 +931,7 @@ void BleVoiceService::processConnect(uint16_t connectionId,
   }
   peerPolicy_.connected(peerBonded || isBondedPeer(peerAddress));
   mtu_ = 23;
-  refreshCallbackSnapshot(millis());
+  refreshCallbackSnapshot(nowMs);
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_connected\"}");
 }
 

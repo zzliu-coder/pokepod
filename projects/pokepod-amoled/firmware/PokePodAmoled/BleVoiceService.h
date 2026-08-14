@@ -169,7 +169,8 @@ class BleVoiceService {
   void processCallbackEvent(const BleVoiceCallbackEvent &event,
                             uint32_t nowMs);
   void processConnect(uint16_t connectionId, uint32_t connectionGeneration,
-                      const uint8_t *peerAddress, bool peerBonded);
+                      const uint8_t *peerAddress, bool peerBonded,
+                      uint32_t nowMs);
   void processDisconnect(uint16_t connectionId,
                          uint32_t connectionGeneration, uint32_t nowMs);
   void processMtu(uint16_t connectionId, uint32_t connectionGeneration,
