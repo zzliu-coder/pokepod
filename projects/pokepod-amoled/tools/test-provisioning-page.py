@@ -347,10 +347,23 @@ assert "WiFi.mode(WIFI_OFF)" not in quiesce_handler
 assert "WiFi.status()" not in start_handler
 portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
-assert "bootUsbLinkStarted = board.sdReady() && linkService.begin(" in main_source
-assert "bootWifiSyncStarted = board.sdReady() && wirelessSync.begin(" in main_source
+assert "bootUsbLinkStarted = board.sdReady() && linkService->begin(" in main_source
+assert "bootWifiSyncStarted = board.sdReady() && wirelessSync->begin(" in main_source
 assert "if (bootUsbLinkStarted && board.sdReady())" in main_source
 assert "if (bootWifiSyncStarted && board.sdReady())" in main_source
+for service_type, service_name in (
+    ("CapsuleLibrary", "capsuleLibrary"),
+    ("CapsuleOperationService", "capsuleOperations"),
+    ("PokePodLinkService", "linkService"),
+    ("WirelessSyncService", "wirelessSync"),
+):
+    assert f"PsramService<{service_type}> {service_name};" in main_source
+    assert f'{service_name}.allocate("' in main_source
+assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in main_source
+assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in main_source
+assert main_source.index("serviceObjectsAllocated") < main_source.index(
+    "bleVoice.begin("
+)
 full_portal_poll = main_source.rindex(portal_loop)
 assert full_portal_poll < main_source.index("wifi.loop(now", full_portal_poll)
 network_section = main_source[

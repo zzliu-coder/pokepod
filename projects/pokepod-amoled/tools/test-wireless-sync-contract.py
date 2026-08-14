@@ -85,9 +85,9 @@ assert "draining" not in window
 assert "atomicTransactionActive" not in window
 assert "deadlineReached" in window
 main = read("PokePodApp.cpp")
-assert main.index("wirelessSync.enforceDeadline(now);") < main.index(
+assert main.index("wirelessSync->enforceDeadline(now);") < main.index(
     "if (bootUsbLinkStarted && board.sdReady() && "
-    "linkService.receivingBinary())"
+    "linkService->receivingBinary())"
 )
 
 link = read("PokePodLinkService.cpp")
@@ -123,7 +123,7 @@ assert "audio_->startCapture(*log_)" not in link_surface
 assert "captureRuntime_->stop(*log_)" in link_recording
 
 main = read("PokePodApp.cpp")
-assert "LinkTransport::usb, &wirelessSync,\n                    nullptr" in main
+assert "LinkTransport::usb, &wirelessSync.get(),\n                    nullptr" in main
 
 identity = read("WirelessSyncIdentity.cpp")
 assert "rotationPolicy_.shouldRotate(rotate" in identity

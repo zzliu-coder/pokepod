@@ -23,7 +23,7 @@ close_guard = re.search(
     r"\(\(lastUsbHostConnected && !usbHostConnected\) \|\| "
     r"usbHostSessionClosed\)\) \{\s*"
     r"usb\.discardHostSessionBuffers\(\);\s*"
-    r"linkService\.disconnect\(\);",
+    r"linkService->disconnect\(\);",
     app,
 )
 assert close_guard is not None

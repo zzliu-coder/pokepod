@@ -5,6 +5,7 @@
 #include <esp_sleep.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <new>
 
 #include "AudioPipeline.h"
 #include "AudioCaptureRuntime.h"
@@ -48,6 +49,51 @@ using namespace pokepod;
 
 namespace {
 
+// These services carry large fixed workspaces but only run from cooperative
+// application/storage tasks. Keep their objects out of DMA-capable internal
+// RAM so the Wi-Fi and BLE drivers retain enough contiguous internal heap to
+// coexist. The board requires OPI PSRAM; the internal fallback keeps boot
+// diagnostics available on a degraded board instead of dereferencing null.
+template <typename T>
+class PsramService {
+ public:
+  bool allocate(const char *name, Print &log) {
+    if (instance_ != nullptr) return external_;
+    void *memory = heap_caps_malloc(
+        sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    external_ = memory != nullptr;
+    if (memory == nullptr) {
+      memory = heap_caps_malloc(
+          sizeof(T), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (memory == nullptr) {
+      log.printf(
+          "{\"event\":\"service_allocation\",\"service\":\"%s\","
+          "\"ok\":false,\"bytes\":%u}\n",
+          name, static_cast<unsigned>(sizeof(T)));
+      return false;
+    }
+    instance_ = new (memory) T();
+    log.printf(
+        "{\"event\":\"service_allocation\",\"service\":\"%s\","
+        "\"ok\":true,\"bytes\":%u,\"memory\":\"%s\"}\n",
+        name, static_cast<unsigned>(sizeof(T)),
+        external_ ? "psram" : "internal");
+    return true;
+  }
+
+  T *operator->() { return instance_; }
+  const T *operator->() const { return instance_; }
+  T &get() { return *instance_; }
+  const T &get() const { return *instance_; }
+  bool ready() const { return instance_ != nullptr; }
+  bool external() const { return external_; }
+
+ private:
+  T *instance_ = nullptr;
+  bool external_ = false;
+};
+
 class SdMmcRecordingCapacitySource final : public RecordingCapacitySource {
  public:
   explicit SdMmcRecordingCapacitySource(const BoardServices &board)
@@ -79,8 +125,8 @@ AudioCaptureDispatcher captureDispatcher;
 UsbLinkBridge usb;
 BleVoiceService bleVoice;
 WavRecorder recorder;
-CapsuleLibrary capsuleLibrary;
-CapsuleOperationService capsuleOperations;
+PsramService<CapsuleLibrary> capsuleLibrary;
+PsramService<CapsuleOperationService> capsuleOperations;
 Dashboard dashboard;
 ButtonDebouncer bootButton;
 DeviceConfig deviceConfig;
@@ -90,11 +136,11 @@ ProvisioningPortal provisioningPortal;
 ProvisioningDiagnostics provisioningDiagnostics;
 PowerDiagnostics powerDiagnostics;
 ProvisioningCoordinator provisioningCoordinator;
-PokePodLinkService linkService;
+PsramService<PokePodLinkService> linkService;
 LinkServiceCoordinator linkCoordinator;
 DeviceRebootCoordinator deviceReboot;
 WirelessSyncIdentity wirelessSyncIdentity;
-WirelessSyncService wirelessSync;
+PsramService<WirelessSyncService> wirelessSync;
 RaiseToWakePolicy raiseToWake;
 RuntimePowerManager runtimePower;
 AutoScreenOffPolicy autoScreenOff;
@@ -253,11 +299,11 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
       recorder.operationActive() ||
       audio.playing() || captureRuntime.running() ||
       audio.playbackCleanupPending();
-  const bool linkLeaseActive = linkService.receivingBinary() ||
-      linkService.maintenanceActive() || wirelessSync.linkBusy() ||
-      wirelessSync.openWindow() || capsuleLibrary.startupActive() ||
-      capsuleLibrary.scanActive() ||
-      capsuleLibrary.scanRequested() || capsuleOperations.sleepBlocker();
+  const bool linkLeaseActive = linkService->receivingBinary() ||
+      linkService->maintenanceActive() || wirelessSync->linkBusy() ||
+      wirelessSync->openWindow() || capsuleLibrary->startupActive() ||
+      capsuleLibrary->scanActive() ||
+      capsuleLibrary->scanRequested() || capsuleOperations->sleepBlocker();
   const PowerFacts facts = {
       usb.tinyUsbMounted(),
       usb.cdcSessionActive(),
@@ -272,7 +318,7 @@ PowerInputs currentPowerInputs(uint32_t nowMs = millis()) {
       StorageCoordinator::instance().readActive(),
   };
   input = powerInputsWithFacts(input, facts);
-  input.networkBusy = tencentWorker.working() || wirelessSync.linkBusy() ||
+  input.networkBusy = tencentWorker.working() || wirelessSync->linkBusy() ||
       wifi.phase() == WifiPhase::connecting;
   input.provisioning = provisioningCoordinator.visible();
   input.uiAnimating = dashboard.scrollActive() ||
@@ -403,7 +449,7 @@ void showMessage(const String &message, uint32_t durationMs = 1800) {
 
 String localCapsuleStatusMessage() {
   if (!board.sdReady()) return "SD 卡不可用";
-  if (capsuleOperations.mutationCapabilityBlocked()) {
+  if (capsuleOperations->mutationCapabilityBlocked()) {
     return "恢复记录失败 · 连接 Mac";
   }
   if (storageBootPhase == StorageBootPhase::localRecovery) {
@@ -413,10 +459,10 @@ String localCapsuleStatusMessage() {
     return "正在启动录音存储";
   }
   if (storageBootPhase == StorageBootPhase::library ||
-      capsuleLibrary.startupActive()) {
+      capsuleLibrary->startupActive()) {
     return "正在恢复胶囊目录";
   }
-  if (capsuleLibrary.startupBlocked()) return "胶囊目录恢复失败";
+  if (capsuleLibrary->startupBlocked()) return "胶囊目录恢复失败";
   if (!capabilities.ready(DeviceCapability::capsuleLibrary)) {
     return "胶囊目录不可用";
   }
@@ -438,8 +484,8 @@ bool submitLocalCapsuleOperation(
     CapsuleOperationAction action, const std::vector<String> &ids,
     LocalOperationPresentation presentation,
     const String &changedAt = String()) {
-  if (!capsuleOperations.submit(action, ids, changedAt)) {
-    showMessage(capsuleOperations.mutationCapabilityBlocked()
+  if (!capsuleOperations->submit(action, ids, changedAt)) {
+    showMessage(capsuleOperations->mutationCapabilityBlocked()
                     ? "本地操作恢复失败，请连接 Mac"
                     : "本地操作忙，请稍后再试");
     return false;
@@ -463,7 +509,7 @@ void restoreRecentTrash() {
 
 void consumeLocalOperationOutcome() {
   CapsuleOperationOutcome outcome;
-  if (!capsuleOperations.takeOutcome(outcome)) return;
+  if (!capsuleOperations->takeOutcome(outcome)) return;
   const LocalOperationPresentation presentation = localOperationPresentation;
   localOperationPresentation = LocalOperationPresentation::none;
   if (outcome.committed) {
@@ -502,7 +548,7 @@ void drawDashboard() {
   view.board = &board.status();
   view.capsuleLibraryReady =
       capabilities.ready(DeviceCapability::capsuleLibrary);
-  view.library = view.capsuleLibraryReady ? &capsuleLibrary : nullptr;
+  view.library = view.capsuleLibraryReady ? &capsuleLibrary.get() : nullptr;
   view.settings = &deviceConfig.settings();
   view.audioReady = audio.ready();
   view.localCapsulesReady = capabilities.allows(kRecordingCapabilities);
@@ -533,19 +579,19 @@ void drawDashboard() {
   view.bleVoiceReadyTimeouts = bleQuality.readyTimeouts;
   view.bleVoiceStopAckTimeouts = bleQuality.stopAckTimeouts;
   view.bleVoiceStreamTimeouts = bleQuality.streamTimeouts;
-  view.wifiSyncOpen = wirelessSync.openWindow();
-  view.wifiSyncSecureReady = wirelessSync.secureReady();
-  view.wifiSyncPaired = wirelessSync.paired();
-  view.wifiSyncNetworkConnected = wirelessSync.networkConnected();
-  view.wifiSyncListener = wirelessSync.listenerActive();
-  view.wifiSyncBonjour = wirelessSync.bonjourActive();
-  view.wifiSyncClient = wirelessSync.clientConnected();
-  view.wifiSyncAuthenticated = wirelessSync.authenticated();
-  view.wifiSyncBusy = wirelessSync.linkBusy();
-  view.wifiSyncCompleted = wirelessSync.completed();
-  view.wifiSyncRemainingSeconds = wirelessSync.remainingSeconds(now);
-  view.wifiSyncLastCompletedAtMs = wirelessSync.lastCompletedAtMs();
-  view.wifiSyncLastError = wirelessSync.lastError();
+  view.wifiSyncOpen = wirelessSync->openWindow();
+  view.wifiSyncSecureReady = wirelessSync->secureReady();
+  view.wifiSyncPaired = wirelessSync->paired();
+  view.wifiSyncNetworkConnected = wirelessSync->networkConnected();
+  view.wifiSyncListener = wirelessSync->listenerActive();
+  view.wifiSyncBonjour = wirelessSync->bonjourActive();
+  view.wifiSyncClient = wirelessSync->clientConnected();
+  view.wifiSyncAuthenticated = wirelessSync->authenticated();
+  view.wifiSyncBusy = wirelessSync->linkBusy();
+  view.wifiSyncCompleted = wirelessSync->completed();
+  view.wifiSyncRemainingSeconds = wirelessSync->remainingSeconds(now);
+  view.wifiSyncLastCompletedAtMs = wirelessSync->lastCompletedAtMs();
+  view.wifiSyncLastError = wirelessSync->lastError();
   view.wirelessHolding = wirelessUiActive;
   view.recording = recorder.recording();
   view.transcribing = tencentWorker.working();
@@ -838,12 +884,12 @@ bool consumeRecorderTerminal(bool notifyUser) {
   bool indexed = completed;
   bool refreshQueued = false;
   if (completed) {
-    if (!capsuleLibrary.scanActive() && !capsuleLibrary.scanRequested()) {
-      indexed = capsuleLibrary.includeInboxCapsule(recorder.capsuleId());
+    if (!capsuleLibrary->scanActive() && !capsuleLibrary->scanRequested()) {
+      indexed = capsuleLibrary->includeInboxCapsule(recorder.capsuleId());
     } else {
       indexed = false;
     }
-    if (!indexed) refreshQueued = capsuleLibrary.requestScan();
+    if (!indexed) refreshQueued = capsuleLibrary->requestScan();
   }
   if (notifyUser) {
     const char *message = "录音失败，内容未提交";
@@ -973,7 +1019,7 @@ void emitStatus() {
       wifi.phaseName(), static_cast<long>(wifi.rssi()),
       wifi.radioOn() ? "true" : "false",
       wifi.powerSaveEnabled() ? "true" : "false",
-      static_cast<unsigned>(capsuleLibrary.pendingCount()),
+      static_cast<unsigned>(capsuleLibrary->pendingCount()),
       deviceConfig.hasTencent() ? "true" : "false",
       tencentWorker.working() ? "true" : "false",
       powerModeName(power.mode), power.cpuMhz,
@@ -997,15 +1043,15 @@ void emitStatus() {
       static_cast<unsigned>(provisioningDiagnostics.count()));
   usb.log().printf(
       "{\"event\":\"wifi_sync_status\",\"window\":%s,\"phase\":\"%s\",\"secure\":%s,\"listener\":%s,\"bonjour\":%s,\"client\":%s,\"authenticated\":%s,\"remaining_seconds\":%lu,\"last_error\":\"%s\"}\n",
-      wirelessSync.openWindow() ? "true" : "false",
-      wirelessSyncWindowPhaseName(wirelessSync.phase()),
-      wirelessSync.secureReady() ? "true" : "false",
-      wirelessSync.listenerActive() ? "true" : "false",
-      wirelessSync.bonjourActive() ? "true" : "false",
-      wirelessSync.clientConnected() ? "true" : "false",
-      wirelessSync.authenticated() ? "true" : "false",
-      static_cast<unsigned long>(wirelessSync.remainingSeconds(millis())),
-      wirelessSync.lastError());
+      wirelessSync->openWindow() ? "true" : "false",
+      wirelessSyncWindowPhaseName(wirelessSync->phase()),
+      wirelessSync->secureReady() ? "true" : "false",
+      wirelessSync->listenerActive() ? "true" : "false",
+      wirelessSync->bonjourActive() ? "true" : "false",
+      wirelessSync->clientConnected() ? "true" : "false",
+      wirelessSync->authenticated() ? "true" : "false",
+      static_cast<unsigned long>(wirelessSync->remainingSeconds(millis())),
+      wirelessSync->lastError());
 }
 
 void pollTouch() {
@@ -1047,10 +1093,11 @@ void pollTouch() {
         touchGesture.verticalSwipe() &&
         capabilities.allows(kCapsuleBrowsingCapabilities)) {
       touchVerticalScrolling = dashboard.beginVerticalScroll(
-          touchGesture.startY, touchGesture.startedAtMs, capsuleLibrary);
+          touchGesture.startY, touchGesture.startedAtMs,
+          capsuleLibrary.get());
     }
     if (touchVerticalScrolling) {
-      if (dashboard.updateVerticalScroll(y, now, capsuleLibrary)) {
+      if (dashboard.updateVerticalScroll(y, now, capsuleLibrary.get())) {
         noteUserActivity(now);
         scrollRedrawPending = true;
       }
@@ -1070,7 +1117,7 @@ void pollTouch() {
                    CapsuleBrowserState::kLongPressMs) {
       touchCapsuleSelectionAttempted = true;
       if (!dashboard.beginCapsuleSelectionAt(touchGesture.startY,
-                                             capsuleLibrary)) {
+                                             capsuleLibrary.get())) {
         showMessage("转写中或版本只读，暂时不能选择");
       }
       drawDashboard();
@@ -1129,11 +1176,12 @@ void pollTouch() {
     else if (action == UiAction::wechatVoice) return;
     else if (action == UiAction::openCapsule) {
       if (dashboard.capsuleSelectionMode()) {
-        if (!dashboard.toggleCapsuleSelectionAt(startY, capsuleLibrary)) {
+        if (!dashboard.toggleCapsuleSelectionAt(
+                startY, capsuleLibrary.get())) {
           showMessage("转写中或版本只读，暂时不能选择");
         }
       } else {
-        dashboard.openCapsuleAt(startY, capsuleLibrary);
+        dashboard.openCapsuleAt(startY, capsuleLibrary.get());
       }
       drawDashboard();
     } else if (action == UiAction::back) {
@@ -1153,7 +1201,7 @@ void pollTouch() {
         return;
       }
       if (wifiUiSwitchOn(wifi.phase())) {
-        if (wirelessSync.openWindow()) wirelessSync.close();
+        if (wirelessSync->openWindow()) wirelessSync->close();
         if (deviceConfig.setWifiEnabled(false, usb.log())) {
           wifi.configurationChanged();
           showMessage("Wi-Fi 已关闭");
@@ -1251,15 +1299,15 @@ void pollTouch() {
         drawDashboard();
         return;
       }
-      if (computerSyncEntryDecision(wirelessSync.openWindow()) ==
+      if (computerSyncEntryDecision(wirelessSync->openWindow()) ==
           ComputerSyncEntryDecision::openAndNavigate) {
-        wirelessSync.open(now);
+        wirelessSync->open(now);
       }
       dashboard.openComputerSync();
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::closeComputerSync) {
-      if (wirelessSync.openWindow()) wirelessSync.close();
+      if (wirelessSync->openWindow()) wirelessSync->close();
       dashboard.back();
       showMessage("电脑同步已关闭");
       dashboard.invalidate();
@@ -1270,7 +1318,7 @@ void pollTouch() {
         drawDashboard();
         return;
       }
-      if (wirelessSync.openWindow()) wirelessSync.close();
+      if (wirelessSync->openWindow()) wirelessSync->close();
       if (provisioningCoordinator.request(now)) {
         showMessage("正在准备配网热点");
       } else {
@@ -1289,7 +1337,7 @@ void pollTouch() {
       dashboard.openScopePicker();
       drawDashboard();
     } else if (capsuleScopeIndexForAction(action) >= 0) {
-      capsuleLibrary.setScope(static_cast<CapsuleScope>(
+      capsuleLibrary->setScope(static_cast<CapsuleScope>(
           capsuleScopeIndexForAction(action)));
       dashboard.scopeChanged();
       drawDashboard();
@@ -1299,14 +1347,15 @@ void pollTouch() {
     } else if (action == UiAction::requestPurge) {
       pendingPurgeIds.clear();
       if (dashboard.capsuleSelectionMode()) {
-        pendingPurgeIds = dashboard.selectedCapsuleIds(capsuleLibrary);
+        pendingPurgeIds = dashboard.selectedCapsuleIds(capsuleLibrary.get());
       } else {
-        const CapsuleSummary *selected = dashboard.selected(capsuleLibrary);
+        const CapsuleSummary *selected = dashboard.selected(
+            capsuleLibrary.get());
         if (selected != nullptr) pendingPurgeIds.push_back(selected->id);
       }
       bool safe = !pendingPurgeIds.empty();
       for (const String &id : pendingPurgeIds) {
-        const CapsuleSummary *record = capsuleLibrary.find(id);
+        const CapsuleSummary *record = capsuleLibrary->find(id);
         if (record == nullptr || !record->trashed || record->readOnly ||
             record->status == CapsuleStatus::transcribing) {
           safe = false;
@@ -1340,10 +1389,10 @@ void pollTouch() {
                action == UiAction::bulkArchive ||
                action == UiAction::bulkTrash) {
       const std::vector<String> ids =
-          dashboard.selectedCapsuleIds(capsuleLibrary);
-      const CapsuleScope scope = capsuleLibrary.scope();
+          dashboard.selectedCapsuleIds(capsuleLibrary.get());
+      const CapsuleScope scope = capsuleLibrary->scope();
       if (action == UiAction::bulkFavorite) {
-        const CapsuleBatchResult result = capsuleLibrary.batch(
+        const CapsuleBatchResult result = capsuleLibrary->batch(
             ids, CapsuleBatchAction::favorite, board.utcNow());
         dashboard.clearCapsuleSelection();
         showMessage(result.ok ? String("已处理 ") + result.changed + " 条"
@@ -1373,7 +1422,8 @@ void pollTouch() {
       }
       drawDashboard();
     } else {
-      const CapsuleSummary *selected = dashboard.selected(capsuleLibrary);
+      const CapsuleSummary *selected = dashboard.selected(
+          capsuleLibrary.get());
       if (selected == nullptr) return;
       const String id = selected->id;
       if (selected->readOnly &&
@@ -1385,7 +1435,7 @@ void pollTouch() {
         return;
       }
       if (action == UiAction::favorite) {
-        capsuleLibrary.toggleFavorite(id);
+        capsuleLibrary->toggleFavorite(id);
         dashboard.invalidate();
       } else if (action == UiAction::archive) {
         const bool wasTrashed = selected->trashed;
@@ -1420,7 +1470,7 @@ void pollTouch() {
         if (selected->status != CapsuleStatus::failed &&
             !(selected->status == CapsuleStatus::queued &&
               !selected->error.isEmpty())) return;
-        if (capsuleLibrary.requeue(id)) {
+        if (capsuleLibrary->requeue(id)) {
           dashboard.closeOverlays();
           tencentWorker.wake();
           showMessage("已重新加入转写队列");
@@ -1454,8 +1504,8 @@ void pollTouch() {
 bool advanceStorageBoot(uint32_t nowMs) {
   switch (storageBootPhase) {
     case StorageBootPhase::localRecovery:
-      capsuleOperations.poll(nowMs);
-      if (capsuleOperations.recoveryActive()) return false;
+      capsuleOperations->poll(nowMs);
+      if (capsuleOperations->recoveryActive()) return false;
       storageBootPhase = StorageBootPhase::recorder;
       return false;
     case StorageBootPhase::recorder:
@@ -1468,28 +1518,29 @@ bool advanceStorageBoot(uint32_t nowMs) {
     case StorageBootPhase::library:
       if (!bootCapsuleLibraryBeginAttempted) {
         bootCapsuleLibraryBeginAttempted = true;
-        bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary.begin(
+        bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary->begin(
             SD_MMC, usb.log(),
-            !capsuleOperations.mutationCapabilityBlocked());
+            !capsuleOperations->mutationCapabilityBlocked());
         if (!bootCapsuleLibraryStarted) {
           capabilities.record(DeviceCapability::capsuleLibrary, false);
           storageBootPhase = StorageBootPhase::transcription;
         }
         return false;
       }
-      if (capsuleLibrary.startupActive()) {
-        (void)capsuleLibrary.pollStartup(nowMs);
+      if (capsuleLibrary->startupActive()) {
+        (void)capsuleLibrary->pollStartup(nowMs);
         return false;
       }
-      bootCapsuleLibraryStarted = capsuleLibrary.startupReady();
+      bootCapsuleLibraryStarted = capsuleLibrary->startupReady();
       capabilities.record(DeviceCapability::capsuleLibrary,
                           bootCapsuleLibraryStarted);
-      lastCapsuleLibraryRevision = capsuleLibrary.revision();
+      lastCapsuleLibraryRevision = capsuleLibrary->revision();
       storageBootPhase = StorageBootPhase::transcription;
       return false;
     case StorageBootPhase::transcription:
       bootTencentWorkerStarted = bootCapsuleLibraryStarted &&
-          tencentWorker.begin(SD_MMC, capsuleLibrary, deviceConfig, usb.log());
+          tencentWorker.begin(SD_MMC, capsuleLibrary.get(), deviceConfig,
+                              usb.log());
       capabilities.record(DeviceCapability::transcription,
                           bootTencentWorkerStarted);
       storageBootPhase = StorageBootPhase::usbLink;
@@ -1498,20 +1549,20 @@ bool advanceStorageBoot(uint32_t nowMs) {
       // Link owns durable capsule storage. Do not start it against an
       // unmounted SD card: a failed begin() leaves deferred cleanup state that
       // would otherwise be polled ahead of touch/provisioning every turn.
-      bootUsbLinkStarted = board.sdReady() && linkService.begin(
+      bootUsbLinkStarted = board.sdReady() && linkService->begin(
           usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
-          dashboard, capsuleLibrary, recorder, deviceConfig, wifi,
+          dashboard, capsuleLibrary.get(), recorder, deviceConfig, wifi,
           tencentWorker, provisioningDiagnostics, powerDiagnostics,
           runtimePower, usb.log(), &linkCoordinator,
-          LinkTransport::usb, &wirelessSync,
+          LinkTransport::usb, &wirelessSync.get(),
                     nullptr, &provisioningCoordinator, nullptr,
           &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot);
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
-      bootWifiSyncStarted = board.sdReady() && wirelessSync.begin(
+      bootWifiSyncStarted = board.sdReady() && wirelessSync->begin(
           SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
-          capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
+          capsuleLibrary.get(), recorder, deviceConfig, wifi, tencentWorker,
           provisioningDiagnostics, powerDiagnostics, runtimePower,
           wirelessSyncIdentity, linkCoordinator, deviceReboot, usb.log(),
           &captureRuntime, &captureDispatcher, &capabilities);
@@ -1539,7 +1590,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
       bootCapsuleLibraryStarted ? "true" : "false",
       capabilities.ready(DeviceCapability::recording) ? "true" : "false",
       bootTencentWorkerStarted ? "true" : "false",
-      capsuleOperations.phaseName(), startupCapabilityModeName(startup.mode));
+      capsuleOperations->phaseName(), startupCapabilityModeName(startup.mode));
   showMessage(startup.message, 4000);
   dashboard.invalidate();
   drawDashboard();
@@ -1555,6 +1606,16 @@ void setup() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
 
   board.begin(Serial);
+  const bool serviceObjectsAllocated =
+      capsuleLibrary.allocate("capsule_library", Serial) &&
+      capsuleOperations.allocate("capsule_operations", Serial) &&
+      linkService.allocate("usb_link", Serial) &&
+      wirelessSync.allocate("wireless_sync", Serial);
+  if (!serviceObjectsAllocated) {
+    Serial.println(
+        "{\"event\":\"boot_fatal\",\"reason\":\"service_allocation\"}");
+    while (true) delay(1000);
+  }
   const BoardStatus &bootBoard = board.status();
   capabilities.record(DeviceCapability::display, bootBoard.display);
   capabilities.record(DeviceCapability::touch, bootBoard.touch);
@@ -1587,8 +1648,10 @@ void setup() {
   bootSyncIdentityStarted =
       wirelessSyncIdentity.begin(ESP.getEfuseMac(), usb.log());
   storageBootAvailable = board.sdReady() &&
-      capsuleOperations.begin(SD_MMC, usb.log());
-  if (storageBootAvailable) capsuleOperations.attachCatalog(capsuleLibrary);
+      capsuleOperations->begin(SD_MMC, usb.log());
+  if (storageBootAvailable) {
+    capsuleOperations->attachCatalog(capsuleLibrary.get());
+  }
   storageBootPhase = storageBootAvailable
       ? StorageBootPhase::localRecovery : StorageBootPhase::recorder;
   capabilities.record(DeviceCapability::capsuleLibrary, false);
@@ -1641,7 +1704,7 @@ void loop() {
     }
     return;
   }
-  capsuleOperations.poll(now);
+  capsuleOperations->poll(now);
   consumeLocalOperationOutcome();
   // Link reboot is a device-lifecycle request, not a transport operation.
   // Advance it before any transport-specific early return so a client that
@@ -1679,9 +1742,9 @@ void loop() {
     const bool restartSafe = quiesceReady &&
         captureRouter.owner() == AudioCaptureOwner::none &&
         !captureRuntime.running() && !recorder.operationActive() &&
-        !localRecordingStart.active() && !linkService.receivingBinary() &&
-        !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
-        !capsuleLibrary.scanActive() && !capsuleOperations.busy() &&
+        !localRecordingStart.active() && !linkService->receivingBinary() &&
+        !linkService->maintenanceActive() && !wirelessSync->linkBusy() &&
+        !capsuleLibrary->scanActive() && !capsuleOperations->busy() &&
         !tencentWorker.working() && StorageCoordinator::instance().idle();
     if (restartSafe) {
       usb.log().println("{\"event\":\"link_reboot_execute\"}");
@@ -1702,7 +1765,7 @@ void loop() {
   if (bootUsbLinkStarted &&
       ((lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed)) {
     usb.discardHostSessionBuffers();
-    linkService.disconnect();
+    linkService->disconnect();
   }
   lastUsbHostConnected = usbHostConnected;
   if (trashUndo.expire(now)) {
@@ -1713,14 +1776,14 @@ void loop() {
   // redraw or an SD/network task owns the main loop. Once a binary request has
   // started, drain it before doing any optional UI or sensor work.
   if (bootUsbLinkStarted && board.sdReady()) {
-    wirelessSync.enforceDeadline(now);
+    wirelessSync->enforceDeadline(now);
   }
-  if (bootUsbLinkStarted && board.sdReady() && linkService.receivingBinary()) {
-    linkService.poll(now);
+  if (bootUsbLinkStarted && board.sdReady() && linkService->receivingBinary()) {
+    linkService->poll(now);
     return;
   }
-  if (bootWifiSyncStarted && board.sdReady() && wirelessSync.receivingBinary()) {
-    wirelessSync.poll(now, wifi.connected());
+  if (bootWifiSyncStarted && board.sdReady() && wirelessSync->receivingBinary()) {
+    wirelessSync->poll(now, wifi.connected());
     return;
   }
   if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
@@ -1838,9 +1901,9 @@ void loop() {
         pendingCaptureStop == PendingCaptureStop::none &&
         captureRouter.owner() == AudioCaptureOwner::none &&
         !captureRuntime.running() && !recorder.operationActive() &&
-        !localRecordingStart.active() && !linkService.receivingBinary() &&
-        !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
-        !capsuleLibrary.scanActive() && !capsuleOperations.busy() &&
+        !localRecordingStart.active() && !linkService->receivingBinary() &&
+        !linkService->maintenanceActive() && !wirelessSync->linkBusy() &&
+        !capsuleLibrary->scanActive() && !capsuleOperations->busy() &&
         !tencentWorker.working() && StorageCoordinator::instance().idle();
     if (restartSafe && bleVoice.claimCallbackOverflowRecoveryRestart()) {
       usb.log().println(
@@ -1859,9 +1922,9 @@ void loop() {
         pendingCaptureStop == PendingCaptureStop::none &&
         captureRouter.owner() == AudioCaptureOwner::none &&
         !captureRuntime.running() && !recorder.operationActive() &&
-        !localRecordingStart.active() && !linkService.receivingBinary() &&
-        !linkService.maintenanceActive() && !wirelessSync.linkBusy() &&
-        !capsuleLibrary.scanActive() && !capsuleOperations.busy() &&
+        !localRecordingStart.active() && !linkService->receivingBinary() &&
+        !linkService->maintenanceActive() && !wirelessSync->linkBusy() &&
+        !capsuleLibrary->scanActive() && !capsuleOperations->busy() &&
         !tencentWorker.working() && StorageCoordinator::instance().idle();
     if (restartSafe && bleVoice.claimAppHandshakeRecoveryRestart()) {
       usb.log().println(
@@ -1893,10 +1956,10 @@ void loop() {
   }
 
   if (bootUsbLinkStarted && board.sdReady()) {
-    wirelessSync.enforceDeadline(now);
-    linkService.poll(now);
+    wirelessSync->enforceDeadline(now);
+    linkService->poll(now);
   }
-  if (bootUsbLinkStarted && linkService.receivingBinary()) {
+  if (bootUsbLinkStarted && linkService->receivingBinary()) {
     return;
   }
 
@@ -1912,13 +1975,13 @@ void loop() {
     dashboard.invalidate();
   }
   const bool networkWork = !lowBatteryShutdown.critical() &&
-      capsuleLibrary.pendingCount() > 0 &&
+      capsuleLibrary->pendingCount() > 0 &&
       deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
   wifi.loop(now, recorder.operationActive(), networkWork,
             board.status().charging, provisioningCoordinator.ownsWifi(),
-            wirelessSync.wifiDemand());
+            wirelessSync->wifiDemand());
   if (bootWifiSyncStarted && board.sdReady()) {
-    wirelessSync.poll(now, wifi.connected());
+    wirelessSync->poll(now, wifi.connected());
   }
   const uint32_t timeSyncRevision = wifi.networkTimeSyncRevision();
   if (timeSyncRevision != lastNetworkTimeSyncRevision) {
@@ -1934,8 +1997,8 @@ void loop() {
   // One application turn performs at most one scan action. Starting is also
   // an action, so the first filesystem slice happens on the next turn. An ASR
   // job retains priority until its result has committed.
-  if (!tencentWorker.working()) capsuleLibrary.pollScan();
-  const uint32_t capsuleRevision = capsuleLibrary.revision();
+  if (!tencentWorker.working()) capsuleLibrary->pollScan();
+  const uint32_t capsuleRevision = capsuleLibrary->revision();
   if (capsuleRevision != lastCapsuleLibraryRevision) {
     lastCapsuleLibraryRevision = capsuleRevision;
     dashboard.invalidate();
@@ -1943,10 +2006,10 @@ void loop() {
   if (!deviceReboot.pending()) {
     tencentWorker.loop(now, wifi.connected(), wifi.timeReady(),
                        transcriptionDispatchBusy(recorder.operationActive(),
-                                                 linkService.maintenanceActive() ||
-                                                     wirelessSync.linkBusy() ||
-                                                     capsuleLibrary.scanActive() ||
-                                                     capsuleOperations.busy()) ||
+                                                 linkService->maintenanceActive() ||
+                                                     wirelessSync->linkBusy() ||
+                                                     capsuleLibrary->scanActive() ||
+                                                     capsuleOperations->busy()) ||
                            lowBatteryShutdown.critical(),
                        board.status().charging);
   }
@@ -1967,7 +2030,7 @@ void loop() {
       !wifi.radioOn()) {
     enterDeepSleep(finalPowerInputs);
   }
-  if (dashboard.advanceVerticalScroll(now, capsuleLibrary)) {
+  if (dashboard.advanceVerticalScroll(now, capsuleLibrary.get())) {
     scrollRedrawPending = true;
   }
   if (scrollRedrawPending &&
@@ -2031,7 +2094,7 @@ void loop() {
   const bool keepScreenAwake = localRecordingStart.active() ||
       recorder.operationActive() || wirelessUiActive ||
       audio.playing() || provisioningCoordinator.visible() ||
-      capsuleOperations.busy() ||
+      capsuleOperations->busy() ||
       touchVerticalScrolling || dashboard.scrollActive() ||
       dashboard.pageTransitionActive();
   if (!screenDimmed &&

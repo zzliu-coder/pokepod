@@ -62,8 +62,8 @@ assert "lastCompletedAtMs_ = 0;" in sync_source
 assert 'lastError_ == "listener-start-failed"' in sync_source
 assert 'lastError_ == "bonjour-start-failed"' in sync_source
 
-assert "computerSyncEntryDecision(wirelessSync.openWindow())" in app_source
-assert "wirelessSync.open(now);" in app_source
+assert "computerSyncEntryDecision(wirelessSync->openWindow())" in app_source
+assert "wirelessSync->open(now);" in app_source
 assert "dashboard.openComputerSync();" in app_source
 assert "action == UiAction::closeComputerSync" in app_source
 assert "toggleComputerSync" not in app_source

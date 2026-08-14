@@ -34,13 +34,13 @@ assert "rolledBackFully" in purge
 assert "requestPurge" in ui_policy and "confirmPurge" in ui_policy
 assert '"永久删除"' in dashboard
 assert '"录音和文字将无法恢复"' in dashboard
-assert "CapsuleOperationService capsuleOperations" in app
-assert "capsuleOperations.poll(now)" in app
+assert "PsramService<CapsuleOperationService> capsuleOperations" in app
+assert "capsuleOperations->poll(now)" in app
 assert "submitLocalCapsuleOperation(" in app
 for synchronous in (
-    "capsuleLibrary.archive(", "capsuleLibrary.unarchive(",
-    "capsuleLibrary.trash(", "capsuleLibrary.restore(",
-    "capsuleLibrary.purge(",
+    "capsuleLibrary->archive(", "capsuleLibrary->unarchive(",
+    "capsuleLibrary->trash(", "capsuleLibrary->restore(",
+    "capsuleLibrary->purge(",
 ):
     assert synchronous not in app
 assert "CapsuleBatchExecutor executor_" in service_h
