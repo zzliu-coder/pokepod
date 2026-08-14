@@ -290,6 +290,10 @@ assert "WiFi.mode(WIFI_OFF)" not in quiesce_handler
 assert "WiFi.status()" not in start_handler
 portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
+assert "bootUsbLinkStarted = board.sdReady() && linkService.begin(" in main_source
+assert "bootWifiSyncStarted = board.sdReady() && wirelessSync.begin(" in main_source
+assert "if (bootUsbLinkStarted && board.sdReady())" in main_source
+assert "if (bootWifiSyncStarted && board.sdReady())" in main_source
 full_portal_poll = main_source.rindex(portal_loop)
 assert full_portal_poll < main_source.index("wifi.loop(now", full_portal_poll)
 network_section = main_source[

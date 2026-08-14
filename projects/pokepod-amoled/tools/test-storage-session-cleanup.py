@@ -38,7 +38,8 @@ assert "storageRead, StorageOwner::tencentRead" in tencent
 
 assert "pollDeferredServiceCleanup();" in app
 assert app.index("pollDeferredServiceCleanup();") < app.index(
-    "if (linkService.receivingBinary())"
+    "if (bootUsbLinkStarted && board.sdReady() && "
+    "linkService.receivingBinary())"
 )
 assert "captureRuntime.pollFinalize" in app
 assert "recorder.operationActive() || pendingRecorderFinalize" in app

@@ -86,7 +86,8 @@ assert "atomicTransactionActive" not in window
 assert "deadlineReached" in window
 main = read("PokePodApp.cpp")
 assert main.index("wirelessSync.enforceDeadline(now);") < main.index(
-    "if (linkService.receivingBinary())"
+    "if (bootUsbLinkStarted && board.sdReady() && "
+    "linkService.receivingBinary())"
 )
 
 link = read("PokePodLinkService.cpp")

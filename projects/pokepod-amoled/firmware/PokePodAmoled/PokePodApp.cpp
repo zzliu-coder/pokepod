@@ -1495,7 +1495,10 @@ bool advanceStorageBoot(uint32_t nowMs) {
       storageBootPhase = StorageBootPhase::usbLink;
       return false;
     case StorageBootPhase::usbLink:
-      bootUsbLinkStarted = linkService.begin(
+      // Link owns durable capsule storage. Do not start it against an
+      // unmounted SD card: a failed begin() leaves deferred cleanup state that
+      // would otherwise be polled ahead of touch/provisioning every turn.
+      bootUsbLinkStarted = board.sdReady() && linkService.begin(
           usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
           dashboard, capsuleLibrary, recorder, deviceConfig, wifi,
           tencentWorker, provisioningDiagnostics, powerDiagnostics,
@@ -1506,7 +1509,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
-      bootWifiSyncStarted = wirelessSync.begin(
+      bootWifiSyncStarted = board.sdReady() && wirelessSync.begin(
           SD_MMC, board, audio, captureRouter, usb, bleVoice, dashboard,
           capsuleLibrary, recorder, deviceConfig, wifi, tencentWorker,
           provisioningDiagnostics, powerDiagnostics, runtimePower,
@@ -1696,7 +1699,8 @@ void loop() {
   if (safeShutdownQuiesce.pending()) (void)advanceSafeShutdown(now);
   const bool usbHostConnected = usb.hostConnected();
   const bool usbHostSessionClosed = usb.takeHostSessionClosed();
-  if ((lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed) {
+  if (bootUsbLinkStarted &&
+      ((lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed)) {
     usb.discardHostSessionBuffers();
     linkService.disconnect();
   }
@@ -1708,12 +1712,14 @@ void loop() {
   // A CDC upload can otherwise overrun TinyUSB while a full-screen AMOLED
   // redraw or an SD/network task owns the main loop. Once a binary request has
   // started, drain it before doing any optional UI or sensor work.
-  wirelessSync.enforceDeadline(now);
-  if (linkService.receivingBinary()) {
+  if (bootUsbLinkStarted && board.sdReady()) {
+    wirelessSync.enforceDeadline(now);
+  }
+  if (bootUsbLinkStarted && board.sdReady() && linkService.receivingBinary()) {
     linkService.poll(now);
     return;
   }
-  if (wirelessSync.receivingBinary()) {
+  if (bootWifiSyncStarted && board.sdReady() && wirelessSync.receivingBinary()) {
     wirelessSync.poll(now, wifi.connected());
     return;
   }
@@ -1886,9 +1892,11 @@ void loop() {
     audio.stopHardware(usb.log());
   }
 
-  wirelessSync.enforceDeadline(now);
-  linkService.poll(now);
-  if (linkService.receivingBinary()) {
+  if (bootUsbLinkStarted && board.sdReady()) {
+    wirelessSync.enforceDeadline(now);
+    linkService.poll(now);
+  }
+  if (bootUsbLinkStarted && linkService.receivingBinary()) {
     return;
   }
 
@@ -1909,7 +1917,9 @@ void loop() {
   wifi.loop(now, recorder.operationActive(), networkWork,
             board.status().charging, provisioningCoordinator.ownsWifi(),
             wirelessSync.wifiDemand());
-  wirelessSync.poll(now, wifi.connected());
+  if (bootWifiSyncStarted && board.sdReady()) {
+    wirelessSync.poll(now, wifi.connected());
+  }
   const uint32_t timeSyncRevision = wifi.networkTimeSyncRevision();
   if (timeSyncRevision != lastNetworkTimeSyncRevision) {
     lastNetworkTimeSyncRevision = timeSyncRevision;
