@@ -198,7 +198,9 @@ def main() -> int:
                         choices=("hello", "status", "record", "stop",
                                  "provisioning-start", "provisioning-stop",
                                  "get-power-diagnostics",
-                                 "clear-power-diagnostics", "reboot"))
+                                 "clear-power-diagnostics",
+                                 "get-provisioning-diagnostics",
+                                 "clear-provisioning-diagnostics", "reboot"))
     parser.add_argument(
         "--install-font", metavar="PATH",
         help="install a PKF2 20px A4 font over PokePod Link v2",

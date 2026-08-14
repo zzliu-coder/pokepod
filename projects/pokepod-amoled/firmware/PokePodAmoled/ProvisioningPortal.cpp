@@ -28,7 +28,19 @@ void BoundedProvisioningWebServer::handleClient() {
     if (_currentStatus == HC_WAIT_READ) {
       if (_currentClient.available()) {
         _currentClient.setTimeout(kIoSliceMs);
-        if (_parseRequest(_currentClient)) {
+        const bool probeRequest = diagnostics_ != nullptr && log_ != nullptr &&
+            requestProbeCount_ < 8;
+        if (probeRequest) {
+          diagnostics_->recordProbe(
+              ProvisioningProbeStage::beforeRequestParse, *log_);
+        }
+        const bool parsed = _parseRequest(_currentClient);
+        if (probeRequest) {
+          diagnostics_->recordProbe(
+              ProvisioningProbeStage::afterRequestParse, *log_);
+          ++requestProbeCount_;
+        }
+        if (parsed) {
           _contentLength = CONTENT_LENGTH_NOT_SET;
           _responseCode = 0;
           _clearResponseHeaders();
@@ -138,6 +150,8 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   config_ = &config;
   diagnostics_ = &diagnostics;
   log_ = &log;
+  server_.attachProvisioningProbe(diagnostics, log);
+  diagnostics_->recordProbe(ProvisioningProbeStage::prepareEntered, log);
   candidate_ = config.settings();
   clearCandidateSecrets();
   const uint32_t suffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xffff);
@@ -169,6 +183,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   diagnostics_->record(ProvisioningLogStage::portalRequested,
                        ProvisioningLogOutcome::info, ssid_, 0, 0, 0, 0,
                        log);
+  diagnostics_->recordProbe(ProvisioningProbeStage::portalRequested, log);
   log.printf("{\"event\":\"provisioning\",\"phase\":\"requested\",\"ssid\":\"%s\"}\n",
              ssid_.c_str());
   return true;
@@ -192,6 +207,7 @@ bool ProvisioningPortal::switchToAccessPointMode() {
     return false;
   }
   logProvisioningMemory(*log_, "before-mode-ap");
+  diagnostics_->recordProbe(ProvisioningProbeStage::beforeModeAp, *log_);
   if (!WiFi.mode(WIFI_AP)) {
     starting_ = false;
     statusMessage_ = "无线模式切换失败，请退出后重试";
@@ -203,6 +219,7 @@ bool ProvisioningPortal::switchToAccessPointMode() {
     clearProvisioningCredential();
     return false;
   }
+  diagnostics_->recordProbe(ProvisioningProbeStage::afterModeAp, *log_);
   diagnostics_->record(ProvisioningLogStage::radioModeStarted,
                        ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
                        *log_);
@@ -218,6 +235,7 @@ bool ProvisioningPortal::startAccessPoint() {
     return false;
   }
   logProvisioningMemory(*log_, "before-softap");
+  diagnostics_->recordProbe(ProvisioningProbeStage::beforeSoftAp, *log_);
   if (!WiFi.softAP(ssid_.c_str(), password_.c_str())) {
     starting_ = false;
     statusMessage_ = "配网热点启动失败，请退出后重试";
@@ -229,7 +247,12 @@ bool ProvisioningPortal::startAccessPoint() {
     clearProvisioningCredential();
     return false;
   }
+  diagnostics_->recordProbe(ProvisioningProbeStage::afterSoftAp, *log_);
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::beforePowerSaveOff, *log_);
   esp_wifi_set_ps(WIFI_PS_NONE);
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::afterPowerSaveOff, *log_);
   diagnostics_->record(ProvisioningLogStage::accessPointStarted,
                        ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
                        *log_);
@@ -245,9 +268,19 @@ bool ProvisioningPortal::startServices() {
     return false;
   }
   logProvisioningMemory(*log_, "before-services");
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::beforeRouteInstall, *log_);
   installRoutes();
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::afterRouteInstall, *log_);
+  diagnostics_->recordProbe(ProvisioningProbeStage::beforeDnsStart, *log_);
   dns_.start(53, "*", WiFi.softAPIP());
+  diagnostics_->recordProbe(ProvisioningProbeStage::afterDnsStart, *log_);
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::beforeServerBegin, *log_);
   server_.begin();
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::afterServerBegin, *log_);
   startedMs_ = millis();
   csrf_.begin(csrf_.token(), startedMs_, kPortalLifetimeMs);
   active_ = true;
@@ -376,6 +409,7 @@ void ProvisioningPortal::stop() {
   candidate_ = DeviceSettings{};
   clearProvisioningCredential();
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::portalStopped, *log_);
     diagnostics_->record(ProvisioningLogStage::portalStopped,
                          ProvisioningLogOutcome::info, ssid_, 0, 0,
                          wasActive ? millis() - startedMs_ : 0,
@@ -548,7 +582,18 @@ void ProvisioningPortal::scanRequest() {
 
 void ProvisioningPortal::showPortal() {
   server_.sendHeader("Cache-Control", "no-store");
-  server_.send(200, "text/html; charset=utf-8", pageHtml());
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::beforePageBuild, *log_);
+  }
+  const String html = pageHtml();
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::afterPageBuild, *log_);
+    diagnostics_->recordProbe(ProvisioningProbeStage::beforePageSend, *log_);
+  }
+  server_.send(200, "text/html; charset=utf-8", html);
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::afterPageSend, *log_);
+  }
 }
 
 void ProvisioningPortal::saveRequest() {

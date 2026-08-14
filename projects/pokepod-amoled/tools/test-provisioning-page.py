@@ -16,6 +16,12 @@ dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
 portal_header = (firmware_dir / "ProvisioningPortal.h").read_text(encoding="utf-8")
 coordinator_header = (firmware_dir / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
+diagnostics_source = (firmware_dir / "ProvisioningDiagnostics.cpp").read_text(
+    encoding="utf-8"
+)
+probe_codec = (firmware_dir / "ProvisioningProbeCodec.h").read_text(
+    encoding="utf-8"
+)
 policy_source = (firmware_dir / "ProvisioningPolicy.h").read_text(encoding="utf-8")
 startup_policy_source = (firmware_dir / "ProvisioningStartupPolicy.h").read_text(
     encoding="utf-8"
@@ -198,6 +204,9 @@ prepare_handler = source[source.index("bool ProvisioningPortal::prepare"):
 start_handler = source[source.index("bool ProvisioningPortal::switchToAccessPointMode"):
                        source.index("void ProvisioningPortal::failStartupTimeout")]
 assert "statusMessage_ = \"正在准备配网热点\";" in prepare_handler
+assert prepare_handler.index("ProvisioningProbeStage::prepareEntered") < (
+    prepare_handler.index("credential_.begin")
+)
 assert "WiFi.mode" not in prepare_handler
 assert "WiFi.softAP" not in prepare_handler
 assert "startScan();" not in prepare_handler
@@ -209,6 +218,54 @@ assert "bool ProvisioningPortal::startServices()" in start_handler
 assert "ProvisioningLogStage::radioModeStarted" in start_handler
 assert "ProvisioningLogStage::accessPointStarted" in start_handler
 assert "logProvisioningMemory" in start_handler
+for before, call, after in (
+    ("ProvisioningProbeStage::beforeModeAp", "WiFi.mode(WIFI_AP)",
+     "ProvisioningProbeStage::afterModeAp"),
+    ("ProvisioningProbeStage::beforeSoftAp", "WiFi.softAP",
+     "ProvisioningProbeStage::afterSoftAp"),
+    ("ProvisioningProbeStage::beforePowerSaveOff", "esp_wifi_set_ps",
+     "ProvisioningProbeStage::afterPowerSaveOff"),
+    ("ProvisioningProbeStage::beforeRouteInstall", "installRoutes()",
+     "ProvisioningProbeStage::afterRouteInstall"),
+    ("ProvisioningProbeStage::beforeDnsStart", "dns_.start",
+     "ProvisioningProbeStage::afterDnsStart"),
+    ("ProvisioningProbeStage::beforeServerBegin", "server_.begin",
+     "ProvisioningProbeStage::afterServerBegin"),
+):
+    assert start_handler.index(before) < start_handler.index(call)
+    assert start_handler.index(call) < start_handler.index(after)
+show_portal = source[source.index("void ProvisioningPortal::showPortal()"):
+                     source.index("void ProvisioningPortal::saveRequest()")]
+assert show_portal.index("ProvisioningProbeStage::beforePageBuild") < (
+    show_portal.index("pageHtml()")
+)
+assert show_portal.index("pageHtml()") < show_portal.index(
+    "ProvisioningProbeStage::afterPageBuild"
+)
+page_send = 'server_.send(200, "text/html; charset=utf-8", html);'
+assert show_portal.index("ProvisioningProbeStage::beforePageSend") < (
+    show_portal.index(page_send)
+)
+assert show_portal.index(page_send) < show_portal.index(
+    "ProvisioningProbeStage::afterPageSend"
+)
+assert "beforeRequestParse" in source
+assert "_parseRequest(_currentClient)" in source
+assert "afterRequestParse" in source
+assert source.index("beforeRequestParse") < source.index(
+    "_parseRequest(_currentClient)"
+)
+assert source.index("_parseRequest(_currentClient)") < source.index(
+    "afterRequestParse"
+)
+assert "requestProbeCount_ < 8" in source
+assert "++requestProbeCount_;" in source
+assert 'constexpr char kProvisioningProbeKey[] = "wifi_probe_v1";' in diagnostics_source
+assert "printProbeBoot(log, resetReason, probeLoaded);" in diagnostics_source
+assert "ssid" not in probe_codec.lower()
+assert "password" not in probe_codec.lower()
+assert "token" not in probe_codec.lower()
+assert "StoredProvisioningProbe" in probe_codec
 assert "statusMessage_ = \"请选择附近的 2.4 GHz 网络或手工输入\";" in start_handler
 state_handler = source[source.index("ProvisioningState ProvisioningPortal::state() const"):
                        source.index("const char *ProvisioningPortal::portalState")]

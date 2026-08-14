@@ -19,9 +19,20 @@ class BoundedProvisioningWebServer final : public WebServer {
  public:
   explicit BoundedProvisioningWebServer(uint16_t port) : WebServer(port) {}
   void handleClient() override;
+  void attachProvisioningProbe(ProvisioningDiagnostics &diagnostics,
+                               Print &log) {
+    diagnostics_ = &diagnostics;
+    log_ = &log;
+    requestProbeCount_ = 0;
+  }
 
   static constexpr uint32_t kIoSliceMs = 40;
   static constexpr uint32_t kIdleClientLifetimeMs = 250;
+
+ private:
+  ProvisioningDiagnostics *diagnostics_ = nullptr;
+  Print *log_ = nullptr;
+  uint8_t requestProbeCount_ = 0;
 };
 
 class ProvisioningPortal {
