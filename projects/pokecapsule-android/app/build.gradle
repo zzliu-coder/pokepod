@@ -7,7 +7,26 @@ def releaseKeyPassword = project.findProperty('releaseKeyPassword')
 def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias,
                          releaseKeyPassword].every { value -> value != null && !value.toString().isEmpty() }
 if (project.findProperty('requireReleaseSigning')?.toString() == 'true' && !hasReleaseSigning) {
-    throw new GradleException('requireReleaseSigning=true requires an external release keystore')
+    throw new GradleException(
+            'requireReleaseSigning=true requires all four external release signer properties')
+}
+
+def requireReleaseSigner = {
+    if (!hasReleaseSigning) {
+        throw new GradleException(
+                'Release tasks require all four external signer properties: '
+                + 'releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword')
+    }
+}
+
+// AGP has changed its default handling of an unconfigured release signing
+// config across versions. Make the product policy independent of that detail:
+// every release task must receive a complete external signer, while debug
+// tasks remain usable without credentials.
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { task -> task.name.toLowerCase().contains('release') }) {
+        requireReleaseSigner()
+    }
 }
 
 android {

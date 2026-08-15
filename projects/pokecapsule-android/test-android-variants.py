@@ -39,6 +39,13 @@ def main() -> int:
         fail("release still references the debug signing key")
     if "requireReleaseSigning" not in build or "releaseStoreFile" not in build:
         fail("external release signing contract is missing")
+    for marker in (
+        "def requireReleaseSigner",
+        "graph.allTasks.any",
+        "Release tasks require all four external signer properties",
+    ):
+        if marker not in build:
+            fail(f"release fail-closed marker is missing: {marker}")
 
     main_permissions = manifest_permissions(APP / "src/main/AndroidManifest.xml")
     legacy_permissions = manifest_permissions(
@@ -96,6 +103,15 @@ def main() -> int:
                    "多个 APK", "POKECAPSULE_BACKUP_ROOT"):
         if marker not in installer_source:
             fail(f"portable installer marker is missing: {marker}")
+
+    release_test = ROOT / "test-release-signing.sh"
+    if not os.access(release_test, os.X_OK):
+        fail("release signing focused test is not executable")
+    subprocess.run(["zsh", "-n", str(release_test)], check=True)
+    release_test_source = release_test.read_text(encoding="utf-8")
+    for marker in ("缺少 signer", "完整 signer", "debug", "assemblePoke3LegacyRelease"):
+        if marker not in release_test_source:
+            fail(f"release signing test marker is missing: {marker}")
 
     print("PASS android_variant_contracts")
     return 0
