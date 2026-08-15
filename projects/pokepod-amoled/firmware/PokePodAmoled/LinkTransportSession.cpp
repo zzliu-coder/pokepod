@@ -140,6 +140,11 @@ void PokePodLinkService::disconnect() {
   cancelLinkOperation(quiesceRequested_
       ? LinkOperationCancelReason::quiesce
       : LinkOperationCancelReason::disconnect);
+  if (firmwareUpdate_.active() || firmwareUpdateRequestId_ != 0) {
+    firmwareUpdate_.abort();
+    firmwareUpdateRequestId_ = 0;
+    operation_.releaseResource(LinkOperationResource::firmwareUpdate);
+  }
   if (batchExecutor_.active()) abandonBatchCommand();
   resetMetadataRead();
   manifestResponseRequestId_ = 0;
@@ -188,6 +193,7 @@ void PokePodLinkService::requestQuiesce() {
 bool PokePodLinkService::quiesced() const {
   return quiesceRequested_ && !sessionActive_ &&
       commandLoadState_ == CommandLoadState::none &&
+      !firmwareUpdate_.active() && firmwareUpdateRequestId_ == 0 &&
       incomingKind_ == IncomingKind::none && !incomingCleanupPending_ &&
       fileTransfer_.quiesced() &&
       !manifestStepper_.active() && !manifestCleanupPending_ &&

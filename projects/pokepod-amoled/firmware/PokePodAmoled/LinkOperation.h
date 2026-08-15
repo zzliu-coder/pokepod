@@ -50,6 +50,7 @@ enum class LinkOperationResource : uint16_t {
   router = 1U << 4,
   transaction = 1U << 5,
   recordingSession = 1U << 6,
+  firmwareUpdate = 1U << 7,
 };
 
 constexpr uint16_t linkOperationResourceBit(LinkOperationResource resource) {
@@ -298,7 +299,8 @@ class LinkOperation {
         linkOperationResourceBit(LinkOperationResource::file) |
         linkOperationResourceBit(LinkOperationResource::router) |
         linkOperationResourceBit(LinkOperationResource::transaction) |
-        linkOperationResourceBit(LinkOperationResource::recordingSession);
+        linkOperationResourceBit(LinkOperationResource::recordingSession) |
+        linkOperationResourceBit(LinkOperationResource::firmwareUpdate);
     return (resources_ & lifecycleResources) == 0;
   }
 

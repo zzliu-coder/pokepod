@@ -13,6 +13,7 @@
 #include "LinkCommandBatchPolicy.h"
 #include "DeviceConfig.h"
 #include "Dashboard.h"
+#include "DeviceRebootCoordinator.h"
 #include "FontPolicy.h"
 #include "TencentWorker.h"
 #include "UsbLinkBridge.h"
@@ -200,6 +201,33 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
 
 void PokePodLinkService::processData(uint32_t requestId, uint16_t flags,
                                      const uint8_t *payload, size_t size) {
+  if (firmwareUpdate_.active() || firmwareUpdateRequestId_ != 0) {
+    if (requestId != firmwareUpdateRequestId_ || !firmwareUpdate_.active()) {
+      sendError(requestId, "unexpected firmware data frame");
+      return;
+    }
+    if (!firmwareUpdate_.writeChunk(payload, size)) {
+      const String error = firmwareUpdate_.error();
+      failFirmwareUpdate(error.isEmpty() ? "OTA write failed" : error.c_str());
+      return;
+    }
+    const uint32_t received = firmwareUpdate_.receivedBytes();
+    if ((flags & 1U) == 0) {
+      if (received == firmwareUpdate_.expectedBytes()) {
+        failFirmwareUpdate("firmware final flag is missing");
+        return;
+      }
+      sendEvent(requestId, "{\"event\":\"binary_ack\",\"received\":" +
+          String(received) + "}");
+      return;
+    }
+    if (received != firmwareUpdate_.expectedBytes()) {
+      failFirmwareUpdate("firmware length mismatch");
+      return;
+    }
+    finishFirmwareUpdate(firmwareUpdate_.finish());
+    return;
+  }
   if (incomingKind_ == IncomingKind::none || requestId != incomingRequestId_) {
     sendError(requestId, "unexpected data frame");
     return;
@@ -223,6 +251,37 @@ void PokePodLinkService::processData(uint32_t requestId, uint16_t flags,
         String(incomingReceived_) + "}");
   }
   if (last) finishIncoming();
+}
+
+void PokePodLinkService::failFirmwareUpdate(const char *message) {
+  const uint32_t requestId = firmwareUpdateRequestId_;
+  firmwareUpdate_.abort();
+  firmwareUpdateRequestId_ = 0;
+  operation_.releaseResource(LinkOperationResource::firmwareUpdate);
+  if (requestId == 0 || !sessionActive_ || !transferPermitted()) return;
+  sendError(requestId, message == nullptr ? "firmware update failed" : message);
+}
+
+void PokePodLinkService::finishFirmwareUpdate(bool ok) {
+  const uint32_t requestId = firmwareUpdateRequestId_;
+  const String error = firmwareUpdate_.error();
+  const String digest = firmwareUpdate_.actualSha256();
+  firmwareUpdateRequestId_ = 0;
+  operation_.releaseResource(LinkOperationResource::firmwareUpdate);
+  if (!ok) {
+    firmwareUpdate_.abort();
+    if (requestId != 0 && sessionActive_ && transferPermitted()) {
+      sendError(requestId, error.isEmpty() ? "OTA image rejected" : error.c_str());
+    }
+    return;
+  }
+  const bool rebootAccepted = rebootCoordinator_ != nullptr &&
+      rebootCoordinator_->request(millis(), transport_);
+  const String extra = "\"installed\":true,\"rebootRequired\":true,\"rebootScheduled\":" +
+      String(rebootAccepted ? "true" : "false") + ",\"sha256\":\"" +
+      digest + "\"";
+  (void)sendTerminalOrDisconnect(requestId,
+      "{\"status\":\"ok\",\"version\":2," + extra + "}");
 }
 
 void PokePodLinkService::finishIncoming() {

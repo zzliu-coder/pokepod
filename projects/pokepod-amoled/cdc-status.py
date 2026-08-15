@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import hashlib
 import glob
 import json
 import os
@@ -207,11 +208,18 @@ def main() -> int:
         "--install-font", metavar="PATH",
         help="install a PKF2 20px A4 font over PokePod Link v2",
     )
+    parser.add_argument(
+        "--firmware", metavar="PATH",
+        help="install an exact ESP32 app image over USB Link v2 without BOOT/RESET",
+    )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
     arguments = parser.parse_args()
     outgoing_binary = None
     operation = arguments.command
+    fields = None
+    if arguments.install_font and arguments.firmware:
+        parser.error("--install-font and --firmware are mutually exclusive")
     if arguments.install_font:
         operation = "font-write"
         try:
@@ -221,11 +229,21 @@ def main() -> int:
             parser.error(str(error))
         if not (20 <= len(outgoing_binary) <= 5 * 1024 * 1024):
             parser.error("font file must be between 20 bytes and 5 MiB")
+    if arguments.firmware:
+        operation = "firmware-update"
+        try:
+            with open(arguments.firmware, "rb") as firmware_file:
+                outgoing_binary = firmware_file.read()
+        except OSError as error:
+            parser.error(str(error))
+        if not (1024 <= len(outgoing_binary) <= 0x300000):
+            parser.error("firmware image must be between 1 KiB and 3 MiB")
+        fields = {"sha256": hashlib.sha256(outgoing_binary).hexdigest()}
     ports = arguments.ports or sorted(glob.glob("/dev/cu.usbmodem*"))
     last_error = None
     for port in ports:
         try:
-            result = query(port, operation, arguments.timeout, outgoing_binary)
+            result = query(port, operation, arguments.timeout, outgoing_binary, fields)
             if result.get("status") != "ok":
                 last_error = result.get("message", result.get("status", "error"))
                 continue

@@ -23,6 +23,7 @@
 #include "LinkTransferGate.h"
 #include "LinkTransferStepper.h"
 #include "MaintenanceCompletionTracker.h"
+#include "FirmwareUpdateSession.h"
 #include "CapsuleTransaction.h"
 #include "CapsuleBatchJournalStore.h"
 #include "CapabilityRegistry.h"
@@ -88,7 +89,9 @@ class PokePodLinkService : private LinkFileTransferHost {
   void requestQuiesce();
   bool quiesced() const;
   bool active() const { return sessionActive_; }
-  bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
+  bool receivingBinary() const {
+    return incomingKind_ != IncomingKind::none || firmwareUpdate_.active();
+  }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
   uint32_t maintenanceStartRevision() const {
     return maintenanceCompletion_.startRevision();
@@ -184,6 +187,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   void failIncoming(const char *message);
   bool cleanupIncomingStorage();
   void finishIncomingCleanup();
+  void finishFirmwareUpdate(bool ok);
+  void failFirmwareUpdate(const char *message);
 
   void handleImmediate(uint32_t requestId, void *jsonRoot);
   void handleRead(uint32_t requestId, void *jsonRoot);
@@ -448,6 +453,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   StringByteSource batchByteSource_;
   StringByteSource batchSecondByteSource_;
   LinkRecordingSession recordingSession_;
+  FirmwareUpdateSession firmwareUpdate_;
+  uint32_t firmwareUpdateRequestId_ = 0;
   LinkDiagnostics diagnostics_;
   LinkFileTransfer fileTransfer_;
 

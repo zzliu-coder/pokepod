@@ -101,6 +101,40 @@ VBUS、音频、同步、配网、UI 动画、自动亮屏或等待超时中的�
 
 ## PokePod Link v2
 
+### 电脑夹具与无需复位的升级
+
+夹具把设备端的连接做成六类受保护触点：USB D+/D−、GND、受限 VBUS、BOOT 和
+RESET。电脑端负责身份核验、诊断导出、备份、升级、回读和证据归档；设备不需要
+增加体积较大的调试接口。触点定义和电气约束见 `fixture/pinout.json`。
+
+普通升级直接使用已启动固件的 USB CDC Link v2，不需要用户按 BOOT/RESET：
+
+```sh
+python3 fixture/pokepod-fixture.py probe --port /dev/cu.usbmodemXXXX
+python3 fixture/pokepod-fixture.py collect --port /dev/cu.usbmodemXXXX
+python3 fixture/pokepod-fixture.py update \
+  --port /dev/cu.usbmodemXXXX \
+  --firmware work/pokepod-build/output/fast/PokePodAmoled.ino.bin
+```
+
+主机先计算镜像 SHA-256；固件把镜像流式写入未运行的 OTA 槽，逐块确认且只在
+长度、分区和 SHA-256 全部通过后切换启动槽。提交后的重启属于设备级生命周期请求，
+USB 断开不会取消它。失败会中止 OTA 句柄并保留当前启动槽。升级要求精确构建产物，
+工具会把请求、响应、诊断和摘要保存到 `work/fixture-runs/`。
+
+BOOT/RESET 仍保留给救援刷写。救援路径调用 `flash.sh`，写前备份 app0 并复读抽样，
+写后完整回读比较 SHA；身份、芯片、容量、备份或回读任一不满足就停止：
+
+```sh
+python3 fixture/pokepod-fixture.py flash \
+  --rom-port /dev/cu.usbmodemROM \
+  --authority work/device-authority.json \
+  --mode fast
+```
+
+夹具控制器的 BOOT/RESET 应采用开漏或三态、电平保护和 VBUS 限流。正常 USB 升级
+不依赖控制器，BOOT/RESET 只作为恢复通道。
+
 CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32。调试日志写入
 调试串口，避免污染 CDC。设备实现：
 
