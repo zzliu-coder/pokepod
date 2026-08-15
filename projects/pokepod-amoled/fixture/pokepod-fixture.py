@@ -59,6 +59,89 @@ def cdc(port: str, command: str, output: Path, timeout: float) -> dict[str, obje
     return value
 
 
+def link_identity(
+    port: str, output: Path, timeout: float,
+) -> dict[str, object]:
+    """Read the permanent device identity through its dedicated operation.
+
+    ``hello`` is deliberately kept as a capability probe.  It may be
+    answered by a bootloader or a compatibility endpoint and therefore must
+    never become the authority for pairing a fixture run to a physical unit.
+    """
+    identity = cdc(port, "identity", output, timeout)
+    device_id = str(identity.get("deviceId", ""))
+    if not device_id.startswith("pokepod-"):
+        raise RuntimeError("PokePod identity response is missing deviceId")
+    return identity
+
+
+def expected_build_from_artifact(firmware: Path) -> dict[str, object]:
+    """Validate a closed artifact and derive the build identity to expect.
+
+    The fixture accepts no caller-provided identity fields.  All values come
+    from the manifest and the bytes being sent, and validation happens before
+    the first Link frame is opened.
+    """
+    manifest_path = firmware.parent / "artifact.json"
+    validator = PROJECT / "tools" / "validate-flash-artifact.py"
+    completed = subprocess.run(
+        [sys.executable, str(validator), "--manifest", str(manifest_path),
+         "--binary", str(firmware)],
+        cwd=PROJECT, text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=30.0, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "firmware artifact validation failed: " +
+            (completed.stderr.strip() or completed.stdout.strip())
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"firmware requires adjacent validated artifact.json: {manifest_path}"
+        ) from error
+    binary = manifest.get("binary")
+    if not isinstance(binary, dict):
+        raise RuntimeError("firmware artifact is missing binary metadata")
+    payload = firmware.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if (binary.get("file") != firmware.name or
+            binary.get("sizeBytes") != len(payload) or
+            binary.get("sha256") != digest):
+        raise RuntimeError("firmware does not match adjacent artifact.json")
+    # ESP image descriptor fields are stable across the supported Arduino
+    # core versions.  This check is intentionally small and fail-closed.
+    if len(payload) < 208 or int.from_bytes(payload[32:36], "little") != 0xABCD5432:
+        raise RuntimeError("firmware has no valid ESP application descriptor")
+    source_revision = manifest.get("sourceRevision")
+    firmware_version = manifest.get("firmwareVersion")
+    if (not isinstance(source_revision, str) or len(source_revision) != 40 or
+            not isinstance(firmware_version, str) or not firmware_version):
+        raise RuntimeError("firmware artifact has no exact build identity")
+    return {
+        "sourceRevision": source_revision,
+        "firmwareVersion": firmware_version,
+        "appElfSha256": payload[176:208].hex(),
+        "binarySha256": digest,
+    }
+
+
+def require_expected_build(
+    identity: dict[str, object], expected: dict[str, object],
+) -> None:
+    for key in ("sourceRevision", "firmwareVersion", "appElfSha256"):
+        if identity.get(key) != expected.get(key):
+            raise RuntimeError(
+                f"running firmware {key} mismatch: "
+                f"expected={expected.get(key)!r} actual={identity.get(key)!r}"
+            )
+    if identity.get("sourceDirty") is not False:
+        raise RuntimeError("running firmware is not a clean exact candidate")
+    if identity.get("runningPartition") not in ("app0", "app1"):
+        raise RuntimeError("running firmware did not report an OTA app partition")
+
+
 def matching_ports(pattern: str) -> list[str]:
     return sorted(path for path in glob.glob(pattern) if Path(path).exists())
 
@@ -85,7 +168,7 @@ def wait_for_application(
     while time.monotonic() < deadline:
         for port in matching_ports(pattern):
             try:
-                identity = cdc(port, "hello", output, command_timeout)
+                identity = link_identity(port, output, command_timeout)
             except RuntimeError as error:
                 last_errors[port] = str(error)
                 continue
@@ -101,9 +184,12 @@ def wait_for_application(
 
 def collect(port: str, operation: str, timeout: float) -> int:
     output = run_dir(operation)
-    identity = cdc(port, "hello", output, timeout)
+    hello = cdc(port, "hello", output, timeout)
+    identity = link_identity(port, output, timeout)
     status = cdc(port, "status", output, timeout)
-    diagnostics: dict[str, object] = {"identity": identity, "status": status}
+    diagnostics: dict[str, object] = {
+        "hello": hello, "identity": identity, "status": status
+    }
     for command in ("get-runtime-diagnostics", "get-power-diagnostics",
                     "get-provisioning-diagnostics"):
         try:
@@ -123,13 +209,16 @@ def update(port: str, firmware: Path, timeout: float, port_pattern: str,
     if not 1024 <= len(image) <= 0x300000:
         raise RuntimeError("firmware image must be between 1 KiB and 3 MiB")
     output = run_dir("update")
-    before = cdc(port, "hello", output, min(timeout, 5.0))
-    expected_device_id = str(before.get("deviceId", ""))
-    if not expected_device_id.startswith("pokepod-"):
-        raise RuntimeError("USB update refused unexpected Link identity")
-    metadata = {"port": port, "deviceId": expected_device_id,
-                "firmware": str(firmware), "bytes": len(image),
-                "sha256": hashlib.sha256(image).hexdigest()}
+    hello = cdc(port, "hello", output, min(timeout, 5.0))
+    before = link_identity(port, output, min(timeout, 5.0))
+    expected_device_id = str(before["deviceId"])
+    expected_build = expected_build_from_artifact(firmware)
+    metadata = {
+        "port": port, "deviceId": expected_device_id, "hello": hello,
+        "identity": before, "firmware": str(firmware), "bytes": len(image),
+        "sha256": hashlib.sha256(image).hexdigest(),
+        "expectedBuild": expected_build,
+    }
     write_json(output / "request.json", metadata)
     command = [sys.executable, str(CDC), port, "--firmware", str(firmware),
                "--timeout", str(timeout)]
@@ -145,6 +234,7 @@ def update(port: str, firmware: Path, timeout: float, port_pattern: str,
         port_pattern, expected_device_id, output, app_timeout,
         min(timeout, 5.0),
     )
+    require_expected_build(post_identity, expected_build)
     evidence: dict[str, object] = {
         "request": metadata,
         "response": completed.stdout,
@@ -177,7 +267,7 @@ def flash_with_evidence(
         command.extend(["--identity-authority", str(authority)])
     completed = subprocess.run(
         command, cwd=PROJECT, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
+        stderr=subprocess.PIPE, timeout=1800.0, check=False,
     )
     (output / "flash.stdout").write_text(completed.stdout, encoding="utf-8")
     (output / "flash.stderr").write_text(completed.stderr, encoding="utf-8")
@@ -216,12 +306,11 @@ def recover(args: argparse.Namespace) -> int:
 
 def exercise(args: argparse.Namespace) -> int:
     output = run_dir(f"exercise-{args.scenario}")
-    identity = cdc(args.port, "hello", output, args.timeout)
-    expected_device_id = str(identity.get("deviceId", ""))
-    if not expected_device_id.startswith("pokepod-"):
-        raise RuntimeError("fixture exercise refused unexpected Link identity")
+    hello = cdc(args.port, "hello", output, args.timeout)
+    identity = link_identity(args.port, output, args.timeout)
+    expected_device_id = str(identity["deviceId"])
     write_json(output / "pre.json", {
-        "identity": identity,
+        "hello": hello, "identity": identity,
         "status": cdc(args.port, "status", output, args.timeout),
     })
     failure: RuntimeError | None = None
@@ -329,8 +418,11 @@ def main() -> int:
     try:
         if args.operation == "probe":
             output = run_dir("probe")
-            write_json(output / "evidence.json", {"hello": cdc(args.port, "hello", output, args.timeout),
-                                                   "status": cdc(args.port, "status", output, args.timeout)})
+            write_json(output / "evidence.json", {
+                "hello": cdc(args.port, "hello", output, args.timeout),
+                "identity": link_identity(args.port, output, args.timeout),
+                "status": cdc(args.port, "status", output, args.timeout),
+            })
             print(output)
             return 0
         if args.operation == "collect":
@@ -341,9 +433,18 @@ def main() -> int:
         if args.operation == "doctor":
             output = run_dir("doctor")
             profile = FixtureControlProfile.load(args.control_profile)
-            write_json(output / "evidence.json", profile.capabilities())
+            evidence = profile.capabilities()
+            write_json(output / "control-capabilities.json", evidence)
+            if profile.backend != "command":
+                write_json(output / "evidence.json", evidence)
+                print(output)
+                return 4
+            controller = FixtureController(profile, output)
+            controller.doctor()
+            evidence["liveController"] = "passed"
+            write_json(output / "evidence.json", evidence)
             print(output)
-            return 0 if profile.backend == "command" else 4
+            return 0
         if args.operation == "recover":
             return recover(args)
         if args.operation == "exercise":

@@ -12,8 +12,10 @@ import serial
 
 
 COMMANDS = {
+    "ping": "PING",
     "assert-boot": "BOOT ASSERT",
     "release-boot": "BOOT RELEASE",
+    "release-reset": "RESET RELEASE",
     "pulse-reset": "RESET PULSE",
     "power-off": "POWER OFF",
     "power-on": "POWER ON",
@@ -55,4 +57,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

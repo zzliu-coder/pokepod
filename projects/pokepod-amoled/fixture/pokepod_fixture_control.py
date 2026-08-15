@@ -13,8 +13,10 @@ from typing import Any
 
 SCHEMA = "pokepod.fixture.control.v1"
 ACTION_NAMES = (
+    "ping",
     "assert_boot",
     "release_boot",
+    "release_reset",
     "pulse_reset",
     "power_off",
     "power_on",
@@ -61,7 +63,8 @@ class FixtureControlProfile:
         actions = {name: _command(raw_actions.get(name), name)
                    for name in ACTION_NAMES}
         if backend == "command":
-            for required in ("assert_boot", "release_boot", "pulse_reset"):
+            for required in ("ping", "assert_boot", "release_boot",
+                             "release_reset", "pulse_reset"):
                 if actions[required] is None:
                     raise FixtureControlError(
                         f"command backend requires action {required}"
@@ -133,16 +136,43 @@ class FixtureController:
             )
 
     def enter_rom_loader(self) -> None:
-        boot_asserted = False
+        # A controller may execute ASSERT even when the serial ACK is lost.
+        # Treat BOOT as potentially asserted before sending anything and make
+        # release an unconditional best-effort safety action.
+        boot_may_be_asserted = True
+        primary_error: BaseException | None = None
         try:
             self._run("assert_boot")
-            boot_asserted = True
             time.sleep(self.profile.boot_settle_seconds)
             self._run("pulse_reset")
             time.sleep(self.profile.reset_settle_seconds)
+        except BaseException as error:
+            primary_error = error
         finally:
-            if boot_asserted:
-                self._run("release_boot")
+            if boot_may_be_asserted:
+                try:
+                    self._run("release_boot")
+                except BaseException as release_error:
+                    if primary_error is None:
+                        raise
+                    (self.evidence_dir / "control-release-boot.failure").write_text(
+                        str(release_error), encoding="utf-8"
+                    )
+        if primary_error is not None:
+            raise primary_error
+
+    def doctor(self) -> None:
+        """Exercise the live controller and leave both protected lines safe."""
+        errors: list[BaseException] = []
+        for action in ("ping", "release_reset", "release_boot"):
+            try:
+                self._run(action)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise FixtureControlError(
+                "fixture doctor failed: " + "; ".join(str(error) for error in errors)
+            )
 
     def power_cycle(self) -> None:
         if self.profile.actions["power_off"] is None:
@@ -151,4 +181,3 @@ class FixtureController:
         time.sleep(self.profile.power_off_seconds)
         self._run("power_on")
         time.sleep(self.profile.reset_settle_seconds)
-

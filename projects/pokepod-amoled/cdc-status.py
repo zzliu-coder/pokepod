@@ -128,29 +128,33 @@ def query(port: str, operation: str, timeout: float,
             # the first data frame. Each framed chunk then remains below that
             # window as well.
             time.sleep(0.010)
-            # esp_ota_begin erases the inactive app slot before the first
-            # chunk. The device publishes a zero-byte acknowledgement only
-            # after that bounded-but-slow prepare phase has completed.
-            prepare_deadline = time.monotonic() + max(60.0, timeout)
-            while True:
-                frame_type, _, incoming_id, prepare_payload = read_frame(
-                    fd, prepare_deadline
-                )
-                if incoming_id != request_id:
-                    continue
-                if frame_type == RESPONSE_JSON:
-                    rejected = json.loads(prepare_payload.decode("utf-8"))
-                    raise ValueError(
-                        "binary transfer rejected: " +
-                        json.dumps(rejected, ensure_ascii=False, sort_keys=True)
+            if operation == "firmware-update":
+                # Firmware OTA may erase an inactive slot before accepting
+                # data. Its explicit zero-byte ACK is a firmware-only prepare
+                # contract. Font writes begin with the first data frame and
+                # use only the ordinary per-chunk ACKs below.
+                prepare_deadline = time.monotonic() + max(60.0, timeout)
+                while True:
+                    frame_type, _, incoming_id, prepare_payload = read_frame(
+                        fd, prepare_deadline
                     )
-                if frame_type != EVENT_JSON:
-                    continue
-                prepare_ack = json.loads(prepare_payload.decode("utf-8"))
-                if (prepare_ack.get("event") != "binary_ack" or
-                        int(prepare_ack.get("received", -1)) != 0):
-                    raise ValueError("invalid firmware prepare acknowledgement")
-                break
+                    if incoming_id != request_id:
+                        continue
+                    if frame_type == RESPONSE_JSON:
+                        rejected = json.loads(prepare_payload.decode("utf-8"))
+                        raise ValueError(
+                            "binary transfer rejected: " +
+                            json.dumps(rejected, ensure_ascii=False, sort_keys=True)
+                        )
+                    if frame_type != EVENT_JSON:
+                        continue
+                    prepare_ack = json.loads(prepare_payload.decode("utf-8"))
+                    if (prepare_ack.get("event") != "binary_ack" or
+                            int(prepare_ack.get("received", -1)) != 0):
+                        raise ValueError(
+                            "invalid firmware prepare acknowledgement"
+                        )
+                    break
             offset = 0
             while offset < len(outgoing_binary):
                 # macOS can buffer CDC writes much faster than the ESP32 can
@@ -220,7 +224,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("ports", nargs="*")
     parser.add_argument("--command", default="status",
-                        choices=("hello", "status", "record", "stop",
+                        choices=("hello", "identity", "status", "record", "stop",
                                  "provisioning-start", "provisioning-stop",
                                  "get-power-diagnostics",
                                  "clear-power-diagnostics",

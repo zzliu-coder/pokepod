@@ -23,6 +23,9 @@ def main() -> int:
     assert pinout["rescue_upgrade"]["requires_manual_boot_reset"] is False
     assert pinout["rescue_upgrade"]["requires_fixture_controller"] is True
     assert "identity" in script and "evidence.json" in script
+    assert "def link_identity" in script
+    assert "expected_build_from_artifact" in script
+    assert "require_expected_build" in script
     assert "cdc-status.py" in script and "flash.sh" in script
     assert "--firmware" in script and "--rom-port" in script
     assert "--identity-authority" in script
@@ -30,9 +33,13 @@ def main() -> int:
     assert "enter_rom_loader" in script and "wait_for_application" in script
     assert "exercise" in script and "automaticRecovery" in script
     assert "assert_boot" in control and "release_boot" in control
+    assert '"ping"' in control and '"release_reset"' in control
+    assert "def doctor" in control
     assert "finally:" in control
     assert "--action" in bridge and "serial.Serial" in bridge
     assert "BOOT ASSERT" in controller and "RESET PULSE" in controller
+    assert "RESET RELEASE" in controller
+    assert "kBootDeadmanMs = 3000" in controller
     assert "OUTPUT LOW" in controller
     assert "normal" in readme.lower() and "rescue" in readme.lower()
     assert "backup" in readme and "回读" in readme

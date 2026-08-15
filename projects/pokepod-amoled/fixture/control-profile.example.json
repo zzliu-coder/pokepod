@@ -1,7 +1,15 @@
 {
   "schema": "pokepod.fixture.control.v1",
   "backend": "manual",
-  "actions": {},
+  "actions": {
+    "ping": null,
+    "assert_boot": null,
+    "release_boot": null,
+    "release_reset": null,
+    "pulse_reset": null,
+    "power_off": null,
+    "power_on": null
+  },
   "timings": {
     "actionTimeoutSeconds": 5.0,
     "bootSettleSeconds": 0.1,

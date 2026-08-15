@@ -27,6 +27,16 @@ static bool lineEquals(const String &line, const char *expected) {
   return line.equals(expected);
 }
 
+static constexpr uint32_t kBootDeadmanMs = 3000;
+static bool bootAsserted = false;
+static uint32_t bootAssertedAtMs = 0;
+
+static void releaseBoot() {
+  releaseLine(POKEPOD_FIXTURE_BOOT_PIN);
+  bootAsserted = false;
+  bootAssertedAtMs = 0;
+}
+
 void setup() {
   releaseLine(POKEPOD_FIXTURE_BOOT_PIN);
   releaseLine(POKEPOD_FIXTURE_RESET_PIN);
@@ -35,9 +45,14 @@ void setup() {
   digitalWrite(POKEPOD_FIXTURE_POWER_PIN, HIGH);
 #endif
   Serial.begin(115200);
+  Serial.setTimeout(50);
 }
 
 void loop() {
+  if (bootAsserted &&
+      static_cast<uint32_t>(millis() - bootAssertedAtMs) >= kBootDeadmanMs) {
+    releaseBoot();
+  }
   if (!Serial.available()) return;
   String line = Serial.readStringUntil('\n');
   line.trim();
@@ -45,9 +60,14 @@ void loop() {
     Serial.println("OK");
   } else if (lineEquals(line, "BOOT ASSERT")) {
     assertLow(POKEPOD_FIXTURE_BOOT_PIN);
+    bootAsserted = true;
+    bootAssertedAtMs = millis();
     Serial.println("OK");
   } else if (lineEquals(line, "BOOT RELEASE")) {
-    releaseLine(POKEPOD_FIXTURE_BOOT_PIN);
+    releaseBoot();
+    Serial.println("OK");
+  } else if (lineEquals(line, "RESET RELEASE")) {
+    releaseLine(POKEPOD_FIXTURE_RESET_PIN);
     Serial.println("OK");
   } else if (lineEquals(line, "RESET PULSE")) {
     assertLow(POKEPOD_FIXTURE_RESET_PIN);

@@ -48,8 +48,10 @@ RESET；可选的负载开关控制 VBUS。电脑通过 `pokepod-fixture-bridge.
   "schema": "pokepod.fixture.control.v1",
   "backend": "command",
   "actions": {
+    "ping": ["python3", "/absolute/project/fixture/pokepod-fixture-bridge.py", "--port", "/dev/cu.usbmodemFIXTURE", "--action", "ping"],
     "assert_boot": ["python3", "/absolute/project/fixture/pokepod-fixture-bridge.py", "--port", "/dev/cu.usbmodemFIXTURE", "--action", "assert-boot"],
     "release_boot": ["python3", "/absolute/project/fixture/pokepod-fixture-bridge.py", "--port", "/dev/cu.usbmodemFIXTURE", "--action", "release-boot"],
+    "release_reset": ["python3", "/absolute/project/fixture/pokepod-fixture-bridge.py", "--port", "/dev/cu.usbmodemFIXTURE", "--action", "release-reset"],
     "pulse_reset": ["python3", "/absolute/project/fixture/pokepod-fixture-bridge.py", "--port", "/dev/cu.usbmodemFIXTURE", "--action", "pulse-reset"]
   }
 }
@@ -93,3 +95,8 @@ RESET，软件会明确返回 `manual`，不会声称已经具备自动救援。
 所有命令都会在 `work/fixture-runs/<timestamp>-<operation>/` 保存身份、诊断、控制器
 输出、命令和 SHA 证据。`collect` 与 `doctor` 只读；`exercise` 会触发产品功能；
 `update`、`recover` 和 `flash` 会写固件。
+
+控制器中的 BOOT 断言带三秒 deadman。即使主机已经拉低 BOOT 但串口 ACK 丢失，
+控制器也会自动释放；主机在进入 ROM 流程的任何失败点同样会 best-effort 释放 BOOT。
+`doctor` 会真实执行 PING、RESET RELEASE 和 BOOT RELEASE，输出机器可读的
+`evidence.json`，不会只根据 profile 文本报告“可用”。
