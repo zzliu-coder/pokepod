@@ -37,7 +37,10 @@ for required in (
     "stage-fast-candidate-evidence.py",
     "verify-fast-candidate-evidence.py",
     "--candidate-dir \"$CANDIDATE_DIR\"",
-    "--source-revision \"$GITHUB_SHA\"",
+    "CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+    "ref: ${{ env.CANDIDATE_SHA }}",
+    "--source-revision \"$CANDIDATE_SHA\"",
+    "name: pokepod-fast-candidate-${{ env.CANDIDATE_SHA }}",
     "if-no-files-found: error",
     "--binary \"$BIN\" --elf \"$ELF\" --map \"$MAP\"",
 ):
@@ -50,9 +53,12 @@ for forbidden in (
     "merge_pull_request",
     "if: always()",
     "arduino/setup-arduino-cli@",
+    "--source-revision \"$GITHUB_SHA\"",
+    "name: pokepod-fast-candidate-${{ github.sha }}",
 ):
     assert forbidden not in source, f"audit workflow performs forbidden action: {forbidden}"
 assert "permissions:\n  contents: read" in source
+assert source.count("ref: ${{ env.CANDIDATE_SHA }}") == 2
 assert "sourceDirty" not in source  # clean status is validated by staged evidence.
 uses = re.findall(r"^\s*uses:\s*([^#\s]+)(?:\s*#\s*(\S+))?\s*$", source, re.MULTILINE)
 expected_uses = Counter(

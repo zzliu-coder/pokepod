@@ -11,6 +11,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 concurrency:
   group: pokepod-audit-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -24,6 +27,7 @@ jobs:
       - name: Check out candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.CANDIDATE_SHA }}
           persist-credentials: false
 
       - name: Bootstrap and verify required host tools
@@ -77,6 +81,7 @@ jobs:
       - name: Check out candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.CANDIDATE_SHA }}
           persist-credentials: false
 
       - name: Bootstrap and verify required host tools
@@ -161,7 +166,7 @@ jobs:
             "$OUTPUT/flash-resource.json")
           review_args=(
             --output "$REVIEW"
-            --source-revision "$GITHUB_SHA"
+            --source-revision "$CANDIDATE_SHA"
             --binary "$BIN"
             --tier "$TIER"
             --baseline-commit 2278bb11af4c97f83e71e6e3529b440e80810419
@@ -181,7 +186,7 @@ jobs:
           python3 tools/write-resource-review.py "${review_args[@]}"
           python3 tools/write-fast-candidate-summary.py \
             --output "$SUMMARY" \
-            --source-revision "$GITHUB_SHA" \
+            --source-revision "$CANDIDATE_SHA" \
             --artifact "$OUTPUT/artifact.json" \
             --flash-resource "$OUTPUT/flash-resource.json" \
             --resource-review "$REVIEW" \
@@ -194,21 +199,21 @@ jobs:
             --baseline-internal-globals 168060
           python3 tools/stage-fast-candidate-evidence.py \
             --output "$CANDIDATE_DIR" \
-            --source-revision "$GITHUB_SHA" \
+            --source-revision "$CANDIDATE_SHA" \
             --binary "$BIN" --elf "$ELF" --map "$MAP" \
             --build-log "$BUILD_LOG" \
             --artifact "$OUTPUT/artifact.json" \
             --flash-resource "$OUTPUT/flash-resource.json" \
             --resource-review "$REVIEW" --summary "$SUMMARY"
           python3 tools/verify-fast-candidate-evidence.py \
-            --source-revision "$GITHUB_SHA" \
+            --source-revision "$CANDIDATE_SHA" \
             --candidate-dir "$CANDIDATE_DIR"
           cat "$SUMMARY"
 
       - name: Upload Fast candidate evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pokepod-fast-candidate-${{ github.sha }}
+          name: pokepod-fast-candidate-${{ env.CANDIDATE_SHA }}
           if-no-files-found: error
           retention-days: 14
           path: projects/pokepod-amoled/work/pokepod-build/github-fast-candidate/
