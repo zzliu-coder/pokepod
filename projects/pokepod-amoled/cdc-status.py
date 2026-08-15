@@ -9,6 +9,7 @@ import hashlib
 import glob
 import json
 import os
+from pathlib import Path
 import re
 import select
 import struct
@@ -28,6 +29,8 @@ MAX_CONTROL = 4096
 MAX_DATA = 16384
 OUTGOING_CHUNK = 128
 OUTGOING_PACE_SECONDS = 0.001
+SOURCE_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+APP_ELF_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def firmware_update_fields(
@@ -41,7 +44,10 @@ def firmware_update_fields(
     identity = (source_revision, firmware_version, app_elf_sha256)
     supplied = sum(value is not None for value in identity)
     if supplied == 0:
-        return fields
+        raise ValueError(
+            "firmware update requires artifact.json identity or all three "
+            "explicit identity options"
+        )
     if supplied != len(identity):
         raise ValueError(
             "firmware identity requires --source-revision, "
@@ -68,6 +74,62 @@ def firmware_update_fields(
         "appElfSha256": app_elf_sha256.lower(),
     })
     return fields
+
+
+def load_adjacent_artifact_identity(firmware: Path) -> dict[str, str]:
+    """Load the identity binding for a firmware image next to artifact.json."""
+    manifest_path = firmware.with_name("artifact.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ValueError(
+            f"firmware update requires adjacent artifact.json: {manifest_path}"
+        ) from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid adjacent artifact.json: {manifest_path}") from error
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or \
+            manifest.get("kind") != "hardmac.artifact":
+        raise ValueError("adjacent artifact.json has an invalid schema")
+    if manifest.get("sourceDirty") is not False:
+        raise ValueError("firmware artifact is dirty; refusing USB update")
+    source_revision = manifest.get("sourceRevision")
+    firmware_version = manifest.get("firmwareVersion")
+    image_identity = manifest.get("imageIdentity")
+    if not isinstance(source_revision, str) or SOURCE_REVISION_RE.fullmatch(source_revision) is None:
+        raise ValueError("artifact sourceRevision is missing or invalid")
+    if not isinstance(firmware_version, str) or not (1 <= len(firmware_version) <= 15) or any(
+        ord(character) < 0x20 or ord(character) >= 0x7F
+        for character in firmware_version
+    ):
+        raise ValueError("artifact firmwareVersion is missing or invalid")
+    if not isinstance(image_identity, dict):
+        raise ValueError("artifact imageIdentity is missing")
+    if image_identity.get("magic") != "PKPDIMG2" or image_identity.get("schema") != 2:
+        raise ValueError("artifact imageIdentity schema is invalid")
+    if image_identity.get("product") != "PokePodAmoled":
+        raise ValueError("artifact imageIdentity product is invalid")
+    if image_identity.get("sourceRevision") != source_revision:
+        raise ValueError("artifact imageIdentity sourceRevision mismatch")
+    if image_identity.get("firmwareVersion") != firmware_version:
+        raise ValueError("artifact imageIdentity firmwareVersion mismatch")
+    if image_identity.get("sourceDirty") is not False:
+        raise ValueError("artifact imageIdentity is dirty")
+    app_elf_sha256 = image_identity.get("appElfSha256")
+    if not isinstance(app_elf_sha256, str) or APP_ELF_SHA256_RE.fullmatch(app_elf_sha256) is None:
+        raise ValueError("artifact imageIdentity appElfSha256 is missing or invalid")
+    binary = manifest.get("binary")
+    if not isinstance(binary, dict) or binary.get("file") != firmware.name:
+        raise ValueError("artifact binary does not match firmware image")
+    payload = firmware.read_bytes()
+    if binary.get("sizeBytes") != len(payload):
+        raise ValueError("artifact binary size does not match firmware image")
+    if binary.get("sha256") != hashlib.sha256(payload).hexdigest():
+        raise ValueError("artifact binary SHA-256 does not match firmware image")
+    return {
+        "sourceRevision": source_revision.lower(),
+        "firmwareVersion": firmware_version,
+        "appElfSha256": app_elf_sha256.lower(),
+    }
 
 
 def configure(fd: int) -> None:
@@ -319,6 +381,23 @@ def main() -> int:
             parser.error(str(error))
         if not (1024 <= len(outgoing_binary) <= 0x300000):
             parser.error("firmware image must be between 1 KiB and 3 MiB")
+        if all(
+            value is None
+            for value in (
+                arguments.source_revision,
+                arguments.firmware_version,
+                arguments.app_elf_sha256,
+            )
+        ):
+            try:
+                artifact_identity = load_adjacent_artifact_identity(
+                    Path(arguments.firmware)
+                )
+            except ValueError as error:
+                parser.error(str(error))
+            arguments.source_revision = artifact_identity["sourceRevision"]
+            arguments.firmware_version = artifact_identity["firmwareVersion"]
+            arguments.app_elf_sha256 = artifact_identity["appElfSha256"]
         try:
             fields = firmware_update_fields(
                 hashlib.sha256(outgoing_binary).hexdigest(),

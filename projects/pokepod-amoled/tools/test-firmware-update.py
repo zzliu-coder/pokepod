@@ -43,6 +43,7 @@ def main() -> int:
     assert "firmwareUpdate_.abort()" in transport and "!firmwareUpdate_.active()" in transport
     assert "--firmware" in cdc and "hashlib.sha256" in cdc
     assert "firmware_update_fields" in cdc
+    assert "load_adjacent_artifact_identity" in cdc
     assert "--source-revision" in cdc and "--firmware-version" in cdc
     assert "--app-elf-sha256" in cdc
     assert "load_firmware_artifact_identity" in fixture
@@ -55,7 +56,12 @@ def main() -> int:
     cdc_module = load_module("pokepod_cdc_status_test", CDC)
     fixture_module = load_module("pokepod_fixture_test", FIXTURE)
     digest = "a" * 64
-    assert cdc_module.firmware_update_fields(digest) == {"sha256": digest}
+    try:
+        cdc_module.firmware_update_fields(digest)
+    except ValueError as error:
+        assert "artifact.json" in str(error)
+    else:
+        raise AssertionError("unbound OTA fields were accepted")
     bound = cdc_module.firmware_update_fields(
         digest, "B" * 40, "2.0.0", "C" * 64
     )
@@ -113,6 +119,7 @@ def main() -> int:
         else:
             raise AssertionError("missing artifact manifest was accepted")
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        assert cdc_module.load_adjacent_artifact_identity(firmware) == expected
         assert fixture_module.load_firmware_artifact_identity(firmware) == expected
         for field in ("sourceRevision", "firmwareVersion", "appElfSha256"):
             invalid = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -124,6 +131,12 @@ def main() -> int:
                 assert field in str(error)
             else:
                 raise AssertionError(f"missing {field} was accepted")
+            try:
+                cdc_module.load_adjacent_artifact_identity(firmware)
+            except ValueError as error:
+                assert field in str(error)
+            else:
+                raise AssertionError(f"missing {field} was accepted by cdc")
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         invalid = json.loads(manifest_path.read_text(encoding="utf-8"))
         invalid["imageIdentity"]["appElfSha256"] = "f" * 63
@@ -134,6 +147,12 @@ def main() -> int:
             assert "appElfSha256" in str(error)
         else:
             raise AssertionError("wrong app ELF digest was accepted")
+        try:
+            cdc_module.load_adjacent_artifact_identity(firmware)
+        except ValueError as error:
+            assert "appElfSha256" in str(error)
+        else:
+            raise AssertionError("wrong app ELF digest was accepted by cdc")
     print("PASS test-firmware-update")
     return 0
 

@@ -19,7 +19,11 @@
   "normal_upgrade": {
     "transport": "usb-cdc-link-v2",
     "requires_manual_boot_reset": false,
-    "command": "python3 ../cdc-status.py --firmware <exact-bin> <app-port>",
+    "command": "python3 ../cdc-status.py --firmware <artifact-dir>/PokePodAmoled.ino.bin <app-port>",
+    "artifact_identity_required": true,
+    "artifact_identity_fields": ["sourceRevision", "firmwareVersion", "appElfSha256"],
+    "explicit_identity_options_supported": true,
+    "rejects_unbound_binary": true,
     "writes_inactive_ota_slot": true,
     "reboots_after_verified_sha256": true
   },

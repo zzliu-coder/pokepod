@@ -20,6 +20,11 @@ def main() -> int:
     for name in ("usb_dp", "usb_dm", "gnd", "vbus_5v", "boot", "reset"):
         assert name in contacts and contacts[name]["required"]
     assert pinout["normal_upgrade"]["requires_manual_boot_reset"] is False
+    assert pinout["normal_upgrade"]["artifact_identity_required"] is True
+    assert pinout["normal_upgrade"]["rejects_unbound_binary"] is True
+    assert pinout["normal_upgrade"]["artifact_identity_fields"] == [
+        "sourceRevision", "firmwareVersion", "appElfSha256"
+    ]
     assert pinout["rescue_upgrade"]["requires_manual_boot_reset"] is False
     assert pinout["rescue_upgrade"]["requires_fixture_controller"] is True
     assert "identity" in script and "evidence.json" in script
@@ -43,6 +48,7 @@ def main() -> int:
     assert "OUTPUT LOW" in controller
     assert "normal" in readme.lower() and "rescue" in readme.lower()
     assert "backup" in readme and "回读" in readme
+    assert "artifact.json" in readme and "appElfSha256" in readme
     print("PASS test-pokepod-fixture")
     return 0
 

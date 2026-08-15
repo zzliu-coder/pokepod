@@ -16,6 +16,12 @@ python3 fixture/pokepod-fixture.py update \
   --firmware work/pokepod-build/output/fast/PokePodAmoled.ino.bin
 ```
 
+普通 OTA 只接受与 BIN 同目录的 `artifact.json`，并自动绑定其中
+`imageIdentity.sourceRevision`、`imageIdentity.firmwareVersion` 和
+`imageIdentity.appElfSha256`。缺少清洁身份、身份字段不完整或清单与 BIN 的 SHA/大小不一致时，
+主机在发送首个数据帧前拒绝更新。直接调用 `cdc-status.py --firmware` 也遵守同一门禁；只有显式
+同时提供 `--source-revision`、`--firmware-version`、`--app-elf-sha256` 才能使用没有相邻清单的镜像。
+
 固件先把镜像写入未运行的 OTA 槽，流式计算 SHA-256，校验完成后才切换启动槽并
 提交设备级重启意图。USB 断开发生在返回 OK 后不会取消重启。更新失败会中止 OTA
 句柄，不改变当前启动槽。
