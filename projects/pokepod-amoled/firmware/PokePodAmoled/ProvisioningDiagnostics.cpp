@@ -20,9 +20,24 @@ void copySsid(char *destination, size_t capacity, const String &ssid) {
   destination[length] = '\0';
 }
 
+uint8_t pollBucket(uint32_t elapsedMs) {
+  if (elapsedMs <= 1) return 0;
+  if (elapsedMs <= 2) return 1;
+  if (elapsedMs <= 4) return 2;
+  if (elapsedMs <= 8) return 3;
+  if (elapsedMs <= 16) return 4;
+  if (elapsedMs <= 32) return 5;
+  if (elapsedMs <= 64) return 6;
+  return 7;
+}
+
 }  // namespace
 
 bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
+  persistentWrites_ = 0;
+  pollCount_ = 0;
+  pollMaxMs_ = 0;
+  std::memset(pollBuckets_, 0, sizeof(pollBuckets_));
   open_ = preferences_.begin("pokepod_diag", false);
   initializeProvisioningLog(stored_);
   initializeProvisioningProbe(probe_);
@@ -73,6 +88,20 @@ bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
   log.printf("{\"event\":\"provisioning_log\",\"ok\":true,\"count\":%u,\"recovered\":%s}\n",
              static_cast<unsigned>(stored_.count), loadedOk ? "true" : "false");
   return true;
+}
+
+void ProvisioningDiagnostics::recordPollDuration(uint32_t elapsedMs,
+                                                 Print &log) {
+  ++pollCount_;
+  if (elapsedMs > pollMaxMs_) pollMaxMs_ = elapsedMs;
+  const uint8_t bucket = pollBucket(elapsedMs);
+  if (pollBuckets_[bucket] != 0xffffU) ++pollBuckets_[bucket];
+  log.printf(
+      "{\"event\":\"provisioning_poll\",\"elapsed_ms\":%lu,"
+      "\"max_ms\":%lu,\"bucket\":%u,\"count\":%lu}\n",
+      static_cast<unsigned long>(elapsedMs),
+      static_cast<unsigned long>(pollMaxMs_), static_cast<unsigned>(bucket),
+      static_cast<unsigned long>(pollCount_));
 }
 
 bool ProvisioningDiagnostics::persist(const StoredProvisioningLog &proposed) {
@@ -131,14 +160,26 @@ bool ProvisioningDiagnostics::recordProbe(
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   proposed.recordResetReason = static_cast<uint16_t>(esp_reset_reason());
   finalizeProvisioningProbe(proposed);
-  const bool ok = persistProbe(proposed);
-  if (ok) probe_ = proposed;
+  const bool persistRequired = provisioningProbePersists(stage);
+  bool ok = true;
+  if (persistRequired) {
+    if (persistentWrites_ >= kProvisioningMaxPersistentWritesPerSession) {
+      ok = false;
+    } else {
+      ok = persistProbe(proposed);
+      if (ok) ++persistentWrites_;
+    }
+  }
+  // RAM always receives the newest breadcrumb, even when its persistence
+  // budget is exhausted. The live USB log carries the exact failure.
+  probe_ = proposed;
   log.printf(
-      "{\"event\":\"provisioning_probe\",\"ok\":%s,"
+      "{\"event\":\"provisioning_probe\",\"ok\":%s,\"persisted\":%s,"
       "\"stage\":\"%s\",\"sequence\":%lu,\"internal_free\":%lu,"
       "\"internal_largest\":%lu,\"psram_free\":%lu,"
       "\"psram_largest\":%lu,\"psram_total\":%lu}\n",
-      ok ? "true" : "false", provisioningProbeStageKey(stage),
+      ok ? "true" : "false", persistRequired && ok ? "true" : "false",
+      provisioningProbeStageKey(stage),
       static_cast<unsigned long>(proposed.sequence),
       static_cast<unsigned long>(proposed.internalFree),
       static_cast<unsigned long>(proposed.internalLargest),
@@ -166,11 +207,18 @@ bool ProvisioningDiagnostics::record(
   copySsid(record.ssid, sizeof(record.ssid), ssid);
   appendProvisioningLog(proposed, record);
   finalizeProvisioningLog(proposed);
-  const bool ok = persist(proposed);
-  if (ok) {
-    stored_ = proposed;
-    ++revision_;
+  const bool persistRequired = provisioningLogPersists(stage);
+  bool ok = true;
+  if (persistRequired) {
+    if (persistentWrites_ >= kProvisioningMaxPersistentWritesPerSession) {
+      ok = false;
+    } else {
+      ok = persist(proposed);
+      if (ok) ++persistentWrites_;
+    }
   }
+  stored_ = proposed;
+  ++revision_;
   log.printf("{\"event\":\"provisioning_diagnostic\",\"ok\":%s,\"stage\":\"%s\",\"outcome\":%u,\"reason\":%u,\"rssi\":%d,\"elapsed_ms\":%lu}\n",
              ok ? "true" : "false", provisioningLogStageKey(stage),
              static_cast<unsigned>(outcome), static_cast<unsigned>(reason),

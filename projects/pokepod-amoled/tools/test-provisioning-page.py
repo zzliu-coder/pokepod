@@ -15,6 +15,9 @@ main_source = (firmware_dir / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
 portal_header = (firmware_dir / "ProvisioningPortal.h").read_text(encoding="utf-8")
+diagnostics_header = (firmware_dir / "ProvisioningDiagnostics.h").read_text(
+    encoding="utf-8"
+)
 coordinator_header = (firmware_dir / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
 diagnostics_source = (firmware_dir / "ProvisioningDiagnostics.cpp").read_text(
     encoding="utf-8"
@@ -360,7 +363,12 @@ for service_type, service_name in (
     assert f"PsramService<{service_type}> {service_name};" in main_source
     assert f'{service_name}.allocate("' in main_source
 assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in main_source
-assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in main_source
+assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in main_source[
+    main_source.index("class PsramService"):
+    main_source.index("class SdMmcRecordingCapacitySource")
+]
+assert "psramDegradedBoot" in main_source
+assert "large_services_started\\\":false" in main_source
 assert main_source.index("serviceObjectsAllocated") < main_source.index(
     "bleVoice.begin("
 )
@@ -379,6 +387,15 @@ touch_before_portal = main_source[
 assert "pollTouch();" in touch_before_portal
 assert portal_loop not in touch_before_portal
 assert "BoundedProvisioningWebServer" in portal_header
+assert "esp_arduino_version.h" in portal_header
+assert "ESP_ARDUINO_VERSION_MAJOR != 3" in portal_header
+assert "ESP_ARDUINO_VERSION_MINOR != 3" in portal_header
+assert "ESP_ARDUINO_VERSION_PATCH != 8" in portal_header
+assert "ProvisioningPollScope" in diagnostics_header
+assert "ProvisioningPollScope pollScope(diagnostics_, log_);" in source
+assert "provisioningProbePersists" in diagnostics_source
+assert "provisioningLogPersists" in diagnostics_source
+assert "kProvisioningMaxPersistentWritesPerSession" in diagnostics_source
 assert "_currentClient.setTimeout(kIoSliceMs);" in source
 bounded_server = source[
     source.index("void BoundedProvisioningWebServer::handleClient()"):

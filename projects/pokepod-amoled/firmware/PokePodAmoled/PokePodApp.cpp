@@ -31,6 +31,7 @@
 #include "LocalRecordingStart.h"
 #include "PowerPolicy.h"
 #include "PowerDiagnostics.h"
+#include "PsramDegradedPolicy.h"
 #include "RaiseToWakePolicy.h"
 #include "RuntimePowerManager.h"
 #include "RuntimeDiagnostics.h"
@@ -50,11 +51,14 @@ using namespace pokepod;
 
 namespace {
 
+static_assert(!psramMayFallbackToInternal(),
+              "large services must fail closed when PSRAM is unavailable");
+
 // These services carry large fixed workspaces but only run from cooperative
 // application/storage tasks. Keep their objects out of DMA-capable internal
 // RAM so the Wi-Fi and BLE drivers retain enough contiguous internal heap to
-// coexist. The board requires OPI PSRAM; the internal fallback keeps boot
-// diagnostics available on a degraded board instead of dereferencing null.
+// coexist. The board requires OPI PSRAM; a failed allocation is a degraded
+// capability state and never falls back into internal RAM.
 template <typename T>
 class PsramService {
  public:
@@ -64,22 +68,18 @@ class PsramService {
         sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     external_ = memory != nullptr;
     if (memory == nullptr) {
-      memory = heap_caps_malloc(
-          sizeof(T), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    if (memory == nullptr) {
       log.printf(
           "{\"event\":\"service_allocation\",\"service\":\"%s\","
-          "\"ok\":false,\"bytes\":%u}\n",
+          "\"ok\":false,\"degraded\":true,\"memory\":\"psram\","
+          "\"bytes\":%u}\n",
           name, static_cast<unsigned>(sizeof(T)));
       return false;
     }
     instance_ = new (memory) T();
     log.printf(
         "{\"event\":\"service_allocation\",\"service\":\"%s\","
-        "\"ok\":true,\"bytes\":%u,\"memory\":\"%s\"}\n",
-        name, static_cast<unsigned>(sizeof(T)),
-        external_ ? "psram" : "internal");
+        "\"ok\":true,\"bytes\":%u,\"memory\":\"psram\"}\n",
+        name, static_cast<unsigned>(sizeof(T)));
     return true;
   }
 
@@ -211,6 +211,7 @@ bool pendingRecorderResultNotify = false;
 bool pendingRecorderFinalize = false;
 bool recorderHardwareReady = false;
 bool recorderRecoveryFailureReported = false;
+bool psramDegradedBoot = false;
 
 enum class StorageBootPhase : uint8_t {
   localRecovery,
@@ -548,10 +549,27 @@ void drawDashboard() {
   const uint32_t now = millis();
   DashboardView view;
   view.board = &board.status();
+  view.settings = &deviceConfig.settings();
+  view.portalPassword = nullptr;
+  if (psramDegradedBoot) {
+    view.localCapsuleStatus = "PSRAM REQUIRED · 大型服务已禁用";
+    view.audioReady = false;
+    view.localCapsulesReady = false;
+    view.recorderReady = false;
+    view.transcriptionReady = false;
+    view.bleVoiceServiceReady = false;
+    view.linkReady = false;
+    view.wifiServiceReady = false;
+    view.usbReady = usb.ready();
+    view.usbConnected = usbCableConnected();
+    view.provisioningDiagnostics = &provisioningDiagnostics;
+    if (deadlinePending(now, transientUntilMs)) view.message = transientMessage;
+    dashboard.draw(view);
+    return;
+  }
   view.capsuleLibraryReady =
       capabilities.ready(DeviceCapability::capsuleLibrary);
   view.library = view.capsuleLibraryReady ? &capsuleLibrary.get() : nullptr;
-  view.settings = &deviceConfig.settings();
   view.audioReady = audio.ready();
   view.localCapsulesReady = capabilities.allows(kRecordingCapabilities);
   if (!view.localCapsulesReady) {
@@ -1740,15 +1758,34 @@ void setup() {
   pinMode(kBootButtonPin, INPUT_PULLUP);
 
   board.begin(Serial);
-  const bool serviceObjectsAllocated =
-      capsuleLibrary.allocate("capsule_library", Serial) &&
-      capsuleOperations.allocate("capsule_operations", Serial) &&
-      linkService.allocate("usb_link", Serial) &&
+  const bool capsuleLibraryAllocated =
+      capsuleLibrary.allocate("capsule_library", Serial);
+  const bool capsuleOperationsAllocated =
+      capsuleOperations.allocate("capsule_operations", Serial);
+  const bool linkServiceAllocated = linkService.allocate("usb_link", Serial);
+  const bool wirelessSyncAllocated =
       wirelessSync.allocate("wireless_sync", Serial);
+  const bool serviceObjectsAllocated = capsuleLibraryAllocated &&
+      capsuleOperationsAllocated && linkServiceAllocated &&
+      wirelessSyncAllocated;
   if (!serviceObjectsAllocated) {
+    psramDegradedBoot = true;
     Serial.println(
-        "{\"event\":\"boot_fatal\",\"reason\":\"service_allocation\"}");
-    while (true) delay(1000);
+        "{\"event\":\"boot_degraded\",\"reason\":\"psram_required\","
+        "\"large_services_started\":false}");
+    capabilities.record(DeviceCapability::display, board.status().display);
+    capabilities.record(DeviceCapability::touch, board.status().touch);
+    capabilities.record(DeviceCapability::storage, false);
+    (void)usb.begin(board.status().variant);
+    (void)deviceConfig.begin(usb.log());
+    (void)provisioningDiagnostics.begin(
+        usb.log(), static_cast<uint16_t>(esp_reset_reason()));
+    (void)runtimeDiagnostics.begin(
+        usb.log(), static_cast<uint16_t>(esp_reset_reason()));
+    dashboard.begin(board.display(), nullptr);
+    showMessage("PSRAM REQUIRED · 请关机检查内存", 60000);
+    drawDashboard();
+    return;
   }
   const BoardStatus &bootBoard = board.status();
   capabilities.record(DeviceCapability::display, bootBoard.display);
@@ -1819,6 +1856,20 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  if (psramDegradedBoot) {
+    const PowerKeyEvent powerKey = board.pollPowerKey();
+    if (powerKey == PowerKeyEvent::longPress) {
+      Serial.println(
+          "{\"event\":\"psram_degraded_shutdown\",\"safe\":true}");
+      board.safeShutdown(Serial);
+    }
+    if (now - lastDashboardMs >= 1000) {
+      lastDashboardMs = now;
+      drawDashboard();
+    }
+    delay(10);
+    return;
+  }
   // Storage boot is a real application phase. One cooperative recovery step
   // runs per turn; the initial library scan, ASR queue, Link and every local
   // mutation remain unopened until this phase reaches a terminal boundary.

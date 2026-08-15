@@ -310,6 +310,7 @@ void ProvisioningPortal::failStartupTimeout() {
 
 void ProvisioningPortal::loop(uint32_t nowMs) {
   if (!active_) return;
+  ProvisioningPollScope pollScope(diagnostics_, log_);
   dns_.processNextRequest();
   server_.handleClient();
   // HTTP handlers can create a new validation timestamp. Refresh the clock

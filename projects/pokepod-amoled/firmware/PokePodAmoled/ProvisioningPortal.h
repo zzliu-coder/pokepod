@@ -5,6 +5,18 @@
 #include <WebServer.h>
 #include <vector>
 
+#if defined(ARDUINO)
+#include <esp_arduino_version.h>
+#if !defined(ESP_ARDUINO_VERSION_MAJOR) || \
+    !defined(ESP_ARDUINO_VERSION_MINOR) || \
+    !defined(ESP_ARDUINO_VERSION_PATCH)
+#error "PokePod provisioning requires Arduino-ESP32 version macros"
+#elif ESP_ARDUINO_VERSION_MAJOR != 3 || ESP_ARDUINO_VERSION_MINOR != 3 || \
+    ESP_ARDUINO_VERSION_PATCH != 8
+#error "PokePod provisioning is pinned to Arduino-ESP32 3.3.8"
+#endif
+#endif
+
 #include "DeviceConfig.h"
 #include "ProvisioningDiagnostics.h"
 #include "ProvisioningPolicy.h"
