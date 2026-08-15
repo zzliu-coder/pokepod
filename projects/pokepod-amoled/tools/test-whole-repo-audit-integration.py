@@ -146,10 +146,12 @@ def test_governance_and_test_registry() -> None:
 
     gates = json.loads(GATES.read_text(encoding="utf-8"))
     assert "test-whole-repo-audit-integration.py" in gates["repository"]
+    assert "test-fixture-boot-ack-loss.py" in gates["source"]
+    assert "test-fixture-build-identity.py" in gates["source"]
+    assert "test-fixture-link-behavior.py" in gates["source"]
+    assert "test-rescue-flash-policy.py" in gates["source"]
+    assert "test-rescue-partition-layout.py" in gates["source"]
     pending = gates.get("pending", {})
-    assert pending["source"][0]["name"] == "test-fixture-boot-ack-loss.py"
-    assert pending["source"][1]["name"] == "test-fixture-build-identity.py"
-    assert pending["source"][2]["name"] == "test-fixture-link-behavior.py"
     assert pending["android"][0]["path"] == "projects/pokecapsule-android/test-android-variants.py"
     assert pending["android"][0]["owner"] == "L5"
 

@@ -38,6 +38,11 @@
     "test-performance-architecture.py",
     "test-pokepod-fixture.py",
     "test-fixture-control.py",
+    "test-fixture-boot-ack-loss.py",
+    "test-fixture-build-identity.py",
+    "test-fixture-link-behavior.py",
+    "test-rescue-flash-policy.py",
+    "test-rescue-partition-layout.py",
     "test-power-diagnostics-contract.py",
     "test-provisioning-page.py",
     "test-provisioning-radio-contract.py",
@@ -77,26 +82,6 @@
     "test-whole-repo-audit-integration.py"
   ],
   "pending": {
-    "source": [
-      {
-        "name": "test-fixture-boot-ack-loss.py",
-        "owner": "L2",
-        "base": "59454f9dae367fdfcf58ff6cfbcab2841c6bf19e",
-        "promoteTo": "source"
-      },
-      {
-        "name": "test-fixture-build-identity.py",
-        "owner": "L2",
-        "base": "59454f9dae367fdfcf58ff6cfbcab2841c6bf19e",
-        "promoteTo": "source"
-      },
-      {
-        "name": "test-fixture-link-behavior.py",
-        "owner": "L2",
-        "base": "59454f9dae367fdfcf58ff6cfbcab2841c6bf19e",
-        "promoteTo": "source"
-      }
-    ],
     "android": [
       {
         "path": "projects/pokecapsule-android/test-android-variants.py",
