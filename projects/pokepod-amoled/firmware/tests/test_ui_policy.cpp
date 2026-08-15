@@ -152,14 +152,23 @@ int main() {
   state.capsuleDetail = false;
   state.page = RootPage::device;
   state.homeMode = HomeMode::idle;
-  assert(uiActionAt(state, 180, 120, false) == UiAction::wifiToggle);
+  assert(uiActionAt(state, 180, 120, false) == UiAction::openProvisioning);
+  assert(uiActionAt(state, ui::kDeviceBluetoothToggleLeft, 120, false) ==
+         UiAction::wifiToggle);
   assert(uiActionAt(state, 180, 300, false) == UiAction::raiseToWakeToggle);
-  assert(uiActionAt(state, 180, 380, false) == UiAction::openProvisioning);
+  assert(uiActionAt(state, 180, 380, false) == UiAction::openShutdownConfirm);
   assert(uiActionAt(state, 180, 200, false) ==
          UiAction::openBluetoothPairing);
   assert(uiActionAt(state, 330, 200, false) ==
          UiAction::bluetoothToggle);
   assert(uiActionAt(state, 180, 240, false) == UiAction::openComputerSync);
+  state.shutdownConfirmOverlay = true;
+  assert(uiActionAt(state, 100, ui::kShutdownConfirmActionsTop + 10, false) ==
+         UiAction::closeOverlay);
+  assert(uiActionAt(state, 260, ui::kShutdownConfirmActionsTop + 10, false) ==
+         UiAction::confirmShutdown);
+  assert(uiActionAt(state, 10, 100, false) == UiAction::closeOverlay);
+  state.shutdownConfirmOverlay = false;
 
   assert(uiActionAt(state, 180, 20, false) == UiAction::none);
   assert(uiActionAt(state, 338, 20, false) == UiAction::none);

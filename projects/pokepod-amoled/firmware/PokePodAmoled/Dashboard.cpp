@@ -326,8 +326,9 @@ void Dashboard::drawBody(const DashboardView &view) {
   if (state_.capsuleScopeOverlay) drawScopePicker(view);
   if (state_.detailMoreOverlay) drawDetailMore(view);
   if (state_.purgeConfirmOverlay) drawPurgeConfirm();
+  if (state_.shutdownConfirmOverlay) drawShutdownConfirm();
   if (!state_.capsuleScopeOverlay && !state_.detailMoreOverlay &&
-      !state_.purgeConfirmOverlay &&
+      !state_.purgeConfirmOverlay && !state_.shutdownConfirmOverlay &&
       shouldDrawToast(!view.message.isEmpty(), view.recording,
                       view.wirelessHolding,
                       state_.screen() == UiScreen::provisioning)) {
@@ -735,6 +736,37 @@ void Dashboard::drawPurgeConfirm() {
                      ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
 }
 
+void Dashboard::drawShutdownConfirm() {
+  display_->fillRoundRect(ui::kShutdownConfirmLeft,
+                          ui::kShutdownConfirmTop,
+                          ui::kShutdownConfirmRight -
+                              ui::kShutdownConfirmLeft,
+                          ui::kShutdownConfirmBottom -
+                              ui::kShutdownConfirmTop,
+                          26, ui::kSurfaceRaised);
+  display_->drawRoundRect(ui::kShutdownConfirmLeft,
+                          ui::kShutdownConfirmTop,
+                          ui::kShutdownConfirmRight -
+                              ui::kShutdownConfirmLeft,
+                          ui::kShutdownConfirmBottom -
+                              ui::kShutdownConfirmTop,
+                          26, ui::kAccent);
+  drawUiIcon(*display_, UiIcon::power, 52, 158, ui::kAccent);
+  renderer_.drawText("关机？", 92, 154, 220, 1, ui::kInk,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::display, true);
+  renderer_.drawText("先保存录音并关闭网络", 52, 212, 264, 2,
+                     ui::kMuted, ui::kSurfaceRaised, 0, true,
+                     UiTextSize::body, false);
+  display_->drawFastHLine(48, ui::kShutdownConfirmActionsTop, 272,
+                          ui::kDivider);
+  display_->drawFastVLine(ui::kShutdownConfirmActionSplit,
+                          ui::kShutdownConfirmActionsTop, 54, ui::kDivider);
+  renderer_.drawText("取消", 82, 294, 72, 1, ui::kInk,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
+  renderer_.drawText("确认关机", 214, 294, 100, 1, ui::kAccent,
+                     ui::kSurfaceRaised, 0, false, UiTextSize::body, true);
+}
+
 void Dashboard::drawDevice(const DashboardView &view) {
   renderer_.drawText("设备", 20, 58, 150, 1, ui::kInk, ui::kBackground,
                      0, false, UiTextSize::display, true);
@@ -823,8 +855,10 @@ void Dashboard::drawDevice(const DashboardView &view) {
                  raiseEnabled ? "触摸或抬起" : "仅实体键",
                  raiseEnabled ? ui::kAccent : ui::kMuted,
                  SettingAccessory::toggle, raiseEnabled);
-  drawSettingRow(ui::kDeviceProvisionTop, UiIcon::phone, "手机配网",
-                 "", ui::kMuted, SettingAccessory::chevron);
+  drawSettingRow(ui::kDeviceProvisionTop, UiIcon::power, "关机",
+                 view.shutdownPending ? "正在保存并关机" : "轻触后确认",
+                 view.shutdownPending ? ui::kWaiting : ui::kMuted,
+                 SettingAccessory::chevron);
 }
 
 void Dashboard::drawComputerSync(const DashboardView &view) {
@@ -1453,6 +1487,7 @@ uint64_t Dashboard::signature(const DashboardView &view,
   value.add(view.bleVoiceBonded);
   value.add(view.bleVoicePairing);
   value.add(view.bluetoothEnabled);
+  value.add(view.shutdownPending);
   value.add(view.bleVoiceDisablePending);
   value.add(view.bleVoicePasskey);
   value.add(view.bleVoiceMtu);
@@ -1469,6 +1504,7 @@ uint64_t Dashboard::signature(const DashboardView &view,
   value.add(state_.capsuleScopeOverlay);
   value.add(state_.detailMoreOverlay);
   value.add(state_.purgeConfirmOverlay);
+  value.add(state_.shutdownConfirmOverlay);
   value.add(purgeConfirmCount_);
 
   if (state_.screen() == UiScreen::capsuleDetail ||
@@ -1774,7 +1810,7 @@ void Dashboard::back() {
     return;
   }
   if (state_.capsuleScopeOverlay || state_.detailMoreOverlay ||
-      state_.purgeConfirmOverlay) {
+      state_.purgeConfirmOverlay || state_.shutdownConfirmOverlay) {
     closeOverlays();
     return;
   }
@@ -1819,6 +1855,16 @@ void Dashboard::openComputerSync() {
   state_.capsuleScopeOverlay = false;
   state_.detailMoreOverlay = false;
   state_.purgeConfirmOverlay = false;
+  state_.shutdownConfirmOverlay = false;
+  invalidated_ = true;
+}
+
+void Dashboard::openShutdownConfirm() {
+  if (state_.screen() != UiScreen::device) return;
+  state_.shutdownConfirmOverlay = true;
+  state_.capsuleScopeOverlay = false;
+  state_.detailMoreOverlay = false;
+  state_.purgeConfirmOverlay = false;
   invalidated_ = true;
 }
 
@@ -1844,6 +1890,7 @@ void Dashboard::openScopePicker() {
   state_.capsuleScopeOverlay = true;
   state_.detailMoreOverlay = false;
   state_.purgeConfirmOverlay = false;
+  state_.shutdownConfirmOverlay = false;
   invalidated_ = true;
 }
 
@@ -1853,6 +1900,7 @@ void Dashboard::openDetailMore() {
   state_.detailMoreOverlay = true;
   state_.capsuleScopeOverlay = false;
   state_.purgeConfirmOverlay = false;
+  state_.shutdownConfirmOverlay = false;
   invalidated_ = true;
 }
 
@@ -1865,15 +1913,17 @@ void Dashboard::openPurgeConfirm(size_t count) {
   state_.purgeConfirmOverlay = true;
   state_.capsuleScopeOverlay = false;
   state_.detailMoreOverlay = false;
+  state_.shutdownConfirmOverlay = false;
   invalidated_ = true;
 }
 
 void Dashboard::closeOverlays() {
   if (!state_.capsuleScopeOverlay && !state_.detailMoreOverlay &&
-      !state_.purgeConfirmOverlay) return;
+      !state_.purgeConfirmOverlay && !state_.shutdownConfirmOverlay) return;
   state_.capsuleScopeOverlay = false;
   state_.detailMoreOverlay = false;
   state_.purgeConfirmOverlay = false;
+  state_.shutdownConfirmOverlay = false;
   purgeConfirmCount_ = 0;
   invalidated_ = true;
 }
@@ -1883,7 +1933,7 @@ void Dashboard::navigate(RootPage page) {
       state_.bluetoothPairing ||
       state_.provisioning ||
       state_.capsuleScopeOverlay || state_.detailMoreOverlay ||
-      state_.purgeConfirmOverlay ||
+      state_.purgeConfirmOverlay || state_.shutdownConfirmOverlay ||
       state_.page == page) return;
   if (ScrollPhysics *scroll = activeScroll()) scroll->cancelMotion();
   pageTransition_.prepare(

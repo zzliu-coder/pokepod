@@ -561,6 +561,7 @@ void drawDashboard() {
   view.transcriptionReady =
       capabilities.ready(DeviceCapability::transcription);
   view.bleVoiceServiceReady = capabilities.ready(DeviceCapability::bleVoice);
+  view.shutdownPending = safeShutdownQuiesce.pending();
   view.bluetoothEnabled = bleVoice.userEnabled();
   view.bleVoiceDisablePending = bleVoice.disablePending();
   view.linkReady = capabilities.ready(DeviceCapability::link);
@@ -1384,6 +1385,23 @@ void pollTouch() {
       } else {
         showMessage("配网启动请求失败");
       }
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (action == UiAction::openShutdownConfirm) {
+      if (safeShutdownQuiesce.pending()) {
+        showMessage("正在安全关机", 2000);
+      } else {
+        dashboard.openShutdownConfirm();
+        if (recorder.recording() || captureRuntime.running()) {
+          showMessage("确认后会先保存当前录音", 3000);
+        }
+      }
+      dashboard.invalidate();
+      drawDashboard();
+    } else if (action == UiAction::confirmShutdown) {
+      dashboard.closeOverlays();
+      requestSafeShutdown(now);
+      showMessage("正在保存并关机", 3000);
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::raiseToWakeToggle) {

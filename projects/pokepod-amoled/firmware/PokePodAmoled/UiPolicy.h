@@ -33,6 +33,7 @@ struct UiState {
   bool detailTrashEnabled = false;
   bool detailMoreOverlay = false;
   bool purgeConfirmOverlay = false;
+  bool shutdownConfirmOverlay = false;
   bool capsuleScopeOverlay = false;
   bool capsuleSelectionMode = false;
   bool capsuleTrashScope = false;
@@ -184,6 +185,8 @@ enum class UiAction : uint8_t {
   toggleBluetoothPairing,
   forgetBluetoothMac,
   openComputerSync,
+  openShutdownConfirm,
+  confirmShutdown,
   closeComputerSync,
   raiseToWakeToggle,
   openCapsule,
@@ -327,6 +330,17 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     return UiAction::none;
   }
+  if (state.shutdownConfirmOverlay) {
+    if (x < ui::kShutdownConfirmLeft || x >= ui::kShutdownConfirmRight ||
+        y < ui::kShutdownConfirmTop || y >= ui::kShutdownConfirmBottom) {
+      return UiAction::closeOverlay;
+    }
+    if (y >= ui::kShutdownConfirmActionsTop) {
+      return x < ui::kShutdownConfirmActionSplit
+          ? UiAction::closeOverlay : UiAction::confirmShutdown;
+    }
+    return UiAction::none;
+  }
   if (state.detailMoreOverlay) {
     if (x < ui::kDetailMoreLeft || x >= ui::kDetailMoreRight ||
         y < ui::kDetailMoreTop || y >= ui::kDetailMoreBottom) {
@@ -369,7 +383,8 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
   }
   if (screen == UiScreen::device) {
     if (y >= ui::kDeviceWifiTop && y < ui::kDeviceMacTop) {
-      return UiAction::wifiToggle;
+      return x >= ui::kDeviceBluetoothToggleLeft
+          ? UiAction::wifiToggle : UiAction::openProvisioning;
     }
     if (y >= ui::kDeviceMacTop && y < ui::kDeviceStorageTop) {
       return x >= ui::kDeviceBluetoothToggleLeft
@@ -382,7 +397,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return UiAction::raiseToWakeToggle;
     }
     if (y >= ui::kDeviceProvisionTop && y < ui::kDeviceRowsBottom) {
-      return UiAction::openProvisioning;
+      return UiAction::openShutdownConfirm;
     }
     return UiAction::none;
   }

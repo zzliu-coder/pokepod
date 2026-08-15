@@ -38,6 +38,7 @@ struct DashboardView {
   bool recorderReady = false;
   bool transcriptionReady = false;
   bool bleVoiceServiceReady = false;
+  bool shutdownPending = false;
   bool bluetoothEnabled = false;
   bool bleVoiceDisablePending = false;
   bool linkReady = false;
@@ -119,6 +120,7 @@ class Dashboard {
   void openProvisioningLog();
   void openBluetoothPairing();
   void openComputerSync();
+  void openShutdownConfirm();
   void closeOverlays();
   void back();
   void navigate(RootPage page);
@@ -162,6 +164,7 @@ class Dashboard {
   void drawScopePicker(const DashboardView &view);
   void drawDetailMore(const DashboardView &view);
   void drawPurgeConfirm();
+  void drawShutdownConfirm();
   void drawDevice(const DashboardView &view);
   void drawComputerSync(const DashboardView &view);
   void drawBluetoothPairing(const DashboardView &view);

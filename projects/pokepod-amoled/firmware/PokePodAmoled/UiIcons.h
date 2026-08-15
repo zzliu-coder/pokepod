@@ -23,6 +23,7 @@ enum class UiIcon : uint8_t {
   chevron,
   warning,
   check,
+  power,
 };
 
 void drawUiIcon(Arduino_GFX &display, UiIcon icon, int16_t x, int16_t y,

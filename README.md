@@ -20,3 +20,11 @@ remediation reviewable as a separate commit.
 The repository CI runs source, asset, toolchain, ASan/UBSan, source-audit
 round-trip and a clean forced Fast build. It does not run a Release build,
 access a serial port, or flash hardware.
+
+The device settings UI keeps a fixed five-row layout: Wi-Fi configuration is
+opened from the left side of the wireless row while the right side remains the
+Wi-Fi toggle; Bluetooth pairing and its master switch use the same split-row
+interaction. The fifth row is an explicit shutdown action with confirmation and
+the existing cooperative safe-shutdown gate. USB CDC OTA is implemented for a
+running firmware image; the fixture performs identity, size and SHA-256 checks,
+streams the inactive OTA slot, and leaves BOOT/RESET as the recovery path.
