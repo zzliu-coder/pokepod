@@ -4,7 +4,9 @@
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +38,10 @@ epoch_export = BUILD.index("export SOURCE_DATE_EPOCH", epoch_lookup)
 compile_call = BUILD.index('"$ARDUINO_CLI" compile', epoch_export)
 assert epoch_lookup < epoch_export < compile_call
 
+argument_guard = BUILD.index('for build_argument in "$@"')
+commit_guard = BUILD.index('if [ -z "$SOURCE_REVISION"')
+assert argument_guard < commit_guard
+
 for inherited_epoch, arguments in (
     ("", ("--build-property", "compiler.cpp.extra_flags=-DPOKEPOD_BUILD_EPOCH_UTC=0")),
     ("9999999999", ("--build-property=compiler.cpp.extra_flags=-DPOKEPOD_BUILD_EPOCH_UTC=1",)),
@@ -51,6 +57,26 @@ for inherited_epoch, arguments in (
     )
     assert rejected.returncode == 64, rejected
     assert "Release build rejects caller-supplied --build-property" in rejected.stderr
+
+# A packaged source tree can have no Git metadata. The argument contract must
+# still win before the later release identity checks return exit 65.
+with tempfile.TemporaryDirectory(prefix="pokepod-release-no-git-") as raw:
+    package_root = Path(raw)
+    packaged_build = package_root / "firmware/build.sh"
+    packaged_build.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "firmware/build.sh", packaged_build)
+    for argument in (
+        "--build-property",
+        "--build-property=compiler.cpp.extra_flags=-DPOKEPOD_BUILD_EPOCH_UTC=1",
+    ):
+        rejected = subprocess.run(
+            ["sh", str(packaged_build), "--release", "--", argument],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected.returncode == 64, rejected
+        assert "Release build rejects caller-supplied --build-property" in rejected.stderr
 
 git_root = subprocess.run(
     ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],

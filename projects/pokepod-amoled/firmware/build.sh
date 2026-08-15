@@ -79,6 +79,17 @@ case "$BUILD_MODE" in
     exit 64
     ;;
 esac
+# Reject caller-supplied compiler properties before validating Git metadata.
+# This keeps malformed release invocations deterministic even for a source
+# archive that intentionally has no .git directory.
+for build_argument in "$@"; do
+  case "$build_argument" in
+    --build-property|--build-property=*)
+      echo "Release build rejects caller-supplied --build-property" >&2
+      exit 64
+      ;;
+  esac
+done
 if [ -z "$SOURCE_REVISION" ] || [ "${#SOURCE_REVISION}" -ne 40 ] ||
    ! printf '%s' "$SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$'; then
   echo "PokePod build requires a real Git commit SHA" >&2
@@ -89,14 +100,6 @@ if [ -z "$SOURCE_TREE" ] || [ "${#SOURCE_TREE}" -ne 40 ] ||
   echo "PokePod build requires a real Git tree SHA" >&2
   exit 65
 fi
-for build_argument in "$@"; do
-  case "$build_argument" in
-    --build-property|--build-property=*)
-      echo "Release build rejects caller-supplied --build-property" >&2
-      exit 64
-      ;;
-  esac
-done
 # Historical release-gate shape retained for source compatibility:
 : '
 if [ "$BUILD_MODE" = release ]; then
