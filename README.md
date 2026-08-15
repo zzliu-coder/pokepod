@@ -17,9 +17,20 @@ documentation-only reconciliation is
 `590b549cb49b9a02064846673b51d26c585ee8a7`; the linear history keeps each
 remediation reviewable as a separate commit.
 
-The repository CI runs source, asset, toolchain, ASan/UBSan, source-audit
-round-trip and a clean forced Fast build. It does not run a Release build,
-access a serial port, or flash hardware.
+The repository CI has two complementary firmware views. The exact-head audit
+workflow binds source and Fast evidence to the PR head; the separate
+`.github/workflows/repository-integration.yml` workflow checks the PR
+merge-result firmware source gate and runs independent Mac, Android and shared
+protocol lanes. The protocol lane uses the dependency-free
+`projects/pokecapsule-protocol/validate-fixtures.py` validator and rejects
+missing local `$ref` targets, invalid examples and invalid processing fixtures.
+The repository CI does not run a Release build, access a serial port, or flash
+hardware. A green host/CI result remains `unverified` for hardware behavior.
+
+The repository contains a CODEOWNERS routing file and a security policy. GitHub
+branch protection, required checks, signing status and downloaded-artifact
+verification are external repository facts; source files can describe the
+required policy but cannot prove that those settings are enabled.
 
 The device settings UI keeps a fixed five-row layout: Wi-Fi configuration is
 opened from the left side of the wireless row while the right side remains the

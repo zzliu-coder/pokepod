@@ -73,6 +73,36 @@
     "test-ci-bootstrap.py",
     "test-exact-candidate-evidence.py",
     "test-test-runner-timeouts.py",
-    "test-source-audit-package.py"
-  ]
+    "test-source-audit-package.py",
+    "test-whole-repo-audit-integration.py"
+  ],
+  "pending": {
+    "source": [
+      {
+        "name": "test-fixture-boot-ack-loss.py",
+        "owner": "L2",
+        "base": "59454f9dae367fdfcf58ff6cfbcab2841c6bf19e",
+        "promoteTo": "source"
+      },
+      {
+        "name": "test-fixture-build-identity.py",
+        "owner": "L2",
+        "base": "59454f9dae367fdfcf58ff6cfbcab2841c6bf19e",
+        "promoteTo": "source"
+      },
+      {
+        "name": "test-fixture-link-behavior.py",
+        "owner": "L2",
+        "base": "59454f9dae367fdfcf58ff6cfbcab2841c6bf19e",
+        "promoteTo": "source"
+      }
+    ],
+    "android": [
+      {
+        "path": "projects/pokecapsule-android/test-android-variants.py",
+        "owner": "L5",
+        "promoteTo": "android-ci"
+      }
+    ]
+  }
 }

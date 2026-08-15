@@ -1,0 +1,10 @@
+# CODEOWNERS is a review-routing declaration.  Required-review enforcement is
+# configured in GitHub branch protection and remains an external repository
+# fact; this file does not claim that protection is enabled.
+* @zzliu-coder
+/.github/ @zzliu-coder
+/projects/pokecapsule-protocol/ @zzliu-coder
+/projects/pokecapsule-android/ @zzliu-coder
+/projects/pokecapsule-mac/ @zzliu-coder
+/projects/pokepod-amoled/ @zzliu-coder
+/SECURITY.md @zzliu-coder
