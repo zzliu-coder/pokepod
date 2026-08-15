@@ -127,7 +127,10 @@ def main() -> int:
     update_parser = sub.add_parser("update")
     update_parser.add_argument("--port", required=True)
     update_parser.add_argument("--firmware", type=Path, required=True)
-    update_parser.add_argument("--timeout", type=float, default=5.0)
+    update_parser.add_argument(
+        "--timeout", type=float, default=60.0,
+        help="per-chunk Link timeout; the first OTA prepare may erase the inactive slot",
+    )
     flash_parser = sub.add_parser("flash")
     flash_parser.add_argument("--rom-port", required=True)
     flash_parser.add_argument("--authority", type=Path)

@@ -24,10 +24,12 @@ def main() -> int:
     assert "esp_ota_abort" in session and "SHA-256 mismatch" in session
     assert "kMaximumImageBytes = 0x300000U" in policy
     assert "firmware-update" in dispatcher and "LinkTransport::usb" in dispatcher
+    assert "binary_ack\\\",\\\"received\\\":0" in dispatcher
     assert "binary_ack" in service and "finishFirmwareUpdate" in service
     assert "LinkOperationResource::firmwareUpdate" in service
     assert "firmwareUpdate_.abort()" in transport and "!firmwareUpdate_.active()" in transport
     assert "--firmware" in cdc and "hashlib.sha256" in cdc
+    assert "max(60.0, timeout)" in cdc
     assert "--identity-authority" in fixture and "--firmware" in fixture
     assert "flash.sh" in fixture and "rescue" in fixture
     print("PASS test-firmware-update")

@@ -167,6 +167,9 @@ void PokePodLinkService::processRequest(uint32_t requestId,
     firmwareUpdateRequestId_ = requestId;
     operation_.advance(LinkOperationState::receiving);
     operation_.ownResource(LinkOperationResource::firmwareUpdate);
+    if (!sendEvent(requestId, "{\"event\":\"binary_ack\",\"received\":0}")) {
+      failFirmwareUpdate("firmware prepare acknowledgement failed");
+    }
     return;
   }
   if (strcmp(operation, "stage-write") == 0 || strcmp(operation, "command") == 0) {
