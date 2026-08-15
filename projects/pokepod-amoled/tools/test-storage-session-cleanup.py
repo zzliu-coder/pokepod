@@ -10,6 +10,7 @@ recorder = (firmware / "WavRecorder.cpp").read_text(encoding="utf-8")
 audio = (firmware / "AudioPipeline.cpp").read_text(encoding="utf-8")
 tencent = (firmware / "TencentAsr.cpp").read_text(encoding="utf-8")
 app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
+board = (firmware / "BoardServices.cpp").read_text(encoding="utf-8")
 coordinator = (firmware / "StorageCoordinator.h").read_text(encoding="utf-8")
 
 assert "bool WavRecorder::pollCleanup" in recorder
@@ -37,13 +38,17 @@ assert "storageRead, StorageOwner::tencentRead" in tencent
 
 assert "pollDeferredServiceCleanup();" in app
 assert app.index("pollDeferredServiceCleanup();") < app.index(
-    "if (linkService.receivingBinary())"
+    "if (bootUsbLinkStarted && board.sdReady() && "
+    "linkService->receivingBinary())"
 )
 assert "captureRuntime.pollFinalize" in app
 assert "recorder.operationActive() || pendingRecorderFinalize" in app
 assert "audio.playbackCleanupPending()" in app
 assert "StorageCoordinator::instance().idle()" in app
-assert app.count("if (board.sdReady()) SD_MMC.end();") == 2
+assert app.count("board.endSdMount();") == 2
+assert "void BoardServices::endSdMount()" in board
+assert "SD_MMC.end();" in board
+assert "status_.sdCard = false;" in board
 assert "bool readActive() const;" in coordinator
 assert "bool idle() const" in coordinator
 

@@ -54,6 +54,7 @@ assert "transferGate_->attachCancellationSink(this)" in tls
 assert "transferGate_->detachCancellationSink(this)" in tls
 
 service = read("WirelessSyncService.cpp")
+poll_turn = read("WirelessLinkPollTurn.h")
 assert "LinkTransport::wifi, nullptr" in service
 assert "link_.begin(tls_" in service
 assert "link_.begin(incoming" not in service
@@ -67,6 +68,15 @@ assert service.index("authenticationDeadline_.expired(nowMs)") < service.index(
     "authenticator_.poll(tls_)"
 )
 assert "clientStartedAtMs_" not in service
+assert "WirelessLinkPollTurn<PokePodLinkService> linkTurn(link_);" in service
+assert "linkTurn.pollAuthenticated(nowMs);" in service
+assert "link_.pollDeferredCleanup();" not in service
+assert "link_.poll(nowMs);" not in service
+assert "if (!fullPollRan_) link_.pollDeferredCleanup();" in poll_turn
+assert "fullPollRan_ = true;" in poll_turn
+assert poll_turn.index("fullPollRan_ = true;") < poll_turn.index(
+    "link_.poll(nowMs);"
+)
 
 window = read("WirelessSyncWindow.h")
 assert "kWirelessSyncWindowMs = 5UL * 60UL * 1000UL" in window
@@ -75,8 +85,9 @@ assert "draining" not in window
 assert "atomicTransactionActive" not in window
 assert "deadlineReached" in window
 main = read("PokePodApp.cpp")
-assert main.index("wirelessSync.enforceDeadline(now);") < main.index(
-    "if (linkService.receivingBinary())"
+assert main.index("wirelessSync->enforceDeadline(now);") < main.index(
+    "if (bootUsbLinkStarted && board.sdReady() && "
+    "linkService->receivingBinary())"
 )
 
 link = read("PokePodLinkService.cpp")
@@ -112,7 +123,7 @@ assert "audio_->startCapture(*log_)" not in link_surface
 assert "captureRuntime_->stop(*log_)" in link_recording
 
 main = read("PokePodApp.cpp")
-assert "LinkTransport::usb, &wirelessSync,\n                    nullptr" in main
+assert "LinkTransport::usb, &wirelessSync.get(),\n                    nullptr" in main
 
 identity = read("WirelessSyncIdentity.cpp")
 assert "rotationPolicy_.shouldRotate(rotate" in identity

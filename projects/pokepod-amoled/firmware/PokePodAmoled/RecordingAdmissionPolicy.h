@@ -30,7 +30,8 @@ constexpr uint32_t kRecordingProbeBytes =
 constexpr uint32_t kRecordingProbeMinimumBytesPerSecond =
     kCapsuleByteRate * 2U;
 constexpr uint64_t kRecordingProbeMaximumTailUs =
-    static_cast<uint64_t>(kRecordingStorageQueueSafetyMs) * 1000ULL;
+    static_cast<uint64_t>(kRecordingStorageQueueSafetyMs) * 1000ULL * 60ULL /
+    100ULL;
 constexpr uint64_t kRecordingProbeMaximumTotalUs =
     (static_cast<uint64_t>(kRecordingProbeBytes) * 1000000ULL) /
     kRecordingProbeMinimumBytesPerSecond;
@@ -39,6 +40,8 @@ static_assert(kMaximumRecordingAudioBytes == 1872000ULL,
               "58.5 seconds of 16 kHz mono PCM must use 1,872,000 bytes");
 static_assert(kMaximumRecordingWavBytes == 1872044ULL,
               "maximum WAV must include the 44-byte header");
+static_assert(kRecordingProbeMaximumTailUs == 1536000ULL,
+              "probe tail may consume at most 60 percent of queue safety");
 
 struct RecordingSpaceSnapshot {
   uint64_t totalBytes = 0;

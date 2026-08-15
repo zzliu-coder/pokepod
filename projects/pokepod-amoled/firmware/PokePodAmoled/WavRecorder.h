@@ -9,6 +9,7 @@
 #endif
 
 #include "AudioFrontEnd.h"
+#include "AudioSessionTelemetry.h"
 #include "BoardConfig.h"
 #include "CapsuleTransaction.h"
 #include "RecorderCheckpoint.h"
@@ -17,14 +18,21 @@
 #include "RecorderStorageQueue.h"
 #include "RecordingAdmissionPolicy.h"
 #include "RecordingCapacitySource.h"
+#include "RecordingStorageQualification.h"
+#include "RuntimeDiagnosticsCodec.h"
 #include "StorageCoordinator.h"
 
 namespace pokepod {
+
+class RuntimeDiagnostics;
 
 class WavRecorder {
  public:
   bool begin(fs::FS &fs, RecordingCapacitySource &capacitySource,
              Print &log);
+  void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
+    runtimeDiagnostics_ = &diagnostics;
+  }
   bool start(Print &log, const String &recordingId, const String &createdAt);
   bool start(Print &log, const String &recordingId, const String &createdAt,
              RecorderOperationOwner owner);
@@ -119,6 +127,24 @@ class WavRecorder {
   const RecorderOutcome &terminalResult() const {
     return terminalState_.peek();
   }
+  void observeCaptureTelemetry(
+      const AudioCaptureServiceMetrics &capture,
+      const AudioCaptureDispatcherMetrics &dispatcher,
+      uint32_t captureTaskStackHighWaterWords) {
+    if (capture.ring.sessionId != captureTelemetryProducer_.sessionId) {
+      captureTelemetryProducer_ =
+          sessionTelemetry_.bindCaptureSession(capture.ring.sessionId);
+    }
+    sessionTelemetry_.observeCapture(captureTelemetryProducer_, capture,
+                                     dispatcher,
+                                     captureTaskStackHighWaterWords);
+  }
+  AudioSessionTelemetrySnapshot telemetrySnapshot() const {
+    return sessionTelemetry_.snapshot();
+  }
+  RecordingQualificationSnapshot qualificationSnapshot() const {
+    return storageQualification_.snapshot();
+  }
   bool takeTerminalResult(RecorderOutcome &outcome) {
     return terminalState_.take(outcome);
   }
@@ -144,6 +170,12 @@ class WavRecorder {
   bool storageAppendMonoBytes(const uint8_t *data, size_t length, Print &log);
   bool startStorageSession(Print &log);
   bool runStoragePerformanceProbe(Print &log);
+  void requestStorageQualificationInvalidation(
+      RecordingQualificationInvalidReason reason);
+  void consumeStorageQualificationInvalidations();
+  void observeStorageWriteLatency(uint32_t elapsedUs);
+  void updateRecorderTelemetry(bool forceStackSample = false);
+  void freezeSessionTelemetry(Print &log);
   bool storageStartCancelled() const;
   uint32_t storageReservationTimeoutMs() const;
   uint32_t storageIoTimeoutMs() const;
@@ -156,6 +188,9 @@ class WavRecorder {
   bool pollBootRecovery(Print &log, uint32_t nowMs);
   bool pollStorage(Print &log, uint32_t nowMs,
                    CapsuleTransactionGate *gate);
+  void recordRuntime(RuntimeDiagnosticStage stage,
+                     RuntimeDiagnosticOutcome outcome,
+                     uint32_t detail0, uint32_t detail1, Print &log);
 
 #if defined(ARDUINO_ARCH_ESP32)
   static void storageTaskThunk(void *context);
@@ -337,6 +372,12 @@ class WavRecorder {
   AudioFrontEndMetrics audioMetrics_{};
   uint32_t audioMetricsSessionId_ = 0;
   uint32_t audioMetricsGeneration_ = 0;
+  RecordingStorageQualification storageQualification_;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
+  AudioSessionTelemetry sessionTelemetry_;
+  AudioSessionTelemetryProducer captureTelemetryProducer_{};
+  uint32_t activeMountGeneration_ = 0;
+  uint32_t activeQualificationProbeEpoch_ = 0;
   FinalizePhase finalizePhase_ = FinalizePhase::idle;
   std::atomic<bool> finalizePending_{false};
   RecorderStopReason finalizeStopReason_ = RecorderStopReason::none;
@@ -390,6 +431,9 @@ class WavRecorder {
   RecorderStorageFrame *storageQueueSlots_ = nullptr;
   RecorderStorageFrame storageFrame_{};
   TaskHandle_t storageTask_ = nullptr;
+  std::atomic<uint32_t> recorderTelemetryLastStackSampleMs_{0};
+  std::atomic<uint32_t> recorderTelemetryStackHighWaterWords_{0};
+  std::atomic<bool> recorderTelemetryStackSampled_{false};
   SemaphoreHandle_t storageStartAck_ = nullptr;
   Print *storageLog_ = nullptr;
   std::atomic<bool> storageSessionActive_{false};

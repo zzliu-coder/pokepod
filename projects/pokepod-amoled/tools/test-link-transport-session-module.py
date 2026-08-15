@@ -51,9 +51,66 @@ assert "extendDeadline" not in TRANSPORT
 assert "restartDeadline" not in TRANSPORT
 
 # Receive and transmit work remain bounded/cooperative.
-assert "size_t budget = 32768" in TRANSPORT
-assert "budget-- > 0" in TRANSPORT
+assert '#include "LinkPollBudget.h"' in HEADER
+assert "kLinkPollBudgetBytes = 32768" in TRANSPORT
+assert "kLinkPollBudgetUs = 2000" in TRANSPORT
+assert "LinkPollBudget budget(" in TRANSPORT
+assert "LinkPollPhaseGate gate(" in TRANSPORT
+assert "pollDeferredCleanup(gate)" in TRANSPORT
+assert "processFrame(&gate)" in TRANSPORT
+assert "gate.consumeBytes();" in TRANSPORT
+assert "deferredRxByte_ = value;" in TRANSPORT
+assert "if (deferredRxByte_ >= 0)" in TRANSPORT
+assert "esp_timer_get_time()" in TRANSPORT
 assert "kLinkWriteSliceBytes = 512" in TRANSPORT
 assert "while (true)" not in TRANSPORT
+
+poll_start = TRANSPORT.index("void PokePodLinkService::poll(uint32_t nowMs)")
+poll_end = TRANSPORT.index("void PokePodLinkService::consumeByte(", poll_start)
+poll = TRANSPORT[poll_start:poll_end]
+assert poll.index("LinkPollBudget budget(") < poll.index(
+    "pollDeferredCleanup(gate)"
+)
+assert poll.index("pollDeferredCleanup(gate)") < poll.index(
+    "recordingSession_.observeAutomaticStop"
+)
+assert poll.index("recordingSession_.observeAutomaticStop") < poll.index(
+    "fileTransfer_.advance()"
+)
+assert poll.index("fileTransfer_.advance()") < poll.index(
+    "advanceManifest(nowMs)"
+)
+
+cleanup_start = TRANSPORT.index("bool PokePodLinkService::pollDeferredCleanup(")
+cleanup_end = TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()")
+cleanup = TRANSPORT[cleanup_start:cleanup_end]
+for phase in (
+    "advanceCommandLoad", "advanceBatchCommand", "advanceTransactionRunner",
+    "advanceBatchStartupRecovery", "recordingSession_.poll",
+    "fileTransfer_.pollCleanup", "cleanupManifestStorage",
+    "advanceLinkOperationSettlement",
+):
+    assert phase in cleanup
+assert cleanup.count("gate.run(") >= 13
+
+frame_start = TRANSPORT.index("void PokePodLinkService::processFrame(")
+frame_end = TRANSPORT.index("bool PokePodLinkService::sendOk(", frame_start)
+frame = TRANSPORT[frame_start:frame_end]
+validation = frame.index("validateLinkPayload(")
+dispatch = frame.index("processRequest(")
+assert frame.index("gate->checkpoint()") < validation
+assert frame.index("gate->checkpoint()", validation) < dispatch
+assert frame.rindex("gate->checkpoint()") > dispatch
+
+receive_loop_start = poll.index("while (gate.checkpoint()")
+receive_loop_end = poll.index("if (!gate.checkpoint()) return;",
+                              receive_loop_start)
+receive_loop = poll[receive_loop_start:receive_loop_end]
+assert receive_loop.index("gate.checkpoint()") < receive_loop.index(
+    "stream_->available()"
+)
+assert receive_loop.index("stream_->read()") < receive_loop.index(
+    "if (!gate.checkpoint())"
+)
 
 print("PASS link_transport_session_module")

@@ -10,6 +10,7 @@
 #include "CapsuleLibrary.h"
 #include "CapabilityRegistry.h"
 #include "DeviceConfig.h"
+#include "DeviceRebootCoordinator.h"
 #include "FontPolicy.h"
 #include "ProvisioningCoordinator.h"
 #include "TencentWorker.h"
@@ -141,6 +142,36 @@ void PokePodLinkService::processRequest(uint32_t requestId,
     }
     return;
   }
+  if (strcmp(operation, "firmware-update") == 0) {
+    const char *expectedSha256 = jsonString(root, "sha256");
+    const bool usbTransport = transport_ == LinkTransport::usb;
+    const bool valid = usbTransport && rebootCoordinator_ != nullptr &&
+        !foregroundBusy() && !rebootCoordinator_->pending() &&
+        FirmwareUpdatePolicy::validImageSize(
+            static_cast<uint32_t>(std::max<int64_t>(0, binaryLength))) &&
+        FirmwareUpdatePolicy::validSha256(expectedSha256);
+    if (!valid) {
+      cJSON_Delete(root);
+      sendError(requestId, usbTransport ? "invalid firmware update request" :
+                                         "firmware update is USB-only");
+      return;
+    }
+    const uint32_t expectedBytes = static_cast<uint32_t>(binaryLength);
+    const bool started = firmwareUpdate_.begin(expectedBytes, expectedSha256);
+    const String error = firmwareUpdate_.error();
+    cJSON_Delete(root);
+    if (!started) {
+      sendError(requestId, error.isEmpty() ? "OTA begin failed" : error.c_str());
+      return;
+    }
+    firmwareUpdateRequestId_ = requestId;
+    operation_.advance(LinkOperationState::receiving);
+    operation_.ownResource(LinkOperationResource::firmwareUpdate);
+    if (!sendEvent(requestId, "{\"event\":\"binary_ack\",\"received\":0}")) {
+      failFirmwareUpdate("firmware prepare acknowledgement failed");
+    }
+    return;
+  }
   if (strcmp(operation, "stage-write") == 0 || strcmp(operation, "command") == 0) {
     if (foregroundBusy()) {
       cJSON_Delete(root);
@@ -204,8 +235,8 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
-        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"reboot\"]";
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
+        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"clear-runtime-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
     (void)sendTerminalOrDisconnect(requestId, diagnostics_.statusJson());
@@ -244,6 +275,12 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     if (foregroundBusy()) sendBusy(requestId);
     else if (diagnostics_.clearPower(*log_)) sendOk(requestId);
     else sendError(requestId, "power diagnostics clear failed");
+  } else if (strcmp(operation, "get-runtime-diagnostics") == 0) {
+    sendJson(requestId, diagnostics_.runtimeJson());
+  } else if (strcmp(operation, "clear-runtime-diagnostics") == 0) {
+    if (foregroundBusy()) sendBusy(requestId);
+    else if (diagnostics_.clearRuntime(*log_)) sendOk(requestId);
+    else sendError(requestId, "runtime diagnostics clear failed");
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
         "\",\"displayName\":\"PokePod\",\"platform\":\"pokepod\",\"manufacturer\":\"PokeCapsule\",\"model\":\"" +
@@ -340,8 +377,13 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendBusy(requestId);
     }
   } else if (strcmp(operation, "reboot") == 0) {
-    sendOk(requestId);
-    rebootAtMs_ = millis() + 100;
+    if (rebootCoordinator_ == nullptr) {
+      sendError(requestId, "reboot coordinator is unavailable");
+    } else if (rebootCoordinator_->pending()) {
+      sendBusy(requestId);
+    } else if (sendOk(requestId)) {
+      (void)rebootCoordinator_->request(millis(), transport_);
+    }
   } else {
     sendError(requestId, "unsupported Link v2 operation");
   }

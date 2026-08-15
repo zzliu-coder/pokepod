@@ -2,6 +2,7 @@
 
 #include <cJSON.h>
 #include <algorithm>
+#include <esp_timer.h>
 
 #include "TencentWorker.h"
 
@@ -9,6 +10,9 @@ namespace pokepod {
 namespace {
 
 constexpr size_t kLinkWriteSliceBytes = 512;
+constexpr size_t kLinkReadSliceBytes = 128;
+constexpr size_t kLinkPollBudgetBytes = 32768;
+constexpr uint64_t kLinkPollBudgetUs = 2000;
 constexpr const char *kTerminalQueueError =
     "{\"status\":\"error\",\"version\":2,"
     "\"message\":\"response unavailable\"}";
@@ -18,6 +22,10 @@ String printed(cJSON *root) {
   const String result = value == nullptr ? String() : String(value);
   cJSON_free(value);
   return result;
+}
+
+uint64_t linkPollNowUs(void *) {
+  return static_cast<uint64_t>(esp_timer_get_time());
 }
 
 }  // namespace
@@ -127,10 +135,18 @@ void PokePodLinkService::advanceLinkOperationSettlement() {
 }
 
 void PokePodLinkService::disconnect() {
+  // An accepted reboot is a device-lifecycle intent.  Transport teardown may
+  // cancel frames and Link operations, but it must not cancel the reboot.
   cancelLinkOperation(quiesceRequested_
       ? LinkOperationCancelReason::quiesce
       : LinkOperationCancelReason::disconnect);
+  if (firmwareUpdate_.active() || firmwareUpdateRequestId_ != 0) {
+    firmwareUpdate_.abort();
+    firmwareUpdateRequestId_ = 0;
+    operation_.releaseResource(LinkOperationResource::firmwareUpdate);
+  }
   if (batchExecutor_.active()) abandonBatchCommand();
+  resetMetadataRead();
   manifestResponseRequestId_ = 0;
   manifestResponseJson_ = "";
   manifestFailureRequestId_ = 0;
@@ -156,6 +172,7 @@ void PokePodLinkService::disconnect() {
   activeMaintenance_ = "";
   maintenanceCompletion_.disconnect();
   commandLoadRespond_ = false;
+  deferredRxByte_ = -1;
   resetFrame();
   // The core keeps the old generation until its resources settle.  The
   // service generation represents only the live physical connection.
@@ -176,6 +193,7 @@ void PokePodLinkService::requestQuiesce() {
 bool PokePodLinkService::quiesced() const {
   return quiesceRequested_ && !sessionActive_ &&
       commandLoadState_ == CommandLoadState::none &&
+      !firmwareUpdate_.active() && firmwareUpdateRequestId_ == 0 &&
       incomingKind_ == IncomingKind::none && !incomingCleanupPending_ &&
       fileTransfer_.quiesced() &&
       !manifestStepper_.active() && !manifestCleanupPending_ &&
@@ -189,34 +207,49 @@ bool PokePodLinkService::quiesced() const {
       !operation_.ownsResource(LinkOperationResource::coordinator);
 }
 
-void PokePodLinkService::pollDeferredCleanup() {
-  advanceCommandLoad();
-  advanceBatchCommand();
-  advanceTransactionRunner();
-  advanceBatchStartupRecovery();
-  advanceStartupPartCleanup();
-  cleanupPurgeStaging();
-  handleLinkRecordingEvent(recordingSession_.poll(
-      operation_, transactionGate_, transport_, transferGate_, sessionActive_,
-      quiesceRequested_));
-  if (incomingCleanupPending_) cleanupIncomingStorage();
-  (void)fileTransfer_.pollCleanup();
-  if (manifestCleanupPending_) cleanupManifestStorage();
-  stepDeferredFileCleanup();
+bool PokePodLinkService::pollDeferredCleanup(LinkPollPhaseGate &gate) {
+  if (!gate.run([&]() { advanceCommandLoad(); })) return false;
+  if (!gate.run([&]() { advanceBatchCommand(); })) return false;
+  if (!gate.run([&]() { advanceTransactionRunner(); })) return false;
+  if (!gate.run([&]() { advanceBatchStartupRecovery(); })) return false;
+  if (!gate.run([&]() { advanceStartupPartCleanup(); })) return false;
+  if (!gate.run([&]() { (void)cleanupPurgeStaging(); })) return false;
+  if (!gate.run([&]() {
+        handleLinkRecordingEvent(recordingSession_.poll(
+            operation_, transactionGate_, transport_, transferGate_,
+            sessionActive_, quiesceRequested_));
+      })) return false;
+  if (incomingCleanupPending_ &&
+      !gate.run([&]() { (void)cleanupIncomingStorage(); })) return false;
+  if (!gate.run([&]() { (void)fileTransfer_.pollCleanup(); })) return false;
+  if (manifestCleanupPending_ &&
+      !gate.run([&]() { (void)cleanupManifestStorage(); })) return false;
+  if (!gate.run([&]() { (void)stepDeferredFileCleanup(); })) return false;
   if (!startupPurgePending_ && deferredCommandFiles_.empty()) {
-    stepDeferredTreeCleanup();
+    if (!gate.run([&]() { (void)stepDeferredTreeCleanup(); })) return false;
   }
-  finishCommandStorageCleanup();
-  advanceLinkOperationSettlement();
+  if (!gate.run([&]() { finishCommandStorageCleanup(); })) return false;
+  if (!gate.run([&]() { advanceLinkOperationSettlement(); })) return false;
   if (!startupReady_ && !startupRecoveryFailed_ &&
       !startupBatchRecoveryPending_ && !startupPartCleanupPending_ &&
       !startupPurgePending_ && deferredTreeCleanupStack_.empty()) {
     startupReady_ = true;
   }
+  return gate.checkpoint();
+}
+
+void PokePodLinkService::pollDeferredCleanup() {
+  const uint64_t startedUs = linkPollNowUs(nullptr);
+  LinkPollBudget budget(kLinkPollBudgetBytes, kLinkPollBudgetUs, startedUs);
+  LinkPollPhaseGate gate(budget, linkPollNowUs);
+  (void)pollDeferredCleanup(gate);
 }
 
 void PokePodLinkService::poll(uint32_t nowMs) {
-  pollDeferredCleanup();
+  const uint64_t startedUs = linkPollNowUs(nullptr);
+  LinkPollBudget budget(kLinkPollBudgetBytes, kLinkPollBudgetUs, startedUs);
+  LinkPollPhaseGate gate(budget, linkPollNowUs);
+  if (!pollDeferredCleanup(gate)) return;
   if (quiesceRequested_) return;
   if (!startupReady_) return;
   if (commandLoadState_ != CommandLoadState::none ||
@@ -227,57 +260,79 @@ void PokePodLinkService::poll(uint32_t nowMs) {
       !deferredTreeCleanupStack_.empty()) return;
   if (stream_ == nullptr) return;
   if (manifestResponseRequestId_ != 0) {
-    finishPendingManifestResponse();
+    (void)gate.run([&]() { finishPendingManifestResponse(); });
     return;
   }
   if (manifestFailureRequestId_ != 0) {
-    finishPendingManifestFailure();
+    (void)gate.run([&]() { finishPendingManifestFailure(); });
     return;
   }
-  recordingSession_.observeAutomaticStop(operation_, transactionGate_);
+  if (!gate.run([&]() {
+        recordingSession_.observeAutomaticStop(operation_, transactionGate_);
+      })) return;
   if (!transferPermitted()) {
-    disconnect();
+    (void)gate.run([&]() { disconnect(); });
     return;
   }
   if (txStepper_.active()) {
-    advanceTransmit(nowMs);
+    (void)gate.run([&]() { advanceTransmit(nowMs); });
     return;
   }
   if (fileTransfer_.dataReady()) {
-    fileTransfer_.advance();
+    (void)gate.run([&]() { fileTransfer_.advance(); });
     return;
   }
   if (manifestStepper_.active() || manifestStepper_.complete() ||
       manifestStepper_.failed()) {
-    advanceManifest(nowMs);
+    (void)gate.run([&]() { advanceManifest(nowMs); });
     return;
   }
   frameProcessedThisPoll_ = false;
-  size_t budget = 32768;
-  while (!frameProcessedThisPoll_ && !txStepper_.active() && transferPermitted() &&
-         stream_->available() > 0 && budget-- > 0) {
-    const int value = stream_->read();
-    if (value >= 0) consumeByte(static_cast<uint8_t>(value));
+  if (receivePhase_ == ReceivePhase::payload &&
+      payloadUsed_ == currentHeader_.payloadLength) {
+    processFrame(&gate);
+    if (frameProcessedThisPoll_ || !gate.checkpoint()) return;
   }
+  // A transport read is irreversible. If it consumed the previous poll's
+  // last time unit, retain the byte until a fresh before-phase checkpoint.
+  if (deferredRxByte_ >= 0) {
+    if (!gate.checkpoint()) return;
+    const uint8_t value = static_cast<uint8_t>(deferredRxByte_);
+    deferredRxByte_ = -1;
+    gate.consumeBytes();
+    consumeByte(value, &gate);
+    if (frameProcessedThisPoll_ || !gate.checkpoint()) return;
+  }
+  size_t sliceBytes = 0;
+  while (gate.checkpoint() && !frameProcessedThisPoll_ &&
+         !txStepper_.active() && transferPermitted() &&
+         stream_->available() > 0) {
+    const int value = stream_->read();
+    if (value < 0) break;
+    gate.consumeBytes();
+    if (!gate.checkpoint()) {
+      deferredRxByte_ = value;
+      return;
+    }
+    consumeByte(static_cast<uint8_t>(value), &gate);
+    if (++sliceBytes == kLinkReadSliceBytes) {
+      sliceBytes = 0;
+      if (!gate.checkpoint()) break;
+    }
+  }
+  if (!gate.checkpoint()) return;
   // A request can start after the caller captured nowMs. Subtracting that
   // older timestamp from the freshly recorded byte time underflows uint32_t
   // and used to reject every upload immediately on some loop iterations.
   if (incomingKind_ != IncomingKind::none &&
       static_cast<uint32_t>(millis() - incomingLastByteMs_) > 5000) {
-    failIncoming("binary transfer timed out");
-  }
-  if (rebootAtMs_ != 0 && static_cast<int32_t>(nowMs - rebootAtMs_) >= 0) {
-    if (tencent_ != nullptr &&
-        !tencent_->quiesce(nowMs, 250, TencentCancelReason::shutdown)) {
-      rebootAtMs_ = millis() + 100;
+    if (!gate.run([&]() { failIncoming("binary transfer timed out"); })) {
       return;
     }
-    if (stream_ != nullptr) stream_->flush();
-    ESP.restart();
   }
 }
 
-void PokePodLinkService::consumeByte(uint8_t value) {
+void PokePodLinkService::consumeByte(uint8_t value, LinkPollPhaseGate *gate) {
   if (receivePhase_ == ReceivePhase::magic) {
     static constexpr uint8_t magic[4] = {'P', 'P', 'V', '2'};
     if (value == magic[magicMatched_]) {
@@ -305,13 +360,13 @@ void PokePodLinkService::consumeByte(uint8_t value) {
     }
     payloadUsed_ = 0;
     receivePhase_ = ReceivePhase::payload;
-    if (currentHeader_.payloadLength == 0) processFrame();
+    if (currentHeader_.payloadLength == 0) processFrame(gate);
     return;
   }
   if (payload_ != nullptr && payloadUsed_ < kLinkMaxDataBytes) {
     payload_[payloadUsed_++] = value;
   }
-  if (payloadUsed_ == currentHeader_.payloadLength) processFrame();
+  if (payloadUsed_ == currentHeader_.payloadLength) processFrame(gate);
 }
 
 void PokePodLinkService::resetFrame() {
@@ -322,17 +377,24 @@ void PokePodLinkService::resetFrame() {
   currentHeader_ = LinkFrameHeader();
 }
 
-void PokePodLinkService::processFrame() {
-  frameProcessedThisPoll_ = true;
+void PokePodLinkService::processFrame(LinkPollPhaseGate *gate) {
+  if (gate != nullptr && !gate->checkpoint()) return;
   const LinkFrameHeader header = currentHeader_;
   const size_t size = payloadUsed_;
   if (!transferPermitted()) {
     resetFrame();
     return;
   }
-  if (!validateLinkPayload(header, payload_, size)) {
+  const bool valid = validateLinkPayload(header, payload_, size);
+  if (gate != nullptr && !gate->checkpoint()) return;
+  frameProcessedThisPoll_ = true;
+  if (!valid) {
     resetFrame();
     sendError(header.requestId, "Link v2 CRC mismatch");
+    return;
+  }
+  if (gate != nullptr && !gate->checkpoint()) {
+    frameProcessedThisPoll_ = false;
     return;
   }
   resetFrame();
@@ -343,6 +405,9 @@ void PokePodLinkService::processFrame() {
   } else {
     sendError(header.requestId, "unexpected Link v2 frame type");
   }
+  // Dispatch may consume the remainder of the slice. The shared poll gate
+  // prevents timeout/reboot or any later lifecycle phase in this same poll.
+  if (gate != nullptr) (void)gate->checkpoint();
 }
 
 bool PokePodLinkService::sendOk(uint32_t requestId, const char *extraJson) {

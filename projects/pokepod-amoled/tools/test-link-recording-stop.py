@@ -54,17 +54,18 @@ assert "transport == LinkTransport::wifi || !sessionActive || quiesceRequested" 
 assert advance.index("recorder_->takeTerminalResult(outcome)") < advance.index(
     "captureRouter_->release")
 assert "recorder_->pollCleanup" not in advance
-assert "operation.releaseResource(LinkOperationResource::router)" in advance
-assert "operation.releaseResource(LinkOperationResource::transaction)" in advance
+assert "operation.releaseResource(LinkOperationResource::recordingSession)" in advance
+assert "stopOperationTracksSession_" in advance
 assert "rememberCompleted" not in advance
 assert "releaseRequestLease" not in advance
 final_drain = advance.index("captureDispatcher_->drain(")
 final_snapshot = advance.index("captureRuntime_->frontEndSnapshot()", final_drain)
 final_observe = advance.index("recorder_->observeAudioMetrics(", final_snapshot)
-recorder_stop = advance.index("recorder_->stop(*log_", final_observe)
-recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_observe)
-assert final_drain < final_snapshot < final_observe < recorder_stop
-assert final_observe < recorder_abort
+final_telemetry = advance.index("recorder_->observeCaptureTelemetry(", final_observe)
+recorder_stop = advance.index("recorder_->stop(*log_", final_telemetry)
+recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_telemetry)
+assert final_drain < final_snapshot < final_observe < final_telemetry < recorder_stop
+assert final_telemetry < recorder_abort
 assert "!recorder_->captureFailureLatched()" in advance
 assert "drainLinkCapture" not in IMPLEMENTATION + SESSION
 assert "while (source.pop(frame))" in CAPTURE_DISPATCHER
@@ -96,8 +97,9 @@ assert "linkTransferPermitted" in start_advance
 assert start_advance.index("RecorderStartPollResult::started") < start_advance.index(
     "captureRuntime_->start")
 assert "LinkRecordingEventKind::startReady" in start_advance
-assert "operation.releaseResource(LinkOperationResource::router)" in start_advance
-assert "operation.releaseResource(LinkOperationResource::transaction)" in start_advance
+assert "operation.transferResourcesToRecordingSession()" in start_advance
+assert "routerOwned_ = true" in start_advance
+assert "transactionOwned_ = true" in start_advance
 
 process = LINK_DISPATCHER[LINK_DISPATCHER.index("void PokePodLinkService::processRequest("): ]
 assert "recordingSession_.ownsRequest(requestId)" in process
@@ -107,8 +109,8 @@ assert process.index("admitLinkOperation(requestId)") < process.index("cJSON_Par
 assert process.index("handleImmediate(requestId, root)") < process.rindex(
     "recordingSession_.ownsRequest(requestId)")
 
-poll = TRANSPORT[TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()"):
-                 TRANSPORT.index("void PokePodLinkService::poll(uint32_t nowMs)")]
+poll = TRANSPORT[TRANSPORT.index("bool PokePodLinkService::pollDeferredCleanup("):
+                 TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()")]
 assert "recordingSession_.poll(" in poll
 assert "handleLinkRecordingEvent" in poll
 

@@ -16,6 +16,12 @@ dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
 portal_header = (firmware_dir / "ProvisioningPortal.h").read_text(encoding="utf-8")
 coordinator_header = (firmware_dir / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
+diagnostics_source = (firmware_dir / "ProvisioningDiagnostics.cpp").read_text(
+    encoding="utf-8"
+)
+probe_codec = (firmware_dir / "ProvisioningProbeCodec.h").read_text(
+    encoding="utf-8"
+)
 policy_source = (firmware_dir / "ProvisioningPolicy.h").read_text(encoding="utf-8")
 startup_policy_source = (firmware_dir / "ProvisioningStartupPolicy.h").read_text(
     encoding="utf-8"
@@ -198,6 +204,9 @@ prepare_handler = source[source.index("bool ProvisioningPortal::prepare"):
 start_handler = source[source.index("bool ProvisioningPortal::switchToAccessPointMode"):
                        source.index("void ProvisioningPortal::failStartupTimeout")]
 assert "statusMessage_ = \"正在准备配网热点\";" in prepare_handler
+assert prepare_handler.index("ProvisioningProbeStage::prepareEntered") < (
+    prepare_handler.index("credential_.begin")
+)
 assert "WiFi.mode" not in prepare_handler
 assert "WiFi.softAP" not in prepare_handler
 assert "startScan();" not in prepare_handler
@@ -209,6 +218,54 @@ assert "bool ProvisioningPortal::startServices()" in start_handler
 assert "ProvisioningLogStage::radioModeStarted" in start_handler
 assert "ProvisioningLogStage::accessPointStarted" in start_handler
 assert "logProvisioningMemory" in start_handler
+for before, call, after in (
+    ("ProvisioningProbeStage::beforeModeAp", "WiFi.mode(WIFI_AP)",
+     "ProvisioningProbeStage::afterModeAp"),
+    ("ProvisioningProbeStage::beforeSoftAp", "WiFi.softAP",
+     "ProvisioningProbeStage::afterSoftAp"),
+    ("ProvisioningProbeStage::beforePowerSaveOff", "esp_wifi_set_ps",
+     "ProvisioningProbeStage::afterPowerSaveOff"),
+    ("ProvisioningProbeStage::beforeRouteInstall", "installRoutes()",
+     "ProvisioningProbeStage::afterRouteInstall"),
+    ("ProvisioningProbeStage::beforeDnsStart", "dns_.start",
+     "ProvisioningProbeStage::afterDnsStart"),
+    ("ProvisioningProbeStage::beforeServerBegin", "server_.begin",
+     "ProvisioningProbeStage::afterServerBegin"),
+):
+    assert start_handler.index(before) < start_handler.index(call)
+    assert start_handler.index(call) < start_handler.index(after)
+show_portal = source[source.index("void ProvisioningPortal::showPortal()"):
+                     source.index("void ProvisioningPortal::saveRequest()")]
+assert show_portal.index("ProvisioningProbeStage::beforePageBuild") < (
+    show_portal.index("pageHtml()")
+)
+assert show_portal.index("pageHtml()") < show_portal.index(
+    "ProvisioningProbeStage::afterPageBuild"
+)
+page_send = 'server_.send(200, "text/html; charset=utf-8", html);'
+assert show_portal.index("ProvisioningProbeStage::beforePageSend") < (
+    show_portal.index(page_send)
+)
+assert show_portal.index(page_send) < show_portal.index(
+    "ProvisioningProbeStage::afterPageSend"
+)
+assert "beforeRequestParse" in source
+assert "_parseRequest(_currentClient)" in source
+assert "afterRequestParse" in source
+assert source.index("beforeRequestParse") < source.index(
+    "_parseRequest(_currentClient)"
+)
+assert source.index("_parseRequest(_currentClient)") < source.index(
+    "afterRequestParse"
+)
+assert "requestProbeCount_ < 8" in source
+assert "++requestProbeCount_;" in source
+assert 'constexpr char kProvisioningProbeKey[] = "wifi_probe_v1";' in diagnostics_source
+assert "printProbeBoot(log, resetReason, probeLoaded);" in diagnostics_source
+assert "ssid" not in probe_codec.lower()
+assert "password" not in probe_codec.lower()
+assert "token" not in probe_codec.lower()
+assert "StoredProvisioningProbe" in probe_codec
 assert "statusMessage_ = \"请选择附近的 2.4 GHz 网络或手工输入\";" in start_handler
 state_handler = source[source.index("ProvisioningState ProvisioningPortal::state() const"):
                        source.index("const char *ProvisioningPortal::portalState")]
@@ -219,22 +276,19 @@ assert "const bool wasPrepared = prepared_;" in stop_handler
 assert "wasActive || wasPrepared" in stop_handler
 assert "clearProvisioningCredential();" in stop_handler
 
-# Arduino-ESP32 String::clear() only resets its logical length. Provisioning
-# credentials must be overwritten through the writable buffer before clear,
-# including startup failures, normal stop, object destruction, and the start of
-# a later session.
-clear_helper = source[source.index("void secureClearString"):
-                      source.index("String validationFailureMessage")]
-assert "const size_t length = secret.length();" in clear_helper
-assert "volatile char *const wipe = secret.begin();" in clear_helper
-assert "wipe[index] = '\\0';" in clear_helper
-assert clear_helper.index("wipe[index] = '\\0';") < clear_helper.index(
-    "secret.clear();")
+# The common volatile wipe helper overwrites every live secret byte before
+# logical reset. Portal secrets use that helper on every terminal path.
+secure_wipe = (firmware_dir / "SecureWipe.h").read_text()
+assert "volatile uint8_t *cursor" in secure_wipe
+assert "secureWipeBytes(secret.begin(), secret.length())" in secure_wipe
+assert secure_wipe.index("secureWipeBytes(secret.begin(), secret.length())") < (
+    secure_wipe.index('secret = "";'))
 clear_credential = source[source.index(
     "void ProvisioningPortal::clearProvisioningCredential"):
     source.index("bool ProvisioningPortal::takeConfigurationChanged")]
-assert clear_credential.index("secureClearString(password_);") < (
+assert clear_credential.index("secureWipe(password_);") < (
     clear_credential.index("credential_.close();"))
+assert "clearCandidateSecrets();" in stop_handler
 destructor = source[source.index("ProvisioningPortal::~ProvisioningPortal"):
                     source.index("bool ProvisioningPortal::prepare")]
 assert "clearProvisioningCredential();" in destructor
@@ -293,15 +347,46 @@ assert "WiFi.mode(WIFI_OFF)" not in quiesce_handler
 assert "WiFi.status()" not in start_handler
 portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
-assert main_source.index(portal_loop) < main_source.index(
-    "wifi.loop(now", main_source.index(portal_loop))
+assert "bootUsbLinkStarted = board.sdReady() && linkService->begin(" in main_source
+assert "bootWifiSyncStarted = board.sdReady() && wirelessSync->begin(" in main_source
+assert "if (bootUsbLinkStarted && board.sdReady())" in main_source
+assert "if (bootWifiSyncStarted && board.sdReady())" in main_source
+for service_type, service_name in (
+    ("CapsuleLibrary", "capsuleLibrary"),
+    ("CapsuleOperationService", "capsuleOperations"),
+    ("PokePodLinkService", "linkService"),
+    ("WirelessSyncService", "wirelessSync"),
+):
+    assert f"PsramService<{service_type}> {service_name};" in main_source
+    assert f'{service_name}.allocate("' in main_source
+assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in main_source
+assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in main_source
+assert main_source.index("serviceObjectsAllocated") < main_source.index(
+    "bleVoice.begin("
+)
+full_portal_poll = main_source.rindex(portal_loop)
+assert full_portal_poll < main_source.index("wifi.loop(now", full_portal_poll)
 network_section = main_source[
-    main_source.index(portal_loop):main_source.index(
-        "if (now - lastTouchMs", main_source.index(portal_loop)
-    )
+    full_portal_poll:main_source.index("PowerInputs finalPowerInputs",
+                                      full_portal_poll)
 ]
 assert "wifi.loop(now" in network_section
 assert "tencentWorker.loop(now" in network_section
+touch_before_portal = main_source[
+    main_source.rfind("if (now - lastTouchMs", 0, full_portal_poll):
+    full_portal_poll
+]
+assert "pollTouch();" in touch_before_portal
+assert portal_loop not in touch_before_portal
+assert "BoundedProvisioningWebServer" in portal_header
+assert "_currentClient.setTimeout(kIoSliceMs);" in source
+bounded_server = source[
+    source.index("void BoundedProvisioningWebServer::handleClient()"):
+    source.index("ProvisioningPortal::ProvisioningPortal()")
+]
+assert "HTTP_MAX_DATA_WAIT" not in bounded_server
+assert "HTTP_MAX_SEND_WAIT" not in bounded_server
+assert "kIdleClientLifetimeMs" in bounded_server
 assert "portal_->loop(millis())" in coordinator
 assert "nowMs = millis();" in source
 assert "if (validating_ && !transitionPending_)" in source

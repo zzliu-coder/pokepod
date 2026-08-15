@@ -68,6 +68,27 @@ bool sameUuid(const char *left, const char *right) {
 
 }  // namespace
 
+PokePodLinkService::MetadataReadResult
+PokePodLinkService::parseMetadataStep(const String &path, void *&root) {
+  root = nullptr;
+  const uint8_t *data = nullptr;
+  size_t bytes = 0;
+  const MetadataReadResult result = readMetadataStep(path, 8192, data, bytes);
+  if (result != MetadataReadResult::ready) return result;
+  root = cJSON_ParseWithLength(reinterpret_cast<const char *>(data), bytes);
+  resetMetadataRead();
+  return root == nullptr ? MetadataReadResult::failed :
+                           MetadataReadResult::ready;
+}
+
+void PokePodLinkService::clearBatchReadContinuation() {
+  cJSON_Delete(asJson(batchReadJson_));
+  batchReadJson_ = nullptr;
+  batchReadContinuation_ = BatchReadContinuation::none;
+  batchMetadataFirstPendingValue_ = "";
+  resetMetadataRead();
+}
+
 bool PokePodLinkService::startBatchStartupRecovery(
     const String &transactionId) {
   constexpr StorageOwner owner = StorageOwner::capsuleTransaction;
@@ -400,6 +421,10 @@ void PokePodLinkService::dispatchLoadedCommand() {
   }
   if (tryStartTextCommand(requestId, root, path, transactionId)) {
     cJSON_Delete(root);
+    // Metadata IO owns a fixed 8 KiB PSRAM slot and advances one 1 KiB read
+    // per poll. Keep the uploaded command resident until that continuation
+    // has either started its durable transaction or reached failure.
+    if (metadataRead_.active() || !metadataReadPath_.isEmpty()) return;
     commandLoadFile_ = File();
     commandLoadValue_ = "";
     commandLoadPath_ = "";
@@ -480,18 +505,20 @@ bool PokePodLinkService::tryStartTextCommand(
   const int expectedRevision = static_cast<int>(
       jsonInt64(root, "expectedRevision"));
   String metadataTarget;
-  cJSON *metadata = nullptr;
   if (correction) {
     if (stagedPath == nullptr || String(stagedPath) != expectedStaged ||
         !storageExists(prepared, StorageAccess::read)) {
       return false;
     }
     metadataTarget = record->directory + "/processing.json";
-    metadata = cJSON_Parse(readText(metadataTarget, 8192).c_str());
   } else {
     metadataTarget = record->directory + "/capsule.json";
-    metadata = cJSON_Parse(readText(metadataTarget, 8192).c_str());
   }
+  void *parsedMetadata = nullptr;
+  const MetadataReadResult metadataResult =
+      parseMetadataStep(metadataTarget, parsedMetadata);
+  if (metadataResult == MetadataReadResult::pending) return true;
+  cJSON *metadata = asJson(parsedMetadata);
   cJSON *revision = metadata == nullptr ? nullptr :
       cJSON_GetObjectItemCaseSensitive(metadata, "revision");
   if (!cJSON_IsNumber(revision) || revision->valueint != expectedRevision) {
@@ -797,7 +824,10 @@ void PokePodLinkService::advanceBatchCommand() {
       batchExecutor_.poll(batchForegroundPermitted());
   if (work.action == LinkCommandExecutor::Action::none) return;
   batchWork_ = work;
-  if (!startBatchWork(work)) finishBatchWork(false);
+  if (!startBatchWork(work) &&
+      batchPending_ != BatchPending::metadataRead) {
+    finishBatchWork(false);
+  }
 }
 
 bool PokePodLinkService::startBatchWork(
@@ -893,12 +923,6 @@ bool PokePodLinkService::buildBatchPlan(
     message = "invalid capsule id";
     return false;
   }
-  if (!rememberBatchId(rawId)) {
-    message = "duplicate capsule id";
-    return false;
-  }
-  batchNextIdItem_ = item->next;
-  ++batchNextIdIndex_;
   String id(rawId);
   id.toLowerCase();
 
@@ -951,24 +975,8 @@ bool PokePodLinkService::buildBatchPlan(
     target = folder + "/" + targetId;
   } else if (remove) {
     target = String(kCapsuleTrash) + "/" + id;
-  } else if (restore) {
-    cJSON *trash = cJSON_Parse(readText(source + "/trash.json", 8192).c_str());
-    const char *folderName = trash == nullptr ? nullptr :
-        jsonString(trash, "originalFolder");
-    String folder = folderDirectory(folderName);
-    cJSON_Delete(trash);
-    if (folder.isEmpty() || !storageExists(folder, StorageAccess::read)) {
-      folder = kCapsuleInbox;
-    }
-    target = folder + "/" + id;
   } else if (evacuate) {
     target = String(kCapsuleInbox) + "/" + id;
-  }
-  const bool noOp = move && source == target;
-  if (!target.isEmpty() && !noOp &&
-      storageExists(target, StorageAccess::read)) {
-    message = "capsule target already exists";
-    return false;
   }
 
   cJSON *expected = cJSON_GetObjectItemCaseSensitive(
@@ -977,7 +985,30 @@ bool PokePodLinkService::buildBatchPlan(
       cJSON_GetObjectItemCaseSensitive(expected, id.c_str()) : nullptr;
   const String revisionPath = source +
       (restore || purge ? "/trash.json" : "/capsule.json");
-  cJSON *revisionRoot = cJSON_Parse(readText(revisionPath, 8192).c_str());
+  void *parsedRevision = nullptr;
+  const MetadataReadResult revisionResult =
+      parseMetadataStep(revisionPath, parsedRevision);
+  if (revisionResult == MetadataReadResult::pending) {
+    batchPending_ = BatchPending::metadataRead;
+    return false;
+  }
+  cJSON *revisionRoot = asJson(parsedRevision);
+  if (restore) {
+    const char *folderName = revisionRoot == nullptr ? nullptr :
+        jsonString(revisionRoot, "originalFolder");
+    String folder = folderDirectory(folderName);
+    if (folder.isEmpty() || !storageExists(folder, StorageAccess::read)) {
+      folder = kCapsuleInbox;
+    }
+    target = folder + "/" + id;
+  }
+  const bool noOp = move && source == target;
+  if (!target.isEmpty() && !noOp &&
+      storageExists(target, StorageAccess::read)) {
+    cJSON_Delete(revisionRoot);
+    message = "capsule target already exists";
+    return false;
+  }
   cJSON *revision = revisionRoot == nullptr ? nullptr :
       cJSON_GetObjectItemCaseSensitive(revisionRoot, "revision");
   const bool revisionMatches = cJSON_IsNumber(wanted) &&
@@ -1005,6 +1036,15 @@ bool PokePodLinkService::buildBatchPlan(
     message = "batch plan is invalid";
     return false;
   }
+  // Commit identity only after the continuation has completed. Retrying an
+  // in-progress metadata read must not make the current item look duplicated.
+  if (!rememberBatchId(rawId)) {
+    message = "duplicate capsule id";
+    return false;
+  }
+  batchNextIdItem_ = item->next;
+  ++batchNextIdIndex_;
+  clearBatchReadContinuation();
   return true;
 }
 
@@ -1102,11 +1142,38 @@ bool PokePodLinkService::buildSimpleBatchPlan(
           (stagedPath == nullptr ? "" : stagedPath);
       const String targetFolder = folderDirectory(destination);
       const String target = targetFolder + "/" + id;
-      const String capsuleText = readText(source + "/capsule.json", 8192);
-      const String processingText = readText(
-          source + "/processing.json", 8192);
-      cJSON *capsule = cJSON_Parse(capsuleText.c_str());
-      cJSON *processing = cJSON_Parse(processingText.c_str());
+      if (batchReadContinuation_ == BatchReadContinuation::none) {
+        batchReadContinuation_ = BatchReadContinuation::importCapsule;
+      }
+      if (batchReadContinuation_ == BatchReadContinuation::importCapsule) {
+        void *parsed = nullptr;
+        const MetadataReadResult result = parseMetadataStep(
+            source + "/capsule.json", parsed);
+        if (result == MetadataReadResult::pending) {
+          batchPending_ = BatchPending::metadataRead;
+          return false;
+        }
+        if (result == MetadataReadResult::failed) {
+          clearBatchReadContinuation();
+          message = "invalid staged import";
+          return false;
+        }
+        batchReadJson_ = parsed;
+        batchReadContinuation_ = BatchReadContinuation::importProcessing;
+        // A single service poll may issue at most one metadata file read.
+        // Start the processing.json continuation on the next poll.
+        batchPending_ = BatchPending::metadataRead;
+        return false;
+      }
+      void *parsedProcessing = nullptr;
+      const MetadataReadResult processingResult = parseMetadataStep(
+          source + "/processing.json", parsedProcessing);
+      if (processingResult == MetadataReadResult::pending) {
+        batchPending_ = BatchPending::metadataRead;
+        return false;
+      }
+      cJSON *capsule = asJson(batchReadJson_);
+      cJSON *processing = asJson(parsedProcessing);
       const char *metadataId = capsule == nullptr ? nullptr :
           jsonString(capsule, "id");
       const char *processingId = processing == nullptr ? nullptr :
@@ -1124,6 +1191,8 @@ bool PokePodLinkService::buildSimpleBatchPlan(
           !storageExists(target, StorageAccess::read);
       cJSON_Delete(capsule);
       cJSON_Delete(processing);
+      batchReadJson_ = nullptr;
+      clearBatchReadContinuation();
       if (!valid) {
         message = "invalid staged import";
         return false;
@@ -1142,8 +1211,12 @@ bool PokePodLinkService::buildSimpleBatchPlan(
 
 bool PokePodLinkService::startBatchPreflight(size_t index) {
   String message;
-  if (!buildBatchPlan(index, batchPlan_, message) ||
-      !batchJournalStore_.writePlan(batchJournalState_,
+  if (!buildBatchPlan(index, batchPlan_, message)) {
+    if (batchPending_ == BatchPending::metadataRead) return true;
+    batchMessage_ = message.isEmpty() ? "batch preflight failed" : message;
+    return false;
+  }
+  if (!batchJournalStore_.writePlan(batchJournalState_,
                                     static_cast<uint16_t>(index), batchPlan_,
                                     storageOwner())) {
     batchMessage_ = message.isEmpty() ? "batch preflight failed" : message;
@@ -1215,23 +1288,49 @@ bool PokePodLinkService::buildBatchMetadata(
         strcmp(operation, "restoreCapsules") == 0 ||
         strcmp(operation, "deleteFolderToInbox") == 0)
            ? String(plan.target) : String(plan.source));
-  cJSON *capsule = cJSON_Parse(
-      readText(directory + "/capsule.json", 8192).c_str());
-  cJSON *revision = capsule == nullptr ? nullptr :
-      cJSON_GetObjectItemCaseSensitive(capsule, "revision");
-  if (capsule == nullptr || !cJSON_IsNumber(revision)) {
-    cJSON_Delete(capsule);
-    message = "capsule metadata is malformed";
-    return false;
+  if (batchReadContinuation_ == BatchReadContinuation::none) {
+    batchReadContinuation_ = BatchReadContinuation::metadataCapsule;
+    batchMetadataFirstPendingValue_ = "";
   }
-  if (copy) {
+  if (batchReadContinuation_ == BatchReadContinuation::metadataCapsule) {
+    void *parsed = nullptr;
+    const MetadataReadResult result = parseMetadataStep(
+        directory + "/capsule.json", parsed);
+    if (result == MetadataReadResult::pending) {
+      batchPending_ = BatchPending::metadataRead;
+      return false;
+    }
+    if (result == MetadataReadResult::failed) {
+      clearBatchReadContinuation();
+      message = "capsule metadata is malformed";
+      return false;
+    }
+    batchReadJson_ = parsed;
+    batchReadContinuation_ = BatchReadContinuation::metadataProcessing;
+  }
+  cJSON *capsule = asJson(batchReadJson_);
+  cJSON *revision = nullptr;
+  if (capsule != nullptr) {
+    revision = cJSON_GetObjectItemCaseSensitive(capsule, "revision");
+    if (!cJSON_IsNumber(revision)) {
+      cJSON_Delete(capsule);
+      batchReadJson_ = nullptr;
+      clearBatchReadContinuation();
+      message = "capsule metadata is malformed";
+      return false;
+    }
+  }
+  if (capsule != nullptr && copy) {
     replaceStringOrNull(capsule, "id", plan.targetId);
     replaceStringOrNull(capsule, "createdAt", board_->utcNow().c_str());
     cJSON_SetNumberValue(revision, 1);
-  } else if (strcmp(operation, "setFavorite") == 0) {
+  } else if (capsule != nullptr &&
+             strcmp(operation, "setFavorite") == 0) {
     cJSON *favorite = cJSON_GetObjectItemCaseSensitive(command, "favorite");
     if (!cJSON_IsBool(favorite)) {
       cJSON_Delete(capsule);
+      batchReadJson_ = nullptr;
+      clearBatchReadContinuation();
       message = "favorite value is required";
       return false;
     }
@@ -1242,14 +1341,17 @@ bool PokePodLinkService::buildBatchMetadata(
       cJSON_AddItemToObject(capsule, "favorite", replacement);
     }
     cJSON_SetNumberValue(revision, revision->valueint + 1);
-  } else if (strcmp(operation, "addTags") == 0 ||
+  } else if (capsule != nullptr &&
+             (strcmp(operation, "addTags") == 0 ||
              strcmp(operation, "removeTags") == 0 ||
              strcmp(operation, "renameTag") == 0 ||
              strcmp(operation, "mergeTag") == 0 ||
-             strcmp(operation, "deleteTag") == 0) {
+             strcmp(operation, "deleteTag") == 0)) {
     cJSON *requested = cJSON_GetObjectItemCaseSensitive(command, "tags");
     if (!cJSON_IsArray(requested) || cJSON_GetArraySize(requested) > 32) {
       cJSON_Delete(capsule);
+      batchReadJson_ = nullptr;
+      clearBatchReadContinuation();
       message = "invalid tags";
       return false;
     }
@@ -1260,6 +1362,8 @@ bool PokePodLinkService::buildBatchMetadata(
       const char *text = cJSON_GetStringValue(tag);
       if (text == nullptr || strlen(text) > 64) {
         cJSON_Delete(capsule);
+        batchReadJson_ = nullptr;
+        clearBatchReadContinuation();
         message = "invalid tags";
         return false;
       }
@@ -1290,6 +1394,8 @@ bool PokePodLinkService::buildBatchMetadata(
     } else {
       if (tags.size() != 2) {
         cJSON_Delete(capsule);
+        batchReadJson_ = nullptr;
+        clearBatchReadContinuation();
         message = "tag rename needs old and new names";
         return false;
       }
@@ -1314,20 +1420,44 @@ bool PokePodLinkService::buildBatchMetadata(
       cJSON_AddItemToObject(capsule, "tags", replacement);
     }
     cJSON_SetNumberValue(revision, revision->valueint + 1);
-  } else {
+  } else if (capsule != nullptr) {
     cJSON_SetNumberValue(revision, revision->valueint + 1);
   }
-  replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
-  value = printed(capsule) + "\n";
-  cJSON_Delete(capsule);
-  if (!copy) return !value.isEmpty();
+  if (capsule != nullptr) {
+    replaceStringOrNull(capsule, "updatedAt", board_->utcNow().c_str());
+    batchMetadataFirstPendingValue_ = printed(capsule) + "\n";
+    cJSON_Delete(capsule);
+    batchReadJson_ = nullptr;
+    if (!copy) {
+      value = batchMetadataFirstPendingValue_;
+      batchMetadataFirstPendingValue_ = "";
+      clearBatchReadContinuation();
+      return !value.isEmpty();
+    }
+    // capsule.json used this poll's one bounded read. Defer the independent
+    // processing.json read even when the first file fit in a single chunk.
+    batchPending_ = BatchPending::metadataRead;
+    return false;
+  }
 
-  cJSON *processing = cJSON_Parse(
-      readText(directory + "/processing.json", 8192).c_str());
+  void *parsedProcessing = nullptr;
+  const MetadataReadResult processingResult = parseMetadataStep(
+      directory + "/processing.json", parsedProcessing);
+  if (processingResult == MetadataReadResult::pending) {
+    batchPending_ = BatchPending::metadataRead;
+    return false;
+  }
+  if (processingResult == MetadataReadResult::failed) {
+    clearBatchReadContinuation();
+    message = "processing metadata is malformed";
+    return false;
+  }
+  cJSON *processing = asJson(parsedProcessing);
   cJSON *processingRevision = processing == nullptr ? nullptr :
       cJSON_GetObjectItemCaseSensitive(processing, "revision");
   if (processing == nullptr || !cJSON_IsNumber(processingRevision)) {
     cJSON_Delete(processing);
+    clearBatchReadContinuation();
     message = "processing metadata is malformed";
     return false;
   }
@@ -1336,6 +1466,9 @@ bool PokePodLinkService::buildBatchMetadata(
                        processingRevision->valueint + 1);
   batchMetadataSecondValue_ = printed(processing) + "\n";
   cJSON_Delete(processing);
+  value = batchMetadataFirstPendingValue_;
+  batchMetadataFirstPendingValue_ = "";
+  clearBatchReadContinuation();
   return !value.isEmpty() && !batchMetadataSecondValue_.isEmpty();
 }
 
@@ -1606,6 +1739,21 @@ bool PokePodLinkService::startBatchRollbackFinalize() {
 }
 
 void PokePodLinkService::advanceBatchPending() {
+  if (batchPending_ == BatchPending::metadataRead) {
+    batchPending_ = BatchPending::none;
+    const bool metadataCommit =
+        batchReadContinuation_ == BatchReadContinuation::metadataCapsule ||
+        batchReadContinuation_ == BatchReadContinuation::metadataProcessing;
+    // Copy/move/restore may already have completed their tree/path mutation.
+    // Resume the exact metadata continuation instead of replaying applyItem.
+    const bool started = metadataCommit
+        ? startBatchMetadataCommit(batchPlan_, false)
+        : startBatchWork(batchWork_);
+    if (!started && batchPending_ != BatchPending::metadataRead) {
+      finishBatchWork(false);
+    }
+    return;
+  }
   if (batchPending_ == BatchPending::persistResult) {
     const CapsuleTransactionPollResult result = transactionRunner_.poll(
         millis(), nullptr);
@@ -1685,7 +1833,9 @@ void PokePodLinkService::advanceBatchPending() {
     if (pending == BatchPending::applyTree) {
       batchPendingStep_ = 2;
       if (!startBatchMetadataCommit(batchPlan_, false)) {
-        finishBatchWork(false);
+        if (batchPending_ != BatchPending::metadataRead) {
+          finishBatchWork(false);
+        }
       }
       return;
     }
@@ -1716,7 +1866,9 @@ void PokePodLinkService::advanceBatchPending() {
     }
     batchPendingStep_ = 2;
     if (!startBatchMetadataCommit(batchPlan_, false)) {
-      finishBatchWork(false);
+      if (batchPending_ != BatchPending::metadataRead) {
+        finishBatchWork(false);
+      }
     }
     return;
   }
@@ -1939,6 +2091,7 @@ void PokePodLinkService::finishBatchCommand() {
   batchResultValue_ = "";
   batchMessage_ = "";
   batchPending_ = BatchPending::none;
+  clearBatchReadContinuation();
   batchPlan_ = {};
   batchNextIdItem_ = nullptr;
   batchNextIdIndex_ = 0;
@@ -1955,6 +2108,7 @@ void PokePodLinkService::finishBatchCommand() {
 }
 
 void PokePodLinkService::abandonBatchCommand() {
+  clearBatchReadContinuation();
   batchExecutor_.disconnect();
   transactionGate_.cancel();
 }

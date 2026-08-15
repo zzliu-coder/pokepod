@@ -18,6 +18,7 @@ class FakeSource {
     AudioCaptureFrame frame;
     frame.sessionId = sessionId;
     frame.sequence = sequence;
+    frame.capturedAtMs = sequence * 20U;
     frame.samples[0] = static_cast<int16_t>(sequence);
     frames_.push_back(frame);
   }
@@ -240,6 +241,15 @@ void runBleAndSequenceFailure() {
   assert(gapResult.sequenceIncomplete);
   assert(gapResult.recorderDeliveryFailure);
   assert(recorder.failureStage == RecorderFailureStage::captureIncomplete);
+  assert(dispatcher.metrics().sequenceFailures == 1);
+  assert(dispatcher.metrics().maximumIntervalUs == 0);
+
+  FakeSource later;
+  later.add(21, 3);
+  (void)dispatcher.drain(later, router, audio, recorder, voice, log, 420);
+  assert(dispatcher.metrics().maximumIntervalUs == 20000U);
+  assert(dispatcher.metrics().intervalSamples == 1U);
+  assert(dispatcher.metrics().intervalHistogram[7] == 1U);
 }
 
 }  // namespace

@@ -271,10 +271,12 @@ int main() {
   assert(service.pop(frame));
   assert(frame.sequence == 1);
   assert(!service.pop(frame));
-  assert(service.captureOnce(82) == AudioCaptureCycleResult::sourceTimeout);
+  assert(service.captureOnce(82) == AudioCaptureCycleResult::sourceEarlyZero);
   assert(service.captureOnce(102) == AudioCaptureCycleResult::sourceFailure);
   metrics = service.metrics();
   assert(metrics.timeouts == 1);
+  assert(metrics.zeroByteReads == 2);
+  assert(metrics.earlyZeroReads == 2);
   assert(metrics.sourceFailures == 1);
   service.stopSession();
   assert(!service.running());

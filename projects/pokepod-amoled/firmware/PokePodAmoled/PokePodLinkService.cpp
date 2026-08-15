@@ -13,6 +13,7 @@
 #include "LinkCommandBatchPolicy.h"
 #include "DeviceConfig.h"
 #include "Dashboard.h"
+#include "DeviceRebootCoordinator.h"
 #include "FontPolicy.h"
 #include "TencentWorker.h"
 #include "UsbLinkBridge.h"
@@ -33,6 +34,8 @@ namespace {
 constexpr size_t kLinkTxFrameBytes = kLinkHeaderBytes + kLinkMaxDataBytes;
 constexpr size_t kLinkPendingControlBytes =
     kLinkHeaderBytes + kLinkMaxControlBytes;
+constexpr size_t kLinkMetadataBufferBytes =
+    LinkBoundedTextRead::kMaximumBytes + 1U;
 constexpr const char *kLinkCommandUploadPart =
     "/PokeCapsule/.system/commands/incoming/upload.part";
 constexpr const char *kLinkStagedUploadPart =
@@ -61,7 +64,9 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                LinkWriteChannel *writeChannel,
                                AudioCaptureRuntime *captureRuntime,
                                AudioCaptureDispatcher *captureDispatcher,
-                               const CapabilityRegistry *capabilities) {
+                               const CapabilityRegistry *capabilities,
+                               DeviceRebootCoordinator *rebootCoordinator,
+                               RuntimeDiagnostics *runtimeDiagnostics) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
@@ -83,9 +88,10 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   diagnostics_.bind(board, audio, usb, bleVoice, dashboard, library, recorder,
                     config, wifi, tencent, provisioningDiagnostics,
                     powerDiagnostics, power, provisioningCoordinator,
-                    capabilities);
+                    capabilities, runtimeDiagnostics);
   fileTransfer_.bind(*this);
   coordinator_ = coordinator;
+  rebootCoordinator_ = rebootCoordinator;
   transport_ = transport;
   pairingProvider_ = pairingProvider;
   transferGate_ = transferGate;
@@ -120,8 +126,13 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
         kLinkPendingControlBytes, sizeof(uint8_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   }
+  if (metadataReadBuffer_ == nullptr) {
+    metadataReadBuffer_ = static_cast<uint8_t *>(heap_caps_calloc(
+        kLinkMetadataBufferBytes, sizeof(uint8_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
   if (payload_ == nullptr || txFrame_ == nullptr ||
-      pendingControlFrame_ == nullptr) {
+      pendingControlFrame_ == nullptr || metadataReadBuffer_ == nullptr) {
     stream_ = nullptr;
     log_->println(
         "{\"event\":\"link_buffer\",\"ok\":false,\"memory\":\"psram\"}");
@@ -130,7 +141,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   log_->printf(
       "{\"event\":\"link_buffer\",\"ok\":true,\"memory\":\"psram\",\"bytes\":%u}\n",
       static_cast<unsigned>(kLinkMaxDataBytes + kLinkTxFrameBytes +
-                            kLinkPendingControlBytes));
+                            kLinkPendingControlBytes +
+                            kLinkMetadataBufferBytes));
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming") ||
       !ensureDirectoryTree(CapsuleBatchJournalStore::kDirectory)) {
@@ -189,6 +201,33 @@ bool PokePodLinkService::beginIncoming(IncomingKind kind, uint32_t requestId,
 
 void PokePodLinkService::processData(uint32_t requestId, uint16_t flags,
                                      const uint8_t *payload, size_t size) {
+  if (firmwareUpdate_.active() || firmwareUpdateRequestId_ != 0) {
+    if (requestId != firmwareUpdateRequestId_ || !firmwareUpdate_.active()) {
+      sendError(requestId, "unexpected firmware data frame");
+      return;
+    }
+    if (!firmwareUpdate_.writeChunk(payload, size)) {
+      const String error = firmwareUpdate_.error();
+      failFirmwareUpdate(error.isEmpty() ? "OTA write failed" : error.c_str());
+      return;
+    }
+    const uint32_t received = firmwareUpdate_.receivedBytes();
+    if ((flags & 1U) == 0) {
+      if (received == firmwareUpdate_.expectedBytes()) {
+        failFirmwareUpdate("firmware final flag is missing");
+        return;
+      }
+      sendEvent(requestId, "{\"event\":\"binary_ack\",\"received\":" +
+          String(received) + "}");
+      return;
+    }
+    if (received != firmwareUpdate_.expectedBytes()) {
+      failFirmwareUpdate("firmware length mismatch");
+      return;
+    }
+    finishFirmwareUpdate(firmwareUpdate_.finish());
+    return;
+  }
   if (incomingKind_ == IncomingKind::none || requestId != incomingRequestId_) {
     sendError(requestId, "unexpected data frame");
     return;
@@ -212,6 +251,37 @@ void PokePodLinkService::processData(uint32_t requestId, uint16_t flags,
         String(incomingReceived_) + "}");
   }
   if (last) finishIncoming();
+}
+
+void PokePodLinkService::failFirmwareUpdate(const char *message) {
+  const uint32_t requestId = firmwareUpdateRequestId_;
+  firmwareUpdate_.abort();
+  firmwareUpdateRequestId_ = 0;
+  operation_.releaseResource(LinkOperationResource::firmwareUpdate);
+  if (requestId == 0 || !sessionActive_ || !transferPermitted()) return;
+  sendError(requestId, message == nullptr ? "firmware update failed" : message);
+}
+
+void PokePodLinkService::finishFirmwareUpdate(bool ok) {
+  const uint32_t requestId = firmwareUpdateRequestId_;
+  const String error = firmwareUpdate_.error();
+  const String digest = firmwareUpdate_.actualSha256();
+  firmwareUpdateRequestId_ = 0;
+  operation_.releaseResource(LinkOperationResource::firmwareUpdate);
+  if (!ok) {
+    firmwareUpdate_.abort();
+    if (requestId != 0 && sessionActive_ && transferPermitted()) {
+      sendError(requestId, error.isEmpty() ? "OTA image rejected" : error.c_str());
+    }
+    return;
+  }
+  const bool rebootAccepted = rebootCoordinator_ != nullptr &&
+      rebootCoordinator_->request(millis(), transport_);
+  const String extra = "\"installed\":true,\"rebootRequired\":true,\"rebootScheduled\":" +
+      String(rebootAccepted ? "true" : "false") + ",\"sha256\":\"" +
+      digest + "\"";
+  (void)sendTerminalOrDisconnect(requestId,
+      "{\"status\":\"ok\",\"version\":2," + extra + "}");
 }
 
 void PokePodLinkService::finishIncoming() {
@@ -575,24 +645,79 @@ bool PokePodLinkService::validFontFile(const String &path) const {
   return ok;
 }
 
-String PokePodLinkService::readText(const String &path, size_t limit) const {
-  if (fs_ == nullptr) return String();
+PokePodLinkService::MetadataReadResult
+PokePodLinkService::readMetadataStep(const String &path, size_t limit,
+                                     const uint8_t *&data, size_t &bytes) {
+  data = nullptr;
+  bytes = 0;
+  if (fs_ == nullptr || metadataReadBuffer_ == nullptr || path.isEmpty() ||
+      limit == 0 || limit > LinkBoundedTextRead::kMaximumBytes) {
+    resetMetadataRead();
+    return MetadataReadResult::failed;
+  }
+  if (!transferPermitted()) {
+    metadataRead_.cancel();
+    resetMetadataRead();
+    return MetadataReadResult::failed;
+  }
+  if (metadataRead_.ready()) {
+    if (metadataReadPath_ != path) {
+      resetMetadataRead();
+      return MetadataReadResult::failed;
+    }
+    data = metadataReadBuffer_;
+    bytes = metadataRead_.bytesRead();
+    return MetadataReadResult::ready;
+  }
+  if (!metadataRead_.active()) {
+    if (!metadataReadPath_.isEmpty() && metadataReadPath_ != path) {
+      resetMetadataRead();
+      return MetadataReadResult::failed;
+    }
+    // Preserve a waiting continuation even when storage arbitration cannot
+    // grant this poll's zero-wait lease.
+    metadataReadPath_ = path;
+    StorageIoLease lease = StorageCoordinator::instance().acquireIo(
+        storageOwner(), StorageAccess::read, 0);
+    if (!lease) return MetadataReadResult::pending;
+    File file = fs_->open(path, FILE_READ);
+    const size_t expected = file ? file.size() : 0;
+    if (!file || file.isDirectory() || !metadataRead_.begin(expected, limit)) {
+      if (file) file.close();
+      resetMetadataRead();
+      return MetadataReadResult::failed;
+    }
+    metadataReadFile_ = file;
+  } else if (metadataReadPath_ != path) {
+    resetMetadataRead();
+    return MetadataReadResult::failed;
+  }
   StorageIoLease lease = StorageCoordinator::instance().acquireIo(
-      storageOwner(), StorageAccess::read, storageIoTimeout());
-  if (!lease) return String();
-  File file = fs_->open(path, FILE_READ);
-  if (!file || file.isDirectory() || file.size() > limit) {
-    if (file) file.close();
-    return String();
+      storageOwner(), StorageAccess::read, 0);
+  if (!lease) return MetadataReadResult::pending;
+  const size_t wanted = metadataRead_.nextReadBytes();
+  const size_t offset = metadataRead_.bytesRead();
+  const int received = wanted == 0 ? 0 :
+      metadataReadFile_.read(metadataReadBuffer_ + offset, wanted);
+  if (received <= 0 || !metadataRead_.acceptRead(received)) {
+    resetMetadataRead();
+    return MetadataReadResult::failed;
   }
-  String value;
-  if (!value.reserve(file.size() + 1)) {
-    file.close();
-    return String();
+  if (!metadataRead_.ready()) return MetadataReadResult::pending;
+  metadataReadFile_.close();
+  metadataReadBuffer_[metadataRead_.bytesRead()] = 0;
+  data = metadataReadBuffer_;
+  bytes = metadataRead_.bytesRead();
+  return MetadataReadResult::ready;
+}
+
+void PokePodLinkService::resetMetadataRead() {
+  if (metadataReadFile_) metadataReadFile_.close();
+  if (metadataReadBuffer_ != nullptr && metadataRead_.bytesRead() > 0) {
+    memset(metadataReadBuffer_, 0, metadataRead_.bytesRead());
   }
-  while (file.available()) value += static_cast<char>(file.read());
-  file.close();
-  return value;
+  metadataRead_.reset();
+  metadataReadPath_ = "";
 }
 
 String PokePodLinkService::deviceId() const {

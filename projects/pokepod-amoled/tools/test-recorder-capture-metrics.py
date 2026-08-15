@@ -14,6 +14,7 @@ app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 link = (firmware / "PokePodLinkService.cpp").read_text(encoding="utf-8")
 link_recording = (firmware / "LinkRecordingSession.cpp").read_text(encoding="utf-8")
 dispatcher = (firmware / "AudioCaptureDispatcher.h").read_text(encoding="utf-8")
+telemetry = (firmware / "AudioSessionTelemetry.h").read_text(encoding="utf-8")
 
 assert "struct AudioCaptureFrontEndSnapshot" in service
 assert "AudioCaptureFrontEndPublisher" in service
@@ -52,6 +53,40 @@ assert "failedRecorderOwner == RecorderOperationOwner::localApp" in dispatch_loo
 assert "captureRuntime.pop(" not in app
 assert "captureRuntime_->pop(" not in link
 assert "while (source.pop(frame))" in dispatcher
+
+for fact in (
+    "captureRingHighWaterFrames", "captureRingDroppedFrames",
+    "recorderQueueHighWaterFrames", "recorderQueueDroppedFrames",
+    "dispatcherMaximumIntervalUs", "dispatcherP99IntervalUs",
+    "i2sTimeouts", "i2sLongestReadUs", "zeroByteReads", "earlyZeroReads",
+    "sourceOverruns",
+    "sourceFailures", "sequenceGaps", "storageWriteP99Us",
+    "storageWriteP999Us", "captureTaskStackHighWaterWords",
+    "recorderTaskStackHighWaterWords", "sourceOverrunObservable", "frozen",
+):
+    assert fact in telemetry
+assert "std::atomic<uint32_t>" in telemetry
+assert "std::vector" not in telemetry
+assert "std::map" not in telemetry
+assert "kAudioLatencyHistogramBuckets = 12" in telemetry
+assert "sequence_.load(std::memory_order_acquire)" in telemetry
+assert "before != after" in telemetry
+assert "i2s_longest_read_us" in wav
+assert "sessionTelemetry_.reset()" in wav
+assert wav.count("freezeSessionTelemetry(log);") == 2
+assert "sessionTelemetry_.recordStorageWrite" in wav
+assert "storageQueue_.dropped()" in wav
+assert wav.count("uxTaskGetStackHighWaterMark(storageTask_)") == 1
+assert "recorderTelemetryLastStackSampleMs_" in wav_h
+assert "forceStackSample" in wav
+assert "observeCaptureTelemetry" in wav_h
+assert "recorder.observeCaptureTelemetry(" in app
+assert "captureRuntime.taskStackHighWater()" in app
+assert app.count("captureRuntime.taskStackHighWater()") == 1
+assert "captureTelemetryLastStackSampleMs" in app
+assert "captureTelemetryStackSampled" in app
+assert "metrics_.sequenceFailures" in dispatcher
+assert "maximumIntervalUs" in dispatcher
 
 local_finish = app[app.index("bool finishPendingCaptureStop() {"):
                    app.index("bool requestCaptureStop(",

@@ -12,6 +12,29 @@
 
 namespace pokepod {
 
+// Arduino-ESP32 WebServer uses five-second read/send waits. Captive-portal
+// probes can therefore monopolize the UI task. This pinned-core adapter keeps
+// the same routing surface while bounding a single incomplete phone request.
+class BoundedProvisioningWebServer final : public WebServer {
+ public:
+  explicit BoundedProvisioningWebServer(uint16_t port) : WebServer(port) {}
+  void handleClient() override;
+  void attachProvisioningProbe(ProvisioningDiagnostics &diagnostics,
+                               Print &log) {
+    diagnostics_ = &diagnostics;
+    log_ = &log;
+    requestProbeCount_ = 0;
+  }
+
+  static constexpr uint32_t kIoSliceMs = 40;
+  static constexpr uint32_t kIdleClientLifetimeMs = 250;
+
+ private:
+  ProvisioningDiagnostics *diagnostics_ = nullptr;
+  Print *log_ = nullptr;
+  uint8_t requestProbeCount_ = 0;
+};
+
 class ProvisioningPortal {
  public:
   ProvisioningPortal();
@@ -48,6 +71,7 @@ class ProvisioningPortal {
 
   void installRoutes();
   void clearProvisioningCredential();
+  void clearCandidateSecrets();
   void startScan();
   void pollScan();
   void showNetworks();
@@ -69,7 +93,7 @@ class ProvisioningPortal {
   static String jsonEscape(const String &value);
 
   DNSServer dns_;
-  WebServer server_;
+  BoundedProvisioningWebServer server_;
   DeviceConfig *config_ = nullptr;
   ProvisioningDiagnostics *diagnostics_ = nullptr;
   Print *log_ = nullptr;

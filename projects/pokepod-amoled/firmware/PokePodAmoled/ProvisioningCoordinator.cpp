@@ -1,8 +1,10 @@
 #include "ProvisioningCoordinator.h"
 
 #include "DeviceConfig.h"
+#include "BleVoiceService.h"
 #include "ProvisioningDiagnostics.h"
 #include "ProvisioningPortal.h"
+#include "RuntimeDiagnostics.h"
 #include "WifiController.h"
 
 namespace pokepod {
@@ -17,7 +19,17 @@ bool ProvisioningCoordinator::begin(
   log_ = &log;
   startup_.reset();
   normalWifiResumed_ = true;
+  blePauseRequested_ = false;
+  restartRequired_ = false;
   return true;
+}
+
+void ProvisioningCoordinator::recordRuntime(
+    RuntimeDiagnosticStage stage, RuntimeDiagnosticOutcome outcome,
+    uint32_t detail0, uint32_t detail1) {
+  if (runtimeDiagnostics_ == nullptr || log_ == nullptr) return;
+  (void)runtimeDiagnostics_->record(RuntimeDiagnosticSubsystem::provisioning,
+                                    stage, outcome, detail0, detail1, *log_);
 }
 
 bool ProvisioningCoordinator::request(uint32_t nowMs) {
@@ -26,12 +38,19 @@ bool ProvisioningCoordinator::request(uint32_t nowMs) {
     return false;
   }
   if (!startup_.request(nowMs)) return false;
+  recordRuntime(RuntimeDiagnosticStage::provisioningRequest,
+                RuntimeDiagnosticOutcome::started, nowMs, 0);
   normalWifiResumed_ = false;
+  blePauseRequested_ = false;
   if (!portal_->prepare(*config_, *diagnostics_, *log_)) {
+    recordRuntime(RuntimeDiagnosticStage::provisioningRequest,
+                  RuntimeDiagnosticOutcome::failure, 1, 0);
     startup_.fail();
     resumeNormalWifi();
     return false;
   }
+  recordRuntime(RuntimeDiagnosticStage::provisioningRequest,
+                RuntimeDiagnosticOutcome::success, nowMs, 0);
   log_->println(
       "{\"event\":\"provisioning_startup\",\"phase\":\"requested\"}");
   return true;
@@ -40,21 +59,58 @@ bool ProvisioningCoordinator::request(uint32_t nowMs) {
 void ProvisioningCoordinator::poll(uint32_t nowMs) {
   if (portal_ == nullptr || wifi_ == nullptr) return;
   if (startup_.pending()) {
-    const ProvisioningStartupAction action = startup_.update(nowMs);
+    bool radiosQuiesced = true;
+    if (startup_.phase() == ProvisioningStartupPhase::quiescing &&
+        bleVoice_ != nullptr) {
+      blePauseRequested_ = true;
+      radiosQuiesced = bleVoice_->pauseForIdleSleep();
+      if (radiosQuiesced) {
+        radiosQuiesced = bleVoice_->suspendForProvisioning();
+        restartRequired_ = restartRequired_ || radiosQuiesced;
+      }
+    }
+    const ProvisioningStartupAction action =
+        startup_.update(nowMs, radiosQuiesced);
     if (action == ProvisioningStartupAction::quiesceRadio) {
+      recordRuntime(RuntimeDiagnosticStage::provisioningQuiesceBefore,
+                    RuntimeDiagnosticOutcome::started, nowMs, 0);
       wifi_->quiesceForProvisioning(*log_);
+      if (bleVoice_ != nullptr) {
+        blePauseRequested_ = true;
+        (void)bleVoice_->pauseForIdleSleep();
+      }
+      recordRuntime(RuntimeDiagnosticStage::provisioningQuiesceAfter,
+                    RuntimeDiagnosticOutcome::success, nowMs, 0);
       log_->println(
           "{\"event\":\"provisioning_startup\",\"phase\":\"quiescing\"}");
     } else if (action == ProvisioningStartupAction::switchRadioMode) {
+      recordRuntime(RuntimeDiagnosticStage::provisioningModeBefore,
+                    RuntimeDiagnosticOutcome::started, nowMs, 0);
       const bool completed = portal_->switchToAccessPointMode();
+      recordRuntime(RuntimeDiagnosticStage::provisioningModeAfter,
+                    completed ? RuntimeDiagnosticOutcome::success
+                              : RuntimeDiagnosticOutcome::failure,
+                    completed ? 0U : 1U, nowMs);
       startup_.finishStep(action, completed, nowMs);
       if (!completed) resumeNormalWifi();
     } else if (action == ProvisioningStartupAction::startAccessPoint) {
+      recordRuntime(RuntimeDiagnosticStage::provisioningSoftApBefore,
+                    RuntimeDiagnosticOutcome::started, nowMs, 0);
       const bool completed = portal_->startAccessPoint();
+      recordRuntime(RuntimeDiagnosticStage::provisioningSoftApAfter,
+                    completed ? RuntimeDiagnosticOutcome::success
+                              : RuntimeDiagnosticOutcome::failure,
+                    completed ? 0U : 1U, nowMs);
       startup_.finishStep(action, completed, nowMs);
       if (!completed) resumeNormalWifi();
     } else if (action == ProvisioningStartupAction::startPortalServices) {
+      recordRuntime(RuntimeDiagnosticStage::provisioningServicesBefore,
+                    RuntimeDiagnosticOutcome::started, nowMs, 0);
       const bool completed = portal_->startServices();
+      recordRuntime(RuntimeDiagnosticStage::provisioningServicesAfter,
+                    completed ? RuntimeDiagnosticOutcome::success
+                              : RuntimeDiagnosticOutcome::failure,
+                    completed ? 0U : 1U, nowMs);
       startup_.finishStep(action, completed, nowMs);
       if (!completed) resumeNormalWifi();
     } else if (action == ProvisioningStartupAction::failTimeout) {
@@ -80,6 +136,19 @@ void ProvisioningCoordinator::stop() {
   resumeNormalWifi();
 }
 
+bool ProvisioningCoordinator::takeRestartRequired() {
+  // BLE is deliberately deinitialized for the AP window so that the scarce
+  // internal-RAM allocation is absent while Wi-Fi creates its AP objects.  The
+  // restart belongs to the device lifecycle and must not fire until the portal
+  // has either stopped or failed to start.
+  if (!restartRequired_ || startup_.pending() || startup_.active()) {
+    return false;
+  }
+  const bool value = restartRequired_;
+  restartRequired_ = false;
+  return value;
+}
+
 bool ProvisioningCoordinator::active() const {
   return portal_ != nullptr && portal_->active();
 }
@@ -100,6 +169,11 @@ void ProvisioningCoordinator::resumeNormalWifi() {
   if (normalWifiResumed_) return;
   normalWifiResumed_ = true;
   if (wifi_ != nullptr) wifi_->configurationChanged();
+  if (bleVoice_ != nullptr && blePauseRequested_ &&
+      !bleVoice_->provisioningSuspended()) {
+    bleVoice_->resumeAfterIdleSleep();
+  }
+  blePauseRequested_ = false;
 }
 
 }  // namespace pokepod

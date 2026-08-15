@@ -28,9 +28,9 @@ require(dashboard, "capsuleScroll_.positionPx() + y -",
         "capsule hit testing ignores pixel scroll")
 require(dashboard, "libraryRevision != lastLibraryRevision_",
         "scroll frames still reconcile the full capsule library")
-require(main, "dashboard.updateVerticalScroll(y, now, capsuleLibrary)",
+require(main, "dashboard.updateVerticalScroll(y, now, capsuleLibrary.get())",
         "drag does not follow the live touch position")
-require(main, "dashboard.advanceVerticalScroll(now, capsuleLibrary)",
+require(main, "dashboard.advanceVerticalScroll(now, capsuleLibrary.get())",
         "inertial scrolling is not serviced")
 require(main, "ui::kScrollFrameIntervalMs",
         "scroll frame pacing is missing")

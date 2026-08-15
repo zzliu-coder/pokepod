@@ -257,6 +257,7 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
   deviceId_ = deviceId;
   enablePolicy_.begin(userEnabled);
   idlePaused_ = false;
+  provisioningSuspended_ = false;
   const String advertisedName = "PokePod-" + deviceId.substring(
       deviceId.length() > 4 ? deviceId.length() - 4 : 0);
   BLEDevice::init(advertisedName.c_str());
@@ -268,7 +269,11 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
   BLESecurity::setKeySize(16);
   passkey_ = BLESecurity::generateRandomPassKey();
   BLESecurity::setPassKey(true, passkey_);
-  BLESecurity::regenPassKeyOnConnect(true);
+  // One pairing attempt has exactly one product passkey. NimBLE's regenerated
+  // callback may arrive after the UI already rendered the code, which used to
+  // make the action card and toast disagree. The service owns the passkey and
+  // keeps it stable until the next explicit pairing attempt.
+  BLESecurity::regenPassKeyOnConnect(false);
   bonded_ = hasBond();
   refreshCallbackSnapshot(millis());
 
@@ -332,11 +337,13 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
 }
 
 void BleVoiceService::requestEnable() {
+  if (provisioningSuspended_) return;
   applyEnableActions(
       enablePolicy_.requestEnable(physicalConnectionPending()), millis());
 }
 
 void BleVoiceService::requestDisable(uint32_t nowMs) {
+  if (provisioningSuspended_) return;
   cancelPairingMode();
   sessionStopRequest_.beginTransition(enablePolicy_.transitionPending());
   applyEnableActions(
@@ -353,6 +360,7 @@ void BleVoiceService::applyEnableActions(
   }
   if (actions.requestSessionStop) sessionStopRequest_.request();
   if (actions.disconnect && physicalConnectionPending() &&
+      !callbackOverflow_.active() &&
       server_ != nullptr) {
     const uint16_t connectionId = physicalConnectionId();
     if (connectionId != kInvalidBleConnectionId) {
@@ -472,7 +480,7 @@ void BleVoiceService::drainCallbackEvents(uint32_t nowMs) {
   if (callbackEvents_.overflowed() || notifyStatusEvents_.overflowed()) {
     callbackEvents_.closeAdmission();
     notifyStatusEvents_.closeAdmission();
-    if (!callbackOverflow_.pending()) {
+    if (!callbackOverflow_.active()) {
       BleVoiceConnectionEpoch overflowEpoch;
       if (connectionPolicy_.hasCurrent()) {
         overflowEpoch.connectionId =
@@ -483,10 +491,14 @@ void BleVoiceService::drainCallbackEvents(uint32_t nowMs) {
         overflowEpoch.generation =
             callbackSecurity_.connectionGeneration();
       }
-      callbackOverflow_.begin(overflowEpoch);
+      callbackOverflow_.begin(overflowEpoch, nowMs);
       failClosedCallbackOverflow(nowMs, callbackOverflow_.epoch());
+      if (callbackOverflow_.hardFailed() && log_ != nullptr) {
+        log_->println(
+            "{\"event\":\"ble_voice_callback_overflow_hard_failed\","
+            "\"reason\":\"invalid_epoch\",\"attempts\":0}");
+      }
     }
-    finishCallbackOverflowIfDisconnected(nowMs);
     return;
   }
 
@@ -534,7 +546,7 @@ void BleVoiceService::processCallbackEvent(
     case BleVoiceCallbackEventType::connect:
       processConnect(event.connectionId, event.connectionGeneration,
                      event.peerAddressValid ? event.peerAddress : nullptr,
-                     event.flag);
+                     event.flag, eventAtMs);
       break;
     case BleVoiceCallbackEventType::disconnect:
       processDisconnect(event.connectionId,
@@ -614,12 +626,27 @@ void BleVoiceService::processDeviceInfoRead() {
 }
 
 void BleVoiceService::poll(uint32_t nowMs) {
+  if (provisioningSuspended_) return;
   drainCallbackEvents(nowMs);
+  advanceCallbackOverflow(nowMs);
   applyEnableActions(enablePolicy_.poll(controller_.active(),
                                         physicalConnectionPending(), nowMs),
                      nowMs);
   if (pairingUntilMs_ != 0 && !pairingMode(nowMs)) pairingUntilMs_ = 0;
   refreshCallbackSnapshot(nowMs);
+  // A transport connection is only useful after the Mac app authenticates,
+  // negotiates MTU and sends READY. Reclaim a bonded system-only/stale link so
+  // the UI and the Mac can return to a clean reconnectable state.
+  if (connected_ && appHandshake_.requestDisconnect(
+                        nowMs, pairingMode(nowMs))) {
+    if (server_ != nullptr && connectionPolicy_.hasCurrent()) {
+      const uint16_t connectionId = connectionPolicy_.currentConnectionId();
+      server_->disconnect(connectionId);
+      if (log_ != nullptr) {
+        log_->println("{\"event\":\"ble_voice_handshake_timeout_disconnect\"}");
+      }
+    }
+  }
   if (controlNotifyPending_ &&
       nowMs - controlNotifyStartedAtMs_ >= kControlNotifyTimeoutMs) {
     clearControlNotify();
@@ -777,20 +804,50 @@ bool BleVoiceService::pauseForIdleSleep() {
   idlePaused_ = true;
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   if (advertising != nullptr) advertising->stop();
-  if (connected_ && server_ != nullptr) {
-    server_->disconnect(connectionPolicy_.currentConnectionId());
+  // The overflow policy alone owns retry cadence and attempt accounting.
+  // Sleep intent only blocks until that cleanup reaches an exact terminal.
+  if (callbackOverflow_.active()) return false;
+  if (physicalConnectionPending() && server_ != nullptr) {
+    const uint16_t connectionId = physicalConnectionId();
+    if (connectionId != kInvalidBleConnectionId) {
+      server_->disconnect(connectionId);
+    }
     return false;
   }
-  return true;
+  return quiescedForSleep();
 }
 
 void BleVoiceService::resumeAfterIdleSleep() {
+  if (provisioningSuspended_) return;
   if (!idlePaused_) return;
   idlePaused_ = false;
   restartAdvertising();
 }
 
+bool BleVoiceService::suspendForProvisioning() {
+  if (provisioningSuspended_) return true;
+  if (!idlePaused_ || !quiescedForSleep()) return false;
+  callbackEvents_.closeAdmission();
+  notifyStatusEvents_.closeAdmission();
+  notifyCallbackBinding_.invalidate();
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  if (advertising != nullptr) advertising->stop();
+  BLEDevice::deinit(false);
+  server_ = nullptr;
+  info_ = nullptr;
+  command_ = nullptr;
+  event_ = nullptr;
+  audio_ = nullptr;
+  provisioningSuspended_ = true;
+  if (log_ != nullptr) {
+    log_->println(
+        "{\"event\":\"ble_voice_provisioning_suspend\",\"ok\":true}");
+  }
+  return true;
+}
+
 void BleVoiceService::prepareForDeepSleep() {
+  if (provisioningSuspended_) return;
   idlePaused_ = true;
   controller_.complete();
   resetAudioNotify();
@@ -865,8 +922,9 @@ void BleVoiceService::handleConnect(uint16_t connectionId,
 void BleVoiceService::processConnect(uint16_t connectionId,
                                      uint32_t connectionGeneration,
                                      const uint8_t *peerAddress,
-                                     bool peerBonded) {
-  if (!enablePolicy_.acceptsNewWork()) {
+                                     bool peerBonded,
+                                     uint32_t nowMs) {
+  if (!enablePolicy_.acceptsNewWork() || callbackOverflow_.active()) {
     if (server_ != nullptr) server_->disconnect(connectionId);
     return;
   }
@@ -889,6 +947,8 @@ void BleVoiceService::processConnect(uint16_t connectionId,
   appReady_ = false;
   connectionId_ = connectionId;
   connectionGeneration_ = connectionGeneration;
+  appHandshake_.connected(nowMs);
+  appHandshakeRecoveryRestartClaimed_ = false;
   connectionPowerMode_ = BleConnectionPowerMode::voice;
   requestConnectionPowerMode(BleConnectionPowerMode::idle);
   currentPeerAddressValid_ = peerAddress != nullptr;
@@ -899,7 +959,7 @@ void BleVoiceService::processConnect(uint16_t connectionId,
   }
   peerPolicy_.connected(peerBonded || isBondedPeer(peerAddress));
   mtu_ = 23;
-  refreshCallbackSnapshot(millis());
+  refreshCallbackSnapshot(nowMs);
   if (log_ != nullptr) log_->println("{\"event\":\"ble_voice_connected\"}");
 }
 
@@ -951,6 +1011,7 @@ void BleVoiceService::processDisconnect(uint16_t connectionId,
   mtu_ = 23;
   connectionId_ = 0;
   connectionGeneration_ = 0;
+  appHandshake_.disconnected();
   connectionPowerMode_ = BleConnectionPowerMode::idle;
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
@@ -1046,7 +1107,9 @@ void BleVoiceService::processCommand(uint16_t connectionId,
   const auto type = static_cast<BleVoiceCommandType>(command.type);
   if (type == BleVoiceCommandType::ready) {
     if (command.sessionId == 0) {
-      appReady_ = authenticated_ && mtuReady();
+      appReady_ = !appHandshake_.disconnectPending() && authenticated_ &&
+          mtuReady();
+      if (appReady_) appHandshake_.ready();
       notifyControl(BleVoiceEventType::status, 0, appReady_ ? 1 : 2);
     } else {
       controller_.markReady(command.sessionId, nowMs);
@@ -1141,10 +1204,13 @@ void BleVoiceService::handlePasskey(uint32_t passkey) {
 }
 
 void BleVoiceService::processPasskey(uint32_t passkey) {
-  passkey_ = passkey;
-  refreshCallbackSnapshot(millis());
+  if (passkey == passkey_) return;
+  // A late stack callback belongs to a previous security attempt. Never let it
+  // replace the code already shown to the user; reassert the current attempt's
+  // value so both sides converge on the same six digits.
+  BLESecurity::setPassKey(true, passkey_);
   if (log_ != nullptr) {
-    log_->println("{\"event\":\"ble_voice_passkey_updated\"}");
+    log_->println("{\"event\":\"ble_voice_stale_passkey_ignored\"}");
   }
 }
 
@@ -1269,19 +1335,66 @@ void BleVoiceService::failClosedCallbackOverflow(
   currentPeerAddressValid_ = false;
   memset(currentPeerAddress_, 0, sizeof(currentPeerAddress_));
   refreshCallbackSnapshot(nowMs);
-  if (epoch.valid() && server_ != nullptr) {
-    server_->disconnect(epoch.connectionId);
+  (void)epoch;
+}
+
+void BleVoiceService::advanceCallbackOverflow(uint32_t nowMs) {
+  if (!callbackOverflow_.active()) return;
+  if (finishCallbackOverflowIfDisconnected(nowMs)) return;
+
+  if (recoverInvalidCallbackOverflow(nowMs)) return;
+
+  const BleCallbackOverflowActions actions = callbackOverflow_.poll(nowMs);
+  if (actions.enteredHardFailed) {
+    if (log_ != nullptr) {
+      log_->printf(
+          "{\"event\":\"ble_voice_callback_overflow_hard_failed\","
+          "\"attempts\":%u,\"deadline_ms\":%lu}\n",
+          static_cast<unsigned>(callbackOverflow_.attempts()),
+          static_cast<unsigned long>(
+              BleCallbackOverflowPolicy::kCleanupDeadlineMs));
+    }
+    return;
+  }
+  if (actions.disconnect && callbackOverflow_.epoch().valid() &&
+      server_ != nullptr) {
+    server_->disconnect(callbackOverflow_.epoch().connectionId);
+    if (log_ != nullptr) {
+      log_->printf(
+          "{\"event\":\"ble_voice_callback_overflow_disconnect\","
+          "\"attempt\":%u}\n",
+          static_cast<unsigned>(callbackOverflow_.attempts()));
+    }
   }
 }
 
-bool BleVoiceService::finishCallbackOverflowIfDisconnected(uint32_t nowMs) {
-  if (!callbackOverflow_.pending()) return false;
-  bool confirmed = !callbackOverflow_.physicalConnectionPending();
-  BleVoiceConnectionEpoch physicalDisconnect;
-  if (!confirmed && physicalDisconnects_.latest(physicalDisconnect)) {
-    confirmed = callbackOverflow_.confirm(physicalDisconnect);
+bool BleVoiceService::recoverInvalidCallbackOverflow(uint32_t nowMs) {
+  if (!callbackOverflow_.hardFailed() ||
+      callbackOverflow_.epoch().valid() ||
+      !callbackOverflow_.recoverInvalidEpoch()) {
+    return false;
   }
-  if (!confirmed) return false;
+  callbackEvents_.resetAfterOverflow();
+  notifyStatusEvents_.resetAfterOverflow();
+  physicalDisconnects_.reset();
+  notifyCallbackBinding_.invalidate();
+  refreshCallbackSnapshot(nowMs);
+  if (log_ != nullptr) {
+    log_->println(
+        "{\"event\":\"ble_voice_callback_overflow_recovered\","
+        "\"mode\":\"invalid_epoch\"}");
+  }
+  if (enablePolicy_.acceptsNewWork() && !idlePaused_) restartAdvertising();
+  return true;
+}
+
+bool BleVoiceService::finishCallbackOverflowIfDisconnected(uint32_t nowMs) {
+  const BleCallbackOverflowPhase phase = callbackOverflow_.phase();
+  if (phase != BleCallbackOverflowPhase::disconnecting &&
+      phase != BleCallbackOverflowPhase::hardFailed) return false;
+  BleVoiceConnectionEpoch physicalDisconnect;
+  if (!physicalDisconnects_.latest(physicalDisconnect) ||
+      !callbackOverflow_.confirm(physicalDisconnect)) return false;
 
   const BleVoiceConnectionEpoch closedEpoch = callbackOverflow_.finish();
   callbackEvents_.resetAfterOverflow();
@@ -1309,7 +1422,8 @@ void BleVoiceService::refreshCallbackSnapshot(uint32_t nowMs) {
 }
 
 void BleVoiceService::restartAdvertising() {
-  if (!enablePolicy_.acceptsNewWork() || idlePaused_ ||
+  if (!enablePolicy_.acceptsNewWork() || callbackOverflow_.active() ||
+      idlePaused_ ||
       connectionPolicy_.hasCurrent()) return;
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   if (advertising != nullptr) advertising->start();

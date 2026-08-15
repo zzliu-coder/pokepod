@@ -189,6 +189,13 @@ class BleVoicePhysicalDisconnectLatch {
     }
   }
 
+  void reset() {
+    version_.fetch_add(1, std::memory_order_acq_rel);
+    connectionId_.store(0xffff, std::memory_order_relaxed);
+    generation_.store(0, std::memory_order_relaxed);
+    version_.fetch_add(1, std::memory_order_release);
+  }
+
  private:
   std::atomic<uint32_t> version_{0};
   std::atomic<uint16_t> connectionId_{0xffff};
@@ -329,6 +336,14 @@ class BleVoiceCallbackMailbox {
 
   bool accepting() const {
     return accepting_.load(std::memory_order_acquire);
+  }
+
+  // Read-only owner observation used by the sleep quiescence contract. A
+  // concurrent publish either advances tail before this snapshot or remains a
+  // producer-side fact for the next poll; it never changes queue semantics.
+  bool empty() const {
+    return head_.load(std::memory_order_acquire) ==
+        tail_.load(std::memory_order_acquire);
   }
 
   void closeAdmission() { failClosed(); }

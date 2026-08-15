@@ -85,6 +85,16 @@ int main() {
   assert(productionCancel.pollQuiesce(121) ==
          TencentQuiesceStatus::complete);
 
+  TencentJobRuntime rebootAbandon;
+  rebootAbandon.workerStartResult(true);
+  const uint32_t rebootGeneration = rebootAbandon.request(1000);
+  assert(rebootAbandon.start(rebootGeneration));
+  assert(rebootAbandon.networkFinished(rebootGeneration, true, false));
+  assert(rebootAbandon.state() == TencentJobState::committing);
+  assert(rebootAbandon.abandonForReboot(rebootGeneration));
+  assert(rebootAbandon.state() == TencentJobState::idle);
+  assert(!rebootAbandon.working());
+
   TencentJobRuntime productionWatchdog;
   const uint32_t watchdogGeneration =
       productionWatchdog.request(180000);

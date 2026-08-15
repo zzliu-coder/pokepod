@@ -61,6 +61,13 @@ class TencentJobRuntime {
 
   void failBeforeRequest() { model_.failWithoutActiveJob(); }
 
+  bool abandonForReboot(uint32_t generation) {
+    cancelToken_.cancel(generation);
+    if (!model_.abandonForReboot(generation)) return false;
+    quiesceActive_ = false;
+    return true;
+  }
+
   TencentQuiesceStatus beginQuiesce(uint32_t nowMs, uint32_t timeoutMs,
                                     TencentCancelReason reason) {
     if (!working()) {

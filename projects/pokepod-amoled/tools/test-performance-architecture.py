@@ -33,7 +33,7 @@ for operation in (
             f"FAIL performance_architecture: {operation} still forces full scan"
         )
 
-require(app, "capsuleLibrary.includeInboxCapsule(recorder.capsuleId())",
+require(app, "capsuleLibrary->includeInboxCapsule(recorder.capsuleId())",
         "recording completion still scans every capsule")
 require(library, "deferredPublish_.begin();",
         "batch mutations do not coalesce visible-index publication")

@@ -23,6 +23,7 @@ class BoardServices;
 class CapsuleLibrary;
 class Dashboard;
 class DeviceConfig;
+class DeviceRebootCoordinator;
 class ProvisioningDiagnostics;
 class PowerDiagnostics;
 class RuntimePowerManager;
@@ -43,7 +44,8 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
              ProvisioningDiagnostics &provisioningDiagnostics,
              PowerDiagnostics &powerDiagnostics,
              RuntimePowerManager &power, WirelessSyncIdentity &identity,
-             LinkServiceCoordinator &coordinator, Print &log,
+             LinkServiceCoordinator &coordinator,
+             DeviceRebootCoordinator &rebootCoordinator, Print &log,
              AudioCaptureRuntime *captureRuntime = nullptr,
              AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr);

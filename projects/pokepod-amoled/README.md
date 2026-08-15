@@ -28,7 +28,7 @@ SD、RTC、QMI8658、AXP2101、Wi-Fi、BLE 和 USB CDC。
 - 胶囊详情可阅读 `final.md > polished.md > raw.txt > title`、播放 WAV、
   收藏、归档和重新转写。
 - PWR 短按亮屏/息屏，长按安全关机。
-- 设置页可开关 Wi-Fi 自动工作和蓝牙语音、启动五分钟 WPA2 手机配网页、开关抬起亮屏。关闭蓝牙会安全结束正在进行的无线语音、停止广播并断开 Mac，同时保留配对关系；蓝牙行左侧进入配对详情，右侧控制总开关。
+- 设置页保留五行：无线网络行左侧进入五分钟 WPA2 手机配网、右侧控制 Wi-Fi 自动工作；蓝牙行左侧进入配对详情、右侧控制蓝牙总开关；电脑同步、自动亮屏保持独立；底部“关机”先二次确认，再沿安全关机状态机保存录音、收口转写和存储后断电。关闭蓝牙会安全结束正在进行的无线语音、停止广播并断开 Mac，同时保留配对关系。
 
 Wi-Fi 平时关闭。录音、待转写或充电产生网络需求时自动连接，最后一项工作
 结束三分钟后关闭。失败按 10 秒、30 秒、2 分钟重试，随后保留队列等待下次
@@ -78,12 +78,80 @@ PokePod 本机“连接手机”页直接显示扫描、连接、验证、保存
 VBUS、音频、同步、配网、UI 动画、自动亮屏或等待超时中的真实阻塞项。确认已保存
 诊断后可用 `--command clear-power-diagnostics` 清空。
 
+录音、手机配网和无线麦克风还会写入一份独立的跨重启运行诊断环形记录。
+它保存最近 12 个阶段快照：阶段开始/完成或失败、关键错误码、内部堆、最大
+连续块、PSRAM、运行时间和重启原因；不保存音频、Wi-Fi 密码、腾讯密钥或请求正文。
+插回 USB 后可读取：
+
+```sh
+./cdc-status.py --command get-runtime-diagnostics
+```
+
+确认记录已导出后可用 `--command clear-runtime-diagnostics` 清空。录音故障重点看
+`recording_storage_reserve`、`recording_capacity`、`recording_probe_*`、
+`recording_metadata` 和 `recording_audio_open`；配网故障重点看
+`provisioning_quiesce_*`、`provisioning_mode_*`、`provisioning_softap_*`；
+“无线麦克风暂时不可用”重点看 `wireless_router_acquire`、
+`wireless_capture_start`、`wireless_session_start`、`audio_capture_status` 和
+`wireless_capture_terminal`。无线采集启动后不再同步写 NVS，终态会明确记录读取次数、
+I2S 超时、最慢读取、环形队列高水位和丢帧数。
+
+录音存储性能探针只计量 SD 的 4 KiB 写入与 flush；NVS 诊断在计量和临时文件清理
+结束后一次性写入。这样“存储卡性能不足”代表 SD 实测结果，不会混入内部 Flash
+诊断耗时，也不会在一次探针中反复磨损 NVS。
+
+手机配网进入 AP 前会先结束 BLE 会话、确认物理断开并释放完整 BLE controller 内存，
+随后才执行 `WiFi.mode(WIFI_AP)`。配网结束后设备通过统一重启协调器恢复 BLE；用户
+退出配网或 USB/Wi-Fi Link 断开不会取消已经接受的重启意图。
+
 腾讯请求使用 TLS 证书校验和 TC3-HMAC-SHA256。WAV 以两遍流式方式完成
 签名与 Base64 上传，不在内存中保存完整音频或完整请求体。转写在后台任务中
 运行，屏幕、按键、BLE 和 Link 主循环保持响应；本地录音占用麦克风或文件提交
 期间，Mac 的 SD 操作会收到可重试的 `busy`。
 
 ## PokePod Link v2
+
+### 电脑夹具与无需复位的升级
+
+夹具把设备端的连接做成六类受保护触点：USB D+/D−、GND、受限 VBUS、BOOT 和
+RESET。电脑端负责身份核验、诊断导出、备份、升级、回读和证据归档；设备不需要
+增加体积较大的调试接口。触点定义和电气约束见 `fixture/pinout.json`。
+
+普通升级直接使用已启动固件的 USB CDC Link v2，不需要用户按 BOOT/RESET：
+
+```sh
+python3 fixture/pokepod-fixture.py probe --port /dev/cu.usbmodemXXXX
+python3 fixture/pokepod-fixture.py collect --port /dev/cu.usbmodemXXXX
+python3 fixture/pokepod-fixture.py update \
+  --port /dev/cu.usbmodemXXXX \
+  --firmware work/pokepod-build/output/fast/PokePodAmoled.ino.bin
+```
+
+这条路径就是设备的应用内 OTA：主机先完成设备身份、镜像长度和 SHA-256 预检，
+固件把镜像分块写入未运行的 OTA 槽，最后由设备级重启协调器在 USB 断开后继续完成
+收口。准备阶段或任一分块被拒绝时，`cdc-status.py` 会保留设备返回的完整 JSON 错误，
+便于区分忙、分区容量、身份和校验失败。首次升级前仍建议用 BOOT/RESET 救援刷写一份
+具备 USB OTA 的固件，之后再用这条命令滚动升级。
+
+主机先计算镜像 SHA-256；固件把镜像流式写入未运行的 OTA 槽，逐块确认且只在
+长度、分区和 SHA-256 全部通过后切换启动槽。提交后的重启属于设备级生命周期请求，
+USB 断开不会取消它。失败会中止 OTA 句柄并保留当前启动槽。升级要求精确构建产物，
+工具会把请求、响应、诊断和摘要保存到 `work/fixture-runs/`。
+
+BOOT/RESET 仍保留给救援刷写。救援路径调用 `flash.sh`，写前备份 app0 并复读抽样，
+写后完整回读比较 SHA；身份、芯片、容量、备份或回读任一不满足就停止：
+
+```sh
+python3 fixture/pokepod-fixture.py flash \
+  --rom-port /dev/cu.usbmodemROM \
+  --authority work/device-authority.json \
+  --mode fast
+```
+
+夹具控制器的 BOOT/RESET 应采用开漏或三态、电平保护和 VBUS 限流。参考控制器固件、
+固定串口桥接协议、控制 profile、自动 ROM 恢复和录音/配网场景复现命令位于
+`fixture/`，详见 `fixture/README.md`。正常 USB 升级
+不依赖控制器，BOOT/RESET 只作为恢复通道。
 
 CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32。调试日志写入
 调试串口，避免污染 CDC。设备实现：
@@ -327,13 +395,17 @@ BOOT` 作为救援入口，然后重新运行同一个脚本。
 真机连接后，CDC 与板载外设验收：
 
 ```sh
-./device-acceptance.sh
+./device-acceptance.sh \
+  --expected-variant v1 \
+  --evidence-root /path/to/evidence \
+  --port /dev/cu.usbmodemXXXXXXXX \
+  --artifact /path/to/PokePodAmoled.ino.bin
 ```
 
-`cdc-status.py` 使用真实 Link v2 帧读取设备状态。真机门检查 V1 显示、触摸、
-IO 扩展器、RTC、IMU、PMU、SD、音频和 USB CDC 状态。BLE 音频、BlackHole、
-Option+Z 与微信输入法的端到端验收由 PokePod Voice.app 的验收流程完成；最终
-文字进入真实输入框仍保留一次人工确认。
+必须显式指定 V1 或 V2、证据目录和串口；脚本不会自动选择串口，也不会刷机。
+`cdc-status.py` 使用真实 Link v2 帧读取组件预检状态。预检只证明组件存在，行为
+场景继续记录为 `unverified`，直到对应 V1/V2 完成本地录音、Link USB/Wi-Fi、
+BLE、SD 故障、启动恢复、功耗、显示和触摸证据。两个板型保存独立 evidence。
 
 ## 无线语音
 

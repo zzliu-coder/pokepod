@@ -82,6 +82,9 @@ class LinkRecordingSession {
     return start_.ownsRequest(requestId) || stop_.ownsRequest(requestId);
   }
   bool owned() const { return owned_; }
+  bool ownsTransferredResources() const {
+    return routerOwned_ && transactionOwned_;
+  }
   bool stopActive() const { return stop_.active(); }
   bool recordingActive() const;
   bool quiesced() const {
@@ -108,6 +111,9 @@ class LinkRecordingSession {
   Print *log_ = nullptr;
 
   bool owned_ = false;
+  bool routerOwned_ = false;
+  bool transactionOwned_ = false;
+  bool stopOperationTracksSession_ = false;
   LinkRecordingStart start_;
   String capsuleId_;
   LinkRecordingStop stop_;

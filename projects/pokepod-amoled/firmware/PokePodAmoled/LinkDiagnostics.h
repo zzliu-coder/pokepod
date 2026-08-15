@@ -15,6 +15,7 @@ class PowerDiagnostics;
 class ProvisioningCoordinator;
 class ProvisioningDiagnostics;
 class RuntimePowerManager;
+class RuntimeDiagnostics;
 class TencentWorker;
 class UsbLinkBridge;
 class WavRecorder;
@@ -38,13 +39,16 @@ class LinkDiagnostics {
             PowerDiagnostics &powerDiagnostics,
             RuntimePowerManager &power,
             ProvisioningCoordinator *provisioningCoordinator,
-            const CapabilityRegistry *capabilities);
+            const CapabilityRegistry *capabilities,
+            RuntimeDiagnostics *runtimeDiagnostics = nullptr);
 
   String statusJson() const;
   String provisioningJson() const;
   String powerJson() const;
+  String runtimeJson() const;
   bool clearProvisioning(Print &log) const;
   bool clearPower(Print &log) const;
+  bool clearRuntime(Print &log) const;
 
  private:
   BoardServices *board_ = nullptr;
@@ -62,6 +66,7 @@ class LinkDiagnostics {
   RuntimePowerManager *power_ = nullptr;
   ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
   const CapabilityRegistry *capabilities_ = nullptr;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
 };
 
 }  // namespace pokepod

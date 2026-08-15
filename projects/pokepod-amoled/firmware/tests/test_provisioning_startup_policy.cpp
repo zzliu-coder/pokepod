@@ -23,8 +23,10 @@ int main() {
   assert(policy.update(1032) ==
          ProvisioningStartupAction::quiesceRadio);
   assert(policy.phase() == ProvisioningStartupPhase::quiescing);
-  assert(policy.update(1151) == ProvisioningStartupAction::none);
-  assert(policy.update(1152) ==
+  assert(policy.update(2000, false) == ProvisioningStartupAction::none);
+  assert(policy.phase() == ProvisioningStartupPhase::quiescing);
+  assert(policy.update(1151, true) == ProvisioningStartupAction::none);
+  assert(policy.update(1152, true) ==
          ProvisioningStartupAction::switchRadioMode);
   assert(policy.update(1153) == ProvisioningStartupAction::none);
   policy.finishStep(ProvisioningStartupAction::switchRadioMode, true, 1152);

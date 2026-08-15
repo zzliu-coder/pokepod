@@ -46,6 +46,7 @@ enum class AudioCaptureCycleResult : uint8_t {
   frameQueued,
   frameDropped,
   sourceTimeout,
+  sourceEarlyZero,
   sourceOverrun,
   sourceFailure,
 };
@@ -56,6 +57,8 @@ struct AudioCaptureServiceMetrics {
   uint32_t readCalls = 0;
   uint32_t shortReads = 0;
   uint32_t timeouts = 0;
+  uint32_t zeroByteReads = 0;
+  uint32_t earlyZeroReads = 0;
   uint32_t sourceOverruns = 0;
   uint32_t sourceFailures = 0;
   uint32_t longestReadUs = 0;
@@ -220,6 +223,8 @@ class AudioCaptureService {
     readCalls_.store(0, std::memory_order_relaxed);
     shortReads_.store(0, std::memory_order_relaxed);
     timeouts_.store(0, std::memory_order_relaxed);
+    zeroByteReads_.store(0, std::memory_order_relaxed);
+    earlyZeroReads_.store(0, std::memory_order_relaxed);
     sourceOverruns_.store(0, std::memory_order_relaxed);
     sourceFailures_.store(0, std::memory_order_relaxed);
     longestReadUs_.store(0, std::memory_order_relaxed);
@@ -256,9 +261,19 @@ class AudioCaptureService {
       sourceFailures_.fetch_add(1, std::memory_order_relaxed);
       return AudioCaptureCycleResult::sourceFailure;
     }
+    const bool zeroByteRead = read.bytes == 0;
+    const bool earlyZero = zeroByteRead &&
+        read.elapsedUs < kAudioCaptureReadTimeoutMs * 1000U;
+    if (zeroByteRead) {
+      zeroByteReads_.fetch_add(1, std::memory_order_relaxed);
+      if (earlyZero) {
+        earlyZeroReads_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     if (read.status == AudioCaptureReadStatus::timeout) {
       timeouts_.fetch_add(1, std::memory_order_relaxed);
-      return AudioCaptureCycleResult::sourceTimeout;
+      return earlyZero ? AudioCaptureCycleResult::sourceEarlyZero
+                       : AudioCaptureCycleResult::sourceTimeout;
     }
     if (read.status == AudioCaptureReadStatus::failure) {
       sourceFailures_.fetch_add(1, std::memory_order_relaxed);
@@ -267,9 +282,10 @@ class AudioCaptureService {
     if (read.status == AudioCaptureReadStatus::overrun) {
       sourceOverruns_.fetch_add(1, std::memory_order_relaxed);
     }
-    if (read.bytes == 0) {
+    if (zeroByteRead) {
       shortReads_.fetch_add(1, std::memory_order_relaxed);
-      return read.status == AudioCaptureReadStatus::overrun
+      return earlyZero ? AudioCaptureCycleResult::sourceEarlyZero
+          : read.status == AudioCaptureReadStatus::overrun
           ? AudioCaptureCycleResult::sourceOverrun
           : AudioCaptureCycleResult::partialInput;
     }
@@ -312,6 +328,8 @@ class AudioCaptureService {
     value.readCalls = readCalls_.load(std::memory_order_relaxed);
     value.shortReads = shortReads_.load(std::memory_order_relaxed);
     value.timeouts = timeouts_.load(std::memory_order_relaxed);
+    value.zeroByteReads = zeroByteReads_.load(std::memory_order_relaxed);
+    value.earlyZeroReads = earlyZeroReads_.load(std::memory_order_relaxed);
     value.sourceOverruns = sourceOverruns_.load(std::memory_order_relaxed);
     value.sourceFailures = sourceFailures_.load(std::memory_order_relaxed);
     value.longestReadUs = longestReadUs_.load(std::memory_order_relaxed);
@@ -364,6 +382,8 @@ class AudioCaptureService {
   std::atomic<uint32_t> readCalls_{0};
   std::atomic<uint32_t> shortReads_{0};
   std::atomic<uint32_t> timeouts_{0};
+  std::atomic<uint32_t> zeroByteReads_{0};
+  std::atomic<uint32_t> earlyZeroReads_{0};
   std::atomic<uint32_t> sourceOverruns_{0};
   std::atomic<uint32_t> sourceFailures_{0};
   std::atomic<uint32_t> longestReadUs_{0};

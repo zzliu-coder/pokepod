@@ -19,10 +19,11 @@ assert "void discardHostSessionBuffers()" in bridge_header
 assert "const bool usbHostSessionClosed = usb.takeHostSessionClosed();" in app
 assert "(lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed" in app
 close_guard = re.search(
-    r"if \(\(lastUsbHostConnected && !usbHostConnected\) \|\| "
-    r"usbHostSessionClosed\) \{\s*"
+    r"if \(bootUsbLinkStarted &&\s*"
+    r"\(\(lastUsbHostConnected && !usbHostConnected\) \|\| "
+    r"usbHostSessionClosed\)\) \{\s*"
     r"usb\.discardHostSessionBuffers\(\);\s*"
-    r"linkService\.disconnect\(\);",
+    r"linkService->disconnect\(\);",
     app,
 )
 assert close_guard is not None

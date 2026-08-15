@@ -11,6 +11,7 @@
     "test-capsule-scan-service.py",
     "test-capsule-startup.py",
     "test-device-config-atomic.py",
+    "test-device-acceptance-contract.py",
     "test-fixed-font-coverage.py",
     "test-fixed-font-rle.py",
     "test-flash-artifact-validation.py",
@@ -18,6 +19,7 @@
     "test-flash-identity-gate.py",
     "test-flash-policy.py",
     "test-flash-size-policy.py",
+    "test-firmware-update.py",
     "test-hardmac-workflow.py",
     "test-link-buffer-policy.py",
     "test-link-capsule-commands-module.py",
@@ -30,11 +32,15 @@
     "test-link-operation-contract.py",
     "test-link-operation-production-contract.py",
     "test-link-recording-stop.py",
+    "test-link-reboot-lifecycle.py",
     "test-link-storage-lease-contract.py",
     "test-local-recording-start.py",
     "test-performance-architecture.py",
+    "test-pokepod-fixture.py",
+    "test-fixture-control.py",
     "test-power-diagnostics-contract.py",
     "test-provisioning-page.py",
+    "test-provisioning-radio-contract.py",
     "test-provisioning-documentation-contract.py",
     "test-recorder-async-finalize.py",
     "test-recorder-capture-metrics.py",
@@ -44,6 +50,7 @@
     "test-resource-review.py",
     "test-runtime-power-time-usb-contract.py",
     "test-scroll-contract.py",
+    "test-security-ignore-contract.py",
     "test-storage-entrypoints.py",
     "test-storage-session-cleanup.py",
     "test-tencent-network-contract.py",
@@ -51,7 +58,8 @@
     "test-time-audio-motion-contract.py",
     "test-usb-connection-contract.py",
     "test-wireless-sync-contract.py",
-    "test-wireless-sync-ui-contract.py"
+    "test-wireless-sync-ui-contract.py",
+    "test-runtime-diagnostics.py"
   ],
   "asset": [
     "test-cjk-font.py"
@@ -62,6 +70,9 @@
   ],
   "repository": [
     "test-audit-candidate-workflow.py",
+    "test-ci-bootstrap.py",
+    "test-exact-candidate-evidence.py",
+    "test-test-runner-timeouts.py",
     "test-source-audit-package.py"
   ]
 }

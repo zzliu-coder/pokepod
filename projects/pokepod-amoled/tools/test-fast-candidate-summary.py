@@ -95,6 +95,7 @@ with tempfile.TemporaryDirectory(prefix="pokepod-fast-candidate-") as raw:
     subprocess.check_call(command)
     summary = json.loads(output.read_text(encoding="utf-8"))
     assert summary["delta"] == {"programBytes": 4, "internalGlobalBytes": 2}
+    assert summary["baseline"]["deltaBytes"] == 4
     assert summary["internalMemory"]["maximumBytes"] == 400
     assert summary["linkedProgram"] == {"bytes": 7, "imagePackagingBytes": 1}
     assert summary["binary"]["sha256"] == file_evidence(binary)["sha256"]

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "AudioCaptureRing.h"
@@ -51,12 +52,16 @@ struct AudioCaptureDispatchResult {
 };
 
 struct AudioCaptureDispatcherMetrics {
+  static constexpr size_t kIntervalHistogramBuckets = 12;
   uint32_t sessionId = 0;
   uint32_t consumedFrames = 0;
   uint32_t sequenceFailures = 0;
   uint32_t routingFailures = 0;
   uint32_t recorderDeliveryFailures = 0;
   uint32_t voiceDeliveryFailures = 0;
+  uint32_t maximumIntervalUs = 0;
+  uint32_t intervalSamples = 0;
+  uint32_t intervalHistogram[kIntervalHistogramBuckets]{};
 };
 
 // The sole consumer of AudioCaptureRuntime's SPSC ring. App and Link may both
@@ -76,12 +81,13 @@ class AudioCaptureDispatcher {
     while (source.pop(frame)) {
       result.hadFrames = true;
       ++result.consumedFrames;
-      ++metrics_.consumedFrames;
       if (result.consumedFrames == 1U) result.firstSequence = frame.sequence;
       result.lastSequence = frame.sequence;
       result.sessionId = frame.sessionId;
 
       const bool sequenceOk = observeSequence(frame);
+      ++metrics_.consumedFrames;
+      if (result.consumedFrames == 1U) observeDispatchInterval(nowMs);
       if (!sequenceOk) {
         result.ok = false;
         result.sequenceIncomplete = true;
@@ -140,18 +146,49 @@ class AudioCaptureDispatcher {
     lastSequence_ = 0;
     sequenceObserved_ = false;
     metrics_ = {};
+    lastDispatchMs_ = 0;
+    dispatchIntervalObserved_ = false;
   }
 
   const AudioCaptureDispatcherMetrics &metrics() const { return metrics_; }
 
  private:
+  static size_t intervalBucket(uint32_t elapsedUs) {
+    static constexpr uint32_t limits[
+        AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets] = {
+        250U, 500U, 1000U, 2000U, 4000U, 8000U,
+        16000U, 32000U, 64000U, 128000U, 512000U, UINT32_MAX};
+    for (size_t i = 0;
+         i < AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets; ++i) {
+      if (elapsedUs <= limits[i]) return i;
+    }
+    return AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets - 1U;
+  }
+
+  void observeDispatchInterval(uint32_t nowMs) {
+    // The metric is the gap between drain calls that actually delivered at
+    // least one frame. Empty loop polls carry no audio work and are excluded.
+    if (dispatchIntervalObserved_) {
+      const uint32_t elapsedUs = (nowMs - lastDispatchMs_) * 1000U;
+      if (elapsedUs > metrics_.maximumIntervalUs) {
+        metrics_.maximumIntervalUs = elapsedUs;
+      }
+      ++metrics_.intervalSamples;
+      ++metrics_.intervalHistogram[intervalBucket(elapsedUs)];
+    }
+    lastDispatchMs_ = nowMs;
+    dispatchIntervalObserved_ = true;
+  }
+
   bool observeSequence(const AudioCaptureFrame &frame) {
     if (frame.sessionId == 0) return false;
     if (frame.sessionId != sessionId_) {
       sessionId_ = frame.sessionId;
       lastSequence_ = frame.sequence;
       sequenceObserved_ = true;
+      metrics_ = {};
       metrics_.sessionId = frame.sessionId;
+      dispatchIntervalObserved_ = false;
       return true;
     }
     if (!sequenceObserved_) {
@@ -167,6 +204,8 @@ class AudioCaptureDispatcher {
   uint32_t sessionId_ = 0;
   uint32_t lastSequence_ = 0;
   bool sequenceObserved_ = false;
+  uint32_t lastDispatchMs_ = 0;
+  bool dispatchIntervalObserved_ = false;
   AudioCaptureDispatcherMetrics metrics_;
 };
 

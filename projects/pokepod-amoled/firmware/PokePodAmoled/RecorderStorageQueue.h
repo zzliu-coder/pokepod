@@ -12,6 +12,8 @@ namespace pokepod {
 // SD primitives.  128 full 20 ms mono frames retain 2.56 seconds.
 constexpr size_t kRecorderStorageFrameBytes = 640;
 constexpr size_t kRecorderStorageQueueFrames = 128;
+constexpr size_t kRecorderQualificationHighWaterFrames =
+    kRecorderStorageQueueFrames * 3U / 4U;
 constexpr size_t kRecorderStorageQueueSlots =
     kRecorderStorageQueueFrames + 1;
 
@@ -93,5 +95,7 @@ class RecorderStorageQueue {
 
 static_assert(kRecorderStorageQueueFrames * 20U >= 2500U,
               "storage queue must cover at least 2.5 seconds");
+static_assert(kRecorderQualificationHighWaterFrames == 96U,
+              "qualification invalidation keeps 640 ms queue headroom");
 
 }  // namespace pokepod

@@ -131,6 +131,9 @@ def main() -> int:
         "sourceRevision": args.source_revision,
         "sourceClean": True,
         "lane": "fast",
+        "resourceReviewApproved": bool(
+            artifact.get("resourceReview", {}).get("approved", False)
+        ),
         "binary": binary_evidence,
         "elf": elf_evidence,
         "linkerMap": map_evidence,
@@ -149,6 +152,7 @@ def main() -> int:
         "baseline": {
             "commit": args.baseline_commit,
             "programBytes": args.baseline_program_bytes,
+            "deltaBytes": int(binary_evidence["bytes"]) - args.baseline_program_bytes,
             "internalGlobalBytes": args.baseline_internal_globals,
         },
         "delta": {

@@ -32,16 +32,32 @@ assert "usb.tinyUsbMounted()," in main
 assert "usb.cdcSessionActive()," in main
 assert "board.status().vbusPresent," in main
 assert "input = powerInputsWithFacts(input, facts)" in main
-assert "wirelessSync.openWindow()" in main
+assert "wirelessSync->openWindow()" in main
 assert "pauseIdleRadios" in main
 assert "enterDeepSleep" in main
+deep_sleep = main[main.index("void enterDeepSleep("):
+                  main.index("void requestSafeShutdown(")]
+assert deep_sleep.count("!bleVoice.quiescedForSleep() || wifi.radioOn()") == 2
+assert deep_sleep.rindex("!bleVoice.quiescedForSleep()") < deep_sleep.index(
+    "bleVoice.prepareForDeepSleep()"
+)
+assert deep_sleep.rindex("!bleVoice.quiescedForSleep()") > deep_sleep.index(
+    "wifi.prepareForSleep()"
+)
+deep_sleep_gate_start = main.rindex("if (!safeShutdownQuiesce.pending() &&")
+deep_sleep_admission = main[deep_sleep_gate_start:
+                            main.index("if (dashboard.advanceVerticalScroll",
+                                       deep_sleep_gate_start)]
+assert "bleVoice.quiescedForSleep()" in deep_sleep_admission
+assert "!bleVoice.connected()" not in deep_sleep_admission
 assert "requestSafeShutdown" in main
 assert "advanceSafeShutdown" in main
-assert main.index("tencentWorker.quiesce") < main.index("SD_MMC.end()")
-assert "SD_MMC.end()" in main
+assert main.index("tencentWorker.quiesce") < main.index("board.endSdMount()")
+assert "board.endSdMount()" in main
 assert "lowBatteryShutdown.critical()" in main
 
 assert "pauseForIdleSleep" in ble
+assert "return quiescedForSleep();" in ble
 assert "resumeAfterIdleSleep" in ble
 assert "idlePaused_" in ble
 assert "prepareForDeepSleep" in ble

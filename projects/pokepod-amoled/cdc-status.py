@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import hashlib
 import glob
 import json
 import os
@@ -127,6 +128,29 @@ def query(port: str, operation: str, timeout: float,
             # the first data frame. Each framed chunk then remains below that
             # window as well.
             time.sleep(0.010)
+            # esp_ota_begin erases the inactive app slot before the first
+            # chunk. The device publishes a zero-byte acknowledgement only
+            # after that bounded-but-slow prepare phase has completed.
+            prepare_deadline = time.monotonic() + max(60.0, timeout)
+            while True:
+                frame_type, _, incoming_id, prepare_payload = read_frame(
+                    fd, prepare_deadline
+                )
+                if incoming_id != request_id:
+                    continue
+                if frame_type == RESPONSE_JSON:
+                    rejected = json.loads(prepare_payload.decode("utf-8"))
+                    raise ValueError(
+                        "binary transfer rejected: " +
+                        json.dumps(rejected, ensure_ascii=False, sort_keys=True)
+                    )
+                if frame_type != EVENT_JSON:
+                    continue
+                prepare_ack = json.loads(prepare_payload.decode("utf-8"))
+                if (prepare_ack.get("event") != "binary_ack" or
+                        int(prepare_ack.get("received", -1)) != 0):
+                    raise ValueError("invalid firmware prepare acknowledgement")
+                break
             offset = 0
             while offset < len(outgoing_binary):
                 # macOS can buffer CDC writes much faster than the ESP32 can
@@ -150,9 +174,10 @@ def query(port: str, operation: str, timeout: float,
                         continue
                     if frame_type == RESPONSE_JSON:
                         rejected = json.loads(ack_payload.decode("utf-8"))
-                        raise ValueError(rejected.get(
-                            "message", "binary transfer rejected"
-                        ))
+                        raise ValueError(
+                            "binary transfer rejected: " +
+                            json.dumps(rejected, ensure_ascii=False, sort_keys=True)
+                        )
                     if frame_type != EVENT_JSON:
                         continue
                     ack = json.loads(ack_payload.decode("utf-8"))
@@ -198,16 +223,27 @@ def main() -> int:
                         choices=("hello", "status", "record", "stop",
                                  "provisioning-start", "provisioning-stop",
                                  "get-power-diagnostics",
-                                 "clear-power-diagnostics", "reboot"))
+                                 "clear-power-diagnostics",
+                                 "get-runtime-diagnostics",
+                                 "clear-runtime-diagnostics",
+                                 "get-provisioning-diagnostics",
+                                 "clear-provisioning-diagnostics", "reboot"))
     parser.add_argument(
         "--install-font", metavar="PATH",
         help="install a PKF2 20px A4 font over PokePod Link v2",
+    )
+    parser.add_argument(
+        "--firmware", metavar="PATH",
+        help="install an exact ESP32 app image over USB Link v2 without BOOT/RESET",
     )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
     arguments = parser.parse_args()
     outgoing_binary = None
     operation = arguments.command
+    fields = None
+    if arguments.install_font and arguments.firmware:
+        parser.error("--install-font and --firmware are mutually exclusive")
     if arguments.install_font:
         operation = "font-write"
         try:
@@ -217,11 +253,21 @@ def main() -> int:
             parser.error(str(error))
         if not (20 <= len(outgoing_binary) <= 5 * 1024 * 1024):
             parser.error("font file must be between 20 bytes and 5 MiB")
+    if arguments.firmware:
+        operation = "firmware-update"
+        try:
+            with open(arguments.firmware, "rb") as firmware_file:
+                outgoing_binary = firmware_file.read()
+        except OSError as error:
+            parser.error(str(error))
+        if not (1024 <= len(outgoing_binary) <= 0x300000):
+            parser.error("firmware image must be between 1 KiB and 3 MiB")
+        fields = {"sha256": hashlib.sha256(outgoing_binary).hexdigest()}
     ports = arguments.ports or sorted(glob.glob("/dev/cu.usbmodem*"))
     last_error = None
     for port in ports:
         try:
-            result = query(port, operation, arguments.timeout, outgoing_binary)
+            result = query(port, operation, arguments.timeout, outgoing_binary, fields)
             if result.get("status") != "ok":
                 last_error = result.get("message", result.get("status", "error"))
                 continue

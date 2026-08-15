@@ -15,6 +15,10 @@ class RecordingCapacitySource {
   virtual ~RecordingCapacitySource() = default;
   virtual RecordingSpaceSnapshot query() = 0;
   virtual uint64_t monotonicMicros() = 0;
+  // Zero means there is no currently proven physical SD mount. A successful
+  // mount receives a new non-zero generation and qualifications never cross
+  // that boundary.
+  virtual uint32_t mountGeneration() const = 0;
 };
 
 }  // namespace pokepod

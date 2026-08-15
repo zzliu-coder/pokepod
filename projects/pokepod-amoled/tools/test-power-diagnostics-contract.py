@@ -49,7 +49,7 @@ assert "prepareForDeepSleep" in board
 assert "LowBatteryShutdownPolicy" in policy
 assert "requestSafeShutdown" in main
 assert "advanceSafeShutdown" in main
-assert main.index("tencentWorker.quiesce") < main.index("SD_MMC.end()")
+assert main.index("tencentWorker.quiesce") < main.index("board.endSdMount()")
 assert "setCpuFrequencyMhz" in power
 assert "CONFIG_PM_ENABLE" in power
 assert "CONFIG_BT_CTRL_MODEM_SLEEP" in power
@@ -101,7 +101,7 @@ assert "AutomaticScreenWakeSource::touchInterrupt" in main
 assert "AutomaticScreenWakeSource::motionInterrupt" in main
 assert "AutomaticScreenWakeSource::raiseToWakePolicy" in main
 assert "recordDeepSleepIntent" in main
-assert main.index("recordDeepSleepIntent") < main.index("SD_MMC.end()")
+assert main.index("recordDeepSleepIntent") < main.index("board.endSdMount()")
 assert "kPowerErrorBootWakeLineHeld" in power
 assert "digitalRead(kBootButtonPin) == LOW" in power
 assert "esp_sleep_get_ext1_wakeup_status" in power

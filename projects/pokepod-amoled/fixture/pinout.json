@@ -1,0 +1,42 @@
+{
+  "schema": "pokepod.fixture.contacts.v1",
+  "device": "Waveshare ESP32-S3-Touch-AMOLED-1.8",
+  "contacts": {
+    "usb_dp": {"signal": "USB D+", "required": true},
+    "usb_dm": {"signal": "USB D-", "required": true},
+    "gnd": {"signal": "GND", "required": true},
+    "vbus_5v": {"signal": "USB VBUS / 5V", "required": true, "current_limited": true},
+    "boot": {"signal": "GPIO0 / BOOT", "active_level": "low", "required": true},
+    "reset": {"signal": "EN / RESET", "active_level": "low", "required": true}
+  },
+  "electrical_rules": [
+    "Never drive BOOT or RESET above the device IO voltage.",
+    "Use open-drain or tri-state control for BOOT and RESET; release both lines during normal USB operation.",
+    "Current-limit VBUS and never back-power a disconnected host or device.",
+    "USB D+ and D- are differential data contacts; do not use them as GPIO.",
+    "The host fixture owns identity, logging, backup, flash, readback, and evidence; the device keeps only these contacts."
+  ],
+  "normal_upgrade": {
+    "transport": "usb-cdc-link-v2",
+    "requires_manual_boot_reset": false,
+    "command": "python3 ../cdc-status.py --firmware <exact-bin> <app-port>",
+    "writes_inactive_ota_slot": true,
+    "reboots_after_verified_sha256": true
+  },
+  "rescue_upgrade": {
+    "transport": "rom-serial-loader",
+    "requires_manual_boot_reset": false,
+    "requires_fixture_controller": true,
+    "manual_fallback_supported": true,
+    "command": "python3 pokepod-fixture.py recover --control-profile <profile> --authority <authority>",
+    "backs_up_app0_before_write": true,
+    "reads_back_and_verifies_app0": true
+  },
+  "controller": {
+    "protocol": "pokepod.fixture.control.v1",
+    "referenceFirmware": "controller-firmware/pokepod_fixture_controller.ino",
+    "hostBridge": "pokepod-fixture-bridge.py",
+    "owns": ["boot", "reset", "optional_vbus_power"],
+    "doesNotOwn": ["device_identity", "firmware_policy", "flash_authority"]
+  }
+}
