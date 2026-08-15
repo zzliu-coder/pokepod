@@ -127,14 +127,16 @@ python3 fixture/pokepod-fixture.py update \
   --firmware work/pokepod-build/output/fast/PokePodAmoled.ino.bin
 ```
 
-这条路径就是设备的应用内 OTA：主机先完成设备身份、镜像长度和 SHA-256 预检，
+这条路径就是设备的应用内 OTA：主机先完成设备身份、镜像长度、SHA-256 和三项构建身份预检，
 固件把镜像分块写入未运行的 OTA 槽，最后由设备级重启协调器在 USB 断开后继续完成
 收口。准备阶段或任一分块被拒绝时，`cdc-status.py` 会保留设备返回的完整 JSON 错误，
 便于区分忙、分区容量、身份和校验失败。首次升级前仍建议用 BOOT/RESET 救援刷写一份
 具备 USB OTA 的固件，之后再用这条命令滚动升级。
 
-主机先计算镜像 SHA-256；固件把镜像流式写入未运行的 OTA 槽，逐块确认且只在
-长度、分区和 SHA-256 全部通过后切换启动槽。提交后的重启属于设备级生命周期请求，
+主机先计算镜像 SHA-256，并发送 `sourceRevision`、`firmwareVersion`、`appElfSha256`。
+设备拒绝缺字段的 OTA 请求；固件把镜像流式写入未运行的 OTA 槽，逐块确认后从候选
+槽的 ESP 应用描述读取真实 ELF SHA。只有源码版本、固件版本、候选 ELF SHA、长度、
+分区和 SHA-256 全部通过后才调用 `esp_ota_end` 并切换启动槽。提交后的重启属于设备级生命周期请求，
 USB 断开不会取消它。失败会中止 OTA 句柄并保留当前启动槽。升级要求精确构建产物，
 工具会把请求、响应、诊断和摘要保存到 `work/fixture-runs/`。
 

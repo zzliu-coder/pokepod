@@ -48,6 +48,16 @@ fail-closed host control profile, automatic ROM rescue, full app0 readback and
 recording/provisioning exercise capture. A plain USB cable supports normal OTA;
 automatic recovery requires the protected open-drain BOOT/RESET controller.
 
+USB firmware OTA binds the request to the artifact's `sourceRevision`,
+`firmwareVersion`, and `appElfSha256`. The device requires all three fields;
+it validates the source/version marker and reads the candidate OTA slot's ESP
+application descriptor before `esp_ota_end` and boot-slot selection. A missing,
+zero, or mismatched candidate ELF digest aborts without changing the boot
+partition. The fixture additionally waits for the application to return and
+checks the running partition and all three fields. Direct `cdc-status.py`
+firmware requests therefore require the same three fields (or a validated
+adjacent `artifact.json`).
+
 The current runtime hardening releases the complete BLE allocation before
 SoftAP provisioning, removes NVS writes from the timed SD qualification probe,
 and keeps persistent diagnostics out of the wireless capture start window.

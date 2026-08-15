@@ -22,9 +22,11 @@ python3 fixture/pokepod-fixture.py update \
 主机在发送首个数据帧前拒绝更新。直接调用 `cdc-status.py --firmware` 也遵守同一门禁；只有显式
 同时提供 `--source-revision`、`--firmware-version`、`--app-elf-sha256` 才能使用没有相邻清单的镜像。
 
-固件先把镜像写入未运行的 OTA 槽，流式计算 SHA-256，校验完成后才切换启动槽并
-提交设备级重启意图。USB 断开发生在返回 OK 后不会取消重启。更新失败会中止 OTA
-句柄，不改变当前启动槽。
+固件先把镜像写入未运行的 OTA 槽，流式计算 SHA-256，并从候选槽的 ESP 应用描述读取
+真实 `app_elf_sha256`。设备在 `esp_ota_end` 和切换启动槽之前强制比较
+`sourceRevision`、`firmwareVersion` 和候选 ELF SHA；缺字段、全零或不匹配都会中止 OTA，
+不改变当前启动槽。提交后的重启属于设备级重启意图，USB 断开发生在返回 OK 后不会取消重启。
+Fixture 随后等待应用重新出现，再核验运行分区和三项身份；更新失败会中止 OTA 句柄。
 
 救援路径保留 BOOT/RESET：
 
