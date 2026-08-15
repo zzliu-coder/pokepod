@@ -4,6 +4,7 @@
 
 #if defined(ARDUINO_ARCH_ESP32)
   #include <esp_err.h>
+  #include <esp_app_desc.h>
   #include <esp_partition.h>
 #endif
 
@@ -24,6 +25,29 @@ bool copySha256(const char *source, char *target, size_t capacity) {
     target[index] = value;
   }
   target[FirmwareUpdatePolicy::kSha256HexBytes] = '\0';
+  return true;
+}
+
+bool validSourceRevision(const char *value) {
+  if (value == nullptr || strlen(value) != 40) return false;
+  for (size_t index = 0; index < 40; ++index) {
+    const char c = value[index];
+    const bool digit = c >= '0' && c <= '9';
+    const bool lower = c >= 'a' && c <= 'f';
+    const bool upper = c >= 'A' && c <= 'F';
+    if (!digit && !lower && !upper) return false;
+  }
+  return true;
+}
+
+bool validFirmwareVersion(const char *value) {
+  if (value == nullptr) return false;
+  const size_t length = strlen(value);
+  if (length == 0 || length > 15) return false;
+  for (size_t index = 0; index < length; ++index) {
+    const unsigned char character = static_cast<unsigned char>(value[index]);
+    if (character < 0x20 || character >= 0x7f) return false;
+  }
   return true;
 }
 
@@ -93,23 +117,31 @@ bool FirmwareUpdateSession::begin(uint32_t expectedBytes,
       !copySha256(expectedSha256, expectedSha256_, sizeof(expectedSha256_))) {
     return fail("invalid firmware metadata");
   }
+  if (expectedSourceRevision == nullptr || expectedSourceRevision[0] == '\0' ||
+      expectedFirmwareVersion == nullptr || expectedFirmwareVersion[0] == '\0' ||
+      expectedAppElfSha256 == nullptr || expectedAppElfSha256[0] == '\0' ||
+      !validSourceRevision(expectedSourceRevision) ||
+      !validFirmwareVersion(expectedFirmwareVersion) ||
+      !FirmwareUpdatePolicy::validSha256(expectedAppElfSha256)) {
+    return fail("missing firmware identity metadata");
+  }
   if (!copyExpectedText(expectedSourceRevision, expectedSourceRevision_,
                         sizeof(expectedSourceRevision_),
                         "invalid expected source revision") ||
       !copyExpectedText(expectedFirmwareVersion, expectedFirmwareVersion_,
                         sizeof(expectedFirmwareVersion_),
                         "invalid expected firmware version") ||
-      !copyExpectedText(expectedAppElfSha256, expectedAppElfSha256_,
-                        sizeof(expectedAppElfSha256_),
-                        "invalid expected ELF SHA-256")) {
+      !copySha256(expectedAppElfSha256, expectedAppElfSha256_,
+                  sizeof(expectedAppElfSha256_))) {
     return false;
   }
-  if (expectedAppElfSha256 != nullptr && expectedAppElfSha256[0] != '\0' &&
-      !FirmwareUpdatePolicy::validSha256(expectedAppElfSha256) &&
-      strcmp(expectedAppElfSha256, "unknown") != 0) {
-    return fail("invalid expected ELF SHA-256");
+  for (size_t index = 0; index < strlen(expectedSourceRevision_); ++index) {
+    if (expectedSourceRevision_[index] >= 'A' &&
+        expectedSourceRevision_[index] <= 'F') {
+      expectedSourceRevision_[index] = static_cast<char>(
+          expectedSourceRevision_[index] - 'A' + 'a');
+    }
   }
-
 #if defined(ARDUINO_ARCH_ESP32)
   const esp_partition_t *running = esp_ota_get_running_partition();
   target_ = esp_ota_get_next_update_partition(running);
@@ -217,18 +249,33 @@ bool FirmwareUpdateSession::validateReceivedIdentity() {
               sizeof(identity_.firmwareVersion)) != 0) {
     return false;
   }
-  // The ESP app descriptor is only available after the candidate image is
-  // linked and running. A build may therefore carry "unknown" in the
-  // embedded pre-boot record; the post-reboot Link identity must still match
-  // the expected ELF digest supplied by the fixture.
-  if (expectedAppElfSha256_[0] != '\0' &&
-      !firmwareIdentityEquals(identity_.appElfSha256,
-                              sizeof(identity_.appElfSha256), "unknown") &&
-      strncmp(identity_.appElfSha256, expectedAppElfSha256_,
-              sizeof(identity_.appElfSha256)) != 0) {
+  return true;
+}
+
+bool FirmwareUpdateSession::validateCandidateAppElfSha256() {
+#if defined(ARDUINO_ARCH_ESP32)
+  if (target_ == nullptr ||
+      !FirmwareUpdatePolicy::validSha256(expectedAppElfSha256_)) {
     return false;
   }
-  return true;
+  esp_app_desc_t description{};
+  if (esp_ota_get_partition_description(target_, &description) != ESP_OK) {
+    return false;
+  }
+  constexpr char kHex[] = "0123456789abcdef";
+  char actual[FirmwareUpdatePolicy::kSha256HexBytes + 1] = {};
+  bool hasNonZeroByte = false;
+  for (size_t index = 0; index < sizeof(description.app_elf_sha256);
+       ++index) {
+    const uint8_t value = description.app_elf_sha256[index];
+    hasNonZeroByte = hasNonZeroByte || value != 0;
+    actual[index * 2] = kHex[value >> 4];
+    actual[index * 2 + 1] = kHex[value & 0x0f];
+  }
+  return hasNonZeroByte && strcmp(actual, expectedAppElfSha256_) == 0;
+#else
+  return false;
+#endif
 }
 
 void FirmwareUpdateSession::formatDigest(const uint8_t digest[32]) {
@@ -269,6 +316,13 @@ bool FirmwareUpdateSession::finish() {
     return fail("OTA image validation failed");
   }
   handle_ = 0;
+  // The marker is embedded before the ESP app descriptor is available, so a
+  // production image may carry appElfSha256="unknown" there. The candidate
+  // partition descriptor is the authoritative pre-boot value.
+  if (!validateCandidateAppElfSha256()) {
+    target_ = nullptr;
+    return fail("candidate app ELF SHA-256 mismatch");
+  }
   if (esp_ota_set_boot_partition(target_) != ESP_OK) {
     target_ = nullptr;
     return fail("OTA boot selection failed");

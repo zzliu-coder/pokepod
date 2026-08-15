@@ -40,6 +40,10 @@ def firmware_update_fields(
     app_elf_sha256: str | None = None,
 ) -> dict[str, str]:
     """Build OTA fields with an explicit legacy compatibility boundary."""
+    if not isinstance(binary_sha256, str) or re.fullmatch(
+        r"[0-9a-fA-F]{64}", binary_sha256
+    ) is None:
+        raise ValueError("firmware SHA-256 must be a 64-character hex digest")
     fields = {"sha256": binary_sha256}
     identity = (source_revision, firmware_version, app_elf_sha256)
     supplied = sum(value is not None for value in identity)
@@ -74,6 +78,23 @@ def firmware_update_fields(
         "appElfSha256": app_elf_sha256.lower(),
     })
     return fields
+
+
+def validate_firmware_query_fields(fields: dict[str, object] | None) -> None:
+    """Reject an unbound firmware request before opening the transport."""
+    if not isinstance(fields, dict):
+        raise ValueError(
+            "firmware-update query requires sha256 and all three identity fields"
+        )
+    try:
+        firmware_update_fields(
+            fields.get("sha256"),
+            fields.get("sourceRevision"),
+            fields.get("firmwareVersion"),
+            fields.get("appElfSha256"),
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid firmware-update query fields: {error}") from error
 
 
 def load_adjacent_artifact_identity(firmware: Path) -> dict[str, str]:
@@ -210,6 +231,8 @@ def read_frame(fd: int, deadline: float):
 def query(port: str, operation: str, timeout: float,
           outgoing_binary: bytes | None = None,
           fields: dict[str, object] | None = None):
+    if operation == "firmware-update":
+        validate_firmware_query_fields(fields)
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
         configure(fd)

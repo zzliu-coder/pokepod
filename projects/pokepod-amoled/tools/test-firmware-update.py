@@ -34,15 +34,21 @@ def main() -> int:
     assert "esp_ota_get_next_update_partition" in session
     assert "esp_ota_begin" in session and "esp_ota_write" in session
     assert "esp_ota_end" in session and "esp_ota_set_boot_partition" in session
+    assert "esp_ota_get_partition_description" in session
+    assert "candidate app ELF SHA-256 mismatch" in session
     assert "esp_ota_abort" in session and "SHA-256 mismatch" in session
     assert "kMaximumImageBytes = 0x300000U" in policy
     assert "firmware-update" in dispatcher and "LinkTransport::usb" in dispatcher
+    assert "validSourceRevision(expectedSourceRevision)" in dispatcher
+    assert "validFirmwareVersion(expectedFirmwareVersion)" in dispatcher
+    assert "validSha256(expectedAppElfSha256)" in dispatcher
     assert "binary_ack\\\",\\\"received\\\":0" in dispatcher
     assert "binary_ack" in service and "finishFirmwareUpdate" in service
     assert "LinkOperationResource::firmwareUpdate" in service
     assert "firmwareUpdate_.abort()" in transport and "!firmwareUpdate_.active()" in transport
     assert "--firmware" in cdc and "hashlib.sha256" in cdc
     assert "firmware_update_fields" in cdc
+    assert "validate_firmware_query_fields" in cdc
     assert "load_adjacent_artifact_identity" in cdc
     assert "--source-revision" in cdc and "--firmware-version" in cdc
     assert "--app-elf-sha256" in cdc
@@ -62,6 +68,28 @@ def main() -> int:
         assert "artifact.json" in str(error)
     else:
         raise AssertionError("unbound OTA fields were accepted")
+    try:
+        cdc_module.query("/definitely-not-a-device", "firmware-update", 1.0,
+                         fields={"sha256": digest})
+    except ValueError as error:
+        assert "identity" in str(error)
+    else:
+        raise AssertionError("low-level unbound OTA query was accepted")
+    bound_query = {
+        "sha256": digest,
+        "sourceRevision": "b" * 40,
+        "firmwareVersion": "2.0.0",
+        "appElfSha256": "c" * 64,
+    }
+    try:
+        cdc_module.query("/definitely-not-a-device", "firmware-update", 1.0,
+                         fields=bound_query)
+    except OSError:
+        pass
+    except ValueError as error:
+        raise AssertionError(f"bound OTA query rejected before transport: {error}")
+    else:
+        raise AssertionError("bound OTA query unexpectedly reached a fake port")
     bound = cdc_module.firmware_update_fields(
         digest, "B" * 40, "2.0.0", "C" * 64
     )

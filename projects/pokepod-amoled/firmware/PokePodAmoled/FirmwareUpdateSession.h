@@ -28,7 +28,7 @@ class FirmwareUpdateSession {
   bool begin(uint32_t expectedBytes, const char *expectedSha256,
              const char *expectedSourceRevision,
              const char *expectedFirmwareVersion,
-             const char *expectedAppElfSha256 = nullptr);
+             const char *expectedAppElfSha256);
   bool writeChunk(const uint8_t *data, size_t bytes);
   bool finish();
   void abort();
@@ -50,6 +50,7 @@ class FirmwareUpdateSession {
   void formatDigest(const uint8_t digest[32]);
   bool inspectIdentity(const uint8_t *data, size_t bytes);
   bool validateReceivedIdentity();
+  bool validateCandidateAppElfSha256();
   bool copyExpectedText(const char *source, char *destination,
                         size_t capacity, const char *fieldName);
 

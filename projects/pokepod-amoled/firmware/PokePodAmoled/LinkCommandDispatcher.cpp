@@ -3,6 +3,7 @@
 #include <cJSON.h>
 #include <mbedtls/sha256.h>
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "FirmwareImageIdentity.h"
@@ -54,6 +55,29 @@ int64_t jsonInt64(cJSON *root, const char *name, int64_t fallback = -1) {
   cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
   return cJSON_IsNumber(item) ? static_cast<int64_t>(item->valuedouble)
                               : fallback;
+}
+
+bool validSourceRevision(const char *value) {
+  if (value == nullptr || strlen(value) != 40) return false;
+  for (size_t index = 0; index < 40; ++index) {
+    const char c = value[index];
+    const bool digit = c >= '0' && c <= '9';
+    const bool lower = c >= 'a' && c <= 'f';
+    const bool upper = c >= 'A' && c <= 'F';
+    if (!digit && !lower && !upper) return false;
+  }
+  return true;
+}
+
+bool validFirmwareVersion(const char *value) {
+  if (value == nullptr) return false;
+  const size_t length = strlen(value);
+  if (length == 0 || length > 15) return false;
+  for (size_t index = 0; index < length; ++index) {
+    const unsigned char character = static_cast<unsigned char>(value[index]);
+    if (character < 0x20 || character >= 0x7f) return false;
+  }
+  return true;
 }
 
 String printed(cJSON *root) {
@@ -186,7 +210,10 @@ void PokePodLinkService::processRequest(uint32_t requestId,
         !foregroundBusy() && !rebootCoordinator_->pending() &&
         FirmwareUpdatePolicy::validImageSize(
             static_cast<uint32_t>(std::max<int64_t>(0, binaryLength))) &&
-        FirmwareUpdatePolicy::validSha256(expectedSha256);
+        FirmwareUpdatePolicy::validSha256(expectedSha256) &&
+        validSourceRevision(expectedSourceRevision) &&
+        validFirmwareVersion(expectedFirmwareVersion) &&
+        FirmwareUpdatePolicy::validSha256(expectedAppElfSha256);
     if (!valid) {
       cJSON_Delete(root);
       sendError(requestId, usbTransport ? "invalid firmware update request" :
