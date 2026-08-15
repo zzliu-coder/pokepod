@@ -59,6 +59,9 @@ final class VoiceRuntimeModel: ObservableObject {
     private var transportReady = false
     private var firmwareReady = false
     private var isShuttingDown = false
+    private var blackHolePackage: URL?
+    private var blackHoleDiscoveryTask: Task<URL?, Never>?
+    private var blackHoleDiscoveryStarted = false
 
     init(
         ble: any BLECentralControlling = BLECentralAdapter(),
@@ -77,6 +80,7 @@ final class VoiceRuntimeModel: ObservableObject {
         }
         platform.input.repairAfterPreviousCrash()
         launchAtLogin = SMAppService.mainApp.status == .enabled
+        startBlackHoleDiscovery()
         refreshPrerequisites()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -164,6 +168,8 @@ final class VoiceRuntimeModel: ObservableObject {
         guard !isShuttingDown else { return }
         isShuttingDown = true
         timer?.invalidate()
+        blackHoleDiscoveryTask?.cancel()
+        blackHoleDiscoveryTask = nil
         safeAbort(reason: "应用退出", report: false, rejectCode: nil)
         ble.disconnect()
     }
@@ -457,7 +463,8 @@ final class VoiceRuntimeModel: ObservableObject {
     private var prerequisiteMessage: String {
         if !bluetoothReady { return "请打开蓝牙并允许 PokePod Voice 使用蓝牙" }
         if !blackHoleReady {
-            return localBlackHolePackage() == nil
+            if blackHoleDiscoveryTask != nil { return "正在检查 BlackHole 安装包" }
+            return blackHolePackage == nil
                 ? "未找到安装包；点击“安装”会后台下载并打开系统安装器"
                 : "已找到 BlackHole 安装包，点击“安装”完成系统安装"
         }
@@ -465,32 +472,50 @@ final class VoiceRuntimeModel: ObservableObject {
         return "准备完成"
     }
 
-    private func localBlackHolePackage() -> URL? {
+    private func installerDiscoveryRoots() -> [URL] {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask)[0]
-            .appendingPathComponent("PokePod Voice/Installers", isDirectory: true)
-        let roots = ["Downloads", "Desktop", "Documents"].map {
-            home.appendingPathComponent($0, isDirectory: true)
-        } + [appSupport]
-        var candidates = [URL]()
-        for root in roots where FileManager.default.fileExists(atPath: root.path) {
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
-            for case let url as URL in enumerator {
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
-                      values.isRegularFile == true else { continue }
-                candidates.append(url)
-            }
+        return BlackHoleInstallPolicy.discoveryRoots(
+            homeDirectory: home,
+            applicationSupportDirectory: appSupport)
+    }
+
+    private func startBlackHoleDiscovery(force: Bool = false) {
+        if !force, blackHoleDiscoveryStarted { return }
+        guard blackHoleDiscoveryTask == nil else { return }
+        blackHoleDiscoveryStarted = true
+        let roots = installerDiscoveryRoots()
+        let task = Task.detached(priority: .utility) {
+            BlackHoleInstallPolicy.discoverPackage(in: roots)
         }
-        return BlackHoleInstallPolicy.selectPackage(from: candidates)
+        blackHoleDiscoveryTask = task
+        Task { @MainActor [weak self] in
+            let package = await task.value
+            guard let self, !self.isShuttingDown else { return }
+            self.blackHolePackage = package
+            self.blackHoleDiscoveryTask = nil
+            self.refreshPrerequisites()
+        }
+    }
+
+    private func rescanBlackHolePackage() async -> URL? {
+        startBlackHoleDiscovery(force: true)
+        guard let task = blackHoleDiscoveryTask else { return blackHolePackage }
+        let package = await task.value
+        guard !isShuttingDown else { return nil }
+        blackHolePackage = package
+        blackHoleDiscoveryTask = nil
+        refreshPrerequisites()
+        return package
     }
 
     private func obtainBlackHolePackage() async throws -> URL {
-        if let local = localBlackHolePackage() { return local }
+        if let local = await rescanBlackHolePackage() {
+            try await verifyBlackHolePackage(local)
+            return local
+        }
 
         var request = URLRequest(url: BlackHoleInstallPolicy.latestReleaseAPIURL)
         request.setValue("PokePodVoice/1.0", forHTTPHeaderField: "User-Agent")
@@ -515,6 +540,10 @@ final class VoiceRuntimeModel: ObservableObject {
         } else {
             throw BlackHoleDownloadError.twoChannelAssetMissing
         }
+        guard BlackHoleInstallPolicy.isOfficialDownloadURL(asset.downloadURL),
+              BlackHoleInstallPolicy.isSafePackageName(asset.name) else {
+            throw BlackHoleDownloadError.untrustedDownloadSource
+        }
 
         var downloadRequest = URLRequest(url: asset.downloadURL)
         downloadRequest.setValue("PokePodVoice/1.0", forHTTPHeaderField: "User-Agent")
@@ -531,16 +560,69 @@ final class VoiceRuntimeModel: ObservableObject {
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
 
-        if let digest = asset.digest?.lowercased(), digest.hasPrefix("sha256:") {
-            let expected = String(digest.dropFirst("sha256:".count))
-            let actual = SHA256.hash(data: try Data(contentsOf: destination))
-                .map { String(format: "%02x", $0) }.joined()
+        if let digest = asset.digest {
+            guard let expected = BlackHoleInstallPolicy.normalizedSHA256Digest(digest) else {
+                try? FileManager.default.removeItem(at: destination)
+                throw BlackHoleDownloadError.invalidDigest
+            }
+            let actual = try await Task.detached(priority: .utility) {
+                try Self.sha256Hex(at: destination)
+            }.value
             guard actual == expected else {
                 try? FileManager.default.removeItem(at: destination)
                 throw BlackHoleDownloadError.digestMismatch
             }
         }
+        try await verifyBlackHolePackage(destination)
         return destination
+    }
+
+    private func verifyBlackHolePackage(_ package: URL) async throws {
+        let roots = installerDiscoveryRoots()
+        guard BlackHoleInstallPolicy.isPackagePathAllowed(package, within: roots) else {
+            throw BlackHoleDownloadError.untrustedPackageLocation
+        }
+        let expectedPath = package.resolvingSymlinksInPath().standardizedFileURL.path
+        let trusted = await Task.detached(priority: .utility) {
+            Self.checkPackageSignature(at: package)
+        }.value
+        guard package.resolvingSymlinksInPath().standardizedFileURL.path == expectedPath else {
+            throw BlackHoleDownloadError.packagePathChanged
+        }
+        guard trusted else { throw BlackHoleDownloadError.signatureVerificationFailed }
+    }
+
+    private nonisolated static func checkPackageSignature(at package: URL) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
+        process.arguments = ["--check-signature", package.path]
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while process.isRunning {
+            if Date() >= deadline {
+                process.terminate()
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let stdout = output.fileHandleForReading.readDataToEndOfFile()
+        let stderr = error.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else { return false }
+        let combined = String(data: stdout + stderr, encoding: .utf8) ?? ""
+        return BlackHoleInstallPolicy.signatureOutputIsTrusted(combined)
+    }
+
+    private nonisolated static func sha256Hex(at file: URL) throws -> String {
+        SHA256.hash(data: try Data(contentsOf: file))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     private func openSystemInstaller(_ package: URL) {
@@ -584,6 +666,11 @@ final class VoiceRuntimeModel: ObservableObject {
         case twoChannelAssetMissing
         case downloadFailed
         case digestMismatch
+        case invalidDigest
+        case untrustedDownloadSource
+        case signatureVerificationFailed
+        case untrustedPackageLocation
+        case packagePathChanged
 
         var errorDescription: String? {
             switch self {
@@ -591,6 +678,11 @@ final class VoiceRuntimeModel: ObservableObject {
             case .twoChannelAssetMissing: return "官方版本没有找到 BlackHole 2ch 安装包"
             case .downloadFailed: return "官方安装包下载失败"
             case .digestMismatch: return "安装包校验失败，已删除不完整文件"
+            case .invalidDigest: return "官方安装包摘要格式无效，已拒绝安装"
+            case .untrustedDownloadSource: return "安装包来源或文件名不受信任，已拒绝安装"
+            case .signatureVerificationFailed: return "安装包签名或开发者身份校验失败，已拒绝安装"
+            case .untrustedPackageLocation: return "安装包位置不受信任，已拒绝打开"
+            case .packagePathChanged: return "安装包路径在校验期间发生变化，已拒绝打开"
             }
         }
     }
