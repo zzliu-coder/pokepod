@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
 from pathlib import Path
+import subprocess
 import struct
+import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +110,78 @@ def main() -> int:
     corrupted = bytearray(candidate)
     corrupted[0x1C] ^= 0x01
     expect_failure(lambda: layout.validate_otadata(bytes(corrupted), "app1"), "otadata_crc")
+
+    # Green artifacts have no resource-review file.  Their exact ELF digest
+    # comes from imageIdentity and must still be checked after reboot.
+    source_revision = "a" * 40
+    elf_sha = "b" * 64
+    green_manifest = {
+        "sourceRevision": source_revision,
+        "imageIdentity": {"appElfSha256": elf_sha},
+    }
+    runtime_identity = {
+        "runningPartition": "app1",
+        "sourceRevision": source_revision,
+        "appElfSha256": elf_sha,
+    }
+    result = layout.validate_runtime_identity(
+        green_manifest, runtime_identity, "app1"
+    )
+    assert result["appElfSha256"] == elf_sha
+    with tempfile.TemporaryDirectory(prefix="pokepod-rescue-green-") as raw:
+        green_root = Path(raw)
+        green_manifest_path = green_root / "artifact.json"
+        green_identity_path = green_root / "identity.json"
+        green_manifest_path.write_text(json.dumps(green_manifest) + "\n", encoding="utf-8")
+        green_identity_path.write_text(json.dumps(runtime_identity) + "\n", encoding="utf-8")
+        cli = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "runtime",
+                "--manifest",
+                str(green_manifest_path),
+                "--application",
+                str(green_identity_path),
+                "--target-slot",
+                "app1",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert cli.returncode == 0, cli.stderr
+        assert "PASS rescue_runtime_identity" in cli.stdout
+    bad_image_identity = dict(green_manifest)
+    bad_image_identity["imageIdentity"] = {"appElfSha256": "invalid"}
+    expect_failure(
+        lambda: layout.validate_runtime_identity(
+            bad_image_identity, runtime_identity, "app1"
+        ),
+        "image_identity_app_elf_sha_invalid",
+    )
+    legacy_manifest = {
+        "sourceRevision": source_revision,
+        "appElfSha256": elf_sha,
+    }
+    assert layout.validate_runtime_identity(
+        legacy_manifest, runtime_identity, "app1"
+    )["appElfSha256"] == elf_sha
+    with tempfile.TemporaryDirectory(prefix="pokepod-rescue-review-") as raw:
+        review_root = Path(raw)
+        manifest_path = review_root / "artifact.json"
+        review_path = review_root / "resource-review.json"
+        review_path.write_text(
+            json.dumps({"elf": {"sha256": elf_sha}}) + "\n", encoding="utf-8"
+        )
+        review_manifest = {
+            "sourceRevision": source_revision,
+            "resourceReview": {"evidenceFile": "resource-review.json"},
+        }
+        manifest_path.write_text(json.dumps(review_manifest) + "\n", encoding="utf-8")
+        assert layout.validate_runtime_identity(
+            review_manifest, runtime_identity, "app1", manifest_path
+        )["appElfSha256"] == elf_sha
 
     print("PASS rescue_partition_layout_behavior")
     return 0

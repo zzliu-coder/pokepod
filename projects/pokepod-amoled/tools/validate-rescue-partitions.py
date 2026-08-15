@@ -15,6 +15,7 @@ import binascii
 import hashlib
 import json
 from pathlib import Path
+import re
 import struct
 from typing import Iterable
 
@@ -255,6 +256,82 @@ def rescue_plan(
     }
 
 
+def _require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
+        fail(f"{label}_invalid")
+    return value.lower()
+
+
+def _read_json(path: Path, label: str) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"{label}_invalid error={error}")
+    if not isinstance(value, dict):
+        fail(f"{label}_invalid")
+    return value
+
+
+def validate_runtime_identity(
+    manifest: dict[str, object], identity: dict[str, object], target: str,
+    manifest_path: Path | None = None,
+) -> dict[str, str]:
+    """Require post-rescue identity to match the exact candidate artifact.
+
+    New artifacts carry the ELF digest in ``imageIdentity``.  The legacy
+    fields and resource-review evidence remain readable for older artifacts,
+    while a present-but-malformed new field is rejected without fallback.
+    """
+
+    if identity.get("runningPartition") != target:
+        fail(
+            f"rescue_running_partition expected={target} "
+            f"actual={identity.get('runningPartition')}"
+        )
+    source_revision = manifest.get("sourceRevision")
+    if not isinstance(source_revision, str) or not source_revision:
+        fail("rescue_source_revision_manifest_invalid")
+    if identity.get("sourceRevision") != source_revision:
+        fail("rescue_source_revision_mismatch")
+
+    image_identity = manifest.get("imageIdentity")
+    if image_identity is not None:
+        if not isinstance(image_identity, dict):
+            fail("image_identity_invalid")
+        expected_elf = _require_sha256(
+            image_identity.get("appElfSha256"), "image_identity_app_elf_sha"
+        )
+    elif manifest.get("appElfSha256") is not None or manifest.get("elfSha256") is not None:
+        expected_elf = _require_sha256(
+            manifest.get("appElfSha256") or manifest.get("elfSha256"),
+            "legacy_app_elf_sha",
+        )
+    else:
+        review_meta = manifest.get("resourceReview")
+        review_ref = review_meta.get("evidenceFile") if isinstance(review_meta, dict) else None
+        if not isinstance(review_ref, str) or not review_ref or manifest_path is None:
+            fail("rescue_app_elf_sha_missing")
+        review_path = (manifest_path.parent / review_ref).resolve()
+        review = _read_json(review_path, "resource_review")
+        review_elf = review.get("elf")
+        expected_elf = _require_sha256(
+            review_elf.get("sha256") if isinstance(review_elf, dict) else None,
+            "review_app_elf_sha",
+        )
+
+    actual_elf = _require_sha256(
+        identity.get("appElfSha256") or identity.get("elfSha256"),
+        "runtime_app_elf_sha",
+    )
+    if actual_elf != expected_elf:
+        fail("rescue_app_elf_sha_mismatch")
+    return {
+        "runningPartition": target,
+        "sourceRevision": source_revision,
+        "appElfSha256": actual_elf,
+    }
+
+
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -303,6 +380,21 @@ def command_verify_otadata(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_runtime(args: argparse.Namespace) -> int:
+    manifest = _read_json(args.manifest, "artifact_manifest")
+    identity = _read_json(args.application, "runtime_identity")
+    result = validate_runtime_identity(
+        manifest, identity, args.target_slot, manifest_path=args.manifest
+    )
+    print(
+        "PASS rescue_runtime_identity "
+        f"partition={result['runningPartition']} "
+        f"sourceRevision={result['sourceRevision']} "
+        f"appElfSha256={result['appElfSha256']}"
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -331,6 +423,12 @@ def main() -> int:
     verify.add_argument("--input", type=Path, required=True)
     verify.add_argument("--target-slot", type=slot_name, required=True)
     verify.set_defaults(handler=command_verify_otadata)
+
+    runtime = sub.add_parser("runtime")
+    runtime.add_argument("--manifest", type=Path, required=True)
+    runtime.add_argument("--application", type=Path, required=True)
+    runtime.add_argument("--target-slot", type=slot_name, required=True)
+    runtime.set_defaults(handler=command_runtime)
 
     args = parser.parse_args()
     return args.handler(args)

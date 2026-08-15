@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / "flash.sh").read_text(encoding="utf-8")
+validator = (ROOT / "tools" / "validate-rescue-partitions.py").read_text(encoding="utf-8")
 
 assert "--rom-rescue" in source
 assert "--rescue-target" in source
@@ -19,9 +20,12 @@ assert "--offset 0x310000 --size 0x300000" in source
 assert 'targetSlot": "write-candidate-only"' in source
 assert 'knownGoodSlot": "never-write"' in source
 assert "rescue_known_good_slot_changed" in source
-assert "rescue_running_partition" in source
-assert "rescue_source_revision_mismatch" in source
-assert "rescue_app_elf_sha_mismatch" in source
+assert "runtime" in source
+assert "imageIdentity" in validator and "appElfSha256" in validator
+assert "rescue_running_partition" in validator
+assert "rescue_source_revision_mismatch" in validator
+assert "rescue_app_elf_sha_mismatch" in validator
+assert "image_identity_app_elf_sha" in validator and "_invalid" in validator
 
 # Identity must be checked again after every prewrite backup and before the
 # first transfer command in either lane.

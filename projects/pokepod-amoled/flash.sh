@@ -640,38 +640,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
       >/dev/null 2>&1
     then
       if [ "$RESCUE_MODE" -eq 1 ]; then
-        python3 - "$POST_IDENTITY" "$RESCUE_TARGET_SLOT" "$MANIFEST_PATH" <<'PY'
-import json
-import pathlib
-import sys
-
-identity = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-target = sys.argv[2]
-manifest_path = pathlib.Path(sys.argv[3])
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-partition = identity.get("runningPartition")
-if partition != target:
-    raise SystemExit(
-        f"FAIL rescue_running_partition expected={target} actual={partition}"
-    )
-source_revision = manifest.get("sourceRevision")
-if not isinstance(source_revision, str) or identity.get("sourceRevision") != source_revision:
-    raise SystemExit("FAIL rescue_source_revision_mismatch")
-expected_elf = manifest.get("appElfSha256") or manifest.get("elfSha256")
-review_meta = manifest.get("resourceReview")
-review_ref = review_meta.get("evidenceFile") if isinstance(review_meta, dict) else None
-if expected_elf is None and isinstance(review_ref, str):
-    review_path = (manifest_path.parent / review_ref).resolve()
-    review = json.loads(review_path.read_text(encoding="utf-8"))
-    expected_elf = review.get("elf", {}).get("sha256")
-actual_elf = identity.get("appElfSha256") or identity.get("elfSha256")
-if not isinstance(expected_elf, str) or actual_elf != expected_elf:
-    raise SystemExit("FAIL rescue_app_elf_sha_mismatch")
-print(
-    f"PASS rescue_runtime_identity partition={partition} "
-    f"sourceRevision={source_revision} appElfSha256={actual_elf}"
-)
-PY
+        python3 "$RESCUE_PARTITION_VALIDATOR" runtime \
+          --manifest "$MANIFEST_PATH" --application "$POST_IDENTITY" \
+          --target-slot "$RESCUE_TARGET_SLOT"
       fi
       python3 - "$RUN_DIR" "$MANIFEST_PATH" "$FIRMWARE_BIN" "$DEVICE_KEY" \
         "$APP_PORT" "$ROM_PORT" "$port" "$IDENTITY_VERDICT" <<'PY'
