@@ -32,17 +32,22 @@ policy = import_file("flash_size_policy", ROOT / "tools" / "flash-size-policy.py
 
 def main() -> int:
     revision = "1" * 40
+    source_tree = "2" * 40
     version = "2.0.0"
     elf_sha = bytes(range(32))
     payload = bytearray(b"\xff" * 4096)
     payload[32:36] = (0xABCD5432).to_bytes(4, "little")
+    identity_format = "<8sHH24s16s41sB3s41s65s"
+    assert struct.calcsize(identity_format) == 203
     marker = struct.pack(
-        "<8sHH24s16s41sB3s",
-        b"PKPDIMG2", 1, 97,
+        identity_format,
+        b"PKPDIMG2", 2, 203,
         b"PokePodAmoled\0".ljust(24, b"\0"),
         (version.encode() + b"\0").ljust(16, b"\0"),
         (revision.encode() + b"\0").ljust(41, b"\0"),
         0, b"\0\0\0",
+        (source_tree.encode() + b"\0").ljust(41, b"\0"),
+        (elf_sha.hex().encode() + b"\0").ljust(65, b"\0"),
     )
     payload[512:512 + len(marker)] = marker
     payload[176:208] = elf_sha
@@ -57,8 +62,19 @@ def main() -> int:
             "kind": "hardmac.artifact",
             "lane": "fast",
             "sourceRevision": revision,
+            "sourceTree": source_tree,
             "sourceDirty": False,
             "firmwareVersion": version,
+            "imageIdentity": {
+                "magic": "PKPDIMG2",
+                "schema": 2,
+                "product": "PokePodAmoled",
+                "firmwareVersion": version,
+                "sourceRevision": revision,
+                "sourceTree": source_tree,
+                "sourceDirty": False,
+                "appElfSha256": elf_sha.hex(),
+            },
             "binary": {
                 "file": binary_path.name,
                 "sizeBytes": len(payload),
