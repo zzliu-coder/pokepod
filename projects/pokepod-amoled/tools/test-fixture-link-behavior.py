@@ -138,7 +138,12 @@ def main() -> int:
         lambda fd: binary_server(fd, "firmware-update", True),
         lambda port: cdc.query(
             port, "firmware-update", 2.0, payload,
-            {"sha256": cdc.hashlib.sha256(payload).hexdigest()},
+            {
+                "sha256": cdc.hashlib.sha256(payload).hexdigest(),
+                "sourceRevision": "a" * 40,
+                "firmwareVersion": "2.0.0",
+                "appElfSha256": "b" * 64,
+            },
         ),
     )
     assert firmware["status"] == "ok"
