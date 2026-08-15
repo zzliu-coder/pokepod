@@ -140,9 +140,10 @@ def query(port: str, operation: str, timeout: float,
                     continue
                 if frame_type == RESPONSE_JSON:
                     rejected = json.loads(prepare_payload.decode("utf-8"))
-                    raise ValueError(rejected.get(
-                        "message", "binary transfer rejected"
-                    ))
+                    raise ValueError(
+                        "binary transfer rejected: " +
+                        json.dumps(rejected, ensure_ascii=False, sort_keys=True)
+                    )
                 if frame_type != EVENT_JSON:
                     continue
                 prepare_ack = json.loads(prepare_payload.decode("utf-8"))
@@ -173,9 +174,10 @@ def query(port: str, operation: str, timeout: float,
                         continue
                     if frame_type == RESPONSE_JSON:
                         rejected = json.loads(ack_payload.decode("utf-8"))
-                        raise ValueError(rejected.get(
-                            "message", "binary transfer rejected"
-                        ))
+                        raise ValueError(
+                            "binary transfer rejected: " +
+                            json.dumps(rejected, ensure_ascii=False, sort_keys=True)
+                        )
                     if frame_type != EVENT_JSON:
                         continue
                     ack = json.loads(ack_payload.decode("utf-8"))
