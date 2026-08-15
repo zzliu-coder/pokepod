@@ -27,6 +27,15 @@ bool copySha256(const char *source, char *target, size_t capacity) {
   return true;
 }
 
+bool copyOptionalText(const char *source, char *target, size_t capacity) {
+  if (source == nullptr || target == nullptr || capacity == 0) return false;
+  const size_t length = firmwareIdentityTextLength(source, capacity);
+  if (length == 0 || length >= capacity) return false;
+  memcpy(target, source, length);
+  target[length] = '\0';
+  return true;
+}
+
 }  // namespace
 
 void FirmwareUpdateSession::resetTextState() {
@@ -35,6 +44,18 @@ void FirmwareUpdateSession::resetTextState() {
   memset(expectedSha256_, 0, sizeof(expectedSha256_));
   memset(actualSha256_, 0, sizeof(actualSha256_));
   memset(error_, 0, sizeof(error_));
+  memset(expectedSourceRevision_, 0, sizeof(expectedSourceRevision_));
+  memset(expectedFirmwareVersion_, 0, sizeof(expectedFirmwareVersion_));
+  memset(expectedAppElfSha256_, 0, sizeof(expectedAppElfSha256_));
+  resetIdentityState();
+}
+
+void FirmwareUpdateSession::resetIdentityState() {
+  memset(&identity_, 0, sizeof(identity_));
+  memset(identityCandidate_, 0, sizeof(identityCandidate_));
+  identityCandidateBytes_ = 0;
+  identityMagicBytes_ = 0;
+  identityCount_ = 0;
 }
 
 bool FirmwareUpdateSession::fail(const char *message) {
@@ -47,11 +68,46 @@ bool FirmwareUpdateSession::fail(const char *message) {
 
 bool FirmwareUpdateSession::begin(uint32_t expectedBytes,
                                   const char *expectedSha256) {
+  return begin(expectedBytes, expectedSha256, nullptr, nullptr, nullptr);
+}
+
+bool FirmwareUpdateSession::copyExpectedText(const char *source,
+                                             char *destination,
+                                             size_t capacity,
+                                             const char *fieldName) {
+  if (source == nullptr || source[0] == '\0') return true;
+  if (!copyOptionalText(source, destination, capacity)) {
+    return fail(fieldName == nullptr ? "invalid expected identity" : fieldName);
+  }
+  return true;
+}
+
+bool FirmwareUpdateSession::begin(uint32_t expectedBytes,
+                                  const char *expectedSha256,
+                                  const char *expectedSourceRevision,
+                                  const char *expectedFirmwareVersion,
+                                  const char *expectedAppElfSha256) {
   if (active()) return fail("firmware update already active");
   resetTextState();
   if (!FirmwareUpdatePolicy::validImageSize(expectedBytes) ||
       !copySha256(expectedSha256, expectedSha256_, sizeof(expectedSha256_))) {
     return fail("invalid firmware metadata");
+  }
+  if (!copyExpectedText(expectedSourceRevision, expectedSourceRevision_,
+                        sizeof(expectedSourceRevision_),
+                        "invalid expected source revision") ||
+      !copyExpectedText(expectedFirmwareVersion, expectedFirmwareVersion_,
+                        sizeof(expectedFirmwareVersion_),
+                        "invalid expected firmware version") ||
+      !copyExpectedText(expectedAppElfSha256, expectedAppElfSha256_,
+                        sizeof(expectedAppElfSha256_),
+                        "invalid expected ELF SHA-256")) {
+    return false;
+  }
+  if (expectedAppElfSha256 != nullptr && expectedAppElfSha256[0] != '\0' &&
+      !FirmwareUpdatePolicy::validSha256(expectedAppElfSha256) &&
+      strcmp(expectedAppElfSha256, "unknown") != 0) {
+    return fail("invalid expected ELF SHA-256");
   }
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -91,6 +147,9 @@ bool FirmwareUpdateSession::writeChunk(const uint8_t *data, size_t bytes) {
     return fail("invalid firmware chunk");
   }
 #if defined(ARDUINO_ARCH_ESP32)
+  if (!inspectIdentity(data, bytes)) {
+    return fail("firmware identity scan failed");
+  }
   if (esp_ota_write(handle_, data, bytes) != ESP_OK ||
       mbedtls_sha256_update(&sha_, data, bytes) != 0) {
     return fail("OTA write failed");
@@ -101,6 +160,74 @@ bool FirmwareUpdateSession::writeChunk(const uint8_t *data, size_t bytes) {
   return fail("firmware OTA requires ESP32");
 #endif
   receivedBytes_ += static_cast<uint32_t>(bytes);
+  return true;
+}
+
+bool FirmwareUpdateSession::inspectIdentity(const uint8_t *data, size_t bytes) {
+  if (data == nullptr || bytes == 0) return false;
+  for (size_t index = 0; index < bytes; ++index) {
+    const uint8_t value = data[index];
+    if (identityCandidateBytes_ != 0) {
+      if (identityCandidateBytes_ >= sizeof(identityCandidate_)) {
+        identityCandidateBytes_ = 0;
+        identityMagicBytes_ = 0;
+      } else {
+        identityCandidate_[identityCandidateBytes_++] = value;
+        if (identityCandidateBytes_ == sizeof(identityCandidate_)) {
+          FirmwareImageIdentity candidate{};
+          memcpy(&candidate, identityCandidate_, sizeof(candidate));
+          if (firmwareImageIdentityValid(candidate)) {
+            if (identityCount_ < 0xffU) ++identityCount_;
+            if (identityCount_ == 1) identity_ = candidate;
+          }
+          identityCandidateBytes_ = 0;
+          identityMagicBytes_ = 0;
+        }
+        continue;
+      }
+    }
+    if (value == static_cast<uint8_t>(kFirmwareImageMagic[identityMagicBytes_])) {
+      ++identityMagicBytes_;
+      if (identityMagicBytes_ == sizeof(kFirmwareImageMagic) - 1U) {
+        memcpy(identityCandidate_, kFirmwareImageMagic,
+               sizeof(kFirmwareImageMagic) - 1U);
+        identityCandidateBytes_ = sizeof(kFirmwareImageMagic) - 1U;
+        identityMagicBytes_ = 0;
+      }
+    } else {
+      identityMagicBytes_ = value == static_cast<uint8_t>(kFirmwareImageMagic[0])
+          ? 1U : 0U;
+    }
+  }
+  return true;
+}
+
+bool FirmwareUpdateSession::validateReceivedIdentity() {
+  if (identityCount_ != 1 || !firmwareImageIdentityValid(identity_) ||
+      identity_.sourceDirty != 0) {
+    return false;
+  }
+  if (expectedSourceRevision_[0] != '\0' &&
+      strncmp(identity_.sourceRevision, expectedSourceRevision_,
+              sizeof(identity_.sourceRevision)) != 0) {
+    return false;
+  }
+  if (expectedFirmwareVersion_[0] != '\0' &&
+      strncmp(identity_.firmwareVersion, expectedFirmwareVersion_,
+              sizeof(identity_.firmwareVersion)) != 0) {
+    return false;
+  }
+  // The ESP app descriptor is only available after the candidate image is
+  // linked and running. A build may therefore carry "unknown" in the
+  // embedded pre-boot record; the post-reboot Link identity must still match
+  // the expected ELF digest supplied by the fixture.
+  if (expectedAppElfSha256_[0] != '\0' &&
+      !firmwareIdentityEquals(identity_.appElfSha256,
+                              sizeof(identity_.appElfSha256), "unknown") &&
+      strncmp(identity_.appElfSha256, expectedAppElfSha256_,
+              sizeof(identity_.appElfSha256)) != 0) {
+    return false;
+  }
   return true;
 }
 
@@ -129,6 +256,12 @@ bool FirmwareUpdateSession::finish() {
     handle_ = 0;
     target_ = nullptr;
     return fail("firmware SHA-256 mismatch");
+  }
+  if (!validateReceivedIdentity()) {
+    (void)esp_ota_abort(handle_);
+    handle_ = 0;
+    target_ = nullptr;
+    return fail("firmware image identity mismatch");
   }
   if (esp_ota_end(handle_) != ESP_OK) {
     handle_ = 0;
@@ -166,6 +299,10 @@ void FirmwareUpdateSession::abort() {
   receivedBytes_ = 0;
   memset(expectedSha256_, 0, sizeof(expectedSha256_));
   memset(actualSha256_, 0, sizeof(actualSha256_));
+  memset(expectedSourceRevision_, 0, sizeof(expectedSourceRevision_));
+  memset(expectedFirmwareVersion_, 0, sizeof(expectedFirmwareVersion_));
+  memset(expectedAppElfSha256_, 0, sizeof(expectedAppElfSha256_));
+  resetIdentityState();
 }
 
 }  // namespace pokepod

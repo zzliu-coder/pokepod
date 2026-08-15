@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "FirmwareImageIdentity.h"
 #include "AudioPipeline.h"
 #include "BoardServices.h"
 #include "CapsuleLibrary.h"
@@ -17,6 +18,11 @@
 #include "WifiController.h"
 #include "WirelessSyncPairing.h"
 #include "WirelessSyncProtocol.h"
+
+#if defined(ARDUINO_ARCH_ESP32)
+  #include <esp_app_desc.h>
+  #include <esp_ota_ops.h>
+#endif
 
 namespace pokepod {
 namespace {
@@ -55,6 +61,34 @@ String printed(cJSON *root) {
   const String result = value == nullptr ? String() : String(value);
   cJSON_free(value);
   return result;
+}
+
+String runningPartitionLabel() {
+#if defined(ARDUINO_ARCH_ESP32)
+  const esp_partition_t *partition = esp_ota_get_running_partition();
+  if (partition != nullptr && partition->label != nullptr) {
+    return String(partition->label);
+  }
+#endif
+  return String("unknown");
+}
+
+String runningAppElfSha256() {
+#if defined(ARDUINO_ARCH_ESP32)
+  const esp_app_desc_t *description = esp_app_get_description();
+  if (description != nullptr) {
+    constexpr char kHex[] = "0123456789abcdef";
+    char digest[sizeof(description->app_elf_sha256) * 2 + 1] = {};
+    for (size_t index = 0; index < sizeof(description->app_elf_sha256);
+         ++index) {
+      const uint8_t value = description->app_elf_sha256[index];
+      digest[index * 2] = kHex[value >> 4];
+      digest[index * 2 + 1] = kHex[value & 0x0f];
+    }
+    return String(digest);
+  }
+#endif
+  return String("unknown");
 }
 
 bool hiddenReadDenied(const String &relative) {
@@ -144,6 +178,9 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   }
   if (strcmp(operation, "firmware-update") == 0) {
     const char *expectedSha256 = jsonString(root, "sha256");
+    const char *expectedSourceRevision = jsonString(root, "sourceRevision");
+    const char *expectedFirmwareVersion = jsonString(root, "firmwareVersion");
+    const char *expectedAppElfSha256 = jsonString(root, "appElfSha256");
     const bool usbTransport = transport_ == LinkTransport::usb;
     const bool valid = usbTransport && rebootCoordinator_ != nullptr &&
         !foregroundBusy() && !rebootCoordinator_->pending() &&
@@ -157,7 +194,9 @@ void PokePodLinkService::processRequest(uint32_t requestId,
       return;
     }
     const uint32_t expectedBytes = static_cast<uint32_t>(binaryLength);
-    const bool started = firmwareUpdate_.begin(expectedBytes, expectedSha256);
+    const bool started = firmwareUpdate_.begin(
+        expectedBytes, expectedSha256, expectedSourceRevision,
+        expectedFirmwareVersion, expectedAppElfSha256);
     const String error = firmwareUpdate_.error();
     cJSON_Delete(root);
     if (!started) {
@@ -284,7 +323,20 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   } else if (strcmp(operation, "identity") == 0) {
     const String extra = "\"deviceId\":\"" + deviceId() +
         "\",\"displayName\":\"PokePod\",\"platform\":\"pokepod\",\"manufacturer\":\"PokeCapsule\",\"model\":\"" +
-        String(variantName(board_->status().variant)) + "\"";
+        String(variantName(board_->status().variant)) +
+        "\",\"firmwareVersion\":\"" +
+        String(kFirmwareImageIdentity.firmwareVersion) +
+        "\",\"sourceRevision\":\"" +
+        String(kFirmwareImageIdentity.sourceRevision) +
+        "\",\"sourceTree\":\"" +
+        String(kFirmwareImageIdentity.sourceTree) +
+        "\",\"sourceDirty\":" +
+        String(kFirmwareImageIdentity.sourceDirty == 0 ? "false" : "true") +
+        ",\"appElfSha256\":\"" +
+        runningAppElfSha256() +
+        "\",\"imageSchema\":" +
+        String(kFirmwareImageIdentity.schemaVersion) +
+        ",\"runningPartition\":\"" + runningPartitionLabel() + "\"";
     sendOk(requestId, extra.c_str());
   } else if (strcmp(operation, "pairing-export") == 0) {
     if (transport_ != LinkTransport::usb || pairingProvider_ == nullptr) {

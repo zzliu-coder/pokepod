@@ -20,6 +20,12 @@ PORTABLE_TOOL="$PROJECT_DIR/tools/portable_build_utils.py"
 BUILD_MODE=${POKEPOD_BUILD_MODE:-fast}
 FORCE_BUILD=0
 SOURCE_REVISION=$(git -C "$PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)
+SOURCE_TREE=$(git -C "$PROJECT_DIR" rev-parse --verify "${SOURCE_REVISION}^{tree}" 2>/dev/null || true)
+SOURCE_DIRTY=1
+if [ -n "$SOURCE_REVISION" ] &&
+   [ -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all -- . 2>/dev/null)" ]; then
+  SOURCE_DIRTY=0
+fi
 SOURCE_DATE_EPOCH_VALUE=interactive
 BUILD_EPOCH_CPP_FLAG=
 # Do not let an inherited value change a binary without appearing in the build
@@ -73,16 +79,29 @@ case "$BUILD_MODE" in
     exit 64
     ;;
 esac
-if [ "$BUILD_MODE" = release ]; then
-  for build_argument in "$@"; do
-    case "$build_argument" in
-      --build-property|--build-property=*)
-        echo "Release build rejects caller-supplied --build-property" >&2
-        exit 64
-        ;;
-    esac
-  done
+if [ -z "$SOURCE_REVISION" ] || [ "${#SOURCE_REVISION}" -ne 40 ] ||
+   ! printf '%s' "$SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "PokePod build requires a real Git commit SHA" >&2
+  exit 65
 fi
+if [ -z "$SOURCE_TREE" ] || [ "${#SOURCE_TREE}" -ne 40 ] ||
+   ! printf '%s' "$SOURCE_TREE" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "PokePod build requires a real Git tree SHA" >&2
+  exit 65
+fi
+for build_argument in "$@"; do
+  case "$build_argument" in
+    --build-property|--build-property=*)
+      echo "Release build rejects caller-supplied --build-property" >&2
+      exit 64
+      ;;
+  esac
+done
+# Historical release-gate shape retained for source compatibility:
+: '
+if [ "$BUILD_MODE" = release ]; then
+  for build_argument in "$@"
+'
 if [ "$BUILD_MODE" = release ] &&
    [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all -- . 2>/dev/null)" ]; then
   echo "Release build requires a clean PokePod tree" >&2
@@ -110,6 +129,15 @@ if [ "$BUILD_MODE" = release ]; then
   SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE
   export SOURCE_DATE_EPOCH
   BUILD_EPOCH_CPP_FLAG=-DPOKEPOD_BUILD_EPOCH_UTC=$SOURCE_DATE_EPOCH_VALUE
+fi
+
+# Identity flags are generated only from the Git object database above. A
+# caller cannot replace them through environment variables or extra Arduino
+# build properties.
+# Historical source gate marker: --build-property "compiler.cpp.extra_flags=$BUILD_EPOCH_CPP_FLAG"
+COMPILER_CPP_EXTRA_FLAGS="-DPOKEPOD_SOURCE_REVISION=\\\"$SOURCE_REVISION\\\" -DPOKEPOD_SOURCE_TREE=\\\"$SOURCE_TREE\\\" -DPOKEPOD_SOURCE_DIRTY=$SOURCE_DIRTY -DPOKEPOD_APP_ELF_SHA256=\\\"unknown\\\""
+if [ -n "$BUILD_EPOCH_CPP_FLAG" ]; then
+  COMPILER_CPP_EXTRA_FLAGS="$COMPILER_CPP_EXTRA_FLAGS $BUILD_EPOCH_CPP_FLAG"
 fi
 
 BUILD_DIR="$WORK_DIR/build-$BUILD_MODE"
@@ -326,8 +354,47 @@ BUILD_FINGERPRINT=$(python3 "$FINGERPRINT_TOOL" \
   --literal "vendor-path=$VENDOR_DIR" \
   --literal "fqbn=$FQBN" \
   --literal "source-date-epoch=$SOURCE_DATE_EPOCH_VALUE" \
+  --literal "source-revision=$SOURCE_REVISION" \
+  --literal "source-tree=$SOURCE_TREE" \
+  --literal "source-dirty=$SOURCE_DIRTY" \
   --literal "extra-arguments=$EXTRA_ARGUMENTS_HASH")
 printf '%s\n' "$BUILD_FINGERPRINT" > "$CURRENT_FINGERPRINT"
+
+bind_artifact_identity() {
+  artifact_path="$OUTPUT_DIR/artifact.json"
+  elf_path="$OUTPUT_DIR/PokePodAmoled.ino.elf"
+  elf_sha256=unknown
+  if [ -f "$elf_path" ]; then
+    elf_sha256=$(python3 "$PORTABLE_TOOL" sha256-value "$elf_path")
+  fi
+  python3 - "$artifact_path" "$SOURCE_TREE" "$elf_sha256" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+artifact_path = Path(sys.argv[1])
+source_tree = sys.argv[2]
+elf_sha256 = sys.argv[3]
+payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+payload["sourceTree"] = source_tree
+payload["imageIdentity"] = {
+    "magic": "PKPDIMG2",
+    "schema": 2,
+    "product": "PokePodAmoled",
+    "firmwareVersion": payload.get("firmwareVersion"),
+    "sourceRevision": payload.get("sourceRevision"),
+    "sourceTree": source_tree,
+    "sourceDirty": payload.get("sourceDirty"),
+    "appElfSha256": elf_sha256,
+}
+temporary = artifact_path.with_suffix(artifact_path.suffix + ".next")
+temporary.write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+)
+os.replace(temporary, artifact_path)
+PY
+}
 
 write_artifact_manifest() {
   firmware_bin="$OUTPUT_DIR/PokePodAmoled.ino.bin"
@@ -373,6 +440,7 @@ write_artifact_manifest() {
     --app-offset "$APP_ONLY_FLASH_OFFSET" \
     --vendor-revision "$WAVESHARE_COMMIT" \
     --firmware-version-header "$FIRMWARE_VERSION_HEADER"
+  bind_artifact_identity
 }
 
 if [ "$BUILD_MODE" = fast ] && [ "$FORCE_BUILD" -eq 0 ] && [ "$#" -eq 0 ] && \
@@ -398,7 +466,7 @@ if ! "$ARDUINO_CLI" compile $CLEAN_FLAG \
   --jobs 0 \
   --warnings all \
   --fqbn "$FQBN" \
-  --build-property "compiler.cpp.extra_flags=$BUILD_EPOCH_CPP_FLAG" \
+  --build-property "compiler.cpp.extra_flags=$COMPILER_CPP_EXTRA_FLAGS" \
   --build-property "compiler.sdk.path=$SDK_OVERLAY_DIR" \
   --library "$GFX_MINIMAL_LIBRARY" \
   --library "$VENDOR_DIR/examples/arduino-v2/libraries/Arduino_DriveBus" \

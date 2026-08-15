@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,36 @@ assert SPEC and SPEC.loader
 POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)
 
+IDENTITY_FORMAT = "<8sHH24s16s41sB3s41s65s"
+IDENTITY_BYTES = struct.calcsize(IDENTITY_FORMAT)
+IDENTITY_MAGIC = b"PKPDIMG2"
+SOURCE_REVISION = "a" * 40
+SOURCE_TREE = "b" * 40
+
+
+def identity(source_dirty: bool = False) -> bytes:
+    return struct.pack(
+        IDENTITY_FORMAT,
+        b"PKPDIMG2",
+        2,
+        IDENTITY_BYTES,
+        b"PokePodAmoled\0".ljust(24, b"\0"),
+        b"2.0.0\0".ljust(16, b"\0"),
+        (SOURCE_REVISION + "\0").encode(),
+        1 if source_dirty else 0,
+        b"\0" * 3,
+        (SOURCE_TREE + "\0").encode(),
+        b"unknown\0".ljust(65, b"\0"),
+    )
+
+
+def write_binary(path: Path, size: int, fill: bytes, source_dirty: bool = False) -> None:
+    assert size > IDENTITY_BYTES
+    path.write_bytes(
+        IDENTITY_MAGIC + fill * (size - IDENTITY_BYTES - len(IDENTITY_MAGIC)) +
+        identity(source_dirty)
+    )
+
 
 def artifact(
     binary: Path,
@@ -25,7 +56,7 @@ def artifact(
     dirty: bool,
     policy: dict[str, object],
     *,
-    source_revision: str = "abc",
+    source_revision: str = SOURCE_REVISION,
     core_profile: str = "production",
     core_version: str = "3.3.8",
 ) -> dict[str, object]:
@@ -36,6 +67,18 @@ def artifact(
         "lane": lane,
         "sourceRevision": source_revision,
         "sourceDirty": dirty,
+        "sourceTree": SOURCE_TREE,
+        "firmwareVersion": "2.0.0",
+        "imageIdentity": {
+            "magic": "PKPDIMG2",
+            "schema": 2,
+            "product": "PokePodAmoled",
+            "firmwareVersion": "2.0.0",
+            "sourceRevision": source_revision,
+            "sourceTree": SOURCE_TREE,
+            "sourceDirty": dirty,
+            "appElfSha256": "unknown",
+        },
         "binary": {
             "file": binary.name,
             "sizeBytes": len(payload),
@@ -59,18 +102,26 @@ def artifact(
     }
 
 
-def validate(manifest: Path, binary: Path, lane: str) -> subprocess.CompletedProcess[str]:
+def validate(
+    manifest: Path,
+    binary: Path,
+    lane: str,
+    elf: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(VALIDATOR),
+        "--manifest",
+        str(manifest),
+        "--binary",
+        str(binary),
+        "--expected-lane",
+        lane,
+    ]
+    if elf is not None:
+        command.extend(("--elf", str(elf)))
     return subprocess.run(
-        [
-            sys.executable,
-            str(VALIDATOR),
-            "--manifest",
-            str(manifest),
-            "--binary",
-            str(binary),
-            "--expected-lane",
-            lane,
-        ],
+        command,
         text=True,
         capture_output=True,
         check=False,
@@ -82,16 +133,23 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-artifact-") as raw:
     output = root / "work/output/fast"
     output.mkdir(parents=True)
     binary = output / "PokePodAmoled.ino.bin"
-    binary.write_bytes(b"y" * 2_404_899)
+    write_binary(binary, 2_404_899, b"y", source_dirty=True)
     policy = POLICY.evaluate(binary.stat().st_size, 0x300000)
     manifest = output / "artifact.json"
     manifest.write_text(json.dumps(artifact(binary, "fast", True, policy)), encoding="utf-8")
+    elf = output / "PokePodAmoled.ino.elf"
+    elf.write_bytes(b"candidate-elf")
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload["imageIdentity"]["appElfSha256"] = hashlib.sha256(
+        elf.read_bytes()
+    ).hexdigest()
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
     review = root / "work/resource-review.json"
     review.write_text(
         json.dumps(
             {
                 "schema": "pokepod.resource-review.v1",
-                "sourceRevision": "abc",
+                "sourceRevision": SOURCE_REVISION,
                 "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                 "programBytes": binary.stat().st_size,
                 "tier": "yellow",
@@ -116,21 +174,50 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-artifact-") as raw:
         ),
         encoding="utf-8",
     )
-    assert validate(manifest, binary, "fast").returncode == 0
+    assert validate(manifest, binary, "fast", elf).returncode == 0
+    replaced_elf = output / "replaced.elf"
+    replaced_elf.write_bytes(b"replaced-elf")
+    replaced = validate(manifest, binary, "fast", replaced_elf)
+    assert replaced.returncode != 0
+    assert "artifact_image_identity_elf_sha256" in replaced.stderr
+
+    missing_binary = output / "missing-identity.bin"
+    missing_binary.write_bytes(b"m" * 512)
+    missing_policy = POLICY.evaluate(missing_binary.stat().st_size, 0x300000)
+    missing_manifest = output / "missing-identity.json"
+    missing_manifest.write_text(
+        json.dumps(artifact(missing_binary, "fast", False, missing_policy)),
+        encoding="utf-8",
+    )
+    missing = validate(missing_manifest, missing_binary, "fast")
+    assert missing.returncode != 0
+    assert "image_identity_count actual=0" in missing.stderr
+
+    duplicate_binary = output / "duplicate-identity.bin"
+    duplicate_binary.write_bytes(b"d" * 512 + identity() + identity())
+    duplicate_policy = POLICY.evaluate(duplicate_binary.stat().st_size, 0x300000)
+    duplicate_manifest = output / "duplicate-identity.json"
+    duplicate_manifest.write_text(
+        json.dumps(artifact(duplicate_binary, "fast", False, duplicate_policy)),
+        encoding="utf-8",
+    )
+    duplicate = validate(duplicate_manifest, duplicate_binary, "fast")
+    assert duplicate.returncode != 0
+    assert "image_identity_count actual=2" in duplicate.stderr
 
     red_binary = output / "red.bin"
-    red_binary.write_bytes(b"r" * 2_700_000)
+    write_binary(red_binary, 2_700_000, b"r")
     forged_policy = POLICY.evaluate(2_350_000, 0x300000)
     forged_manifest = output / "red-artifact.json"
     forged_manifest.write_text(
-        json.dumps(artifact(red_binary, "fast", True, forged_policy)), encoding="utf-8"
+        json.dumps(artifact(red_binary, "fast", False, forged_policy)), encoding="utf-8"
     )
     forged = validate(forged_manifest, red_binary, "fast")
     assert forged.returncode != 0
     assert "resource_policy_mismatch" in forged.stderr
 
     green_binary = output / "green.bin"
-    green_binary.write_bytes(b"g" * 128)
+    write_binary(green_binary, 512, b"g", source_dirty=True)
     green_policy = POLICY.evaluate(green_binary.stat().st_size, 0x300000)
     dirty_release = output / "dirty-release.json"
     dirty_release.write_text(
@@ -140,29 +227,32 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-artifact-") as raw:
     assert dirty.returncode != 0
     assert "source_dirty" in dirty.stderr
 
+    clean_binary = output / "clean.bin"
+    write_binary(clean_binary, 512, b"c")
+    clean_policy = POLICY.evaluate(clean_binary.stat().st_size, 0x300000)
     clean_release = output / "clean-release.json"
     clean_release.write_text(
         json.dumps(
             artifact(
-                green_binary,
+                clean_binary,
                 "release",
                 False,
-                green_policy,
+                clean_policy,
                 source_revision="a" * 40,
             )
         ),
         encoding="utf-8",
     )
-    assert validate(clean_release, green_binary, "release").returncode == 0
+    assert validate(clean_release, clean_binary, "release").returncode == 0
 
     matrix_release = output / "matrix-release.json"
     matrix_release.write_text(
         json.dumps(
             artifact(
-                green_binary,
+                clean_binary,
                 "release",
                 False,
-                green_policy,
+                clean_policy,
                 source_revision="a" * 40,
                 core_profile="matrix",
                 core_version="3.3.11",
@@ -170,7 +260,7 @@ with tempfile.TemporaryDirectory(prefix="pokepod-flash-artifact-") as raw:
         ),
         encoding="utf-8",
     )
-    matrix = validate(matrix_release, green_binary, "release")
+    matrix = validate(matrix_release, clean_binary, "release")
     assert matrix.returncode != 0
     assert "release_artifact_toolchain" in matrix.stderr
 
