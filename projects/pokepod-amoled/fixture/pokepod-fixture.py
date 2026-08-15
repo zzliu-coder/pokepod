@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +25,8 @@ PROJECT = Path(__file__).resolve().parents[0].parent
 CDC = PROJECT / "cdc-status.py"
 FLASH = PROJECT / "flash.sh"
 RUNS = PROJECT / "work" / "fixture-runs"
+SOURCE_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+APP_ELF_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def run_dir(operation: str) -> Path:
@@ -35,6 +38,62 @@ def run_dir(operation: str) -> Path:
 
 def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def load_firmware_artifact_identity(firmware: Path) -> dict[str, str]:
+    """Load the product identity bound to a firmware image's artifact."""
+    manifest_path = firmware.with_name("artifact.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"identity-bound USB update requires adjacent artifact.json: {manifest_path}"
+        ) from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid adjacent artifact.json: {manifest_path}") from error
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"invalid artifact.json: {manifest_path}")
+    if manifest.get("schemaVersion") != 1 or manifest.get("kind") != "hardmac.artifact":
+        raise RuntimeError("adjacent artifact.json has an invalid schema")
+    if manifest.get("sourceDirty") is not False:
+        raise RuntimeError("firmware artifact is dirty; refusing USB update")
+    source_revision = manifest.get("sourceRevision")
+    firmware_version = manifest.get("firmwareVersion")
+    image_identity = manifest.get("imageIdentity")
+    if not isinstance(source_revision, str) or SOURCE_REVISION_RE.fullmatch(source_revision) is None:
+        raise RuntimeError("artifact sourceRevision is missing or invalid")
+    if (not isinstance(firmware_version, str) or not (1 <= len(firmware_version) <= 15)
+            or any(ord(character) < 0x20 or ord(character) >= 0x7F
+                   for character in firmware_version)):
+        raise RuntimeError("artifact firmwareVersion is missing or invalid")
+    if not isinstance(image_identity, dict):
+        raise RuntimeError("artifact imageIdentity is missing")
+    if image_identity.get("magic") != "PKPDIMG2" or image_identity.get("schema") != 2:
+        raise RuntimeError("artifact imageIdentity schema is invalid")
+    if image_identity.get("product") != "PokePodAmoled":
+        raise RuntimeError("artifact imageIdentity product is invalid")
+    if image_identity.get("sourceRevision") != source_revision:
+        raise RuntimeError("artifact imageIdentity sourceRevision mismatch")
+    if image_identity.get("firmwareVersion") != firmware_version:
+        raise RuntimeError("artifact imageIdentity firmwareVersion mismatch")
+    if image_identity.get("sourceDirty") is not False:
+        raise RuntimeError("artifact imageIdentity is dirty")
+    app_elf_sha256 = image_identity.get("appElfSha256")
+    if not isinstance(app_elf_sha256, str) or APP_ELF_SHA256_RE.fullmatch(app_elf_sha256) is None:
+        raise RuntimeError("artifact imageIdentity appElfSha256 is missing or invalid")
+    binary = manifest.get("binary")
+    if not isinstance(binary, dict) or binary.get("file") != firmware.name:
+        raise RuntimeError("artifact binary does not match firmware image")
+    payload = firmware.read_bytes()
+    if binary.get("sizeBytes") != len(payload):
+        raise RuntimeError("artifact binary size does not match firmware image")
+    if binary.get("sha256") != hashlib.sha256(payload).hexdigest():
+        raise RuntimeError("artifact binary SHA-256 does not match firmware image")
+    return {
+        "sourceRevision": source_revision.lower(),
+        "firmwareVersion": firmware_version,
+        "appElfSha256": app_elf_sha256.lower(),
+    }
 
 
 def cdc(port: str, command: str, output: Path, timeout: float) -> dict[str, object]:
@@ -213,14 +272,22 @@ def update(port: str, firmware: Path, timeout: float, port_pattern: str,
     before = link_identity(port, output, min(timeout, 5.0))
     expected_device_id = str(before["deviceId"])
     expected_build = expected_build_from_artifact(firmware)
+    expected_identity = load_firmware_artifact_identity(firmware)
+    for key in ("sourceRevision", "firmwareVersion", "appElfSha256"):
+        if expected_build[key] != expected_identity[key]:
+            raise RuntimeError(f"artifact identity disagreement for {key}")
     metadata = {
         "port": port, "deviceId": expected_device_id, "hello": hello,
         "identity": before, "firmware": str(firmware), "bytes": len(image),
         "sha256": hashlib.sha256(image).hexdigest(),
         "expectedBuild": expected_build,
+        "expectedIdentity": expected_identity,
     }
     write_json(output / "request.json", metadata)
     command = [sys.executable, str(CDC), port, "--firmware", str(firmware),
+               "--source-revision", expected_identity["sourceRevision"],
+               "--firmware-version", expected_identity["firmwareVersion"],
+               "--app-elf-sha256", expected_identity["appElfSha256"],
                "--timeout", str(timeout)]
     completed = subprocess.run(command, cwd=PROJECT, text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,

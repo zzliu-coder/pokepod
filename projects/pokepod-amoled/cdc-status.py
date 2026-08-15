@@ -9,6 +9,7 @@ import hashlib
 import glob
 import json
 import os
+import re
 import select
 import struct
 import sys
@@ -27,6 +28,46 @@ MAX_CONTROL = 4096
 MAX_DATA = 16384
 OUTGOING_CHUNK = 128
 OUTGOING_PACE_SECONDS = 0.001
+
+
+def firmware_update_fields(
+    binary_sha256: str,
+    source_revision: str | None = None,
+    firmware_version: str | None = None,
+    app_elf_sha256: str | None = None,
+) -> dict[str, str]:
+    """Build OTA fields with an explicit legacy compatibility boundary."""
+    fields = {"sha256": binary_sha256}
+    identity = (source_revision, firmware_version, app_elf_sha256)
+    supplied = sum(value is not None for value in identity)
+    if supplied == 0:
+        return fields
+    if supplied != len(identity):
+        raise ValueError(
+            "firmware identity requires --source-revision, "
+            "--firmware-version and --app-elf-sha256 together"
+        )
+    if not isinstance(source_revision, str) or re.fullmatch(
+        r"[0-9a-fA-F]{40}", source_revision
+    ) is None:
+        raise ValueError("--source-revision must be a 40-character hex revision")
+    if not isinstance(firmware_version, str) or not firmware_version or len(firmware_version) > 15 or any(
+        ord(character) < 0x20 or ord(character) >= 0x7F
+        for character in firmware_version
+    ):
+        raise ValueError(
+            "--firmware-version must be 1-15 printable ASCII characters"
+        )
+    if not isinstance(app_elf_sha256, str) or re.fullmatch(
+        r"[0-9a-fA-F]{64}", app_elf_sha256
+    ) is None:
+        raise ValueError("--app-elf-sha256 must be a 64-character hex digest")
+    fields.update({
+        "sourceRevision": source_revision.lower(),
+        "firmwareVersion": firmware_version,
+        "appElfSha256": app_elf_sha256.lower(),
+    })
+    return fields
 
 
 def configure(fd: int) -> None:
@@ -240,6 +281,18 @@ def main() -> int:
         "--firmware", metavar="PATH",
         help="install an exact ESP32 app image over USB Link v2 without BOOT/RESET",
     )
+    parser.add_argument(
+        "--source-revision",
+        help="40-character source revision bound to --firmware",
+    )
+    parser.add_argument(
+        "--firmware-version",
+        help="firmware version bound to --firmware",
+    )
+    parser.add_argument(
+        "--app-elf-sha256",
+        help="64-character application ELF digest bound to --firmware",
+    )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
     arguments = parser.parse_args()
@@ -266,7 +319,27 @@ def main() -> int:
             parser.error(str(error))
         if not (1024 <= len(outgoing_binary) <= 0x300000):
             parser.error("firmware image must be between 1 KiB and 3 MiB")
-        fields = {"sha256": hashlib.sha256(outgoing_binary).hexdigest()}
+        try:
+            fields = firmware_update_fields(
+                hashlib.sha256(outgoing_binary).hexdigest(),
+                arguments.source_revision,
+                arguments.firmware_version,
+                arguments.app_elf_sha256,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    elif any(
+        value is not None
+        for value in (
+            arguments.source_revision,
+            arguments.firmware_version,
+            arguments.app_elf_sha256,
+        )
+    ):
+        parser.error(
+            "--source-revision, --firmware-version and --app-elf-sha256 "
+            "require --firmware"
+        )
     ports = arguments.ports or sorted(glob.glob("/dev/cu.usbmodem*"))
     last_error = None
     for port in ports:
