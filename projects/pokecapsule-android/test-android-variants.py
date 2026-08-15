@@ -93,6 +93,15 @@ def main() -> int:
     if not os.access(build_script, os.X_OK):
         fail("build.sh is not executable")
     subprocess.run(["zsh", "-n", str(build_script)], check=True)
+    build_script_source = build_script.read_text(encoding="utf-8")
+    for marker in (
+        "POKECAPSULE_RELEASE_STORE_FILE",
+        "gradle_signing_properties+=(\"-PreleaseStoreFile=$release_store_file\")",
+        "explicit_release_store_file",
+        '"${gradle_signing_properties[@]}"',
+    ):
+        if marker not in build_script_source:
+            fail(f"environment signing conversion marker is missing: {marker}")
 
     installer = ROOT.parent.parent / "artifacts" / "安装-PokeCapsule-1.7.command"
     installer_source = installer.read_text(encoding="utf-8")

@@ -46,12 +46,28 @@ release_store_file=${POKECAPSULE_RELEASE_STORE_FILE:-}
 release_store_password=${POKECAPSULE_RELEASE_STORE_PASSWORD:-}
 release_key_alias=${POKECAPSULE_RELEASE_KEY_ALIAS:-}
 release_key_password=${POKECAPSULE_RELEASE_KEY_PASSWORD:-}
+explicit_release_store_file=false
+explicit_release_store_password=false
+explicit_release_key_alias=false
+explicit_release_key_password=false
 for argument in "$@"; do
   case "$argument" in
-    -PreleaseStoreFile=*) release_store_file=${argument#*=} ;;
-    -PreleaseStorePassword=*) release_store_password=${argument#*=} ;;
-    -PreleaseKeyAlias=*) release_key_alias=${argument#*=} ;;
-    -PreleaseKeyPassword=*) release_key_password=${argument#*=} ;;
+    -PreleaseStoreFile=*)
+      release_store_file=${argument#*=}
+      explicit_release_store_file=true
+      ;;
+    -PreleaseStorePassword=*)
+      release_store_password=${argument#*=}
+      explicit_release_store_password=true
+      ;;
+    -PreleaseKeyAlias=*)
+      release_key_alias=${argument#*=}
+      explicit_release_key_alias=true
+      ;;
+    -PreleaseKeyPassword=*)
+      release_key_password=${argument#*=}
+      explicit_release_key_password=true
+      ;;
   esac
 done
 if [[ "$has_release_task" == true ]]; then
@@ -65,6 +81,20 @@ if [[ "$has_release_task" == true ]]; then
     print -u2 "请通过 Gradle -P 参数或安全 CI secret 注入；不会使用 debug key。"
     exit 2
   fi
+
+  # Keep passwords out of logs. Explicit -P values remain authoritative;
+  # environment values are appended only when their matching -P is absent.
+  gradle_signing_properties=()
+  [[ "$explicit_release_store_file" == true ]] || \
+    gradle_signing_properties+=("-PreleaseStoreFile=$release_store_file")
+  [[ "$explicit_release_store_password" == true ]] || \
+    gradle_signing_properties+=("-PreleaseStorePassword=$release_store_password")
+  [[ "$explicit_release_key_alias" == true ]] || \
+    gradle_signing_properties+=("-PreleaseKeyAlias=$release_key_alias")
+  [[ "$explicit_release_key_password" == true ]] || \
+    gradle_signing_properties+=("-PreleaseKeyPassword=$release_key_password")
+else
+  gradle_signing_properties=()
 fi
 
-"$GRADLE_BIN" --no-daemon "$@"
+"$GRADLE_BIN" --no-daemon "${gradle_signing_properties[@]}" "$@"

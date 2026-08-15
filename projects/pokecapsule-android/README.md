@@ -19,6 +19,11 @@ releaseKeyPassword=...
 requireReleaseSigning=true   # 发布流水线建议开启
 ```
 
+使用 `build.sh` 时也可以通过 `POKECAPSULE_RELEASE_STORE_FILE`、
+`POKECAPSULE_RELEASE_STORE_PASSWORD`、`POKECAPSULE_RELEASE_KEY_ALIAS` 和
+`POKECAPSULE_RELEASE_KEY_PASSWORD` 注入；入口会在不打印值的情况下转换成
+Gradle 参数。命令行显式的 `-P` 参数优先于同名环境变量。
+
 ## 可复现构建
 
 仓库固定使用 Gradle `8.14.5`。本机先准备 Android SDK 34 和 Java 17，再执行：
