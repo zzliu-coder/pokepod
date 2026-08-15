@@ -71,13 +71,34 @@ jobs:
           gradle-version: "8.14.5"
       - name: Run both Android product lines
         working-directory: projects/pokecapsule-android
-        run: >-
-          ./build.sh
-          testPoke3LegacyDebugUnitTest testPhoneModernDebugUnitTest
-          lintPoke3LegacyDebug lintPhoneModernDebug
-          assemblePoke3LegacyDebug assemblePhoneModernDebug
-          lintPoke3LegacyRelease lintPhoneModernRelease
-          assemblePoke3LegacyRelease assemblePhoneModernRelease
+        run: |
+          set -euo pipefail
+          release_store_file="$RUNNER_TEMP/pokecapsule-ci-release.p12"
+          release_store_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          release_key_alias="pokecapsule-ci"
+          release_key_password="$release_store_password"
+          printf '::add-mask::%s\n' "$release_store_password"
+          cleanup() {
+            rm -f "$release_store_file"
+          }
+          trap cleanup EXIT
+          keytool -genkeypair -noprompt \
+            -alias "$release_key_alias" \
+            -keyalg RSA -keysize 2048 -validity 2 \
+            -storetype PKCS12 -keystore "$release_store_file" \
+            -storepass "$release_store_password" \
+            -keypass "$release_key_password" \
+            -dname 'CN=PokeCapsule CI,O=PokePod'
+          ./build.sh \
+            "-PreleaseStoreFile=$release_store_file" \
+            "-PreleaseStorePassword=$release_store_password" \
+            "-PreleaseKeyAlias=$release_key_alias" \
+            "-PreleaseKeyPassword=$release_key_password" \
+            testPoke3LegacyDebugUnitTest testPhoneModernDebugUnitTest \
+            lintPoke3LegacyDebug lintPhoneModernDebug \
+            assemblePoke3LegacyDebug assemblePhoneModernDebug \
+            lintPoke3LegacyRelease lintPhoneModernRelease \
+            assemblePoke3LegacyRelease assemblePhoneModernRelease
       - name: Run Android variant contract
         working-directory: projects/pokecapsule-android
         run: python3 test-android-variants.py

@@ -91,6 +91,14 @@ def test_workflow_contract() -> None:
         "gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a",
         'gradle-version: "8.14.5"',
         "./build.sh",
+        "keytool -genkeypair -noprompt",
+        'release_store_file="$RUNNER_TEMP/pokecapsule-ci-release.p12"',
+        'printf \'::add-mask::%s\\n\' "$release_store_password"',
+        "trap cleanup EXIT",
+        '"-PreleaseStoreFile=$release_store_file"',
+        '"-PreleaseStorePassword=$release_store_password"',
+        '"-PreleaseKeyAlias=$release_key_alias"',
+        '"-PreleaseKeyPassword=$release_key_password"',
         "testPoke3LegacyDebugUnitTest",
         "testPhoneModernDebugUnitTest",
         "protocol:",
@@ -106,6 +114,9 @@ def test_workflow_contract() -> None:
         "build.sh --release",
         "if: always()",
         "permissions:\n  contents: write",
+        "signingConfigs.debug",
+        "ci-pass",
+        "Upload Android",
     ):
         assert forbidden not in source, f"forbidden workflow operation: {forbidden}"
 
