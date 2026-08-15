@@ -1,9 +1,14 @@
 #!/bin/zsh
 set -euo pipefail
 
-ADB=/opt/homebrew/bin/adb
-APK="/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/artifacts/PokeCapsule-1.7.0-debug.apk"
-BACKUP_ROOT="/Users/zheliu/Documents/Codex/2026-07-27/referenced-chatgpt-conversation-this-is-untrusted-3/work/device-backups"
+SCRIPT_DIR=${0:A:h}
+ADB=${ADB:-$(command -v adb || true)}
+APK_ARG=${1:-}
+APK=${APK_ARG:-}
+if [[ -n "$APK" && "$APK" != /* ]]; then
+  APK="$SCRIPT_DIR/$APK"
+fi
+BACKUP_ROOT=${POKECAPSULE_BACKUP_ROOT:-"$HOME/Documents/PokeCapsule-Backups"}
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 finish() {
@@ -16,11 +21,6 @@ printf 'PokeCapsule 1.7 安全安装器\n\n'
 
 if [[ ! -x "$ADB" ]]; then
   printf '找不到 ADB：%s\n' "$ADB"
-  exit 1
-fi
-
-if [[ ! -f "$APK" ]]; then
-  printf '找不到安装包：%s\n' "$APK"
   exit 1
 fi
 
@@ -57,6 +57,43 @@ SERIAL="${poke_serials[1]}"
 MANUFACTURER=$("$ADB" -s "$SERIAL" shell getprop ro.product.manufacturer | tr -d '\r')
 MODEL=$("$ADB" -s "$SERIAL" shell getprop ro.product.model | tr -d '\r')
 DEVICE=$("$ADB" -s "$SERIAL" shell getprop ro.product.device | tr -d '\r')
+
+if [[ -z "$APK" ]]; then
+  candidates=()
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] && candidates+=("$candidate")
+  done < <(find "$SCRIPT_DIR" -maxdepth 1 -type f -name '*.apk' -print | sort)
+
+  preferred=()
+  for candidate in "${candidates[@]}"; do
+    name=$(basename "$candidate" | tr '[:upper:]' '[:lower:]')
+    if [[ "$name" == *poke3legacy* || "$name" == *poke3* ]]; then
+      preferred+=("$candidate")
+    fi
+  done
+  if (( ${#preferred[@]} == 1 )); then
+    APK="${preferred[1]}"
+  elif (( ${#candidates[@]} == 1 )); then
+    APK="${candidates[1]}"
+  elif (( ${#candidates[@]} == 0 )); then
+    printf '没有找到 APK。请把 APK 放在安装器旁边，或作为第一个参数传入。\n'
+    exit 1
+  else
+    printf '检测到多个 APK，无法安全猜测版本。请把目标 APK 作为第一个参数传入：\n'
+    printf '  %s\n' "${candidates[@]}"
+    exit 1
+  fi
+fi
+
+if [[ ! -f "$APK" ]]; then
+  printf '找不到安装包：%s\n' "$APK"
+  exit 1
+fi
+apk_name=$(basename "$APK" | tr '[:upper:]' '[:lower:]')
+if [[ "$apk_name" == *phonemodern* ]]; then
+  printf '当前目标是 Poke3，拒绝安装 phoneModern APK：%s\n' "$APK"
+  exit 1
+fi
 BACKUP_DIR="$BACKUP_ROOT/$STAMP-$SERIAL"
 mkdir -p "$BACKUP_DIR"
 
