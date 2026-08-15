@@ -643,6 +643,13 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         python3 "$RESCUE_PARTITION_VALIDATOR" runtime \
           --manifest "$MANIFEST_PATH" --application "$POST_IDENTITY" \
           --target-slot "$RESCUE_TARGET_SLOT"
+      else
+        # App-only writes always target app0 and deliberately leave otadata
+        # untouched.  A device that comes back on app1 is an old image and
+        # must fail closed instead of being reported as a successful flash.
+        python3 "$RESCUE_PARTITION_VALIDATOR" runtime \
+          --manifest "$MANIFEST_PATH" --application "$POST_IDENTITY" \
+          --target-slot app0
       fi
       python3 - "$RUN_DIR" "$MANIFEST_PATH" "$FIRMWARE_BIN" "$DEVICE_KEY" \
         "$APP_PORT" "$ROM_PORT" "$port" "$IDENTITY_VERDICT" <<'PY'

@@ -293,6 +293,11 @@ def validate_runtime_identity(
         fail("rescue_source_revision_manifest_invalid")
     if identity.get("sourceRevision") != source_revision:
         fail("rescue_source_revision_mismatch")
+    firmware_version = manifest.get("firmwareVersion")
+    if not isinstance(firmware_version, str) or not firmware_version:
+        fail("rescue_firmware_version_manifest_invalid")
+    if identity.get("firmwareVersion") != firmware_version:
+        fail("rescue_firmware_version_mismatch")
 
     image_identity = manifest.get("imageIdentity")
     if image_identity is not None:
@@ -328,6 +333,7 @@ def validate_runtime_identity(
     return {
         "runningPartition": target,
         "sourceRevision": source_revision,
+        "firmwareVersion": firmware_version,
         "appElfSha256": actual_elf,
     }
 

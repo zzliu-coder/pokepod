@@ -13,6 +13,7 @@ assert "--rescue-target" in source
 assert "--known-good-slot" in source
 assert "rescue_target_and_known_good_must_differ" in source
 assert "validate-rescue-partitions.py" in source
+assert "--target-slot app0" in source
 assert "--offset 0x8000 --size 0x1000" in source
 assert "--offset 0xE000 --size 0x2000" in source
 assert "--offset 0x10000 --size 0x300000" in source
@@ -24,6 +25,7 @@ assert "runtime" in source
 assert "imageIdentity" in validator and "appElfSha256" in validator
 assert "rescue_running_partition" in validator
 assert "rescue_source_revision_mismatch" in validator
+assert "rescue_firmware_version_mismatch" in validator
 assert "rescue_app_elf_sha_mismatch" in validator
 assert "image_identity_app_elf_sha" in validator and "_invalid" in validator
 

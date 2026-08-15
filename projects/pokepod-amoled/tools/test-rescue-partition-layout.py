@@ -114,20 +114,37 @@ def main() -> int:
     # Green artifacts have no resource-review file.  Their exact ELF digest
     # comes from imageIdentity and must still be checked after reboot.
     source_revision = "a" * 40
+    firmware_version = "2.0.0"
     elf_sha = "b" * 64
     green_manifest = {
         "sourceRevision": source_revision,
+        "firmwareVersion": firmware_version,
         "imageIdentity": {"appElfSha256": elf_sha},
     }
     runtime_identity = {
         "runningPartition": "app1",
         "sourceRevision": source_revision,
+        "firmwareVersion": firmware_version,
         "appElfSha256": elf_sha,
     }
     result = layout.validate_runtime_identity(
         green_manifest, runtime_identity, "app1"
     )
     assert result["appElfSha256"] == elf_sha
+    assert result["firmwareVersion"] == firmware_version
+    app_only_identity = dict(runtime_identity)
+    app_only_identity["runningPartition"] = "app0"
+    assert layout.validate_runtime_identity(
+        green_manifest, app_only_identity, "app0"
+    )["runningPartition"] == "app0"
+    wrong_firmware = dict(runtime_identity)
+    wrong_firmware["firmwareVersion"] = "1.0.0"
+    expect_failure(
+        lambda: layout.validate_runtime_identity(
+            green_manifest, wrong_firmware, "app1"
+        ),
+        "rescue_firmware_version_mismatch",
+    )
     with tempfile.TemporaryDirectory(prefix="pokepod-rescue-green-") as raw:
         green_root = Path(raw)
         green_manifest_path = green_root / "artifact.json"
@@ -162,6 +179,7 @@ def main() -> int:
     )
     legacy_manifest = {
         "sourceRevision": source_revision,
+        "firmwareVersion": firmware_version,
         "appElfSha256": elf_sha,
     }
     assert layout.validate_runtime_identity(
@@ -176,6 +194,7 @@ def main() -> int:
         )
         review_manifest = {
             "sourceRevision": source_revision,
+            "firmwareVersion": firmware_version,
             "resourceReview": {"evidenceFile": "resource-review.json"},
         }
         manifest_path.write_text(json.dumps(review_manifest) + "\n", encoding="utf-8")
