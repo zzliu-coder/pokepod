@@ -92,7 +92,17 @@ VBUS、音频、同步、配网、UI 动画、自动亮屏或等待超时中的�
 `recording_metadata` 和 `recording_audio_open`；配网故障重点看
 `provisioning_quiesce_*`、`provisioning_mode_*`、`provisioning_softap_*`；
 “无线麦克风暂时不可用”重点看 `wireless_router_acquire`、
-`wireless_capture_start` 和 `wireless_session_start`。
+`wireless_capture_start`、`wireless_session_start`、`audio_capture_status` 和
+`wireless_capture_terminal`。无线采集启动后不再同步写 NVS，终态会明确记录读取次数、
+I2S 超时、最慢读取、环形队列高水位和丢帧数。
+
+录音存储性能探针只计量 SD 的 4 KiB 写入与 flush；NVS 诊断在计量和临时文件清理
+结束后一次性写入。这样“存储卡性能不足”代表 SD 实测结果，不会混入内部 Flash
+诊断耗时，也不会在一次探针中反复磨损 NVS。
+
+手机配网进入 AP 前会先结束 BLE 会话、确认物理断开并释放完整 BLE controller 内存，
+随后才执行 `WiFi.mode(WIFI_AP)`。配网结束后设备通过统一重启协调器恢复 BLE；用户
+退出配网或 USB/Wi-Fi Link 断开不会取消已经接受的重启意图。
 
 腾讯请求使用 TLS 证书校验和 TC3-HMAC-SHA256。WAV 以两遍流式方式完成
 签名与 Base64 上传，不在内存中保存完整音频或完整请求体。转写在后台任务中
@@ -138,7 +148,9 @@ python3 fixture/pokepod-fixture.py flash \
   --mode fast
 ```
 
-夹具控制器的 BOOT/RESET 应采用开漏或三态、电平保护和 VBUS 限流。正常 USB 升级
+夹具控制器的 BOOT/RESET 应采用开漏或三态、电平保护和 VBUS 限流。参考控制器固件、
+固定串口桥接协议、控制 profile、自动 ROM 恢复和录音/配网场景复现命令位于
+`fixture/`，详见 `fixture/README.md`。正常 USB 升级
 不依赖控制器，BOOT/RESET 只作为恢复通道。
 
 CDC 是纯二进制协议通道，帧包含版本、请求 ID、长度和 CRC32。调试日志写入

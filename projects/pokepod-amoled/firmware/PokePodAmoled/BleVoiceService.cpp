@@ -257,6 +257,7 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
   deviceId_ = deviceId;
   enablePolicy_.begin(userEnabled);
   idlePaused_ = false;
+  provisioningSuspended_ = false;
   const String advertisedName = "PokePod-" + deviceId.substring(
       deviceId.length() > 4 ? deviceId.length() - 4 : 0);
   BLEDevice::init(advertisedName.c_str());
@@ -336,11 +337,13 @@ bool BleVoiceService::begin(const String &deviceId, bool userEnabled,
 }
 
 void BleVoiceService::requestEnable() {
+  if (provisioningSuspended_) return;
   applyEnableActions(
       enablePolicy_.requestEnable(physicalConnectionPending()), millis());
 }
 
 void BleVoiceService::requestDisable(uint32_t nowMs) {
+  if (provisioningSuspended_) return;
   cancelPairingMode();
   sessionStopRequest_.beginTransition(enablePolicy_.transitionPending());
   applyEnableActions(
@@ -623,6 +626,7 @@ void BleVoiceService::processDeviceInfoRead() {
 }
 
 void BleVoiceService::poll(uint32_t nowMs) {
+  if (provisioningSuspended_) return;
   drainCallbackEvents(nowMs);
   advanceCallbackOverflow(nowMs);
   applyEnableActions(enablePolicy_.poll(controller_.active(),
@@ -814,12 +818,36 @@ bool BleVoiceService::pauseForIdleSleep() {
 }
 
 void BleVoiceService::resumeAfterIdleSleep() {
+  if (provisioningSuspended_) return;
   if (!idlePaused_) return;
   idlePaused_ = false;
   restartAdvertising();
 }
 
+bool BleVoiceService::suspendForProvisioning() {
+  if (provisioningSuspended_) return true;
+  if (!idlePaused_ || !quiescedForSleep()) return false;
+  callbackEvents_.closeAdmission();
+  notifyStatusEvents_.closeAdmission();
+  notifyCallbackBinding_.invalidate();
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  if (advertising != nullptr) advertising->stop();
+  BLEDevice::deinit(false);
+  server_ = nullptr;
+  info_ = nullptr;
+  command_ = nullptr;
+  event_ = nullptr;
+  audio_ = nullptr;
+  provisioningSuspended_ = true;
+  if (log_ != nullptr) {
+    log_->println(
+        "{\"event\":\"ble_voice_provisioning_suspend\",\"ok\":true}");
+  }
+  return true;
+}
+
 void BleVoiceService::prepareForDeepSleep() {
+  if (provisioningSuspended_) return;
   idlePaused_ = true;
   controller_.complete();
   resetAudioNotify();

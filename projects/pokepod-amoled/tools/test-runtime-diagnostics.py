@@ -37,6 +37,21 @@ assert "provisioningQuiesceBefore" in provisioning
 assert "recordWirelessRuntime" in app
 assert "wirelessCaptureStart" in app
 
+# NVS-backed runtime diagnostics must never execute inside the timed SD probe
+# primitive. The probe persists only aggregate facts after cleanup.
+probe_loop = wav[wav.index("for (uint8_t index = 0;"):
+                 wav.index("const uint64_t totalUs")]
+assert "recordRuntime(" not in probe_loop
+assert "completedBytes" in wav and "failedChunk" in wav
+
+# Every persistent wireless-start diagnostic precedes capture task creation.
+wireless_start = app[app.index("bool startWirelessHold()"):
+                     app.index("AudioCaptureDispatchResult drainCapturedAudio")]
+capture_start = wireless_start.index("captureRuntime.start(")
+assert "recordWirelessRuntime(" not in wireless_start[capture_start:]
+assert wireless_start.index("bleVoice.startSession(") < capture_start
+assert "wireless_capture_terminal" in app
+
 for secret in ("secretKey", "secretId", "password", "credential"):
     assert secret not in runtime
     assert secret not in codec

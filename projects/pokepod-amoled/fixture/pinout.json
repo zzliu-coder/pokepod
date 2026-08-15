@@ -25,9 +25,18 @@
   },
   "rescue_upgrade": {
     "transport": "rom-serial-loader",
-    "requires_manual_boot_reset": true,
-    "command": "./flash.sh --fast --rom-port <rom-port>",
+    "requires_manual_boot_reset": false,
+    "requires_fixture_controller": true,
+    "manual_fallback_supported": true,
+    "command": "python3 pokepod-fixture.py recover --control-profile <profile> --authority <authority>",
     "backs_up_app0_before_write": true,
     "reads_back_and_verifies_app0": true
+  },
+  "controller": {
+    "protocol": "pokepod.fixture.control.v1",
+    "referenceFirmware": "controller-firmware/pokepod_fixture_controller.ino",
+    "hostBridge": "pokepod-fixture-bridge.py",
+    "owns": ["boot", "reset", "optional_vbus_power"],
+    "doesNotOwn": ["device_identity", "firmware_policy", "flash_authority"]
   }
 }

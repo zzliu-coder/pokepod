@@ -52,6 +52,11 @@ class BleVoiceService {
   void setBatteryPercent(int batteryPercent);
   bool pauseForIdleSleep();
   void resumeAfterIdleSleep();
+  // Provisioning temporarily releases the complete BLE controller allocation
+  // before enabling SoftAP. GATT wrapper objects are deliberately not rebuilt
+  // in-place; the App performs one safe device restart after the portal closes.
+  bool suspendForProvisioning();
+  bool provisioningSuspended() const { return provisioningSuspended_; }
   void prepareForDeepSleep();
 
   bool connected() const { return connected_; }
@@ -59,10 +64,12 @@ class BleVoiceService {
   bool disablePending() const { return enablePolicy_.transitionPending(); }
   bool idlePaused() const { return idlePaused_; }
   bool radioActive() const {
+    if (provisioningSuspended_) return false;
     return !quiescedForSleep() ||
         (userEnabled() && !idlePaused_);
   }
   bool quiescedForSleep() const {
+    if (provisioningSuspended_) return true;
     return bleVoiceQuiescedForSleep(sleepQuiescenceFacts());
   }
   bool callbackOverflowHardFailed() const {
@@ -290,6 +297,7 @@ class BleVoiceService {
   BleSessionStopRequestLatch sessionStopRequest_;
   bool callbackOverflowRecoveryRestartClaimed_ = false;
   bool appHandshakeRecoveryRestartClaimed_ = false;
+  bool provisioningSuspended_ = false;
 };
 
 }  // namespace pokepod

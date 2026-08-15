@@ -26,6 +26,14 @@ class DeviceRebootCoordinator {
     return true;
   }
 
+  bool requestLocal(uint32_t nowMs) {
+    if (pending()) return false;
+    origin_ = LinkTransport::none;
+    dueAtMs_ = nowMs + kResponseDrainMs;
+    phase_ = DeviceRebootPhase::accepted;
+    return true;
+  }
+
   bool pending() const { return phase_ != DeviceRebootPhase::idle; }
   bool due(uint32_t nowMs) const {
     return pending() && static_cast<int32_t>(nowMs - dueAtMs_) >= 0;

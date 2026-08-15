@@ -382,6 +382,8 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
   RecorderTerminal failureTerminal = RecorderTerminal::none;
   RecorderFailureStage failureStage = RecorderFailureStage::none;
   uint64_t maximumTailUs = 0;
+  uint32_t completedBytes = 0;
+  uint8_t failedChunk = kRecordingProbeChunkCount;
   const uint64_t probeStartedUs = capacitySource_->monotonicMicros();
   uint64_t probeFinishedUs = probeStartedUs;
 
@@ -401,30 +403,22 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
       break;
     }
     const uint64_t primitiveStartedUs = capacitySource_->monotonicMicros();
-    recordRuntime(RuntimeDiagnosticStage::recordingProbeWrite,
-                  RuntimeDiagnosticOutcome::started, index,
-                  kRecordingProbeChunkBytes, log);
     const size_t written = probe.write(recordingProbeBuffer_,
                                        kRecordingProbeChunkBytes);
-    recordRuntime(RuntimeDiagnosticStage::recordingProbeFlush,
-                  RuntimeDiagnosticOutcome::started, index,
-                  static_cast<uint32_t>(written), log);
     probe.flush();
     const uint64_t primitiveFinishedUs = capacitySource_->monotonicMicros();
     probeFinishedUs = primitiveFinishedUs;
     const uint64_t tailUs = primitiveFinishedUs - primitiveStartedUs;
-    recordRuntime(RuntimeDiagnosticStage::recordingProbeFlush,
-                  probe.getWriteError() == 0
-                      ? RuntimeDiagnosticOutcome::success
-                      : RuntimeDiagnosticOutcome::failure,
-                  index, static_cast<uint32_t>(tailUs / 1000ULL), log);
     if (tailUs > maximumTailUs) maximumTailUs = tailUs;
     if (written != kRecordingProbeChunkBytes || probe.getWriteError() != 0) {
+      failedChunk = index;
       failureTerminal = RecorderTerminal::storageFailure;
       failureStage = RecorderFailureStage::storageProbeWrite;
       break;
     }
+    completedBytes += static_cast<uint32_t>(written);
     if (tailUs > kRecordingProbeMaximumTailUs) {
+      failedChunk = index;
       failureTerminal = RecorderTerminal::admissionFailure;
       failureStage = RecorderFailureStage::storageTooSlow;
       break;
@@ -465,6 +459,23 @@ bool WavRecorder::runStoragePerformanceProbe(Print &log) {
     failureTerminal = RecorderTerminal::storageFailure;
     failureStage = RecorderFailureStage::storageProbeCleanup;
   }
+
+  // RuntimeDiagnostics persists its ring to NVS.  Persisting once per 4 KiB
+  // primitive used to put synchronous internal-flash writes inside the timed
+  // SD probe, so the UI could report a fast card as slow and every admission
+  // caused dozens of needless NVS writes.  Only aggregate facts are recorded,
+  // after all latency measurements and file cleanup have finished.
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeWrite,
+                failureStage == RecorderFailureStage::none
+                    ? RuntimeDiagnosticOutcome::success
+                    : RuntimeDiagnosticOutcome::failure,
+                completedBytes, failedChunk, log);
+  recordRuntime(RuntimeDiagnosticStage::recordingProbeFlush,
+                failureStage == RecorderFailureStage::none
+                    ? RuntimeDiagnosticOutcome::success
+                    : RuntimeDiagnosticOutcome::failure,
+                static_cast<uint32_t>(totalUs / 1000ULL),
+                static_cast<uint32_t>(maximumTailUs / 1000ULL), log);
 
   log.printf(
       "{\"event\":\"recording_storage_probe\",\"ok\":%s,"

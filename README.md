@@ -28,3 +28,13 @@ interaction. The fifth row is an explicit shutdown action with confirmation and
 the existing cooperative safe-shutdown gate. USB CDC OTA is implemented for a
 running firmware image; the fixture performs identity, size and SHA-256 checks,
 streams the inactive OTA slot, and leaves BOOT/RESET as the recovery path.
+The repository also includes a reference USB fixture-controller firmware,
+fail-closed host control profile, automatic ROM rescue, full app0 readback and
+recording/provisioning exercise capture. A plain USB cable supports normal OTA;
+automatic recovery requires the protected open-drain BOOT/RESET controller.
+
+The current runtime hardening releases the complete BLE allocation before
+SoftAP provisioning, removes NVS writes from the timed SD qualification probe,
+and keeps persistent diagnostics out of the wireless capture start window.
+Status and terminal logs expose capture read counts, I2S timeouts, ring
+high-water and drops so device failures can be diagnosed from collected facts.

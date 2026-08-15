@@ -8,6 +8,7 @@
 namespace pokepod {
 
 class DeviceConfig;
+class BleVoiceService;
 class ProvisioningDiagnostics;
 class ProvisioningPortal;
 class RuntimeDiagnostics;
@@ -21,6 +22,7 @@ class ProvisioningCoordinator {
   void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
     runtimeDiagnostics_ = &diagnostics;
   }
+  void bindBleVoice(BleVoiceService &bleVoice) { bleVoice_ = &bleVoice; }
   bool request(uint32_t nowMs);
   void poll(uint32_t nowMs);
   void stop();
@@ -36,6 +38,7 @@ class ProvisioningCoordinator {
     return provisioningStartupPhaseName(startup_.phase());
   }
   bool takeConfigurationChanged();
+  bool takeRestartRequired();
 
  private:
   void resumeNormalWifi();
@@ -49,8 +52,11 @@ class ProvisioningCoordinator {
   ProvisioningDiagnostics *diagnostics_ = nullptr;
   Print *log_ = nullptr;
   RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
+  BleVoiceService *bleVoice_ = nullptr;
   ProvisioningStartupPolicy startup_;
   bool normalWifiResumed_ = true;
+  bool blePauseRequested_ = false;
+  bool restartRequired_ = false;
 };
 
 }  // namespace pokepod

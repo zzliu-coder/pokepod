@@ -687,19 +687,6 @@ bool startWirelessHold() {
   }
   uint32_t sessionId = esp_random();
   if (sessionId == 0) sessionId = 1;
-  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
-                        RuntimeDiagnosticOutcome::started, sessionId, 0);
-  if (!captureRuntime.start(audio, sessionId, usb.log())) {
-    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
-                          RuntimeDiagnosticOutcome::failure, sessionId,
-                          static_cast<uint32_t>(captureRuntime.incomplete()));
-    captureRouter.release(AudioCaptureOwner::wirelessVoice);
-    showMessage("无线麦克风暂时不可用");
-    drawDashboard();
-    return false;
-  }
-  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
-                        RuntimeDiagnosticOutcome::success, sessionId, 0);
   recordWirelessRuntime(RuntimeDiagnosticStage::wirelessSessionStart,
                         RuntimeDiagnosticOutcome::started, sessionId,
                         static_cast<uint32_t>(bleVoice.mtu()));
@@ -713,6 +700,10 @@ bool startWirelessHold() {
     drawDashboard();
     return false;
   }
+  // RuntimeDiagnostics writes NVS synchronously.  Complete every persistent
+  // diagnostic before the high-priority capture task starts; otherwise six
+  // capture frames can fill the ring while the main loop is blocked and the
+  // Mac observes a ready session with zero audio notifications.
   recordWirelessRuntime(RuntimeDiagnosticStage::wirelessSessionStart,
                         RuntimeDiagnosticOutcome::success, sessionId,
                         static_cast<uint32_t>(bleVoice.sessionState()));
@@ -720,6 +711,18 @@ bool startWirelessHold() {
                         RuntimeDiagnosticOutcome::success, sessionId,
                         (static_cast<uint32_t>(bleVoice.mtu()) << 16) |
                             static_cast<uint32_t>(bleVoice.appReady()));
+  recordWirelessRuntime(RuntimeDiagnosticStage::wirelessCaptureStart,
+                        RuntimeDiagnosticOutcome::started, sessionId, 0);
+  if (!captureRuntime.start(audio, sessionId, usb.log())) {
+    bleVoice.abortSession(VoiceSessionError::microphoneBusy);
+    captureRouter.release(AudioCaptureOwner::wirelessVoice);
+    showMessage("无线麦克风暂时不可用");
+    drawDashboard();
+    return false;
+  }
+  usb.log().printf(
+      "{\"event\":\"wireless_capture_started\",\"session_id\":%lu}\n",
+      static_cast<unsigned long>(sessionId));
   wirelessUiActive = true;
   noteUserActivity();
   transientMessage = "";
@@ -834,11 +837,31 @@ bool finishPendingCaptureStop() {
   pendingRecorderStopReason = RecorderStopReason::none;
 
   if (owner == PendingCaptureStop::wirelessVoice) {
+    const AudioCaptureServiceMetrics captureMetrics = captureRuntime.metrics();
     recordWirelessRuntime(RuntimeDiagnosticStage::wirelessStop,
                           complete ? RuntimeDiagnosticOutcome::success
                                    : RuntimeDiagnosticOutcome::failure,
-                          static_cast<uint32_t>(dispatch.ok),
-                          static_cast<uint32_t>(captureRuntime.incomplete()));
+                          captureMetrics.readCalls,
+                          ((captureMetrics.timeouts & 0xffffU) << 16) |
+                              (captureMetrics.ring.droppedFrames & 0xffffU));
+    usb.log().printf(
+        "{\"event\":\"wireless_capture_terminal\",\"session_id\":%lu,"
+        "\"complete\":%s,\"dispatch_ok\":%s,\"read_calls\":%lu,"
+        "\"short_reads\":%lu,\"timeouts\":%lu,\"early_zero\":%lu,"
+        "\"source_failures\":%lu,\"longest_read_us\":%lu,"
+        "\"ring_high_water\":%lu,\"ring_drops\":%lu,"
+        "\"consumed_frames\":%lu}\n",
+        static_cast<unsigned long>(captureMetrics.ring.sessionId),
+        complete ? "true" : "false", dispatch.ok ? "true" : "false",
+        static_cast<unsigned long>(captureMetrics.readCalls),
+        static_cast<unsigned long>(captureMetrics.shortReads),
+        static_cast<unsigned long>(captureMetrics.timeouts),
+        static_cast<unsigned long>(captureMetrics.earlyZeroReads),
+        static_cast<unsigned long>(captureMetrics.sourceFailures),
+        static_cast<unsigned long>(captureMetrics.longestReadUs),
+        static_cast<unsigned long>(captureMetrics.ring.highWaterFrames),
+        static_cast<unsigned long>(captureMetrics.ring.droppedFrames),
+        static_cast<unsigned long>(dispatch.consumedFrames));
     if (complete) bleVoice.endSession();
     else bleVoice.abortSession(VoiceSessionError::notifyFailed);
     captureRouter.release(AudioCaptureOwner::wirelessVoice);
@@ -1113,6 +1136,33 @@ void emitStatus() {
       wirelessSync->authenticated() ? "true" : "false",
       static_cast<unsigned long>(wirelessSync->remainingSeconds(millis())),
       wirelessSync->lastError());
+  const AudioCaptureServiceMetrics captureMetrics = captureRuntime.metrics();
+  const AudioCaptureDispatcherMetrics dispatchMetrics =
+      captureDispatcher.metrics();
+  usb.log().printf(
+      "{\"event\":\"audio_capture_status\",\"session_id\":%lu,"
+      "\"read_calls\":%lu,\"short_reads\":%lu,\"timeouts\":%lu,"
+      "\"zero_reads\":%lu,\"early_zero\":%lu,"
+      "\"source_overruns\":%lu,\"source_failures\":%lu,"
+      "\"longest_read_us\":%lu,\"ring_current\":%lu,"
+      "\"ring_high_water\":%lu,\"ring_drops\":%lu,"
+      "\"dispatch_consumed\":%lu,\"dispatch_voice_failures\":%lu,"
+      "\"dispatch_routing_failures\":%lu}\n",
+      static_cast<unsigned long>(captureMetrics.ring.sessionId),
+      static_cast<unsigned long>(captureMetrics.readCalls),
+      static_cast<unsigned long>(captureMetrics.shortReads),
+      static_cast<unsigned long>(captureMetrics.timeouts),
+      static_cast<unsigned long>(captureMetrics.zeroByteReads),
+      static_cast<unsigned long>(captureMetrics.earlyZeroReads),
+      static_cast<unsigned long>(captureMetrics.sourceOverruns),
+      static_cast<unsigned long>(captureMetrics.sourceFailures),
+      static_cast<unsigned long>(captureMetrics.longestReadUs),
+      static_cast<unsigned long>(captureMetrics.ring.currentFrames),
+      static_cast<unsigned long>(captureMetrics.ring.highWaterFrames),
+      static_cast<unsigned long>(captureMetrics.ring.droppedFrames),
+      static_cast<unsigned long>(dispatchMetrics.consumedFrames),
+      static_cast<unsigned long>(dispatchMetrics.voiceDeliveryFailures),
+      static_cast<unsigned long>(dispatchMetrics.routingFailures));
 }
 
 void pollTouch() {
@@ -1374,6 +1424,11 @@ void pollTouch() {
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {
+      if (storageBootPhase != StorageBootPhase::ready) {
+        showMessage("本地服务启动中，请稍候");
+        drawDashboard();
+        return;
+      }
       if (!capabilities.allows(kWifiCapabilities)) {
         showMessage("Wi-Fi 服务未就绪");
         drawDashboard();
@@ -1745,6 +1800,7 @@ void setup() {
   provisioningCoordinator.begin(provisioningPortal, wifi, deviceConfig,
                                 provisioningDiagnostics, usb.log());
   provisioningCoordinator.bindRuntimeDiagnostics(runtimeDiagnostics);
+  provisioningCoordinator.bindBleVoice(bleVoice);
   const StartupCapabilityPresentation startup =
       startupCapabilityPresentation(capabilities);
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
@@ -1776,6 +1832,9 @@ void loop() {
       pollTouch();
     }
     provisioningCoordinator.poll(now);
+    if (provisioningCoordinator.takeRestartRequired()) {
+      (void)deviceReboot.requestLocal(now);
+    }
     if (provisioningCoordinator.takeConfigurationChanged()) {
       dashboard.invalidate();
     }
@@ -2053,6 +2112,10 @@ void loop() {
     pollTouch();
   }
   provisioningCoordinator.poll(now);
+  if (provisioningCoordinator.takeRestartRequired()) {
+    (void)deviceReboot.requestLocal(now);
+    showMessage("配网已退出，正在恢复蓝牙…", 3000);
+  }
   if (provisioningCoordinator.takeConfigurationChanged()) {
     tencentWorker.wake();
     dashboard.invalidate();

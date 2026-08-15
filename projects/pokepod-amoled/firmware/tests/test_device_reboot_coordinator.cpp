@@ -40,6 +40,15 @@ int main() {
   assert(!reboot.pending());
   assert(reboot.origin() == LinkTransport::none);
 
+  // Local device lifecycle owners (for example provisioning after BLE has
+  // been deinitialized) use the same durable request without inventing a
+  // transport owner.
+  assert(reboot.requestLocal(2000));
+  assert(reboot.pending());
+  assert(reboot.origin() == LinkTransport::none);
+  assert(reboot.due(2100));
+  reboot.acknowledgeRestart();
+
   // USB and Wi-Fi use the same reusable coordinator across device sessions.
   assert(reboot.request(UINT32_MAX - 49U, LinkTransport::usb));
   assert(!reboot.due(49));
