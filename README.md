@@ -24,8 +24,12 @@ merge-result firmware source gate and runs independent Mac, Android and shared
 protocol lanes. The protocol lane uses the dependency-free
 `projects/pokecapsule-protocol/validate-fixtures.py` validator and rejects
 missing local `$ref` targets, invalid examples and invalid processing fixtures.
-The repository CI does not run a Release build, access a serial port, or flash
-hardware. A green host/CI result remains `unverified` for hardware behavior.
+The Android lane runs debug checks plus Release lint/assemble using a temporary
+runner-only signing key; this validates the variant build graph and does not
+produce a distributable signed release. Firmware Fast is an exact-head
+artifact/evidence build; firmware Release is not run. Neither firmware build
+nor any Mac/Android host result accesses a serial port or flashes hardware, and
+a green host/CI result remains `unverified` for device behavior.
 
 The repository contains a CODEOWNERS routing file and a security policy. GitHub
 branch protection, required checks, signing status and downloaded-artifact

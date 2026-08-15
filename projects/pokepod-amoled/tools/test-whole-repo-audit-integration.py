@@ -152,8 +152,14 @@ def test_governance_and_test_registry() -> None:
         "protocol",
         "branch protection",
         "unverified",
+        "Android lane runs debug checks plus Release lint/assemble",
+        "temporary",
+        "runner-only signing key",
+        "Firmware Fast",
+        "firmware Release is not run",
     ):
         assert required in readme, required
+    assert "does not run a Release build" not in readme
 
     gates = json.loads(GATES.read_text(encoding="utf-8"))
     assert "test-whole-repo-audit-integration.py" in gates["repository"]
@@ -162,9 +168,7 @@ def test_governance_and_test_registry() -> None:
     assert "test-fixture-link-behavior.py" in gates["source"]
     assert "test-rescue-flash-policy.py" in gates["source"]
     assert "test-rescue-partition-layout.py" in gates["source"]
-    pending = gates.get("pending", {})
-    assert pending["android"][0]["path"] == "projects/pokecapsule-android/test-android-variants.py"
-    assert pending["android"][0]["owner"] == "L5"
+    assert "pending" not in gates
 
 
 if __name__ == "__main__":

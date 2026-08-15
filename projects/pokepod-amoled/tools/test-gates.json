@@ -80,14 +80,5 @@
     "test-test-runner-timeouts.py",
     "test-source-audit-package.py",
     "test-whole-repo-audit-integration.py"
-  ],
-  "pending": {
-    "android": [
-      {
-        "path": "projects/pokecapsule-android/test-android-variants.py",
-        "owner": "L5",
-        "promoteTo": "android-ci"
-      }
-    ]
-  }
+  ]
 }
