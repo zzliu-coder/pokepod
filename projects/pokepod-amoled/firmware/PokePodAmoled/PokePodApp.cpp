@@ -552,7 +552,7 @@ void drawDashboard() {
   view.settings = &deviceConfig.settings();
   view.portalPassword = nullptr;
   if (psramDegradedBoot) {
-    view.localCapsuleStatus = "PSRAM REQUIRED · 大型服务已禁用";
+    view.localCapsuleStatus = "PSRAM REQUIRED";
     view.audioReady = false;
     view.localCapsulesReady = false;
     view.recorderReady = false;
@@ -1783,7 +1783,7 @@ void setup() {
     (void)runtimeDiagnostics.begin(
         usb.log(), static_cast<uint16_t>(esp_reset_reason()));
     dashboard.begin(board.display(), nullptr);
-    showMessage("PSRAM REQUIRED · 请关机检查内存", 60000);
+    showMessage("PSRAM REQUIRED · CHECK MEMORY", 60000);
     drawDashboard();
     return;
   }
