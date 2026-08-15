@@ -36,6 +36,9 @@ def main() -> int:
     assert "esp_ota_end" in session and "esp_ota_set_boot_partition" in session
     assert "esp_ota_get_partition_description" in session
     assert "candidate app ELF SHA-256 mismatch" in session
+    assert session.index("if (!validateCandidateAppElfSha256())") < session.index(
+        "if (esp_ota_end(handle_)", session.index("bool FirmwareUpdateSession::finish")
+    )
     assert "esp_ota_abort" in session and "SHA-256 mismatch" in session
     assert "kMaximumImageBytes = 0x300000U" in policy
     assert "firmware-update" in dispatcher and "LinkTransport::usb" in dispatcher

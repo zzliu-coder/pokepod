@@ -310,19 +310,21 @@ bool FirmwareUpdateSession::finish() {
     target_ = nullptr;
     return fail("firmware image identity mismatch");
   }
+  // The marker is embedded before the ESP app descriptor is available, so a
+  // production image may carry appElfSha256="unknown" there. The candidate
+  // partition descriptor is the authoritative pre-boot value.
+  if (!validateCandidateAppElfSha256()) {
+    (void)esp_ota_abort(handle_);
+    handle_ = 0;
+    target_ = nullptr;
+    return fail("candidate app ELF SHA-256 mismatch");
+  }
   if (esp_ota_end(handle_) != ESP_OK) {
     handle_ = 0;
     target_ = nullptr;
     return fail("OTA image validation failed");
   }
   handle_ = 0;
-  // The marker is embedded before the ESP app descriptor is available, so a
-  // production image may carry appElfSha256="unknown" there. The candidate
-  // partition descriptor is the authoritative pre-boot value.
-  if (!validateCandidateAppElfSha256()) {
-    target_ = nullptr;
-    return fail("candidate app ELF SHA-256 mismatch");
-  }
   if (esp_ota_set_boot_partition(target_) != ESP_OK) {
     target_ = nullptr;
     return fail("OTA boot selection failed");
