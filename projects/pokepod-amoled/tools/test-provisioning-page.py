@@ -166,13 +166,18 @@ assert "view.provisioning = provisioningCoordinator.visible();" in draw_dashboar
 # The ternary above therefore publishes null after stop instead of retaining a
 # pointer across portal credential wiping or across frames.
 coordinator_stop = coordinator[
-    coordinator.index("void ProvisioningCoordinator::stop()"):
+    coordinator.index("void ProvisioningCoordinator::stop("):
     coordinator.index("bool ProvisioningCoordinator::active() const")
 ]
-assert "portal_->stop();" in coordinator_stop
-assert coordinator_stop.index("portal_->stop();") < coordinator_stop.index(
+assert "portal_->stop(reason);" in coordinator_stop
+assert coordinator_stop.index("portal_->stop(reason);") < coordinator_stop.index(
     "startup_.reset();"
 )
+assert "ProvisioningStopReason::bootButton" in main_source
+assert "ProvisioningStopReason::touchBack" in main_source
+assert "provisioningStopReasonKey(reason)" in source
+assert "ProvisioningStopReason::startupTimeout" in source
+assert "migrateProvisioningPasswordMode(storedMode)" in config_source
 assert "bool visible() const { return startup_.visible(); }" in coordinator_header
 startup_reset = startup_policy_source[
     startup_policy_source.index("void reset()"):
@@ -219,7 +224,7 @@ confirm_handler = source[source.index(
     source.index("void ProvisioningPortal::discardSensitiveCandidate")]
 assert confirm_handler.index("acceptPhysicalPress") < confirm_handler.index(
     "armStationValidation")
-assert "stop();" in confirm_handler
+assert "stop(ProvisioningStopReason::lifetimeExpired);" in confirm_handler
 assert "void ProvisioningPortal::beginStationValidation()" in source
 assert "void ProvisioningPortal::restorePortalForRetry()" in source
 assert "restorePortalForRetry();" in source
@@ -297,7 +302,7 @@ assert "statusMessage_ = \"请选择附近的 2.4 GHz 网络或手工输入\";" 
 state_handler = source[source.index("ProvisioningState ProvisioningPortal::state() const"):
                        source.index("const char *ProvisioningPortal::portalState")]
 assert 'statusMessage_.indexOf("仍在")' in state_handler
-stop_handler = source[source.index("void ProvisioningPortal::stop()"):
+stop_handler = source[source.index("void ProvisioningPortal::stop("):
                       source.index("bool ProvisioningPortal::takeConfigurationChanged")]
 assert "const bool wasPrepared = prepared_;" in stop_handler
 assert "wasActive || wasPrepared" in stop_handler
@@ -347,7 +352,8 @@ timeout_handler = source[source.index(
 assert switch_handler.count("clearProvisioningCredential();") == 3
 assert access_point_handler.count("clearProvisioningCredential();") == 2
 assert services_handler.count("clearProvisioningCredential();") == 1
-assert timeout_handler.count("clearProvisioningCredential();") == 2
+assert timeout_handler.count("clearProvisioningCredential();") == 1
+assert "stop(ProvisioningStopReason::startupTimeout);" in timeout_handler
 request_handler = coordinator[coordinator.index("bool ProvisioningCoordinator::request"):
                               coordinator.index("void ProvisioningCoordinator::poll")]
 assert "quiesceForProvisioning" not in request_handler

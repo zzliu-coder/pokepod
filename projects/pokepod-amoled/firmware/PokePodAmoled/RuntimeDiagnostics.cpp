@@ -33,6 +33,7 @@ bool RuntimeDiagnostics::begin(Print &log, uint16_t resetReason) {
   lock();
   audioSessionSnapshot_ = {};
   audioSessionSnapshotAvailable_ = false;
+  initializeRuntimeDiagnosticTrace(trace_);
   open_ = preferences_.begin("pokepod_rt", false);
   initializeRuntimeDiagnosticLog(stored_);
   if (!open_) {
@@ -58,6 +59,7 @@ bool RuntimeDiagnostics::begin(Print &log, uint16_t resetReason) {
   record.subsystem = static_cast<uint8_t>(RuntimeDiagnosticSubsystem::boot);
   record.stage = static_cast<uint8_t>(RuntimeDiagnosticStage::boot);
   record.outcome = static_cast<uint8_t>(RuntimeDiagnosticOutcome::success);
+  appendRuntimeDiagnosticTrace(trace_, record);
   appendRuntimeDiagnostic(proposed, record);
   finalizeRuntimeDiagnosticLog(proposed);
   const bool recorded = persist(proposed);
@@ -81,11 +83,6 @@ bool RuntimeDiagnostics::record(RuntimeDiagnosticSubsystem subsystem,
                                 uint32_t detail0, uint32_t detail1,
                                 Print &log) {
   lock();
-  if (!open_) {
-    unlock();
-    return false;
-  }
-  StoredRuntimeDiagnosticLog proposed = stored_;
   StoredRuntimeDiagnosticRecord record{};
   const time_t now = time(nullptr);
   record.epoch = now >= kValidEpoch ? static_cast<uint32_t>(now) : 0;
@@ -99,14 +96,25 @@ bool RuntimeDiagnostics::record(RuntimeDiagnosticSubsystem subsystem,
   record.subsystem = static_cast<uint8_t>(subsystem);
   record.stage = static_cast<uint8_t>(stage);
   record.outcome = static_cast<uint8_t>(outcome);
-  appendRuntimeDiagnostic(proposed, record);
-  finalizeRuntimeDiagnosticLog(proposed);
-  const bool ok = persist(proposed);
-  if (ok) stored_ = proposed;
-  const uint32_t sequence = record.sequence;
+  appendRuntimeDiagnosticTrace(trace_, record);
+  const RuntimeDiagnosticTraceRecord *latestTrace =
+      runtimeDiagnosticTraceNewest(trace_, 0);
+  const uint32_t traceSequence =
+      latestTrace != nullptr ? latestTrace->traceSequence : 0;
+  const bool persistent = runtimeDiagnosticShouldPersist(
+      subsystem, stage, outcome);
+  bool ok = true;
+  if (persistent) {
+    StoredRuntimeDiagnosticLog proposed = stored_;
+    appendRuntimeDiagnostic(proposed, record);
+    finalizeRuntimeDiagnosticLog(proposed);
+    ok = open_ && persist(proposed);
+    if (ok) stored_ = proposed;
+  }
   unlock();
-  log.printf("{\"event\":\"runtime_diagnostic\",\"ok\":%s,\"sequence\":%lu,\"subsystem\":\"%s\",\"stage\":\"%s\",\"outcome\":\"%s\",\"detail0\":%lu,\"detail1\":%lu,\"internal_free\":%lu,\"internal_largest\":%lu,\"psram_free\":%lu,\"reset_reason\":%u}\n",
-             ok ? "true" : "false", static_cast<unsigned long>(sequence),
+  log.printf("{\"event\":\"runtime_diagnostic\",\"ok\":%s,\"persistent\":%s,\"trace_sequence\":%lu,\"subsystem\":\"%s\",\"stage\":\"%s\",\"outcome\":\"%s\",\"detail0\":%lu,\"detail1\":%lu,\"internal_free\":%lu,\"internal_largest\":%lu,\"psram_free\":%lu,\"reset_reason\":%u}\n",
+             ok ? "true" : "false", persistent ? "true" : "false",
+             static_cast<unsigned long>(traceSequence),
              runtimeDiagnosticSubsystemKey(subsystem),
              runtimeDiagnosticStageKey(stage),
              runtimeDiagnosticOutcomeKey(outcome),
@@ -123,6 +131,7 @@ bool RuntimeDiagnostics::clear(Print &log) {
   lock();
   audioSessionSnapshot_ = {};
   audioSessionSnapshotAvailable_ = false;
+  initializeRuntimeDiagnosticTrace(trace_);
   StoredRuntimeDiagnosticLog proposed{};
   initializeRuntimeDiagnosticLog(proposed);
   finalizeRuntimeDiagnosticLog(proposed);
@@ -247,6 +256,75 @@ String RuntimeDiagnostics::json() const {
     json += '}';
   }
   json += "}";
+  return json;
+}
+
+String RuntimeDiagnostics::traceJson(size_t newestOffset, size_t limit) const {
+  if (limit > kRuntimeDiagnosticTracePageCapacity) {
+    limit = kRuntimeDiagnosticTracePageCapacity;
+  }
+  RuntimeDiagnosticTraceRecord page[kRuntimeDiagnosticTracePageCapacity]{};
+  size_t total = 0;
+  size_t copied = 0;
+  const_cast<RuntimeDiagnostics *>(this)->lock();
+  total = trace_.count;
+  while (copied < limit && newestOffset + copied < trace_.count) {
+    const RuntimeDiagnosticTraceRecord *record =
+        runtimeDiagnosticTraceNewest(trace_, newestOffset + copied);
+    if (record == nullptr) break;
+    page[copied++] = *record;
+  }
+  const_cast<RuntimeDiagnostics *>(this)->unlock();
+
+  String json;
+  json.reserve(3072);
+  json = "{\"status\":\"ok\",\"version\":1,\"total\":";
+  json += String(static_cast<unsigned>(total));
+  json += ",\"offset\":";
+  json += String(static_cast<unsigned>(newestOffset));
+  json += ",\"count\":";
+  json += String(static_cast<unsigned>(copied));
+  json += ",\"next_offset\":";
+  if (newestOffset + copied < total) {
+    json += String(static_cast<unsigned>(newestOffset + copied));
+  } else {
+    json += "null";
+  }
+  json += ",\"records\":[";
+  for (size_t index = 0; index < copied; ++index) {
+    if (index != 0) json += ',';
+    const RuntimeDiagnosticTraceRecord &traceRecord = page[index];
+    const StoredRuntimeDiagnosticRecord &record = traceRecord.record;
+    json += "{\"trace_sequence\":";
+    json += String(static_cast<unsigned long>(traceRecord.traceSequence));
+    json += ",\"epoch\":";
+    json += String(static_cast<unsigned long>(record.epoch));
+    json += ",\"uptime_ms\":";
+    json += String(static_cast<unsigned long>(record.uptimeMs));
+    json += ",\"subsystem\":\"";
+    json += runtimeDiagnosticSubsystemKey(
+        static_cast<RuntimeDiagnosticSubsystem>(record.subsystem));
+    json += "\",\"stage\":\"";
+    json += runtimeDiagnosticStageKey(
+        static_cast<RuntimeDiagnosticStage>(record.stage));
+    json += "\",\"outcome\":\"";
+    json += runtimeDiagnosticOutcomeKey(
+        static_cast<RuntimeDiagnosticOutcome>(record.outcome));
+    json += "\",\"detail0\":";
+    json += String(static_cast<unsigned long>(record.detail0));
+    json += ",\"detail1\":";
+    json += String(static_cast<unsigned long>(record.detail1));
+    json += ",\"internal_free\":";
+    json += String(static_cast<unsigned long>(record.internalFree));
+    json += ",\"internal_largest\":";
+    json += String(static_cast<unsigned long>(record.internalLargest));
+    json += ",\"psram_free\":";
+    json += String(static_cast<unsigned long>(record.psramFree));
+    json += ",\"reset_reason\":";
+    json += String(static_cast<unsigned>(record.resetReason));
+    json += '}';
+  }
+  json += "]}";
   return json;
 }
 

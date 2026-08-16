@@ -29,6 +29,8 @@ class RuntimeDiagnostics {
               uint32_t detail0, uint32_t detail1, Print &log);
   bool clear(Print &log);
   String json() const;
+  String traceJson(size_t newestOffset = 0,
+                   size_t limit = kRuntimeDiagnosticTracePageCapacity) const;
 
   // The terminal capture snapshot is intentionally RAM-only.  Publishing it
   // cannot perform an NVS write, so a storage/capture completion path remains
@@ -53,6 +55,7 @@ class RuntimeDiagnostics {
   Preferences preferences_;
 #endif
   StoredRuntimeDiagnosticLog stored_{};
+  RuntimeDiagnosticTraceLog trace_{};
   AudioSessionTelemetrySnapshot audioSessionSnapshot_{};
   bool audioSessionSnapshotAvailable_ = false;
   bool open_ = false;

@@ -5,6 +5,7 @@
 using namespace pokepod;
 
 int main() {
+  static_assert(!bleFirmwareMayRequestConnectionParameters());
   const BleConnectionParameters idle =
       bleConnectionParameters(BleConnectionPowerMode::idle);
   const BleConnectionParameters voice =

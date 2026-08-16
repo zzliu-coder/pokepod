@@ -175,6 +175,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   changed_ = false;
   saved_ = false;
   closeAtMs_ = 0;
+  lastStopReason_ = ProvisioningStopReason::none;
   candidateRssi_ = -127;
   validationAttempt_ = 0;
   sensitiveConfirmation_.reset();
@@ -306,7 +307,7 @@ void ProvisioningPortal::failStartupTimeout() {
   diagnostics_->record(ProvisioningLogStage::failed,
                        ProvisioningLogOutcome::failure, ssid_, 0,
                        kProvisioningReasonStartupTimeout, 0, 0, *log_);
-  clearProvisioningCredential();
+  stop(ProvisioningStopReason::startupTimeout);
 }
 
 void ProvisioningPortal::loop(uint32_t nowMs) {
@@ -375,11 +376,12 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
   }
   if ((closeAtMs_ != 0 && static_cast<int32_t>(nowMs - closeAtMs_) >= 0) ||
       monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
-    stop();
+    stop(closeAtMs_ != 0 ? ProvisioningStopReason::saved
+                         : ProvisioningStopReason::lifetimeExpired);
   }
 }
 
-void ProvisioningPortal::stop() {
+void ProvisioningPortal::stop(ProvisioningStopReason reason) {
   const bool wasActive = active_;
   const bool wasPrepared = prepared_;
   if (wasActive) {
@@ -405,6 +407,7 @@ void ProvisioningPortal::stop() {
   transitionPending_ = false;
   networks_.clear();
   closeAtMs_ = 0;
+  lastStopReason_ = reason;
   csrf_.close();
   sensitiveConfirmation_.reset();
   clearCandidateSecrets();
@@ -413,12 +416,16 @@ void ProvisioningPortal::stop() {
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
     diagnostics_->recordProbe(ProvisioningProbeStage::portalStopped, *log_);
     diagnostics_->record(ProvisioningLogStage::portalStopped,
-                         ProvisioningLogOutcome::info, ssid_, 0, 0,
+                         ProvisioningLogOutcome::info, ssid_, 0,
+                         static_cast<uint16_t>(reason),
                          wasActive ? millis() - startedMs_ : 0,
                          validationAttempt_, *log_);
   }
   if ((wasActive || wasPrepared) && log_ != nullptr) {
-    log_->println("{\"event\":\"provisioning_stopped\"}");
+    log_->printf(
+        "{\"event\":\"provisioning_stopped\",\"reason\":\"%s\","
+        "\"reason_code\":%u}\n",
+        provisioningStopReasonKey(reason), static_cast<unsigned>(reason));
   }
 }
 
@@ -745,7 +752,7 @@ bool ProvisioningPortal::confirmSensitiveChange(uint32_t nowMs) {
   if (!active_) return false;
   if (monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
     discardSensitiveCandidate();
-    stop();
+    stop(ProvisioningStopReason::lifetimeExpired);
     return false;
   }
   if (!sensitiveConfirmation_.acceptPhysicalPress(nowMs)) {

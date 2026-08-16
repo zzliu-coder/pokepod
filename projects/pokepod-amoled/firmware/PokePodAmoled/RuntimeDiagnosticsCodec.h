@@ -11,6 +11,8 @@ constexpr uint16_t kRuntimeDiagnosticsVersion = 1;
 // Keep the complete JSON payload below the Link control-frame budget while
 // retaining enough history to reconstruct the last failed operation.
 constexpr size_t kRuntimeDiagnosticsCapacity = 12;
+constexpr size_t kRuntimeDiagnosticTraceCapacity = 64;
+constexpr size_t kRuntimeDiagnosticTracePageCapacity = 8;
 
 enum class RuntimeDiagnosticSubsystem : uint8_t {
   boot = 1,
@@ -43,6 +45,7 @@ enum class RuntimeDiagnosticStage : uint8_t {
   provisioningSoftApAfter = 26,
   provisioningServicesBefore = 27,
   provisioningServicesAfter = 28,
+  provisioningStop = 29,
   wirelessAttempt = 40,
   wirelessRouterAcquire = 41,
   wirelessCaptureStart = 42,
@@ -85,12 +88,26 @@ struct StoredRuntimeDiagnosticLog {
   StoredRuntimeDiagnosticRecord records[kRuntimeDiagnosticsCapacity];
   uint32_t crc32;
 };
+
+struct RuntimeDiagnosticTraceRecord {
+  uint32_t traceSequence;
+  StoredRuntimeDiagnosticRecord record;
+};
+
+struct RuntimeDiagnosticTraceLog {
+  uint16_t count;
+  uint16_t next;
+  uint32_t nextSequence;
+  RuntimeDiagnosticTraceRecord records[kRuntimeDiagnosticTraceCapacity];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(StoredRuntimeDiagnosticRecord) == 38,
               "runtime diagnostic record layout is persistent");
 static_assert(sizeof(StoredRuntimeDiagnosticLog) < 1024,
               "runtime diagnostic log must remain a bounded NVS blob");
+static_assert(sizeof(RuntimeDiagnosticTraceLog) < 4096,
+              "runtime diagnostic trace must remain a bounded RAM object");
 
 inline uint32_t runtimeDiagnosticsCrc32(const uint8_t *data, size_t length) {
   uint32_t crc = 0xffffffffU;
@@ -162,6 +179,61 @@ inline const StoredRuntimeDiagnosticRecord *runtimeDiagnosticNewest(
   return &log.records[index];
 }
 
+inline void initializeRuntimeDiagnosticTrace(RuntimeDiagnosticTraceLog &log) {
+  std::memset(&log, 0, sizeof(log));
+  log.nextSequence = 1;
+}
+
+inline void appendRuntimeDiagnosticTrace(
+    RuntimeDiagnosticTraceLog &log, StoredRuntimeDiagnosticRecord record) {
+  RuntimeDiagnosticTraceRecord &slot = log.records[log.next];
+  slot.traceSequence = log.nextSequence++;
+  if (log.nextSequence == 0) log.nextSequence = 1;
+  slot.record = record;
+  log.next = static_cast<uint16_t>(
+      (log.next + 1U) % kRuntimeDiagnosticTraceCapacity);
+  if (log.count < kRuntimeDiagnosticTraceCapacity) ++log.count;
+}
+
+inline const RuntimeDiagnosticTraceRecord *runtimeDiagnosticTraceNewest(
+    const RuntimeDiagnosticTraceLog &log, size_t newestOffset) {
+  if (newestOffset >= log.count) return nullptr;
+  const size_t newest =
+      (log.next + kRuntimeDiagnosticTraceCapacity - 1U) %
+      kRuntimeDiagnosticTraceCapacity;
+  const size_t index =
+      (newest + kRuntimeDiagnosticTraceCapacity - newestOffset) %
+      kRuntimeDiagnosticTraceCapacity;
+  return &log.records[index];
+}
+
+inline bool runtimeDiagnosticShouldPersist(
+    RuntimeDiagnosticSubsystem subsystem, RuntimeDiagnosticStage stage,
+    RuntimeDiagnosticOutcome outcome) {
+  if (outcome == RuntimeDiagnosticOutcome::failure ||
+      outcome == RuntimeDiagnosticOutcome::interrupted) {
+    return true;
+  }
+  if (subsystem == RuntimeDiagnosticSubsystem::boot &&
+      stage == RuntimeDiagnosticStage::boot) {
+    return true;
+  }
+  if (subsystem == RuntimeDiagnosticSubsystem::recording &&
+      stage == RuntimeDiagnosticStage::recordingCleanup) {
+    return true;
+  }
+  if (subsystem == RuntimeDiagnosticSubsystem::provisioning &&
+      (stage == RuntimeDiagnosticStage::provisioningServicesAfter ||
+       stage == RuntimeDiagnosticStage::provisioningStop)) {
+    return true;
+  }
+  if (subsystem == RuntimeDiagnosticSubsystem::wirelessVoice &&
+      stage == RuntimeDiagnosticStage::wirelessStop) {
+    return true;
+  }
+  return false;
+}
+
 inline const char *runtimeDiagnosticSubsystemKey(
     RuntimeDiagnosticSubsystem subsystem) {
   switch (subsystem) {
@@ -219,6 +291,8 @@ inline const char *runtimeDiagnosticStageKey(RuntimeDiagnosticStage stage) {
       return "provisioning_services_before";
     case RuntimeDiagnosticStage::provisioningServicesAfter:
       return "provisioning_services_after";
+    case RuntimeDiagnosticStage::provisioningStop:
+      return "provisioning_stop";
     case RuntimeDiagnosticStage::wirelessAttempt:
       return "wireless_attempt";
     case RuntimeDiagnosticStage::wirelessRouterAcquire:

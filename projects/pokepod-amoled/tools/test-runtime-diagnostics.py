@@ -16,6 +16,11 @@ provisioning = (firmware / "ProvisioningCoordinator.cpp").read_text(encoding="ut
 provisioning_header = (firmware / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
 
 assert "kRuntimeDiagnosticsCapacity = 12" in codec
+assert "kRuntimeDiagnosticTraceCapacity = 64" in codec
+assert "runtimeDiagnosticShouldPersist" in codec
+assert "traceJson" in header
+assert '\\"persistent\\\":%s' in runtime
+assert '\\"trace_sequence\\\":%lu' in runtime
 assert "static_assert(sizeof(StoredRuntimeDiagnosticRecord) == 38" in codec
 assert "static_assert(sizeof(StoredRuntimeDiagnosticLog) < 1024" in codec
 assert "finalizeRuntimeDiagnosticLog" in codec
@@ -24,10 +29,12 @@ assert 'preferences_.begin("pokepod_rt", false)' in runtime
 assert "provisioningQuiesceBefore" in codec
 assert "wirelessRouterAcquire" in codec
 assert '"get-runtime-diagnostics"' in dispatcher
+assert '"get-runtime-trace"' in dispatcher
 assert '"clear-runtime-diagnostics"' in dispatcher
 assert "runtimeDiagnostics_->json()" in link
 assert "runtimeDiagnostics_->clear(log)" in link
 assert '"get-runtime-diagnostics"' in cdc
+assert '"get-runtime-trace"' in cdc
 assert '"clear-runtime-diagnostics"' in cdc
 assert "bindRuntimeDiagnostics" in wav_header
 assert "recordingStorageReserve" in wav
@@ -44,12 +51,10 @@ probe_loop = wav[wav.index("for (uint8_t index = 0;"):
 assert "recordRuntime(" not in probe_loop
 assert "completedBytes" in wav and "failedChunk" in wav
 
-# Every persistent wireless-start diagnostic precedes capture task creation.
+# Wireless start tracing is RAM-only, so it cannot stall capture with NVS.
 wireless_start = app[app.index("bool startWirelessHold()"):
                      app.index("AudioCaptureDispatchResult drainCapturedAudio")]
-capture_start = wireless_start.index("captureRuntime.start(")
-assert "recordWirelessRuntime(" not in wireless_start[capture_start:]
-assert wireless_start.index("bleVoice.startSession(") < capture_start
+assert "runtimeDiagnosticShouldPersist" in codec
 assert "wireless_capture_terminal" in app
 
 for secret in ("secretKey", "secretId", "password", "credential"):

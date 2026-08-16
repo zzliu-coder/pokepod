@@ -15,6 +15,8 @@
 #include "DeviceRebootCoordinator.h"
 #include "FontPolicy.h"
 #include "ProvisioningCoordinator.h"
+#include "ProvisioningPortal.h"
+#include "RuntimeDiagnosticsCodec.h"
 #include "TencentWorker.h"
 #include "WifiController.h"
 #include "WirelessSyncPairing.h"
@@ -301,8 +303,8 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
-        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"clear-runtime-diagnostics\",\"reboot\"]";
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
+        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
     (void)sendTerminalOrDisconnect(requestId, diagnostics_.statusJson());
@@ -326,7 +328,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
       sendError(requestId,
                 "provisioning-stop is only available over USB");
     } else {
-      provisioningCoordinator_->stop();
+      provisioningCoordinator_->stop(ProvisioningStopReason::linkRequest);
       sendOk(requestId, "\"phase\":\"idle\"");
     }
   } else if (strcmp(operation, "get-provisioning-diagnostics") == 0) {
@@ -343,6 +345,19 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
     else sendError(requestId, "power diagnostics clear failed");
   } else if (strcmp(operation, "get-runtime-diagnostics") == 0) {
     sendJson(requestId, diagnostics_.runtimeJson());
+  } else if (strcmp(operation, "get-runtime-trace") == 0) {
+    int64_t offset = jsonInt64(root, "offset", 0);
+    int64_t limit = jsonInt64(root, "limit",
+                              kRuntimeDiagnosticTracePageCapacity);
+    if (offset < 0 || offset >=
+            static_cast<int64_t>(kRuntimeDiagnosticTraceCapacity) ||
+        limit < 1 || limit >
+            static_cast<int64_t>(kRuntimeDiagnosticTracePageCapacity)) {
+      sendError(requestId, "invalid runtime trace page");
+    } else {
+      sendJson(requestId, diagnostics_.runtimeTraceJson(
+          static_cast<size_t>(offset), static_cast<size_t>(limit)));
+    }
   } else if (strcmp(operation, "clear-runtime-diagnostics") == 0) {
     if (foregroundBusy()) sendBusy(requestId);
     else if (diagnostics_.clearRuntime(*log_)) sendOk(requestId);

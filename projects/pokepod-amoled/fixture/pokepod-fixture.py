@@ -8,8 +8,10 @@ from datetime import datetime, timezone
 import glob
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +29,10 @@ FLASH = PROJECT / "flash.sh"
 RUNS = PROJECT / "work" / "fixture-runs"
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 APP_ELF_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+MAC_VOICE_DIAGNOSTIC = (
+    Path.home() / "Library" / "Application Support" /
+    "PokePodVoice" / "last-session.json"
+)
 
 
 def run_dir(operation: str) -> Path:
@@ -241,8 +247,7 @@ def wait_for_application(
     )
 
 
-def collect(port: str, operation: str, timeout: float) -> int:
-    output = run_dir(operation)
+def collect_into(output: Path, port: str, timeout: float) -> dict[str, object]:
     hello = cdc(port, "hello", output, timeout)
     identity = link_identity(port, output, timeout)
     status = cdc(port, "status", output, timeout)
@@ -255,9 +260,170 @@ def collect(port: str, operation: str, timeout: float) -> int:
             diagnostics[command] = cdc(port, command, output, timeout)
         except RuntimeError as error:
             diagnostics[command] = {"error": str(error)}
+    trace_records: list[object] = []
+    trace_offset = 0
+    while trace_offset < 64:
+        completed = subprocess.run(
+            [sys.executable, str(CDC), port, "--command",
+             "get-runtime-trace", "--trace-offset", str(trace_offset),
+             "--trace-limit", "8", "--timeout", str(timeout)],
+            cwd=PROJECT, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=max(timeout + 5.0, 10.0),
+            check=False,
+        )
+        (output / f"cdc-runtime-trace-{trace_offset}.stdout").write_text(
+            completed.stdout, encoding="utf-8")
+        (output / f"cdc-runtime-trace-{trace_offset}.stderr").write_text(
+            completed.stderr, encoding="utf-8")
+        if completed.returncode != 0:
+            diagnostics["get-runtime-trace"] = {
+                "error": completed.stderr.strip(), "records": trace_records}
+            break
+        page = json.loads(completed.stdout)
+        records = page.get("records")
+        if isinstance(records, list):
+            trace_records.extend(records)
+        next_offset = page.get("next_offset")
+        if not isinstance(next_offset, int):
+            diagnostics["get-runtime-trace"] = {
+                "status": "ok", "total": page.get("total", len(trace_records)),
+                "records": trace_records}
+            break
+        trace_offset = next_offset
+    return diagnostics
+
+
+def collect(port: str, operation: str, timeout: float) -> int:
+    output = run_dir(operation)
+    diagnostics = collect_into(output, port, timeout)
     write_json(output / "evidence.json", diagnostics)
     print(output)
     return 0
+
+
+def copy_mac_voice_diagnostic(output: Path) -> dict[str, object]:
+    target = output / "mac-voice-last-session.json"
+    if not MAC_VOICE_DIAGNOSTIC.is_file():
+        return {"status": "unavailable", "path": str(MAC_VOICE_DIAGNOSTIC)}
+    shutil.copyfile(MAC_VOICE_DIAGNOSTIC, target)
+    return {
+        "status": "captured",
+        "file": target.name,
+        "sizeBytes": target.stat().st_size,
+        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+    }
+
+
+def find_esptool() -> Path:
+    configured = os.environ.get("ESPTOOL_BIN")
+    if configured:
+        candidate = Path(configured)
+        if candidate.is_file():
+            return candidate
+    candidates = sorted((Path.home() / "Library" / "Arduino15" / "packages" /
+                         "esp32" / "tools" / "esptool_py").glob("*/esptool"))
+    if not candidates:
+        raise RuntimeError("esptool is unavailable")
+    return candidates[-1]
+
+
+def run_evidence_command(command: list[str], output: Path, label: str,
+                         timeout: float = 30.0) -> None:
+    completed = subprocess.run(
+        command, cwd=PROJECT, text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, timeout=timeout, check=False)
+    (output / f"{label}.log").write_text(completed.stdout, encoding="utf-8")
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"diagnostic command {label} failed with exit {completed.returncode}")
+
+
+def diagnose_rom(args: argparse.Namespace, output: Path) -> dict[str, object]:
+    if args.authority is None:
+        raise RuntimeError("ROM diagnosis requires --authority")
+    esptool = find_esptool()
+    common = [str(esptool), "--chip", "esp32s3", "--port", args.rom_port,
+              "--baud", "115200", "--no-stub"]
+    run_evidence_command(common + ["chip-id"], output, "rom-chip-id")
+    run_evidence_command(common + ["flash-id"], output, "rom-flash-id")
+    verdict = output / "rom-identity-verdict.json"
+    run_evidence_command([
+        sys.executable, str(PROJECT / "tools" / "validate-flash-identity.py"),
+        "evidence", "--authority", str(args.authority),
+        "--chip-log", str(output / "rom-chip-id.log"),
+        "--flash-log", str(output / "rom-flash-id.log"),
+        "--output", str(verdict),
+    ], output, "rom-identity-validation")
+    regions = (
+        ("partition-table", "0x8000", "0x1000"),
+        ("nvs.private", "0x9000", "0x5000"),
+        ("coredump", "0xff0000", "0x10000"),
+    )
+    evidence: dict[str, object] = {
+        "status": "captured", "port": args.rom_port,
+        "identityVerdict": verdict.name, "regions": {},
+    }
+    for name, offset, size in regions:
+        target = output / f"{name}.bin"
+        run_evidence_command(
+            common + ["read-flash", offset, size, str(target)],
+            output, f"rom-read-{name}", 60.0)
+        if name == "nvs.private":
+            target.chmod(0o600)
+        evidence["regions"][name] = {
+            "file": target.name, "sizeBytes": target.stat().st_size,
+            "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        }
+    if args.elf is not None and args.elf.is_file():
+        core_tool_candidates = sorted(
+            (Path.home() / ".espressif" / "python_env").glob(
+                "idf*_py*_env/bin/esp-coredump"))
+        if core_tool_candidates:
+            run_evidence_command([
+                str(core_tool_candidates[-1]), "--chip", "esp32s3",
+                "info_corefile", "--core", str(output / "coredump.bin"),
+                "--core-format", "raw", str(args.elf),
+            ], output, "coredump-report", 60.0)
+            evidence["coredumpReport"] = "coredump-report.log"
+        else:
+            evidence["coredumpReport"] = "decoder_unavailable"
+    else:
+        evidence["coredumpReport"] = "elf_unavailable"
+    return evidence
+
+
+def diagnose(args: argparse.Namespace) -> int:
+    output = run_dir("diagnose")
+    result: dict[str, object] = {
+        "schema": "pokepod.fixture-diagnosis.v1",
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "macVoice": copy_mac_voice_diagnostic(output),
+    }
+    app_errors: dict[str, str] = {}
+    candidates = [args.port] if args.port else matching_ports(args.port_pattern)
+    for port in candidates:
+        if port is None:
+            continue
+        try:
+            result["mode"] = "application"
+            result["application"] = collect_into(output, port, args.timeout)
+            result["port"] = port
+            write_json(output / "evidence.json", result)
+            print(output)
+            return 0
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            app_errors[port] = str(error)
+    result["applicationErrors"] = app_errors
+    if args.rom_port:
+        result["mode"] = "rom"
+        result["rom"] = diagnose_rom(args, output)
+        write_json(output / "evidence.json", result)
+        print(output)
+        return 0
+    result["mode"] = "unavailable"
+    write_json(output / "evidence.json", result)
+    print(output)
+    return 3
 
 
 def latest_boot(runtime: dict[str, object]) -> dict[str, int]:
@@ -500,6 +666,13 @@ def main() -> int:
     collect_parser = sub.add_parser("collect")
     collect_parser.add_argument("--port", required=True)
     collect_parser.add_argument("--timeout", type=float, default=3.0)
+    diagnose_parser = sub.add_parser("diagnose")
+    diagnose_parser.add_argument("--port")
+    diagnose_parser.add_argument("--port-pattern", default="/dev/cu.usbmodem*")
+    diagnose_parser.add_argument("--rom-port")
+    diagnose_parser.add_argument("--authority", type=Path)
+    diagnose_parser.add_argument("--elf", type=Path)
+    diagnose_parser.add_argument("--timeout", type=float, default=3.0)
     update_parser = sub.add_parser("update")
     update_parser.add_argument("--port", required=True)
     update_parser.add_argument("--firmware", type=Path, required=True)
@@ -549,6 +722,8 @@ def main() -> int:
             return 0
         if args.operation == "collect":
             return collect(args.port, "collect", args.timeout)
+        if args.operation == "diagnose":
+            return diagnose(args)
         if args.operation == "update":
             return update(args.port, args.firmware, args.timeout,
                           args.port_pattern, args.app_timeout)

@@ -11,6 +11,7 @@ USB D+/D−、GND、受限 VBUS、BOOT、RESET 六类电气触点；USB 正常�
 ```sh
 python3 fixture/pokepod-fixture.py probe --port /dev/cu.usbmodemXXXX
 python3 fixture/pokepod-fixture.py collect --port /dev/cu.usbmodemXXXX
+python3 fixture/pokepod-fixture.py diagnose --port /dev/cu.usbmodemXXXX
 python3 fixture/pokepod-fixture.py update \
   --port /dev/cu.usbmodemXXXX \
   --firmware work/pokepod-build/output/fast/PokePodAmoled.ino.bin
@@ -21,6 +22,12 @@ python3 fixture/pokepod-fixture.py update \
 `imageIdentity.appElfSha256`。缺少清洁身份、身份字段不完整或清单与 BIN 的 SHA/大小不一致时，
 主机在发送首个数据帧前拒绝更新。直接调用 `cdc-status.py --firmware` 也执行同一个完整门禁，
 要求 BIN 同目录存在 `artifact.json` 和实际 ELF。三个显式身份参数只能复核清单值，不能绕过清单。
+
+`diagnose` 是统一只读取证入口。应用正常时，它分页导出 64 条 RAM runtime trace、跨重启
+运行/电源/配网记录、身份与状态，并复制 Mac 端最近一次无线语音时间线。应用无响应且
+设备已在 ROM loader 时，可显式提供 `--rom-port`、私有 authority 和候选 ELF；夹具会先
+验证芯片、Flash 容量和 eFuse MAC，再只读导出 partition table、私有 NVS 与 coredump，并
+在本机解码 coredump。私有 NVS 文件权限固定为 0600，报告不打印其中的凭据。
 
 固件先把镜像写入未运行的 OTA 槽，流式计算 SHA-256，并从候选槽的 ESP 应用描述读取
 真实 `app_elf_sha256`。设备在 `esp_ota_end` 和切换启动槽之前强制比较

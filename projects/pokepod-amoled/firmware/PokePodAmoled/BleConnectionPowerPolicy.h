@@ -9,6 +9,15 @@ enum class BleConnectionPowerMode : uint8_t {
   voice,
 };
 
+// Arduino-ESP32 3.3.8's ESP32-S3 controller can watchdog inside
+// ll_connection_update_ind when an application-initiated update overlaps the
+// peer/controller procedure. PokePod's bounded audio queue tolerates the
+// negotiated default interval, so the locked production core must not issue
+// an additional update from firmware.
+inline constexpr bool bleFirmwareMayRequestConnectionParameters() {
+  return false;
+}
+
 struct BleConnectionParameters {
   uint16_t minInterval;
   uint16_t maxInterval;

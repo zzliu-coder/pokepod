@@ -82,6 +82,8 @@ void fillSamples(int16_t *samples, int16_t base) {
 int main() {
   static_assert(kAudioCaptureReadTimeoutMs == 50U,
                 "hardware I2S timeout contract changed");
+  static_assert(kAudioCaptureWarmupMs == 150U,
+                "bounded hardware warm-up contract changed");
   static_assert(kAudioCaptureStopTimeoutMs ==
                     kAudioCaptureReadTimeoutMs *
                         kAudioCaptureStopReadWindows,
@@ -292,6 +294,38 @@ int main() {
   const uint16_t previousPeak = frontEnd.outputPeak;
   assert(source.starts == 1 && source.stops == 1);
   assert(service.captureOnce(122) == AudioCaptureCycleResult::idle);
+
+  FakeCaptureSource warmingSource({
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+      {AudioCaptureReadStatus::ok, raw, 4000},
+  });
+  AudioCaptureService<2> warmingService;
+  assert(warmingService.startSession(79, warmingSource));
+  assert(warmingService.captureOnce(1000) ==
+         AudioCaptureCycleResult::sourceWarmingUp);
+  assert(warmingService.captureOnce(1100) ==
+         AudioCaptureCycleResult::sourceWarmingUp);
+  assert(warmingService.metrics().firstFailure ==
+         AudioCaptureFailureCode::none);
+  assert(warmingService.metrics().warmupZeroReads == 2);
+  assert(warmingService.captureOnce(1120) ==
+         AudioCaptureCycleResult::partialInput);
+  warmingService.stopSession();
+
+  FakeCaptureSource failedWarmupSource({
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+  });
+  AudioCaptureService<2> failedWarmupService;
+  assert(failedWarmupService.startSession(80, failedWarmupSource));
+  assert(failedWarmupService.captureOnce(2000) ==
+         AudioCaptureCycleResult::sourceWarmingUp);
+  assert(failedWarmupService.captureOnce(2150) ==
+         AudioCaptureCycleResult::sourceEarlyZero);
+  assert(failedWarmupService.metrics().firstFailure ==
+         AudioCaptureFailureCode::earlyZeroRead);
+  failedWarmupService.stopSession();
 
   // A new runtime session publishes the caller-provided ID and a fully reset
   // DSP snapshot before capture work can begin. No terminal metrics leak into

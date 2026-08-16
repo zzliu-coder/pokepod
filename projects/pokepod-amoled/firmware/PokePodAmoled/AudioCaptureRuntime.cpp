@@ -139,6 +139,9 @@ void AudioCaptureRuntime::taskMain() {
       }
       if (cycle == AudioCaptureCycleResult::sourceFailure ||
           cycle == AudioCaptureCycleResult::sourceEarlyZero) taskYIELD();
+      if (cycle == AudioCaptureCycleResult::sourceWarmingUp) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
     }
     if (sessionState_.taskStopped()) {
       xSemaphoreGive(stopped_);

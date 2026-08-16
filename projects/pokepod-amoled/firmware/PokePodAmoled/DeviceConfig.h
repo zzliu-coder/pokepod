@@ -18,7 +18,7 @@ struct DeviceSettings {
   bool bluetoothEnabled = true;
   bool raiseToWake = true;
   ProvisioningPasswordMode provisioningPasswordMode =
-      ProvisioningPasswordMode::legacy;
+      kDefaultProvisioningPasswordMode;
 };
 
 struct WifiCredential {

@@ -24,6 +24,11 @@ int main() {
   // Zero-filled v1 blobs remain the legacy/random provisioning behavior.
   assert(storedDeviceConfigProvisioningPasswordMode(empty) ==
          ProvisioningPasswordMode::legacy);
+  assert(migrateProvisioningPasswordMode(
+             ProvisioningPasswordMode::legacy) ==
+         ProvisioningPasswordMode::fixed88888888);
+  assert(kDefaultProvisioningPasswordMode ==
+         ProvisioningPasswordMode::fixed88888888);
 
   StoredDeviceConfig random = empty;
   random.reserved[1] = kStoredProvisioningPasswordRandom;

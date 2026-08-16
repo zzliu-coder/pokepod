@@ -30,6 +30,38 @@ int main() {
          kRuntimeDiagnosticsCapacity + 2);
   assert(runtimeDiagnosticNewest(log, kRuntimeDiagnosticsCapacity - 1)->detail0 == 3);
 
+  RuntimeDiagnosticTraceLog trace{};
+  initializeRuntimeDiagnosticTrace(trace);
+  for (uint32_t index = 0; index < kRuntimeDiagnosticTraceCapacity + 5;
+       ++index) {
+    StoredRuntimeDiagnosticRecord record{};
+    record.subsystem = static_cast<uint8_t>(
+        RuntimeDiagnosticSubsystem::wirelessVoice);
+    record.stage = static_cast<uint8_t>(
+        RuntimeDiagnosticStage::wirelessCaptureStart);
+    record.outcome = static_cast<uint8_t>(RuntimeDiagnosticOutcome::started);
+    record.detail0 = index;
+    appendRuntimeDiagnosticTrace(trace, record);
+  }
+  assert(trace.count == kRuntimeDiagnosticTraceCapacity);
+  assert(runtimeDiagnosticTraceNewest(trace, 0)->record.detail0 ==
+         kRuntimeDiagnosticTraceCapacity + 4);
+  assert(runtimeDiagnosticTraceNewest(
+             trace, kRuntimeDiagnosticTraceCapacity - 1)->record.detail0 == 5);
+
+  assert(!runtimeDiagnosticShouldPersist(
+      RuntimeDiagnosticSubsystem::wirelessVoice,
+      RuntimeDiagnosticStage::wirelessCaptureStart,
+      RuntimeDiagnosticOutcome::started));
+  assert(runtimeDiagnosticShouldPersist(
+      RuntimeDiagnosticSubsystem::wirelessVoice,
+      RuntimeDiagnosticStage::wirelessFailure,
+      RuntimeDiagnosticOutcome::failure));
+  assert(runtimeDiagnosticShouldPersist(
+      RuntimeDiagnosticSubsystem::recording,
+      RuntimeDiagnosticStage::recordingCleanup,
+      RuntimeDiagnosticOutcome::success));
+
   log.records[0].detail0 ^= 1U;
   assert(!validateRuntimeDiagnosticLog(log));
   assert(runtimeDiagnosticStageKey(RuntimeDiagnosticStage::recordingProbeFlush) != nullptr);

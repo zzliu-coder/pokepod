@@ -61,5 +61,12 @@ identity arguments can only confirm those validated values.
 The current runtime hardening releases the complete BLE allocation before
 SoftAP provisioning, removes NVS writes from the timed SD qualification probe,
 and keeps persistent diagnostics out of the wireless capture start window.
-Status and terminal logs expose capture read counts, I2S timeouts, ring
-high-water and drops so device failures can be diagnosed from collected facts.
+Wireless voice now starts capture first and opens the BLE session only after a
+complete PCM frame exists; the firmware also leaves connection-parameter
+negotiation to the peer/controller to avoid the observed ESP32-S3 controller
+watchdog path. Runtime evidence is split into a 64-event RAM trace and a
+12-record cross-reboot terminal ring. The fixture `diagnose` command collects
+both tiers, provisioning stop reasons, a ROM coredump/NVS snapshot when needed,
+and the Mac app's atomically persisted last-session timeline. Personal devices
+migrate to the configurable fixed provisioning-password mode; public/shared
+deployments can select the random-password mode.

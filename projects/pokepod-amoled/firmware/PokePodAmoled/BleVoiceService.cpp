@@ -1028,16 +1028,13 @@ void BleVoiceService::processDisconnect(uint16_t connectionId,
 void BleVoiceService::requestConnectionPowerMode(
     BleConnectionPowerMode mode) {
   if (!connected_ || server_ == nullptr || connectionPowerMode_ == mode) return;
-  const BleConnectionParameters parameters = bleConnectionParameters(mode);
-  if (server_->requestConnParams(connectionId_, parameters.minInterval,
-                                 parameters.maxInterval,
-                                 parameters.latency,
-                                 parameters.timeout)) {
-    connectionPowerMode_ = mode;
-    if (log_ != nullptr) {
-      log_->printf("{\"event\":\"ble_connection_power\",\"mode\":\"%s\"}\n",
-                   mode == BleConnectionPowerMode::voice ? "voice" : "idle");
-    }
+  connectionPowerMode_ = mode;
+  if (log_ != nullptr) {
+    log_->printf(
+        "{\"event\":\"ble_connection_power\",\"mode\":\"%s\","
+        "\"controller_request\":false,"
+        "\"policy\":\"peer_negotiated_default\"}\n",
+        mode == BleConnectionPowerMode::voice ? "voice" : "idle");
   }
 }
 

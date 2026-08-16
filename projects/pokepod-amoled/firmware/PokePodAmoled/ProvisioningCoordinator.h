@@ -13,6 +13,7 @@ class ProvisioningDiagnostics;
 class ProvisioningPortal;
 class RuntimeDiagnostics;
 class WifiController;
+enum class ProvisioningStopReason : uint8_t;
 
 class ProvisioningCoordinator {
  public:
@@ -25,7 +26,7 @@ class ProvisioningCoordinator {
   void bindBleVoice(BleVoiceService &bleVoice) { bleVoice_ = &bleVoice; }
   bool request(uint32_t nowMs);
   void poll(uint32_t nowMs);
-  void stop();
+  void stop(ProvisioningStopReason reason);
 
   bool visible() const { return startup_.visible(); }
   bool active() const;

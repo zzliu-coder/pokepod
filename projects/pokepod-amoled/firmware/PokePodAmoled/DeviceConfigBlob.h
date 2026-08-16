@@ -24,6 +24,15 @@ enum class ProvisioningPasswordMode : uint8_t {
   fixed88888888 = kStoredProvisioningPasswordFixed88888888,
 };
 
+constexpr ProvisioningPasswordMode kDefaultProvisioningPasswordMode =
+    ProvisioningPasswordMode::fixed88888888;
+
+inline ProvisioningPasswordMode migrateProvisioningPasswordMode(
+    ProvisioningPasswordMode mode) {
+  return mode == ProvisioningPasswordMode::legacy
+      ? kDefaultProvisioningPasswordMode : mode;
+}
+
 #pragma pack(push, 1)
 struct StoredWifiCredential {
   char ssid[33];

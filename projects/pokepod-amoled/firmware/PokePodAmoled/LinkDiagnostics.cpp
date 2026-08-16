@@ -422,6 +422,14 @@ String LinkDiagnostics::runtimeJson() const {
   return runtimeDiagnostics_->json();
 }
 
+String LinkDiagnostics::runtimeTraceJson(size_t newestOffset,
+                                         size_t limit) const {
+  if (runtimeDiagnostics_ == nullptr) {
+    return "{\"status\":\"unavailable\",\"version\":1,\"records\":[]}";
+  }
+  return runtimeDiagnostics_->traceJson(newestOffset, limit);
+}
+
 bool LinkDiagnostics::clearProvisioning(Print &log) const {
   return provisioningDiagnostics_ != nullptr &&
       provisioningDiagnostics_->clear(log);

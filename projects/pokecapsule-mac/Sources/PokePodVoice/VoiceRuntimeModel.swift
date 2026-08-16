@@ -64,6 +64,9 @@ final class VoiceRuntimeModel: ObservableObject {
     private var blackHolePackage: URL?
     private var blackHoleDiscoveryTask: Task<URL?, Never>?
     private var blackHoleDiscoveryStarted = false
+    private let diagnosticURL = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+    )[0].appendingPathComponent("PokePodVoice/last-session.json")
 
     init(
         ble: any BLECentralControlling = BLECentralAdapter(),
@@ -540,6 +543,13 @@ final class VoiceRuntimeModel: ObservableObject {
 
     private func publishTimeline() {
         sessionDiagnostic = timeline.summary
+        do {
+            try VoiceSessionDiagnosticStore.write(timeline, to: diagnosticURL)
+        } catch {
+            // Diagnostics must never alter realtime session state. The live UI
+            // remains authoritative; fixture collection reports a missing
+            // file as an explicit host-side evidence gap.
+        }
     }
 
     private func recordInputRestored(at: TimeInterval) {

@@ -124,14 +124,20 @@ void ProvisioningCoordinator::poll(uint32_t nowMs) {
     // sampled after startup rather than the caller's stale loop timestamp.
     if (portal_->active()) portal_->loop(millis());
     if (!portal_->active()) {
+      recordRuntime(RuntimeDiagnosticStage::provisioningStop,
+                    RuntimeDiagnosticOutcome::success,
+                    static_cast<uint32_t>(portal_->lastStopReason()), nowMs);
       startup_.reset();
       resumeNormalWifi();
     }
   }
 }
 
-void ProvisioningCoordinator::stop() {
-  if (portal_ != nullptr) portal_->stop();
+void ProvisioningCoordinator::stop(ProvisioningStopReason reason) {
+  if (portal_ != nullptr) portal_->stop(reason);
+  recordRuntime(RuntimeDiagnosticStage::provisioningStop,
+                RuntimeDiagnosticOutcome::success,
+                static_cast<uint32_t>(reason), millis());
   startup_.reset();
   resumeNormalWifi();
 }

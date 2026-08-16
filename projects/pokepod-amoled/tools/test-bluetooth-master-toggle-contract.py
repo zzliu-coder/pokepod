@@ -40,7 +40,7 @@ assert "bleVoice.acknowledgeSessionStopRequest()" in app
 assert "captureRouter.owner() == AudioCaptureOwner::wirelessVoice" in app
 loop_poll = app.index("bleVoice.poll(now);")
 stop_adapter = app[app.index("if (bleVoice.sessionStopRequested())", loop_poll):
-                   app.index("if (wirelessUiActive && !bleVoice.streaming())",
+                   app.index("if (wirelessUiActive && !wirelessCaptureStart.active()",
                              loop_poll)]
 assert stop_adapter.index("requestCaptureStop(") < stop_adapter.index(
     "acknowledgeSessionStopRequest()"

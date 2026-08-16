@@ -86,6 +86,7 @@ enum class AudioCaptureCycleResult : uint8_t {
   frameDropped,
   sourceTimeout,
   sourceEarlyZero,
+  sourceWarmingUp,
   sourceOverrun,
   sourceFailure,
 };
@@ -98,6 +99,7 @@ struct AudioCaptureServiceMetrics {
   uint32_t timeouts = 0;
   uint32_t zeroByteReads = 0;
   uint32_t earlyZeroReads = 0;
+  uint32_t warmupZeroReads = 0;
   uint32_t sourceOverruns = 0;
   uint32_t sourceFailures = 0;
   uint32_t longestReadUs = 0;
@@ -266,6 +268,7 @@ class AudioCaptureService {
     timeouts_.store(0, std::memory_order_relaxed);
     zeroByteReads_.store(0, std::memory_order_relaxed);
     earlyZeroReads_.store(0, std::memory_order_relaxed);
+    warmupZeroReads_.store(0, std::memory_order_relaxed);
     sourceOverruns_.store(0, std::memory_order_relaxed);
     sourceFailures_.store(0, std::memory_order_relaxed);
     longestReadUs_.store(0, std::memory_order_relaxed);
@@ -275,6 +278,8 @@ class AudioCaptureService {
         static_cast<uint8_t>(AudioCaptureFailureCode::none),
         std::memory_order_relaxed);
     firstFailureAtMs_.store(0, std::memory_order_relaxed);
+    captureClockStarted_ = false;
+    captureStartedAtMs_ = 0;
     frontEnd_.reset();
     ring_.resetSession(sessionId);
     frontEndPublisher_.publish(sessionId_, true, frontEnd_.metrics());
@@ -293,6 +298,10 @@ class AudioCaptureService {
 
   AudioCaptureCycleResult captureOnce(uint32_t nowMs) {
     if (!running_ || source_ == nullptr) return AudioCaptureCycleResult::idle;
+    if (!captureClockStarted_) {
+      captureClockStarted_ = true;
+      captureStartedAtMs_ = nowMs;
+    }
     AudioCaptureReadResult read = source_->readStereo48(
         raw_ + rawUsed_, sizeof(raw_) - rawUsed_);
     readCalls_.fetch_add(1, std::memory_order_relaxed);
@@ -310,14 +319,22 @@ class AudioCaptureService {
     const bool zeroByteRead = read.bytes == 0;
     const bool earlyZero = zeroByteRead &&
         read.elapsedUs < kAudioCaptureReadTimeoutMs * 1000U;
+    const bool warmingUp = earlyZero && rawUsed_ == 0 &&
+        ring_.metrics().pushedFrames == 0 &&
+        static_cast<int32_t>(nowMs - captureStartedAtMs_) <
+            static_cast<int32_t>(kAudioCaptureWarmupMs);
     if (zeroByteRead) {
       zeroByteReads_.fetch_add(1, std::memory_order_relaxed);
       if (earlyZero) {
         earlyZeroReads_.fetch_add(1, std::memory_order_relaxed);
       }
+      if (warmingUp) {
+        warmupZeroReads_.fetch_add(1, std::memory_order_relaxed);
+      }
     }
     if (read.status == AudioCaptureReadStatus::timeout) {
       timeouts_.fetch_add(1, std::memory_order_relaxed);
+      if (warmingUp) return AudioCaptureCycleResult::sourceWarmingUp;
       noteFirstFailure(earlyZero ? AudioCaptureFailureCode::earlyZeroRead
                                  : AudioCaptureFailureCode::sourceTimeout,
                        nowMs);
@@ -387,6 +404,8 @@ class AudioCaptureService {
     value.timeouts = timeouts_.load(std::memory_order_relaxed);
     value.zeroByteReads = zeroByteReads_.load(std::memory_order_relaxed);
     value.earlyZeroReads = earlyZeroReads_.load(std::memory_order_relaxed);
+    value.warmupZeroReads =
+        warmupZeroReads_.load(std::memory_order_relaxed);
     value.sourceOverruns = sourceOverruns_.load(std::memory_order_relaxed);
     value.sourceFailures = sourceFailures_.load(std::memory_order_relaxed);
     value.longestReadUs = longestReadUs_.load(std::memory_order_relaxed);
@@ -455,6 +474,7 @@ class AudioCaptureService {
   std::atomic<uint32_t> timeouts_{0};
   std::atomic<uint32_t> zeroByteReads_{0};
   std::atomic<uint32_t> earlyZeroReads_{0};
+  std::atomic<uint32_t> warmupZeroReads_{0};
   std::atomic<uint32_t> sourceOverruns_{0};
   std::atomic<uint32_t> sourceFailures_{0};
   std::atomic<uint32_t> longestReadUs_{0};
@@ -463,6 +483,8 @@ class AudioCaptureService {
   std::atomic<uint8_t> firstFailure_{
       static_cast<uint8_t>(AudioCaptureFailureCode::none)};
   std::atomic<uint32_t> firstFailureAtMs_{0};
+  bool captureClockStarted_ = false;
+  uint32_t captureStartedAtMs_ = 0;
 };
 
 }  // namespace pokepod

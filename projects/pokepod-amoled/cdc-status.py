@@ -411,6 +411,7 @@ def main() -> int:
                                  "get-power-diagnostics",
                                  "clear-power-diagnostics",
                                  "get-runtime-diagnostics",
+                                 "get-runtime-trace",
                                  "clear-runtime-diagnostics",
                                  "get-provisioning-diagnostics",
                                  "clear-provisioning-diagnostics", "reboot"))
@@ -436,10 +437,19 @@ def main() -> int:
     )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
+    parser.add_argument("--trace-offset", type=int, default=0)
+    parser.add_argument("--trace-limit", type=int, default=8)
     arguments = parser.parse_args()
     outgoing_binary = None
     operation = arguments.command
     fields = None
+    if operation == "get-runtime-trace":
+        if not 0 <= arguments.trace_offset < 64:
+            parser.error("--trace-offset must be between 0 and 63")
+        if not 1 <= arguments.trace_limit <= 8:
+            parser.error("--trace-limit must be between 1 and 8")
+        fields = {"offset": arguments.trace_offset,
+                  "limit": arguments.trace_limit}
     if arguments.install_font and arguments.firmware:
         parser.error("--install-font and --firmware are mutually exclusive")
     if arguments.install_font:

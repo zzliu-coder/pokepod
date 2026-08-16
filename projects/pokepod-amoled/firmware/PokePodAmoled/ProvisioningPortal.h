@@ -24,6 +24,29 @@
 
 namespace pokepod {
 
+enum class ProvisioningStopReason : uint8_t {
+  none = 0,
+  bootButton = 1,
+  touchBack = 2,
+  linkRequest = 3,
+  saved = 4,
+  lifetimeExpired = 5,
+  startupTimeout = 6,
+};
+
+inline const char *provisioningStopReasonKey(ProvisioningStopReason reason) {
+  switch (reason) {
+    case ProvisioningStopReason::none: return "none";
+    case ProvisioningStopReason::bootButton: return "boot_button";
+    case ProvisioningStopReason::touchBack: return "touch_back";
+    case ProvisioningStopReason::linkRequest: return "link_request";
+    case ProvisioningStopReason::saved: return "saved";
+    case ProvisioningStopReason::lifetimeExpired: return "lifetime_expired";
+    case ProvisioningStopReason::startupTimeout: return "startup_timeout";
+  }
+  return "unknown";
+}
+
 // Arduino-ESP32 WebServer uses five-second read/send waits. Captive-portal
 // probes can therefore monopolize the UI task. This pinned-core adapter keeps
 // the same routing surface while bounding a single incomplete phone request.
@@ -58,7 +81,7 @@ class ProvisioningPortal {
   bool startServices();
   void failStartupTimeout();
   void loop(uint32_t nowMs);
-  void stop();
+  void stop(ProvisioningStopReason reason);
   bool active() const { return active_; }
   bool prepared() const { return prepared_; }
   const String &ssid() const { return ssid_; }
@@ -73,6 +96,7 @@ class ProvisioningPortal {
   }
   bool confirmSensitiveChange(uint32_t nowMs);
   bool takeConfigurationChanged();
+  ProvisioningStopReason lastStopReason() const { return lastStopReason_; }
 
  private:
   struct ScannedNetwork {
@@ -133,6 +157,7 @@ class ProvisioningPortal {
   ProvisioningCsrfPolicy csrf_;
   ProvisioningCredentialPolicy credential_;
   ProvisioningSensitiveConfirmationPolicy sensitiveConfirmation_;
+  ProvisioningStopReason lastStopReason_ = ProvisioningStopReason::none;
 };
 
 }  // namespace pokepod

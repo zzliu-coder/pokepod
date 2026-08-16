@@ -39,6 +39,10 @@ def main() -> int:
     assert "fixture-runs" in script
     assert "enter_rom_loader" in script and "wait_for_application" in script
     assert "exercise" in script and "automaticRecovery" in script
+    assert "def diagnose" in script and "def diagnose_rom" in script
+    assert '"get-runtime-trace"' in script
+    assert '"coredump"' in script and '"nvs.private"' in script
+    assert "copy_mac_voice_diagnostic" in script
     assert "def latest_boot" in script and "def require_same_boot" in script
     assert 'require_same_boot(pre_boot, mid_boot, "active provisioning")' in script
     assert 'require_same_boot(pre_boot, post_boot, "recording")' in script
@@ -55,6 +59,7 @@ def main() -> int:
     assert "normal" in readme.lower() and "rescue" in readme.lower()
     assert "backup" in readme and "回读" in readme
     assert "artifact.json" in readme and "appElfSha256" in readme
+    assert "diagnose" in readme and "64 条 RAM runtime trace" in readme
 
     fixture_dir = ROOT / "fixture"
     sys.path.insert(0, str(fixture_dir))

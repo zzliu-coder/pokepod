@@ -114,10 +114,25 @@ bool DeviceConfig::begin(Print &log) {
       preferences_.getBytes(kConfigBlobKey, &stored, sizeof(stored)) ==
           sizeof(stored) &&
       decodeConfig(stored, settings_, wifiNetworks_)) {
-    log.printf("{\"event\":\"config\",\"ok\":true,\"wifi_configured\":%s,\"wifi_network_count\":%u,\"tencent_configured\":%s}\n",
+    const ProvisioningPasswordMode storedMode =
+        settings_.provisioningPasswordMode;
+    bool passwordModePersisted = true;
+    if (storedMode == ProvisioningPasswordMode::legacy) {
+      settings_.provisioningPasswordMode =
+          migrateProvisioningPasswordMode(storedMode);
+      passwordModePersisted = persistState(settings_, wifiNetworks_);
+      log.printf(
+          "{\"event\":\"provisioning_password_mode_migrated\","
+          "\"ok\":%s,\"from\":0,\"to\":%u}\n",
+          passwordModePersisted ? "true" : "false",
+          static_cast<unsigned>(settings_.provisioningPasswordMode));
+    }
+    log.printf("{\"event\":\"config\",\"ok\":true,\"wifi_configured\":%s,\"wifi_network_count\":%u,\"tencent_configured\":%s,\"provisioning_password_mode\":%u,\"password_mode_persisted\":%s}\n",
                hasWifi() ? "true" : "false",
                static_cast<unsigned>(wifiNetworks_.size()),
-               hasTencent() ? "true" : "false");
+               hasTencent() ? "true" : "false",
+               static_cast<unsigned>(settings_.provisioningPasswordMode),
+               passwordModePersisted ? "true" : "false");
     return true;
   }
 

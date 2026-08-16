@@ -39,6 +39,8 @@ assert '"触摸或抬起"' in dashboard
 assert "kDimScreenBrightness" in main
 assert "BleConnectionPowerMode::voice" in ble
 assert "BleConnectionPowerMode::idle" in ble
+assert "requestConnParams" not in ble
+assert '"controller_request\\\":false' in ble
 assert "usb.tinyUsbMounted()," in main
 assert "usb.cdcSessionActive()," in main
 assert "StorageCoordinator::instance().mutationActive()," in main

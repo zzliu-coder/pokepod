@@ -46,6 +46,7 @@ class LinkDiagnostics {
   String provisioningJson() const;
   String powerJson() const;
   String runtimeJson() const;
+  String runtimeTraceJson(size_t newestOffset, size_t limit) const;
   bool clearProvisioning(Print &log) const;
   bool clearPower(Print &log) const;
   bool clearRuntime(Print &log) const;
