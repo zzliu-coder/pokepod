@@ -2065,7 +2065,13 @@ bool WavRecorder::ensureStorageTask(Print &log) {
     return false;
   }
   const BaseType_t created = xTaskCreatePinnedToCore(
-      storageTaskThunk, "pokepod_recorder_storage", 4096, this, 1,
+      // The admission/probe path constructs transaction and diagnostic
+      // objects in the storage task before the recording session is live.
+      // 4096 words was insufficient on ESP32-S3: the first successful
+      // qualification publication could exhaust the task stack after the
+      // SD probe had already completed. Keep the queue/bulk buffers in PSRAM,
+      // but give this control path a bounded 8192-word stack.
+      storageTaskThunk, "pokepod_recorder_storage", 8192, this, 1,
       &storageTask_, 0);
   if (created != pdPASS || storageTask_ == nullptr) {
     vSemaphoreDelete(storageStartAck_);
