@@ -1473,7 +1473,7 @@ void pollTouch() {
         if (wirelessSync->openWindow()) wirelessSync->close();
         if (deviceConfig.setWifiEnabled(false, usb.log())) {
           wifi.configurationChanged();
-          showMessage("Wi-Fi 已关闭");
+          showMessage("Wi-Fi 已关闭", UiNoticeKind::success);
         }
       } else if (!deviceConfig.hasWifi()) {
         showMessage("请先完成手机配网", UiNoticeKind::warning);
@@ -1506,12 +1506,14 @@ void pollTouch() {
       }
       if (enabled) {
         bleVoice.requestEnable();
-        showMessage(bleVoice.disablePending() ? "蓝牙将在语音结束后开启"
-                                              : "蓝牙已开启");
+        const bool pending = bleVoice.disablePending();
+        showMessage(pending ? "蓝牙将在语音结束后开启" : "蓝牙已开启",
+                    pending ? UiNoticeKind::progress : UiNoticeKind::success);
       } else {
         bleVoice.requestDisable(now);
-        showMessage(bleVoice.disablePending() ? "蓝牙正在安全关闭"
-                                              : "蓝牙已关闭");
+        const bool pending = bleVoice.disablePending();
+        showMessage(pending ? "蓝牙正在安全关闭" : "蓝牙已关闭",
+                    pending ? UiNoticeKind::progress : UiNoticeKind::success);
       }
       dashboard.invalidate();
       drawDashboard();
@@ -1578,7 +1580,7 @@ void pollTouch() {
     } else if (action == UiAction::closeComputerSync) {
       if (wirelessSync->openWindow()) wirelessSync->close();
       dashboard.back();
-      showMessage("电脑同步已关闭", UiNoticeKind::info);
+      showMessage("电脑同步已关闭", UiNoticeKind::success);
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {
