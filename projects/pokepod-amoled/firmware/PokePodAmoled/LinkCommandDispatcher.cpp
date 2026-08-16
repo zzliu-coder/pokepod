@@ -90,7 +90,7 @@ String printed(cJSON *root) {
 String runningPartitionLabel() {
 #if defined(ARDUINO_ARCH_ESP32)
   const esp_partition_t *partition = esp_ota_get_running_partition();
-  if (partition != nullptr && partition->label != nullptr) {
+  if (partition != nullptr && partition->label[0] != '\0') {
     return String(partition->label);
   }
 #endif
