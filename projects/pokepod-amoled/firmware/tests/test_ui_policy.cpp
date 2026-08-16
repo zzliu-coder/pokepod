@@ -51,6 +51,10 @@ int main() {
   assert(boot.released(bootContext) ==
          BootGestureAction::voiceReadyShortPress);
 
+  bootContext.localRecording = true;
+  assert(boot.pressed(3600, bootContext) == BootGestureAction::none);
+  assert(boot.released(bootContext) == BootGestureAction::stopLocalRecording);
+
   bootContext.localRecording = false;
   bootContext.screenOn = false;
   assert(boot.pressed(4000, bootContext) == BootGestureAction::wakeScreen);
