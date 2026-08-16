@@ -89,6 +89,12 @@ assert "stored.reserved[1] = static_cast<uint8_t>(settings.provisioningPasswordM
 assert "decodedSettings.provisioningPasswordMode" in config_source
 assert "validProvisioningPasswordMode(settings.provisioningPasswordMode)" in config_source
 assert "ProvisioningPasswordMode provisioningPasswordMode" in config_header
+assert 'cJSON_GetObjectItemCaseSensitive(values, "provisioningPasswordMode")' in link_dispatcher
+assert "kStoredProvisioningPasswordFixed88888888" in link_dispatcher
+assert "invalid provisioning password mode" in link_dispatcher
+assert "--provisioning-password-mode" in (
+    firmware_dir.parents[1] / "cdc-status.py"
+).read_text(encoding="utf-8")
 assert "esp_fill_random(destination, length);" in source
 assert "credential_.begin(config.settings().provisioningPasswordMode," in source
 assert "password_ = credential_.password();" in source

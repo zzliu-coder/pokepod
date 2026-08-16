@@ -295,6 +295,12 @@ awk '
   /^CONFIG_NIMBLE_MAX_CONNECTIONS=/ {
     print "CONFIG_NIMBLE_MAX_CONNECTIONS=1"; next
   }
+  /^# CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE is not set$/ {
+    print "CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y"; next
+  }
+  /^CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=/ {
+    print "CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y"; next
+  }
   { print }
 ' "$ESP32_S3_SDK_DIR/sdkconfig" > "$SDK_OVERLAY_DIR/sdkconfig.next"
 if cmp -s "$SDK_OVERLAY_DIR/sdkconfig.next" "$SDK_OVERLAY_DIR/sdkconfig"; then
@@ -303,13 +309,24 @@ else
   mv "$SDK_OVERLAY_DIR/sdkconfig.next" "$SDK_OVERLAY_DIR/sdkconfig"
 fi
 awk '
+  BEGIN { llcp_conn_update = 0 }
   /^#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS / {
     print "#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1"; next
   }
   /^#define CONFIG_NIMBLE_MAX_CONNECTIONS / {
     print "#define CONFIG_NIMBLE_MAX_CONNECTIONS 1"; next
   }
+  /^#define CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE / {
+    print "#define CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE 1";
+    llcp_conn_update = 1;
+    next
+  }
   { print }
+  END {
+    if (!llcp_conn_update) {
+      print "#define CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE 1"
+    }
+  }
 ' "$ESP32_S3_SDK_DIR/$SDK_VARIANT/include/sdkconfig.h" \
   > "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next"
 if cmp -s "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h.next" \
@@ -321,6 +338,10 @@ else
 fi
 rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$SDK_OVERLAY_DIR/sdkconfig"
 rg -qx '#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1' \
+  "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
+rg -qx 'CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y' \
+  "$SDK_OVERLAY_DIR/sdkconfig"
+rg -qx '#define CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE 1' \
   "$SDK_OVERLAY_DIR/$SDK_VARIANT/include/sdkconfig.h"
 if [ ! -d "$VENDOR_DIR/.git" ]; then
   git clone https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.8.git "$VENDOR_DIR"
@@ -454,6 +475,7 @@ if [ "$BUILD_MODE" = fast ] && [ "$FORCE_BUILD" -eq 0 ] && [ "$#" -eq 0 ] && \
    [ -f "$OUTPUT_DIR/artifact.json" ]; then
   printf 'CACHE HIT pokepod fast build (%s)\n' "$BUILD_FINGERPRINT"
   rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$BUILD_DIR/sdkconfig"
+  rg -qx 'CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y' "$BUILD_DIR/sdkconfig"
   write_artifact_manifest
   python3 "$PORTABLE_TOOL" sha256 "$OUTPUT_DIR"/*
   printf 'Build mode: fast; elapsed: %ss\n' "$(($(date +%s) - STARTED_AT))"
@@ -488,6 +510,7 @@ then
 fi
 cat "$BUILD_LOG"
 rg -qx 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$BUILD_DIR/sdkconfig"
+rg -qx 'CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y' "$BUILD_DIR/sdkconfig"
 if rg -q '^CONFIG_BT_NIMBLE_MAX_CONNECTIONS=[2-9]' \
   "$BUILD_DIR/sdkconfig"; then
   printf 'Build used a multi-connection NimBLE configuration\n' >&2

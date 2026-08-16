@@ -269,7 +269,19 @@ def encode_frame(frame_type: int, request_id: int, payload: bytes,
 
 
 def read_frame(fd: int, deadline: float):
-    raw = read_exact(fd, HEADER.size, deadline)
+    # Startup diagnostics and Link v2 share the maintenance CDC endpoint. A
+    # fixture opening immediately after reset may inherit a short text tail;
+    # resynchronize on the binary magic instead of treating that evidence as
+    # a permanent protocol failure.
+    prefix = bytearray(read_exact(fd, len(MAGIC), deadline))
+    discarded = 0
+    while bytes(prefix) != MAGIC:
+        prefix.pop(0)
+        prefix.extend(read_exact(fd, 1, deadline))
+        discarded += 1
+        if discarded > 8192:
+            raise ValueError("PokePod Link v2 magic was not found")
+    raw = bytes(prefix) + read_exact(fd, HEADER.size - len(MAGIC), deadline)
     magic, version, frame_type, flags, request_id, length, expected_crc = (
         HEADER.unpack(raw)
     )
@@ -407,6 +419,8 @@ def main() -> int:
     parser.add_argument("ports", nargs="*")
     parser.add_argument("--command", default="status",
                         choices=("hello", "identity", "status", "record", "stop",
+                                 "diagnostic-wireless-start",
+                                 "diagnostic-wireless-stop",
                                  "provisioning-start", "provisioning-stop",
                                  "get-power-diagnostics",
                                  "clear-power-diagnostics",
@@ -435,6 +449,11 @@ def main() -> int:
         "--app-elf-sha256",
         help="64-character application ELF digest bound to --firmware",
     )
+    parser.add_argument(
+        "--provisioning-password-mode",
+        choices=("random", "fixed"),
+        help="persist the local provisioning AP password policy over USB Link",
+    )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
     parser.add_argument("--trace-offset", type=int, default=0)
@@ -450,10 +469,27 @@ def main() -> int:
             parser.error("--trace-limit must be between 1 and 8")
         fields = {"offset": arguments.trace_offset,
                   "limit": arguments.trace_limit}
-    if arguments.install_font and arguments.firmware:
-        parser.error("--install-font and --firmware are mutually exclusive")
+    selected_mutations = sum(bool(value) for value in (
+        arguments.install_font,
+        arguments.firmware,
+        arguments.provisioning_password_mode,
+    ))
+    if selected_mutations > 1:
+        parser.error(
+            "--install-font, --firmware and --provisioning-password-mode "
+            "are mutually exclusive"
+        )
     if arguments.install_font:
         operation = "font-write"
+    if arguments.provisioning_password_mode:
+        operation = "configure"
+        fields = {
+            "values": {
+                "provisioningPasswordMode": (
+                    2 if arguments.provisioning_password_mode == "fixed" else 1
+                )
+            }
+        }
         try:
             with open(arguments.install_font, "rb") as font_file:
                 outgoing_binary = font_file.read()

@@ -185,6 +185,8 @@ assert "PRODUCTION_CORE_VERSION = \"3.3.8\"" in (
 assert "POKEPOD_CORE_MATRIX" in build
 assert "PartitionScheme=app3M_fat9M_16MB" in build
 assert "CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1" in build
+assert "CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y" in build
+assert "#define CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE 1" in build
 assert "APP_ONLY_FLASH_OFFSET=0x10000" in build
 assert 'FIRMWARE_VERSION_HEADER="$SKETCH_DIR/FirmwareVersion.h"' in build
 assert "--firmware-version-header" in build

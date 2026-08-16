@@ -591,6 +591,10 @@ def exercise(args: argparse.Namespace) -> int:
             cdc(args.port, "record", output, args.timeout)
             time.sleep(args.hold_seconds)
             cdc(args.port, "stop", output, args.timeout)
+        elif args.scenario == "wireless-voice":
+            cdc(args.port, "diagnostic-wireless-start", output, args.timeout)
+            time.sleep(args.hold_seconds)
+            cdc(args.port, "diagnostic-wireless-stop", output, args.timeout)
         elif args.scenario == "provisioning":
             cdc(args.port, "provisioning-start", output, args.timeout)
             time.sleep(args.hold_seconds)
@@ -616,7 +620,7 @@ def exercise(args: argparse.Namespace) -> int:
         post_runtime = cdc(app_port, "get-runtime-diagnostics", output,
                            args.timeout)
         post_boot = latest_boot(post_runtime)
-        if args.scenario == "recording":
+        if args.scenario in ("recording", "wireless-voice"):
             require_same_boot(pre_boot, post_boot, "recording")
         elif (post_boot["sequence"] != pre_boot["sequence"]
               and post_boot["resetReason"] != 3):
@@ -630,6 +634,7 @@ def exercise(args: argparse.Namespace) -> int:
             "status": cdc(app_port, "status", output, args.timeout),
             "runtime": post_runtime,
             "boot": post_boot,
+            "macVoice": copy_mac_voice_diagnostic(output),
         })
     except RuntimeError as error:
         failure = error
@@ -710,7 +715,11 @@ def main() -> int:
     recover_parser.add_argument("--expected-device-id")
     recover_parser.add_argument("--mode", choices=("fast", "release"), default="fast")
     exercise_parser = sub.add_parser("exercise")
-    exercise_parser.add_argument("--scenario", choices=("recording", "provisioning"), required=True)
+    exercise_parser.add_argument(
+        "--scenario",
+        choices=("recording", "wireless-voice", "provisioning"),
+        required=True,
+    )
     exercise_parser.add_argument("--port", required=True)
     exercise_parser.add_argument("--port-pattern", default="/dev/cu.usbmodem*")
     exercise_parser.add_argument("--timeout", type=float, default=3.0)

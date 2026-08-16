@@ -134,6 +134,10 @@ uint16_t requiredCapabilitiesForLinkOperation(const char *operation) {
       strcmp(operation, "stop") == 0) {
     return kRecordingCapabilities;
   }
+  if (strcmp(operation, "diagnostic-wireless-start") == 0 ||
+      strcmp(operation, "diagnostic-wireless-stop") == 0) {
+    return kBleVoiceCapabilities;
+  }
   if (strcmp(operation, "font-write") == 0) {
     return capabilityMask(DeviceCapability::storage);
   }
@@ -303,7 +307,7 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"pairing-export\",\"reboot\"]"
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"diagnostic-wireless-voice\",\"pairing-export\",\"reboot\"]"
         : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
@@ -461,6 +465,28 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
         sendError(requestId, result.message);
       }
       // accepted and cleanupPending complete asynchronously through poll().
+    }
+  } else if (strcmp(operation, "diagnostic-wireless-start") == 0) {
+    if (transport_ != LinkTransport::usb) {
+      sendError(requestId,
+                "wireless voice diagnostics are only available over USB");
+    } else if (wirelessVoiceStart_ == nullptr) {
+      sendError(requestId, "wireless voice diagnostic control is unavailable");
+    } else if (wirelessVoiceStart_()) {
+      sendOk(requestId);
+    } else {
+      sendError(requestId, "wireless voice start was rejected");
+    }
+  } else if (strcmp(operation, "diagnostic-wireless-stop") == 0) {
+    if (transport_ != LinkTransport::usb) {
+      sendError(requestId,
+                "wireless voice diagnostics are only available over USB");
+    } else if (wirelessVoiceStop_ == nullptr) {
+      sendError(requestId, "wireless voice diagnostic control is unavailable");
+    } else if (wirelessVoiceStop_()) {
+      sendOk(requestId);
+    } else {
+      sendError(requestId, "wireless voice stop was rejected");
     }
   } else if (strcmp(operation, "stop") == 0) {
     if (!recordingSession_.recordingActive()) {
@@ -913,8 +939,23 @@ void PokePodLinkService::handleConfigure(uint32_t requestId, void *jsonRoot) {
   }
   cJSON *wifiEnabled = cJSON_GetObjectItemCaseSensitive(values, "wifiEnabled");
   cJSON *raiseToWake = cJSON_GetObjectItemCaseSensitive(values, "raiseToWake");
+  cJSON *provisioningPasswordMode =
+      cJSON_GetObjectItemCaseSensitive(values, "provisioningPasswordMode");
   if (cJSON_IsBool(wifiEnabled)) settings.wifiEnabled = cJSON_IsTrue(wifiEnabled);
   if (cJSON_IsBool(raiseToWake)) settings.raiseToWake = cJSON_IsTrue(raiseToWake);
+  if (provisioningPasswordMode != nullptr) {
+    if (!cJSON_IsNumber(provisioningPasswordMode) ||
+        (provisioningPasswordMode->valueint !=
+             kStoredProvisioningPasswordRandom &&
+         provisioningPasswordMode->valueint !=
+             kStoredProvisioningPasswordFixed88888888)) {
+      sendError(requestId, "invalid provisioning password mode");
+      return;
+    }
+    settings.provisioningPasswordMode =
+        static_cast<ProvisioningPasswordMode>(
+            provisioningPasswordMode->valueint);
+  }
   if (!config_->save(settings, *log_)) {
     sendError(requestId, "configuration save failed");
     return;
@@ -926,7 +967,10 @@ void PokePodLinkService::handleConfigure(uint32_t requestId, void *jsonRoot) {
       ",\"wifiNetworkCount\":" +
       String(static_cast<unsigned>(config_->wifiNetworks().size())) +
       ",\"tencentConfigured\":" +
-      String(config_->hasTencent() ? "true" : "false");
+      String(config_->hasTencent() ? "true" : "false") +
+      ",\"provisioningPasswordMode\":" +
+      String(static_cast<unsigned>(
+          config_->settings().provisioningPasswordMode));
   sendOk(requestId, extra.c_str());
 }
 

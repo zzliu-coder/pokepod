@@ -66,7 +66,9 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                AudioCaptureDispatcher *captureDispatcher,
                                const CapabilityRegistry *capabilities,
                                DeviceRebootCoordinator *rebootCoordinator,
-                               RuntimeDiagnostics *runtimeDiagnostics) {
+                               RuntimeDiagnostics *runtimeDiagnostics,
+                               LinkDeviceExerciseAction wirelessVoiceStart,
+                               LinkDeviceExerciseAction wirelessVoiceStop) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
@@ -92,6 +94,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   fileTransfer_.bind(*this);
   coordinator_ = coordinator;
   rebootCoordinator_ = rebootCoordinator;
+  wirelessVoiceStart_ = wirelessVoiceStart;
+  wirelessVoiceStop_ = wirelessVoiceStop;
   transport_ = transport;
   pairingProvider_ = pairingProvider;
   transferGate_ = transferGate;

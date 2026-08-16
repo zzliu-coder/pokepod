@@ -14,19 +14,22 @@ assert "ARDUINO_USB_CDC_LINE_STATE_EVENT" in bridge
 assert "data->line_state.dtr" in bridge
 assert "ARDUINO_USB_CDC_DISCONNECTED_EVENT" in bridge
 assert "bool hostSessionActive() const" in bridge_header
-assert "bool takeHostSessionClosed()" in bridge_header
+assert "UsbCdcSessionSnapshot hostSessionSnapshot() const" in bridge_header
+assert "bool takeHostSessionClosed(uint32_t &generation)" in bridge_header
 assert "void discardHostSessionBuffers()" in bridge_header
-assert "const bool usbHostSessionClosed = usb.takeHostSessionClosed();" in app
-assert "(lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed" in app
+assert "usb.takeHostSessionClosed(closedUsbSessionGeneration)" in app
+assert "closedUsbSessionGeneration == usbSession.generation" in app
+assert "usbSession.generation != lastUsbSessionGeneration" in app
 close_guard = re.search(
     r"if \(bootUsbLinkStarted &&\s*"
-    r"\(\(lastUsbHostConnected && !usbHostConnected\) \|\| "
-    r"usbHostSessionClosed\)\) \{\s*"
+    r"\(usbPhysicallyDisconnected \|\| currentUsbSessionClosed\)\) \{\s*"
     r"usb\.discardHostSessionBuffers\(\);\s*"
     r"linkService->disconnect\(\);",
     app,
 )
 assert close_guard is not None
+assert "usbSessionAdvanced &&" in app
+assert "lastUsbSessionGeneration != 0" in app
 assert "while (cdc_.available() > 0)" in bridge
 assert "tud_cdc_read_flush();" in bridge
 assert "tud_cdc_write_clear();" in bridge

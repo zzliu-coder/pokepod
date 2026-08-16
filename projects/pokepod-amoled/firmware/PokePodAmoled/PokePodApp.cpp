@@ -188,6 +188,7 @@ uint32_t lastNetworkTimeSyncRevision = 0;
 uint32_t lastCapsuleLibraryRevision = 0;
 bool ignoreTouchUntilRelease = false;
 bool lastUsbHostConnected = false;
+uint32_t lastUsbSessionGeneration = 0;
 bool lastVbusPresent = false;
 bool screenDimmed = false;
 String transientMessage;
@@ -1900,7 +1901,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
           LinkTransport::usb, &wirelessSync.get(),
                     nullptr, &provisioningCoordinator, nullptr,
           &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot,
-          &runtimeDiagnostics);
+          &runtimeDiagnostics, startWirelessHold, stopWirelessHold);
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
@@ -2055,8 +2056,15 @@ void setup() {
   drawDashboard();
   autoScreenOff.begin(millis());
   lastUsbHostConnected = usb.hostConnected();
+  lastUsbSessionGeneration = usb.hostSessionSnapshot().generation;
   lastVbusPresent = board.status().vbusPresent;
   emitStatus();
+  // Arduino feeds the subscribed loop task immediately before every loop()
+  // call. Any synchronous storage, Wi-Fi, BLE or Link stall longer than the
+  // configured five seconds therefore produces a panic coredump and reboot
+  // instead of leaving a lit but permanently unresponsive device.
+  enableLoopWDT();
+  Serial.println("{\"event\":\"loop_task_watchdog_enabled\",\"timeout_s\":5}");
 }
 
 void loop() {
@@ -2159,13 +2167,30 @@ void loop() {
   pollDeferredServiceCleanup();
   if (safeShutdownQuiesce.pending()) (void)advanceSafeShutdown(now);
   const bool usbHostConnected = usb.hostConnected();
-  const bool usbHostSessionClosed = usb.takeHostSessionClosed();
+  const UsbCdcSessionSnapshot usbSession = usb.hostSessionSnapshot();
+  uint32_t closedUsbSessionGeneration = 0;
+  const bool usbHostSessionClosed =
+      usb.takeHostSessionClosed(closedUsbSessionGeneration);
+  const bool usbSessionAdvanced = usbSession.generation != 0 &&
+      usbSession.generation != lastUsbSessionGeneration;
+  const bool currentUsbSessionClosed = usbHostSessionClosed &&
+      !usbSession.active &&
+      closedUsbSessionGeneration == usbSession.generation;
+  const bool usbPhysicallyDisconnected =
+      lastUsbHostConnected && !usbHostConnected;
   if (bootUsbLinkStarted &&
-      ((lastUsbHostConnected && !usbHostConnected) || usbHostSessionClosed)) {
+      (usbPhysicallyDisconnected || currentUsbSessionClosed)) {
     usb.discardHostSessionBuffers();
+    linkService->disconnect();
+  } else if (bootUsbLinkStarted && usbSessionAdvanced &&
+             lastUsbSessionGeneration != 0) {
+    // A fast close/reopen can happen entirely between two loop turns. Reset
+    // the old Link owner, but retain bytes already received for the new DTR
+    // generation. A stale close event must never discard the new request.
     linkService->disconnect();
   }
   lastUsbHostConnected = usbHostConnected;
+  lastUsbSessionGeneration = usbSession.generation;
   if (trashUndo.expire(now)) {
     dashboard.invalidate();
   }

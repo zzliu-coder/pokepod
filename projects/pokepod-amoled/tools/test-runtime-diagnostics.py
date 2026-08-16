@@ -43,6 +43,15 @@ assert "bindRuntimeDiagnostics" in provisioning_header
 assert "provisioningQuiesceBefore" in provisioning
 assert "recordWirelessRuntime" in app
 assert "wirelessCaptureStart" in app
+assert '"diagnostic-wireless-start"' in dispatcher
+assert '"diagnostic-wireless-stop"' in dispatcher
+assert "transport_ != LinkTransport::usb" in dispatcher
+assert "wirelessVoiceStart_()" in dispatcher
+assert "wirelessVoiceStop_()" in dispatcher
+assert "startWirelessHold, stopWirelessHold" in app
+assert '"wireless-voice"' in (
+    root / "fixture" / "pokepod-fixture.py"
+).read_text(encoding="utf-8")
 
 # NVS-backed runtime diagnostics must never execute inside the timed SD probe
 # primitive. The probe persists only aggregate facts after cleanup.

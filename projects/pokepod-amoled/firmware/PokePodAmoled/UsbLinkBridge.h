@@ -23,7 +23,12 @@ class UsbLinkBridge {
   // DTR tracks whether a desktop process currently owns the CDC session.
   bool hostSessionActive() const { return cdcSession_.active(); }
   bool cdcSessionActive() const { return hostSessionActive(); }
-  bool takeHostSessionClosed() { return cdcSession_.takeClosed(); }
+  UsbCdcSessionSnapshot hostSessionSnapshot() const {
+    return cdcSession_.snapshot();
+  }
+  bool takeHostSessionClosed(uint32_t &generation) {
+    return cdcSession_.takeClosed(generation);
+  }
   // Drop bytes owned by a closed CDC session before Link v2 can poll again.
   void discardHostSessionBuffers();
 

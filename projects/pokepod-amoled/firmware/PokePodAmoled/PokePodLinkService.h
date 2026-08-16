@@ -32,6 +32,8 @@
 
 namespace pokepod {
 
+using LinkDeviceExerciseAction = bool (*)();
+
 class BoardServices;
 class AudioPipeline;
 class AudioCaptureRuntime;
@@ -76,7 +78,9 @@ class PokePodLinkService : private LinkFileTransferHost {
              AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr,
              DeviceRebootCoordinator *rebootCoordinator = nullptr,
-             RuntimeDiagnostics *runtimeDiagnostics = nullptr);
+             RuntimeDiagnostics *runtimeDiagnostics = nullptr,
+             LinkDeviceExerciseAction wirelessVoiceStart = nullptr,
+             LinkDeviceExerciseAction wirelessVoiceStop = nullptr);
   void poll(uint32_t nowMs);
   // Finishes read-only handle cleanup after an immediate transport cancel.
   // This never reads frames or writes responses, so a Wi-Fi service can call
@@ -365,6 +369,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   Print *log_ = nullptr;
   LinkServiceCoordinator *coordinator_ = nullptr;
   DeviceRebootCoordinator *rebootCoordinator_ = nullptr;
+  LinkDeviceExerciseAction wirelessVoiceStart_ = nullptr;
+  LinkDeviceExerciseAction wirelessVoiceStop_ = nullptr;
   LinkTransport transport_ = LinkTransport::none;
   WirelessSyncPairingProvider *pairingProvider_ = nullptr;
   LinkTransferGate *transferGate_ = nullptr;

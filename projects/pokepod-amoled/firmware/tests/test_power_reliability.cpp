@@ -141,7 +141,9 @@ int main() {
   assert(cdc.active());
   cdc.lineState(false);
   assert(!cdc.active());
-  assert(cdc.takeClosed());
+  uint32_t closedGeneration = 0;
+  assert(cdc.takeClosed(closedGeneration));
+  assert(closedGeneration == 1);
   assert(usbPhysicalConnected(true, true, true));
   assert(!usbPhysicalConnected(true, true, false));
   return 0;

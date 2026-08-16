@@ -95,6 +95,17 @@ def identity_server(fd: int) -> None:
     })
 
 
+def noisy_identity_server(fd: int) -> None:
+    frame_type, _, request_id, payload = read_frame(fd)
+    assert frame_type == cdc.REQUEST_JSON
+    assert json.loads(payload)["operation"] == "identity"
+    os.write(fd, b'{"event":"boot_capabilities"}\r\n')
+    send_frame(fd, cdc.RESPONSE_JSON, request_id, {
+        "status": "ok", "version": 2,
+        "deviceId": "pokepod-aabbccddeeff",
+    })
+
+
 def binary_server(fd: int, operation: str, expect_prepare: bool) -> None:
     frame_type, _, request_id, payload = read_frame(fd)
     assert frame_type == cdc.REQUEST_JSON
@@ -128,6 +139,11 @@ def binary_server(fd: int, operation: str, expect_prepare: bool) -> None:
 def main() -> int:
     identity = run_case(identity_server, lambda port: cdc.query(port, "identity", 2.0))
     assert identity["deviceId"] == "pokepod-001122334455"
+    noisy_identity = run_case(
+        noisy_identity_server,
+        lambda port: cdc.query(port, "identity", 2.0),
+    )
+    assert noisy_identity["deviceId"] == "pokepod-aabbccddeeff"
     payload = bytes(range(200))
     font = run_case(
         lambda fd: binary_server(fd, "font-write", False),
