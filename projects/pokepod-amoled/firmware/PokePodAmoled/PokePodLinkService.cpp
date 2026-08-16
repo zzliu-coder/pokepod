@@ -94,6 +94,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   fileTransfer_.bind(*this);
   coordinator_ = coordinator;
   rebootCoordinator_ = rebootCoordinator;
+  runtimeDiagnostics_ = runtimeDiagnostics;
   wirelessVoiceStart_ = wirelessVoiceStart;
   wirelessVoiceStop_ = wirelessVoiceStop;
   transport_ = transport;
@@ -102,6 +103,7 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   writeChannel_ = writeChannel;
   connectionGeneration_ = 0;
   nextConnectionGeneration_ = 0;
+  liveness_.reset();
   activeMaintenance_ = "";
   quiesceRequested_ = false;
   if (!transaction_.begin(fs, log)) return false;

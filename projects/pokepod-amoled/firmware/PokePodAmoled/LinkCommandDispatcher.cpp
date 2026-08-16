@@ -307,11 +307,28 @@ void PokePodLinkService::handleImmediate(uint32_t requestId, void *jsonRoot) {
   const char *operation = jsonString(root, "operation");
   if (strcmp(operation, "hello") == 0) {
     const char *capabilities = transport_ == LinkTransport::usb
-        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"diagnostic-wireless-voice\",\"pairing-export\",\"reboot\"]"
-        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"reboot\"]";
+        ? "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"set-provisioning-password-mode\",\"link-probe\",\"set-time\",\"record\",\"stop\",\"font-write\",\"firmware-update\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"provisioning-start\",\"provisioning-stop\",\"diagnostic-wireless-voice\",\"pairing-export\",\"reboot\"]"
+        : "\"protocol\":\"PokePod Link\",\"capabilities\":[\"read\",\"stage-write\",\"command\",\"configure\",\"link-probe\",\"set-time\",\"record\",\"stop\",\"font-write\",\"provisioning-diagnostics\",\"power-diagnostics\",\"runtime-diagnostics\",\"runtime-trace\",\"clear-runtime-diagnostics\",\"reboot\"]";
     sendOk(requestId, capabilities);
   } else if (strcmp(operation, "status") == 0) {
     (void)sendTerminalOrDisconnect(requestId, diagnostics_.statusJson());
+  } else if (strcmp(operation, "link-probe") == 0) {
+    sendOk(requestId, linkProbeJson().c_str());
+  } else if (strcmp(operation, "set-provisioning-password-mode") == 0) {
+    const int64_t mode = jsonInt64(root, "mode", -1);
+    if (transport_ != LinkTransport::usb) {
+      sendError(requestId,
+                "provisioning password mode is only available over USB");
+    } else if (mode != kStoredProvisioningPasswordRandom &&
+               mode != kStoredProvisioningPasswordFixed88888888) {
+      sendError(requestId, "invalid provisioning password mode");
+    } else if (!config_->setProvisioningPasswordMode(
+                   static_cast<ProvisioningPasswordMode>(mode), *log_)) {
+      sendError(requestId, "provisioning password mode save failed");
+    } else {
+      const String extra = "\"provisioningPasswordMode\":" + String(mode);
+      sendOk(requestId, extra.c_str());
+    }
   } else if (strcmp(operation, "provisioning-start") == 0) {
     if (transport_ != LinkTransport::usb ||
         provisioningCoordinator_ == nullptr) {

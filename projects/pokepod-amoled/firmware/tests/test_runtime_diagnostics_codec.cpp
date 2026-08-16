@@ -61,6 +61,12 @@ int main() {
       RuntimeDiagnosticSubsystem::recording,
       RuntimeDiagnosticStage::recordingCleanup,
       RuntimeDiagnosticOutcome::success));
+  assert(runtimeDiagnosticShouldPersist(
+      RuntimeDiagnosticSubsystem::link,
+      RuntimeDiagnosticStage::linkStallRecovery,
+      RuntimeDiagnosticOutcome::failure));
+  assert(runtimeDiagnosticSubsystemKey(RuntimeDiagnosticSubsystem::link) !=
+         nullptr);
 
   log.records[0].detail0 ^= 1U;
   assert(!validateRuntimeDiagnosticLog(log));

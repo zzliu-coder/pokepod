@@ -28,6 +28,8 @@ assert "validateRuntimeDiagnosticLog" in codec
 assert 'preferences_.begin("pokepod_rt", false)' in runtime
 assert "provisioningQuiesceBefore" in codec
 assert "wirelessRouterAcquire" in codec
+assert "linkStallRecovery" in codec
+assert "RuntimeDiagnosticSubsystem::link" in codec
 assert '"get-runtime-diagnostics"' in dispatcher
 assert '"get-runtime-trace"' in dispatcher
 assert '"clear-runtime-diagnostics"' in dispatcher
@@ -45,6 +47,7 @@ assert "recordWirelessRuntime" in app
 assert "wirelessCaptureStart" in app
 assert '"diagnostic-wireless-start"' in dispatcher
 assert '"diagnostic-wireless-stop"' in dispatcher
+assert '"link-probe"' in dispatcher
 assert "transport_ != LinkTransport::usb" in dispatcher
 assert "wirelessVoiceStart_()" in dispatcher
 assert "wirelessVoiceStop_()" in dispatcher

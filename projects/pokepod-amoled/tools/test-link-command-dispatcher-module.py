@@ -23,7 +23,8 @@ for method in METHODS:
 # Frozen protocol surface and capability gating remain byte/schema compatible.
 for operation in (
     "font-write", "stage-write", "command", "status", "fingerprint",
-    "record", "stop", "read", "provisioning-start",
+    "record", "stop", "read", "provisioning-start", "link-probe",
+    "set-provisioning-password-mode",
 ):
     assert f'"{operation}"' in DISPATCHER
 assert "jsonInt64(root, \"version\") != kLinkVersion" in DISPATCHER

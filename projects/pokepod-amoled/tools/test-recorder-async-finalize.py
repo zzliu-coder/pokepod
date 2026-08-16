@@ -115,8 +115,7 @@ assert "recorder.operationActive() || pendingRecorderFinalize" in app
 assert "recorder.pollCleanup" not in app
 assert "recorder.recoverInterrupted" not in app
 assert app.index("if (safeShutdownQuiesce.pending())") < app.index(
-    "if (bootUsbLinkStarted && board.sdReady() && "
-    "linkService->receivingBinary())"
+    "if (bootUsbLinkStarted && linkService->receivingBinary())"
 )
 
 owner_block_start = app.index(

@@ -12,7 +12,8 @@ DISPATCHER = (FIRMWARE / "LinkCommandDispatcher.cpp").read_text(encoding="utf-8"
 
 METHODS = (
     "activateConnectionGeneration", "admitLinkOperation", "operationOwns",
-    "cancelLinkOperation", "advanceLinkOperationSettlement", "disconnect",
+    "cancelLinkOperation", "advanceLinkOperationSettlement",
+    "recoverStalledLink", "linkProbeJson", "disconnect",
     "requestQuiesce", "quiesced", "pollDeferredCleanup", "poll",
     "consumeByte", "resetFrame", "processFrame", "sendOk", "sendBusy",
     "sendError", "sendTerminalOrDisconnect", "sendEvent", "advanceTransmit",
@@ -33,6 +34,9 @@ assert "admitLinkOperation(requestId)" in DISPATCHER
 assert "operation_.queueFrame(" in TRANSPORT
 assert "operation_.frameDrained(" in TRANSPORT
 assert "advanceLinkOperationSettlement();" in TRANSPORT
+assert "liveness_.noteProgress(millis())" in TRANSPORT
+assert "RuntimeDiagnosticStage::linkStallRecovery" in TRANSPORT
+assert "usb_->discardHostSessionBuffers();" in TRANSPORT
 
 # Frozen Link v2 framing, CRC and response schema remain unchanged.
 assert "{'P', 'P', 'V', '2'}" in TRANSPORT
@@ -72,6 +76,9 @@ assert poll.index("LinkPollBudget budget(") < poll.index(
     "pollDeferredCleanup(gate)"
 )
 assert poll.index("pollDeferredCleanup(gate)") < poll.index(
+    "recoverStalledLink(nowMs)"
+)
+assert poll.index("recoverStalledLink(nowMs)") < poll.index(
     "recordingSession_.observeAutomaticStop"
 )
 assert poll.index("recordingSession_.observeAutomaticStop") < poll.index(

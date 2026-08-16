@@ -16,6 +16,7 @@
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
+#include "LinkLivenessProbe.h"
 #include "LinkPollBudget.h"
 #include "LinkCommandExecutor.h"
 #include "LinkOperation.h"
@@ -174,6 +175,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool operationOwns(uint32_t requestId) const;
   void cancelLinkOperation(LinkOperationCancelReason reason);
   void advanceLinkOperationSettlement();
+  bool recoverStalledLink(uint32_t nowMs);
+  String linkProbeJson() const;
   void resetFrame();
   void processFrame(LinkPollPhaseGate *gate = nullptr);
   enum class MetadataReadResult : uint8_t { pending, ready, failed };
@@ -369,6 +372,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   Print *log_ = nullptr;
   LinkServiceCoordinator *coordinator_ = nullptr;
   DeviceRebootCoordinator *rebootCoordinator_ = nullptr;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
   LinkDeviceExerciseAction wirelessVoiceStart_ = nullptr;
   LinkDeviceExerciseAction wirelessVoiceStop_ = nullptr;
   LinkTransport transport_ = LinkTransport::none;
@@ -376,6 +380,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   LinkTransferGate *transferGate_ = nullptr;
   LinkWriteChannel *writeChannel_ = nullptr;
   LinkOperation operation_;
+  LinkLivenessProbe liveness_;
   uint32_t connectionGeneration_ = 0;
   uint32_t nextConnectionGeneration_ = 0;
   CapsuleTransaction transaction_;

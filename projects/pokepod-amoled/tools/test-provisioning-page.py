@@ -92,9 +92,32 @@ assert "ProvisioningPasswordMode provisioningPasswordMode" in config_header
 assert 'cJSON_GetObjectItemCaseSensitive(values, "provisioningPasswordMode")' in link_dispatcher
 assert "kStoredProvisioningPasswordFixed88888888" in link_dispatcher
 assert "invalid provisioning password mode" in link_dispatcher
+assert 'strcmp(operation, "set-provisioning-password-mode") == 0' in link_dispatcher
+password_mode_operation = link_dispatcher[
+    link_dispatcher.index('strcmp(operation, "set-provisioning-password-mode")'):
+    link_dispatcher.index('strcmp(operation, "provisioning-start")')
+]
+assert "config_->setProvisioningPasswordMode" in password_mode_operation
+assert "wifi_->configurationChanged()" not in password_mode_operation
+assert "tencent_->wake()" not in password_mode_operation
 assert "--provisioning-password-mode" in (
     firmware_dir.parents[1] / "cdc-status.py"
 ).read_text(encoding="utf-8")
+cdc_status = (firmware_dir.parents[1] / "cdc-status.py").read_text(
+    encoding="utf-8"
+)
+font_argument = cdc_status[
+    cdc_status.index("    if arguments.install_font:"):
+    cdc_status.index("    if arguments.provisioning_password_mode:")
+]
+password_argument = cdc_status[
+    cdc_status.index("    if arguments.provisioning_password_mode:"):
+    cdc_status.index("    if arguments.firmware:")
+]
+assert "open(arguments.install_font" in font_argument
+assert "open(arguments.install_font" not in password_argument
+assert 'operation = "set-provisioning-password-mode"' in password_argument
+assert '"mode": 2 if arguments.provisioning_password_mode == "fixed" else 1' in password_argument
 assert "esp_fill_random(destination, length);" in source
 assert "credential_.begin(config.settings().provisioningPasswordMode," in source
 assert "password_ = credential_.password();" in source
@@ -388,7 +411,7 @@ portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
 assert "bootUsbLinkStarted = board.sdReady() && linkService->begin(" in main_source
 assert "bootWifiSyncStarted = board.sdReady() && wirelessSync->begin(" in main_source
-assert "if (bootUsbLinkStarted && board.sdReady())" in main_source
+assert "if (bootUsbLinkStarted)" in main_source
 assert "if (bootWifiSyncStarted && board.sdReady())" in main_source
 for service_type, service_name in (
     ("CapsuleLibrary", "capsuleLibrary"),

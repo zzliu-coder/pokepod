@@ -19,6 +19,7 @@ enum class RuntimeDiagnosticSubsystem : uint8_t {
   recording = 2,
   provisioning = 3,
   wirelessVoice = 4,
+  link = 5,
 };
 
 enum class RuntimeDiagnosticStage : uint8_t {
@@ -53,6 +54,7 @@ enum class RuntimeDiagnosticStage : uint8_t {
   wirelessReady = 44,
   wirelessFailure = 45,
   wirelessStop = 46,
+  linkStallRecovery = 60,
 };
 
 enum class RuntimeDiagnosticOutcome : uint8_t {
@@ -148,7 +150,7 @@ inline bool validateRuntimeDiagnosticLog(
   for (size_t index = 0; index < kRuntimeDiagnosticsCapacity; ++index) {
     const StoredRuntimeDiagnosticRecord &record = log.records[index];
     if (record.subsystem > static_cast<uint8_t>(
-            RuntimeDiagnosticSubsystem::wirelessVoice) ||
+            RuntimeDiagnosticSubsystem::link) ||
         record.outcome > static_cast<uint8_t>(
             RuntimeDiagnosticOutcome::interrupted)) {
       return false;
@@ -241,6 +243,7 @@ inline const char *runtimeDiagnosticSubsystemKey(
     case RuntimeDiagnosticSubsystem::recording: return "recording";
     case RuntimeDiagnosticSubsystem::provisioning: return "provisioning";
     case RuntimeDiagnosticSubsystem::wirelessVoice: return "wireless_voice";
+    case RuntimeDiagnosticSubsystem::link: return "link";
   }
   return "unknown";
 }
@@ -307,6 +310,8 @@ inline const char *runtimeDiagnosticStageKey(RuntimeDiagnosticStage stage) {
       return "wireless_failure";
     case RuntimeDiagnosticStage::wirelessStop:
       return "wireless_stop";
+    case RuntimeDiagnosticStage::linkStallRecovery:
+      return "link_stall_recovery";
   }
   return "unknown";
 }

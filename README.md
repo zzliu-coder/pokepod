@@ -70,3 +70,12 @@ both tiers, provisioning stop reasons, a ROM coredump/NVS snapshot when needed,
 and the Mac app's atomically persisted last-session timeline. Personal devices
 migrate to the configurable fixed provisioning-password mode; public/shared
 deployments can select the random-password mode.
+
+USB Link has an independent liveness probe in addition to the main-loop task
+watchdog. It records receive, transmit and request progress; a terminal frame,
+partial frame or resource-free request that makes no progress for five seconds
+is persisted as a runtime diagnostic and the Link channel is reset without
+restarting the device. `cdc-status.py --command link-probe` reports the live
+generation, request, operation state, queued frames and recovery count. The
+USB-only provisioning-password command persists that one setting without
+restarting Wi-Fi or Tencent services.

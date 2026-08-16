@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <esp_timer.h>
 
+#include "RuntimeDiagnostics.h"
 #include "TencentWorker.h"
+#include "UsbLinkBridge.h"
 
 namespace pokepod {
 namespace {
@@ -39,7 +41,59 @@ uint32_t PokePodLinkService::activateConnectionGeneration() {
   // replay cache only when a fresh transport epoch is observed, after any
   // previous operation has finished owner-scoped cleanup.
   completed_.clear();
+  liveness_.openSession(connectionGeneration_, millis());
   return connectionGeneration_;
+}
+
+String PokePodLinkService::linkProbeJson() const {
+  const LinkLivenessSnapshot &probe = liveness_.snapshot();
+  String value = "\"linkSessionActive\":" +
+      String(sessionActive_ ? "true" : "false") +
+      ",\"linkGeneration\":" + String(connectionGeneration_) +
+      ",\"linkRequestId\":" + String(operation_.requestId()) +
+      ",\"linkOperationState\":" +
+      String(static_cast<unsigned>(operation_.state())) +
+      ",\"linkQueuedFrames\":" + String(operation_.queuedFrameCount()) +
+      ",\"linkLastProgressMs\":" + String(probe.lastProgressMs) +
+      ",\"linkRecoveryCount\":" + String(probe.recoveryCount) +
+      ",\"linkLastRecoveryMs\":" + String(probe.lastRecoveryMs) +
+      ",\"linkLastStall\":" +
+      String(static_cast<unsigned>(probe.lastStall));
+  return value;
+}
+
+bool PokePodLinkService::recoverStalledLink(uint32_t nowMs) {
+  const bool receivePartial = receivePhase_ != ReceivePhase::magic ||
+      deferredRxByte_ >= 0;
+  const bool transmitPending = txStepper_.active() || txFrameBytes_ != 0 ||
+      pendingControlBytes_ != 0;
+  const bool operationRecoverable = operation_.operationalResourcesDrained() &&
+      recordingSession_.quiesced() && !transactionRunner_.active() &&
+      !fileTransfer_.cleanupPending() && !manifestCleanupPending_ &&
+      !incomingCleanupPending_;
+  const LinkLivenessStall stall = liveness_.observe(
+      nowMs, sessionActive_, operation_.requestId(),
+      operation_.queuedFrameCount(), receivePartial, transmitPending,
+      operationRecoverable);
+  if (stall == LinkLivenessStall::none) return false;
+
+  const uint32_t detail1 =
+      (static_cast<uint32_t>(stall) << 24U) |
+      ((operation_.queuedFrameCount() & 0xffffU) << 8U) |
+      static_cast<uint32_t>(operation_.state());
+  if (runtimeDiagnostics_ != nullptr && log_ != nullptr) {
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::link,
+        RuntimeDiagnosticStage::linkStallRecovery,
+        RuntimeDiagnosticOutcome::failure, operation_.requestId(), detail1,
+        *log_);
+  }
+  liveness_.recovered(stall, nowMs);
+  if (transport_ == LinkTransport::usb && usb_ != nullptr) {
+    usb_->discardHostSessionBuffers();
+  }
+  disconnect();
+  return true;
 }
 
 LinkOperationAdmission PokePodLinkService::admitLinkOperation(
@@ -250,6 +304,7 @@ void PokePodLinkService::poll(uint32_t nowMs) {
   LinkPollBudget budget(kLinkPollBudgetBytes, kLinkPollBudgetUs, startedUs);
   LinkPollPhaseGate gate(budget, linkPollNowUs);
   if (!pollDeferredCleanup(gate)) return;
+  if (recoverStalledLink(nowMs)) return;
   if (quiesceRequested_) return;
   if (!startupReady_) return;
   if (commandLoadState_ != CommandLoadState::none ||
@@ -333,6 +388,7 @@ void PokePodLinkService::poll(uint32_t nowMs) {
 }
 
 void PokePodLinkService::consumeByte(uint8_t value, LinkPollPhaseGate *gate) {
+  liveness_.noteProgress(millis());
   if (receivePhase_ == ReceivePhase::magic) {
     static constexpr uint8_t magic[4] = {'P', 'P', 'V', '2'};
     if (value == magic[magicMatched_]) {
@@ -567,6 +623,7 @@ bool PokePodLinkService::queueFrame(LinkFrameType type, uint16_t flags,
     failQueue();
     return false;
   }
+  liveness_.noteProgress(millis());
   return true;
 }
 
@@ -597,6 +654,10 @@ void PokePodLinkService::advanceTransmit(uint32_t nowMs) {
   const bool permittedAfter = transferPermitted();
   const LinkTransferStepResult result =
       txStepper_.accept(permittedAfter, attempt);
+  if (attempt.disposition == LinkWriteDisposition::progress &&
+      attempt.bytes != 0) {
+    liveness_.noteProgress(millis());
+  }
   if (result == LinkTransferStepResult::cancelled ||
       result == LinkTransferStepResult::disconnected ||
       result == LinkTransferStepResult::failed) {

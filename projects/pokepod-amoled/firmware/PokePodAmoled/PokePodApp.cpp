@@ -2201,7 +2201,7 @@ void loop() {
   if (bootUsbLinkStarted && board.sdReady()) {
     wirelessSync->enforceDeadline(now);
   }
-  if (bootUsbLinkStarted && board.sdReady() && linkService->receivingBinary()) {
+  if (bootUsbLinkStarted && linkService->receivingBinary()) {
     linkService->poll(now);
     return;
   }
@@ -2335,7 +2335,7 @@ void loop() {
     audio.stopHardware(usb.log());
   }
 
-  if (bootUsbLinkStarted && board.sdReady()) {
+  if (bootUsbLinkStarted) {
     wirelessSync->enforceDeadline(now);
     linkService->poll(now);
   }

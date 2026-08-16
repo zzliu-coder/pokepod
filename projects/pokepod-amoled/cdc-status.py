@@ -421,6 +421,7 @@ def main() -> int:
                         choices=("hello", "identity", "status", "record", "stop",
                                  "diagnostic-wireless-start",
                                  "diagnostic-wireless-stop",
+                                 "link-probe",
                                  "provisioning-start", "provisioning-stop",
                                  "get-power-diagnostics",
                                  "clear-power-diagnostics",
@@ -481,15 +482,6 @@ def main() -> int:
         )
     if arguments.install_font:
         operation = "font-write"
-    if arguments.provisioning_password_mode:
-        operation = "configure"
-        fields = {
-            "values": {
-                "provisioningPasswordMode": (
-                    2 if arguments.provisioning_password_mode == "fixed" else 1
-                )
-            }
-        }
         try:
             with open(arguments.install_font, "rb") as font_file:
                 outgoing_binary = font_file.read()
@@ -497,6 +489,11 @@ def main() -> int:
             parser.error(str(error))
         if not (20 <= len(outgoing_binary) <= 5 * 1024 * 1024):
             parser.error("font file must be between 20 bytes and 5 MiB")
+    if arguments.provisioning_password_mode:
+        operation = "set-provisioning-password-mode"
+        fields = {
+            "mode": 2 if arguments.provisioning_password_mode == "fixed" else 1
+        }
     if arguments.firmware:
         operation = "firmware-update"
         try:
