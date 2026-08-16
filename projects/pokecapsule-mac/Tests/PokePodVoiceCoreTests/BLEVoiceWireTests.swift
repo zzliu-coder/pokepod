@@ -35,6 +35,12 @@ final class BLEVoiceWireTests: XCTestCase {
             0x40, 0x01, 0xd2, 0x04, 10
         ])
         XCTAssertEqual(try BLEVoiceAudioFrame.decode(encoded), frame)
+        XCTAssertEqual(
+            BLEVoiceAudioFrame.notificationMetadata(from: encoded)?.sessionId,
+            0x1122_3344)
+        XCTAssertEqual(
+            BLEVoiceAudioFrame.notificationMetadata(from: encoded)?.sequence,
+            0xaabb_ccdd)
 
         var badVersion = encoded
         badVersion[0] = 2

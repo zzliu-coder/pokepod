@@ -28,6 +28,14 @@ public enum VoiceSessionPresentationPolicy {
         _ outcome: VoiceSessionCompletionOutcome,
         environmentReady: Bool
     ) -> VoiceSessionPresentationUpdate {
+        completion(outcome, failure: nil, environmentReady: environmentReady)
+    }
+
+    public static func completion(
+        _ outcome: VoiceSessionCompletionOutcome,
+        failure: VoiceSessionFailure?,
+        environmentReady: Bool
+    ) -> VoiceSessionPresentationUpdate {
         switch outcome {
         case .none:
             return .init(state: .unchanged, detail: nil)
@@ -38,13 +46,19 @@ public enum VoiceSessionPresentationPolicy {
                     ? "输入结束，默认麦克风已恢复"
                     : "输入已结束，请完成运行环境设置")
         case let .aborted(_, reason):
+            let failureDetail: String
+            if let failure {
+                failureDetail = failure.userDescription
+            } else {
+                failureDetail = reason == .watchdog
+                    ? VoiceSessionFailureKind.watchdog.userDescription
+                    : "本次输入已安全中止"
+            }
             return .init(
                 state: environmentReady ? .ready : .setup,
                 detail: environmentReady
-                    ? (reason == .watchdog
-                        ? "本次输入因音频超时已中止，可以立即重试"
-                        : "本次输入已安全中止，可以再次按住说话")
-                    : "本次输入已中止，请完成运行环境设置")
+                    ? "\(failureDetail)，可以立即重试"
+                    : "\(failureDetail)，请完成运行环境设置")
         }
     }
 }

@@ -10,7 +10,13 @@ enum BLECentralSignal {
     case deviceInfo(BLEVoiceDeviceInfo)
     case ready(BLEVoiceDeviceInfo?)
     case sessionStarted(UInt32)
+    case audioNotification(
+        sessionId: UInt32?,
+        sequence: UInt32?,
+        byteCount: Int,
+        at: TimeInterval)
     case audio(BLEVoiceAudioFrame)
+    case audioDecodeFailure(sessionId: UInt32?, detail: String)
     case sessionEnded(UInt32)
     case status(UInt16)
     case sessionError(sessionId: UInt32, code: UInt16)
@@ -373,12 +379,24 @@ extension BLECentralAdapter: CBPeripheralDelegate {
                     }
                 }
             } else if characteristic.uuid == CBUUID(string: BLEVoiceUUID.audio) {
-                let frame = try BLEVoiceAudioFrame.decode(value)
-                if !receivedFirstAudio {
-                    receivedFirstAudio = true
-                    try BLEHandshakePolicy.validateFirstAudioNotification(length: value.count)
+                let metadata = BLEVoiceAudioFrame.notificationMetadata(from: value)
+                onSignal?(.audioNotification(
+                    sessionId: metadata?.sessionId,
+                    sequence: metadata?.sequence,
+                    byteCount: value.count,
+                    at: monotonicNow))
+                do {
+                    let frame = try BLEVoiceAudioFrame.decode(value)
+                    if !receivedFirstAudio {
+                        receivedFirstAudio = true
+                        try BLEHandshakePolicy.validateFirstAudioNotification(length: value.count)
+                    }
+                    onSignal?(.audio(frame))
+                } catch {
+                    onSignal?(.audioDecodeFailure(
+                        sessionId: metadata?.sessionId,
+                        detail: error.localizedDescription))
                 }
-                onSignal?(.audio(frame))
             }
         } catch {
             onSignal?(.error("BLE 数据帧无效：\(error.localizedDescription)"))

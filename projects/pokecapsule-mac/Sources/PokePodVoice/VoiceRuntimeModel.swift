@@ -44,6 +44,7 @@ final class VoiceRuntimeModel: ObservableObject {
     @Published private(set) var accessibilityReady = false
     @Published private(set) var connectionQuality = VoiceLinkQualityFormatter.summary(
         nil, context: .disconnected)
+    @Published private(set) var sessionDiagnostic = "尚无语音会话指标"
     @Published private(set) var deviceQueueQuality = DeviceSendQueueQualityFormatter.summary(nil)
     @Published private(set) var deviceName = "PokePod"
     @Published var launchAtLogin = false
@@ -54,6 +55,7 @@ final class VoiceRuntimeModel: ObservableObject {
     private var machine = VoiceSessionMachine()
     private var completion = VoiceSessionCompletionCoordinator()
     private var jitter = VoiceJitterBuffer()
+    private var timeline = VoiceSessionTimeline()
     private var latestQuality: VoiceLinkQualitySnapshot?
     private var timer: Timer?
     private var transportReady = false
@@ -230,7 +232,11 @@ final class VoiceRuntimeModel: ObservableObject {
                 showError("运行环境尚未就绪")
                 return
             }
-            guard VoiceSessionStartCoordinator.start(
+            if machine.phase == .idle {
+                timeline.begin(sessionId: sessionId, at: monotonicNow)
+                publishTimeline()
+            }
+            let accepted = VoiceSessionStartCoordinator.start(
                 sessionId: sessionId,
                 now: monotonicNow,
                 machine: &machine,
@@ -239,49 +245,121 @@ final class VoiceRuntimeModel: ObservableObject {
                 sendSessionReady: { [ble] in ble.declareSessionReady(sessionId: $0) },
                 reject: { [ble] in ble.reject(
                     sessionId: $0,
-                    code: BLEVoiceRejectCode.platformSetupFailed.rawValue) }) else { return }
+                    code: BLEVoiceRejectCode.platformSetupFailed.rawValue) })
+            guard accepted else {
+                let failure = executor.lastFailure?.sessionFailure
+                    ?? VoiceSessionFailure(
+                        kind: .platformSetupFailed,
+                        detail: "会话启动被拒绝")
+                recordInputRestored(at: monotonicNow)
+                timeline.fail(failure, at: monotonicNow)
+                publishTimeline()
+                return
+            }
+            timeline.record(.platformPrepared, at: monotonicNow)
+            timeline.record(.sessionReadySent, at: monotonicNow)
+            publishTimeline()
             latestQuality = jitter.qualitySnapshot
             updateQuality(context: .active)
             state = .listening
             detail = "正在准备 120 ms 音频缓冲"
+        case let .audioNotification(sessionId, sequence, byteCount, at):
+            guard let sessionId,
+                  VoiceSessionSignalPolicy.remoteErrorTargetsActive(
+                      reportedSessionId: sessionId,
+                      activeSessionId: machine.activeSessionId) else { return }
+            timeline.record(
+                .audioNotification,
+                at: at,
+                sequence: sequence,
+                count: byteCount)
+            publishTimeline()
         case let .audio(frame):
             do {
                 for output in try jitter.ingest(frame) {
+                    if frame.sessionId == timeline.sessionId {
+                        timeline.record(
+                            output.concealed ? .sequenceGap : .audioDecoded,
+                            at: monotonicNow,
+                            sequence: output.sequence,
+                            count: output.samples.count,
+                            detail: output.concealed ? "静音补帧" : nil)
+                    }
                     let actions = machine.receive(
                         sessionId: frame.sessionId,
                         samples: output.samples,
                         now: monotonicNow)
                     guard executor.execute(actions) else {
+                        let failure = executor.lastFailure?.sessionFailure
+                            ?? VoiceSessionFailure(
+                                kind: .blackHoleWriteFailed,
+                                detail: "音频输出执行器未提供原因")
                         safeAbort(
-                            reason: "音频输出失败",
+                            reason: failure.userDescription,
+                            failure: failure,
                             report: false,
                             rejectCode: BLEVoiceRejectCode.audioOutputFailed.rawValue)
                         return
                     }
+                    recordTimelineActions(actions, at: monotonicNow)
                 }
                 latestQuality = jitter.qualitySnapshot
                 updateQuality(context: .active)
                 if case .streaming = machine.phase { detail = "正在向微信输入法传送语音" }
+                publishTimeline()
             } catch {
+                let failure: VoiceSessionFailure
+                if case let VoiceJitterError.excessiveGap(gap) = error {
+                    failure = VoiceSessionFailure(
+                        kind: .sequenceGap,
+                        detail: "缺口 \(gap) 帧")
+                } else {
+                    failure = VoiceSessionFailure(
+                        kind: .audioDecodeFailed,
+                        detail: error.localizedDescription)
+                }
                 safeAbort(
-                    reason: "音频序列异常：\(error.localizedDescription)",
+                    reason: failure.userDescription,
+                    failure: failure,
                     rejectCode: BLEVoiceRejectCode.audioSequenceInvalid.rawValue)
             }
+        case let .audioDecodeFailure(sessionId, detail):
+            guard let active = machine.activeSessionId,
+                  sessionId == nil || sessionId == active else { return }
+            let failure = VoiceSessionFailure(kind: .audioDecodeFailed, detail: detail)
+            safeAbort(
+                reason: failure.userDescription,
+                failure: failure,
+                rejectCode: BLEVoiceRejectCode.audioSequenceInvalid.rawValue)
         case let .sessionEnded(sessionId):
+            guard machine.activeSessionId == sessionId else { return }
+            timeline.record(.sessionEnded, at: monotonicNow)
+            publishTimeline()
             switch completion.beginEnding(
                 sessionId: sessionId,
                 now: monotonicNow,
                 machine: &machine,
                 executor: executor) {
             case .accepted:
+                recordTimelineActions(completion.lastActions, at: monotonicNow)
+                publishTimeline()
                 detail = "正在排空尾部音频"
             case let .failed(failedSessionId):
+                let failure = executor.lastFailure?.sessionFailure
+                    ?? VoiceSessionFailure(
+                        kind: .platformSetupFailed,
+                        detail: "结束会话时音频恢复失败")
+                recordTimelineActions(completion.lastActions, at: monotonicNow)
+                recordInputRestored(at: monotonicNow)
+                timeline.fail(failure, at: monotonicNow)
+                publishTimeline()
                 ble.reject(
                     sessionId: failedSessionId,
                     code: BLEVoiceRejectCode.audioOutputFailed.rawValue)
                 applyCompletionPresentation(.aborted(
                     failedSessionId,
-                    .executionFailure))
+                    .executionFailure),
+                    failure: failure)
             case .ignored:
                 break
             }
@@ -291,14 +369,28 @@ final class VoiceRuntimeModel: ObservableObject {
             guard VoiceSessionSignalPolicy.remoteErrorTargetsActive(
                 reportedSessionId: sessionId,
                 activeSessionId: machine.activeSessionId) else { return }
-            safeAbort(reason: "PokePod 会话错误码 \(code)")
+            let failure = VoiceSessionFailure(
+                kind: timeline.firstAudioNotificationAt == nil
+                    ? .deviceDidNotSendFrames
+                    : .unknown,
+                detail: "PokePod 会话错误码 \(code)")
+            safeAbort(
+                reason: failure.userDescription,
+                failure: failure)
             if DeviceInfoRefreshPolicy.shouldRefresh(after: .sessionFailed) {
                 ble.requestDeviceInfoRefresh()
             }
         case let .error(message):
             safeAbort(reason: message)
         case let .disconnected(message):
-            safeAbort(reason: message, report: false, rejectCode: nil)
+            let kind: VoiceSessionFailureKind = timeline.firstAudioNotificationAt == nil
+                ? .audioNotificationNotReceived
+                : .disconnected
+            safeAbort(
+                reason: message,
+                failure: VoiceSessionFailure(kind: kind, detail: message),
+                report: false,
+                rejectCode: nil)
             updateQuality(context: .disconnected)
             firmwareReady = false
             transportReady = false
@@ -313,19 +405,33 @@ final class VoiceRuntimeModel: ObservableObject {
             machine: &machine,
             executor: executor,
             acknowledgeStop: { [ble] in ble.acknowledgeStop(sessionId: $0) })
+        recordTimelineActions(completion.lastActions, at: monotonicNow)
         switch outcome {
         case .completed:
+            recordInputRestored(at: monotonicNow)
+            timeline.finish(at: monotonicNow)
+            publishTimeline()
             applyCompletionPresentation(outcome)
             if DeviceInfoRefreshPolicy.shouldRefresh(after: .sessionCompleted) {
                 ble.requestDeviceInfoRefresh()
             }
         case let .aborted(sessionId, reason):
+            let failure = reason == .watchdog && timeline.firstAudioNotificationAt == nil
+                ? VoiceSessionFailure(
+                    kind: .deviceDidNotSendFrames,
+                    detail: "400 ms watchdog")
+                : VoiceSessionFailure(
+                    kind: reason == .watchdog ? .watchdog : .unknown,
+                    detail: nil)
+            recordInputRestored(at: monotonicNow)
+            timeline.fail(failure, at: monotonicNow)
+            publishTimeline()
             ble.reject(
                 sessionId: sessionId,
                 code: reason == .executionFailure
                     ? BLEVoiceRejectCode.audioOutputFailed.rawValue
                     : BLEVoiceRejectCode.sessionAborted.rawValue)
-            applyCompletionPresentation(outcome)
+            applyCompletionPresentation(outcome, failure: failure)
             return
         case .none:
             break
@@ -352,10 +458,14 @@ final class VoiceRuntimeModel: ObservableObject {
         }
     }
 
-    private func applyCompletionPresentation(_ outcome: VoiceSessionCompletionOutcome) {
+    private func applyCompletionPresentation(
+        _ outcome: VoiceSessionCompletionOutcome,
+        failure: VoiceSessionFailure? = nil
+    ) {
         if outcome != .none { updateQuality(context: .recent) }
         applyPresentationUpdate(VoiceSessionPresentationPolicy.completion(
             outcome,
+            failure: failure,
             environmentReady: firmwareReady && prerequisitesReady))
     }
 
@@ -377,6 +487,7 @@ final class VoiceRuntimeModel: ObservableObject {
 
     private func safeAbort(
         reason: String,
+        failure: VoiceSessionFailure? = nil,
         report: Bool = true,
         rejectCode: UInt16? = BLEVoiceRejectCode.sessionAborted.rawValue
     ) {
@@ -385,7 +496,7 @@ final class VoiceRuntimeModel: ObservableObject {
         let wirePolicy: VoiceSessionAbortWirePolicy
         if let rejectCode { wirePolicy = .reject(code: rejectCode) }
         else { wirePolicy = .silent }
-        _ = VoiceSessionAbortCoordinator.abort(
+        let sessionId = VoiceSessionAbortCoordinator.abort(
             reason: reason,
             report: false,
             wirePolicy: wirePolicy,
@@ -393,7 +504,47 @@ final class VoiceRuntimeModel: ObservableObject {
             completion: &completion,
             executor: executor,
             reject: { [ble] in ble.reject(sessionId: $0, code: $1) })
-        if report { showError(reason) }
+        if sessionId != nil {
+            recordInputRestored(at: monotonicNow)
+            let effectiveFailure = failure ?? VoiceSessionFailure(
+                kind: .unknown,
+                detail: reason)
+            timeline.fail(effectiveFailure, at: monotonicNow)
+            publishTimeline()
+        }
+        if report || failure != nil {
+            showError(failure?.userDescription ?? reason)
+        }
+    }
+
+    private func recordTimelineActions(
+        _ actions: [VoiceSessionAction],
+        at: TimeInterval
+    ) {
+        for action in actions {
+            switch action {
+            case .writeSamples(let samples):
+                timeline.record(.blackHoleWritten, at: at, count: samples.count)
+            case .shortcutDown:
+                timeline.record(.shortcutDown, at: at)
+            case .shortcutUp:
+                timeline.record(.shortcutUp, at: at)
+            case .restoreDefaultInput:
+                timeline.record(.inputRestored, at: at)
+            case .saveDefaultInput, .switchToBlackHole, .startAudioSink,
+                 .stopAudioSink, .reportFailure:
+                break
+            }
+        }
+    }
+
+    private func publishTimeline() {
+        sessionDiagnostic = timeline.summary
+    }
+
+    private func recordInputRestored(at: TimeInterval) {
+        guard !timeline.inputWasRestored else { return }
+        timeline.record(.inputRestored, at: at)
     }
 
     private func updateQuality(context: VoiceLinkQualityContext) {

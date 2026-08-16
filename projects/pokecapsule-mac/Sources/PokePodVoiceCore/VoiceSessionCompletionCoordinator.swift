@@ -19,8 +19,12 @@ public enum VoiceSessionCompletionOutcome: Equatable {
 
 public struct VoiceSessionCompletionCoordinator {
     public private(set) var pendingStopAcknowledgement: UInt32?
+    public private(set) var lastActions: [VoiceSessionAction]
 
-    public init() {}
+    public init() {
+        pendingStopAcknowledgement = nil
+        lastActions = []
+    }
 
     @discardableResult
     public mutating func beginEnding(
@@ -29,6 +33,7 @@ public struct VoiceSessionCompletionCoordinator {
         machine: inout VoiceSessionMachine,
         executor: VoiceActionExecutor
     ) -> VoiceSessionEndResult {
+        lastActions = []
         guard pendingStopAcknowledgement == nil,
               machine.activeSessionId == sessionId else { return .ignored }
         switch machine.phase {
@@ -36,6 +41,7 @@ public struct VoiceSessionCompletionCoordinator {
         default: return .ignored
         }
         let actions = machine.end(sessionId: sessionId, now: now)
+        lastActions = actions
         guard executor.execute(actions) else {
             machine = VoiceSessionMachine(timing: machine.timing)
             return .failed(sessionId)
@@ -51,7 +57,8 @@ public struct VoiceSessionCompletionCoordinator {
         executor: VoiceActionExecutor,
         acknowledgeStop: (UInt32) -> Void
     ) -> VoiceSessionCompletionOutcome {
-        tick(
+        lastActions = []
+        return tick(
             now: now,
             machine: &machine,
             execute: { executor.execute($0) },
@@ -67,6 +74,7 @@ public struct VoiceSessionCompletionCoordinator {
     ) -> VoiceSessionCompletionOutcome {
         let activeBeforeTick = machine.activeSessionId
         let actions = machine.tick(now: now)
+        lastActions = actions
         guard execute(actions) else {
             let failed = pendingStopAcknowledgement ?? activeBeforeTick
             pendingStopAcknowledgement = nil
@@ -94,5 +102,6 @@ public struct VoiceSessionCompletionCoordinator {
 
     public mutating func cancel() {
         pendingStopAcknowledgement = nil
+        lastActions = []
     }
 }

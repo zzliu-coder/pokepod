@@ -237,6 +237,18 @@ public struct BLEVoiceAudioFrame: Equatable {
         return frame
     }
 
+    /// Reads only the stable routing fields from an incoming notification.
+    /// This is intentionally tolerant: malformed payloads still need a
+    /// session/sequence hint for diagnostics before full decode rejects them.
+    public static func notificationMetadata(
+        from data: Data
+    ) -> (sessionId: UInt32, sequence: UInt32)? {
+        guard data.count >= headerLength else { return nil }
+        return (
+            sessionId: data.readLittleEndian(at: 2),
+            sequence: data.readLittleEndian(at: 6))
+    }
+
     private func validate() throws {
         guard sampleCount > 0, sampleCount <= Self.samplesPerFrame else {
             throw BLEVoiceWireError.invalidSampleCount(sampleCount)
