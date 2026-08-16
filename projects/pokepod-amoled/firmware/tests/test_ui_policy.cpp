@@ -43,6 +43,14 @@ int main() {
   assert(boot.pressed(3000, bootContext) == BootGestureAction::none);
   assert(boot.released(bootContext) == BootGestureAction::stopLocalRecording);
 
+  // A ready Mac voice session reserves the physical button's short release
+  // for the "请按住说话" hint; local capsules remain screen-controlled.
+  bootContext.localRecording = false;
+  bootContext.wirelessAppReady = true;
+  assert(boot.pressed(3500, bootContext) == BootGestureAction::none);
+  assert(boot.released(bootContext) ==
+         BootGestureAction::voiceReadyShortPress);
+
   bootContext.localRecording = false;
   bootContext.screenOn = false;
   assert(boot.pressed(4000, bootContext) == BootGestureAction::wakeScreen);

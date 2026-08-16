@@ -619,7 +619,7 @@ void ProvisioningPortal::saveRequest() {
   const String passwordMode = server_.arg("provisioningPasswordMode");
   if (!passwordMode.isEmpty() && passwordMode != "0" &&
       passwordMode != "1" && passwordMode != "2") {
-    statusMessage_ = "Password mode error; choose again";
+    statusMessage_ = "配网密码模式不正确，请重新选择";
     diagnostics_->record(ProvisioningLogStage::failed,
                          ProvisioningLogOutcome::failure, next.wifiSsid,
                          -127, kProvisioningReasonInvalidInput, 0,
@@ -1011,7 +1011,7 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
     html += " selected";
   }
   html += ">88888888</option></select></label>";
-  html += F(R"HTML(<p class='privacy'>配网密码将在热点关闭后清除; 88888888 personal only. 配网热点仍会在五分钟后关闭。</p>
+  html += F(R"HTML(<p class='privacy'>配网密码将在热点关闭后清除；88888888 is for personal devices only. 配网热点仍会在五分钟后关闭。</p>
 <label class='field'><span class='field-name'>热词 ID <span class='optional'>可选</span></span><input name='hotwordId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' value=')HTML");
   html += htmlEscape(candidate_.hotwordId);
   html += F("'></label>");

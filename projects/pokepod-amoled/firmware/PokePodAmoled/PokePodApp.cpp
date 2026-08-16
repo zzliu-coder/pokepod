@@ -673,14 +673,14 @@ bool startWirelessHold() {
     recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
                           RuntimeDiagnosticOutcome::failure, 1,
                           static_cast<uint32_t>(storageBootPhase));
-    showMessage("本地服务启动中，请稍候");
+    showMessage("本地服务启动中，请稍候", UiNoticeKind::progress);
     drawDashboard();
     return false;
   }
   if (!bleVoice.userEnabled()) {
     recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
                           RuntimeDiagnosticOutcome::failure, 2, readiness);
-    showMessage("蓝牙已关闭");
+    showMessage("蓝牙已关闭", UiNoticeKind::warning);
     drawDashboard();
     return false;
   }
@@ -688,7 +688,7 @@ bool startWirelessHold() {
     recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
                           RuntimeDiagnosticOutcome::failure, 3,
                           capabilities.readyMask());
-    showMessage("无线语音服务未就绪");
+    showMessage("无线语音服务未就绪", UiNoticeKind::warning);
     drawDashboard();
     return false;
   }
@@ -700,7 +700,8 @@ bool startWirelessHold() {
     showMessage(bleVoice.connected()
                     ? (bleVoice.mtuReady() ? "等待 Mac 应用"
                                            : "等待蓝牙 MTU")
-                    : "等待 Mac 应用");
+                    : "等待 Mac 应用",
+                UiNoticeKind::warning);
     drawDashboard();
     return false;
   }
@@ -712,7 +713,7 @@ bool startWirelessHold() {
     recordWirelessRuntime(RuntimeDiagnosticStage::wirelessRouterAcquire,
                           RuntimeDiagnosticOutcome::failure,
                           static_cast<uint32_t>(captureRouter.owner()), 0);
-    showMessage("无线麦克风暂时不可用");
+    showMessage("无线麦克风暂时不可用", UiNoticeKind::warning);
     drawDashboard();
     return false;
   }
@@ -727,7 +728,7 @@ bool startWirelessHold() {
                           static_cast<uint32_t>(bleVoice.sessionError()));
     (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
                              RecorderStopReason::none, true, false);
-    showMessage("无线麦克风暂时不可用");
+    showMessage("无线麦克风暂时不可用", UiNoticeKind::warning);
     drawDashboard();
     return false;
   }
@@ -747,7 +748,7 @@ bool startWirelessHold() {
   if (!captureRuntime.start(audio, sessionId, usb.log())) {
     bleVoice.abortSession(VoiceSessionError::microphoneBusy);
     captureRouter.release(AudioCaptureOwner::wirelessVoice);
-    showMessage("无线麦克风暂时不可用");
+    showMessage("无线麦克风暂时不可用", UiNoticeKind::warning);
     drawDashboard();
     return false;
   }
@@ -1103,13 +1104,14 @@ void toggleRecording() {
   } else if (recorder.operationActive() || pendingRecorderFinalize) {
     showMessage("上一段录音仍在保存");
   } else if (tencentWorker.working()) {
-    showMessage("当前胶囊正在转写");
+    showMessage("当前胶囊正在转写", UiNoticeKind::warning);
   } else if (!capabilities.allows(kRecordingCapabilities)) {
-    showMessage(board.sdReady() ? "录音服务未就绪" : "请插入 microSD 卡");
+    showMessage(board.sdReady() ? "录音服务未就绪" : "请插入 microSD 卡",
+                UiNoticeKind::warning);
   } else if (!board.sdReady()) {
-    showMessage("请插入 microSD 卡");
+    showMessage("请插入 microSD 卡", UiNoticeKind::warning);
   } else if (!audio.ready()) {
-    showMessage("麦克风尚未就绪");
+    showMessage("麦克风尚未就绪", UiNoticeKind::warning);
   } else {
     if (audio.playing()) audio.stopPlayback(usb.log());
     tencentWorker.wake();
@@ -1186,6 +1188,10 @@ void applyBootGestureAction(BootGestureAction action, uint32_t nowMs) {
       return;
     case BootGestureAction::wirelessUnavailable:
       showMessage("等待 Mac 应用", UiNoticeKind::warning);
+      dashboard.invalidate();
+      return;
+    case BootGestureAction::voiceReadyShortPress:
+      showMessage("请按住说话", UiNoticeKind::warning);
       dashboard.invalidate();
       return;
     case BootGestureAction::bluetoothDisabled:
@@ -1450,7 +1456,7 @@ void pollTouch() {
       drawDashboard();
     } else if (action == UiAction::wifiToggle) {
       if (!capabilities.allows(kWifiCapabilities)) {
-        showMessage("Wi-Fi 服务未就绪");
+        showMessage("Wi-Fi 服务未就绪", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1477,7 +1483,7 @@ void pollTouch() {
       drawDashboard();
     } else if (action == UiAction::bluetoothToggle) {
       if (!capabilities.ready(DeviceCapability::bleVoice)) {
-        showMessage("蓝牙服务未就绪");
+        showMessage("蓝牙服务未就绪", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1485,7 +1491,7 @@ void pollTouch() {
       // Persisted user intent is the source of truth. Runtime state changes
       // only after the complete atomic blob has committed.
       if (!deviceConfig.setBluetoothEnabled(enabled, usb.log())) {
-        showMessage("蓝牙设置保存失败");
+        showMessage("蓝牙设置保存失败", UiNoticeKind::error);
         drawDashboard();
         return;
       }
@@ -1502,7 +1508,7 @@ void pollTouch() {
       drawDashboard();
     } else if (action == UiAction::openBluetoothPairing) {
       if (!capabilities.ready(DeviceCapability::bleVoice)) {
-        showMessage("蓝牙服务未就绪");
+        showMessage("蓝牙服务未就绪", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1511,7 +1517,7 @@ void pollTouch() {
     } else if (action == UiAction::toggleBluetoothPairing) {
       if (!bleVoice.userEnabled() ||
           bleVoice.disablePending()) {
-        showMessage("请先开启蓝牙");
+        showMessage("请先开启蓝牙", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1549,7 +1555,7 @@ void pollTouch() {
       drawDashboard();
     } else if (action == UiAction::openComputerSync) {
       if (!capabilities.allows(kComputerSyncCapabilities)) {
-        showMessage("电脑同步服务未就绪");
+        showMessage("电脑同步服务未就绪", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1568,12 +1574,12 @@ void pollTouch() {
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {
       if (storageBootPhase != StorageBootPhase::ready) {
-        showMessage("本地服务启动中，请稍候");
+        showMessage("本地服务启动中，请稍候", UiNoticeKind::progress);
         drawDashboard();
         return;
       }
       if (!capabilities.allows(kWifiCapabilities)) {
-        showMessage("Wi-Fi 服务未就绪");
+        showMessage("Wi-Fi 服务未就绪", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1581,7 +1587,7 @@ void pollTouch() {
       if (provisioningCoordinator.request(now)) {
         showMessage("正在准备配网热点");
       } else {
-        showMessage("配网启动请求失败");
+        showMessage("配网启动请求失败", UiNoticeKind::error);
       }
       dashboard.invalidate();
       drawDashboard();
@@ -1739,7 +1745,7 @@ void pollTouch() {
         }
       } else if (action == UiAction::retry) {
         if (!capabilities.allows(kTranscriptionCapabilities)) {
-          showMessage("转写服务未就绪");
+        showMessage("转写服务未就绪", UiNoticeKind::warning);
           drawDashboard();
           return;
         }
@@ -1751,14 +1757,14 @@ void pollTouch() {
           tencentWorker.wake();
           showMessage("已重新加入转写队列");
         } else {
-          showMessage("重新转写失败");
+          showMessage("重新转写失败", UiNoticeKind::error);
         }
       } else if (action == UiAction::play) {
         if (audio.playing()) {
           audio.stopPlayback(usb.log());
           showMessage("已停止播放");
         } else if (!capabilities.allows(kPlaybackCapabilities)) {
-          showMessage("播放服务未就绪");
+          showMessage("播放服务未就绪", UiNoticeKind::warning);
         } else if (!captureRouter.available() || recorder.recording()) {
           showMessage("麦克风使用中，暂时无法播放");
         } else if (tencentWorker.working()) {
@@ -1767,7 +1773,7 @@ void pollTouch() {
                    !audio.startPlayback(
                        SD_MMC, selected->directory + "/" + selected->audioFile,
                        usb.log())) {
-          showMessage("音频播放失败");
+          showMessage("音频播放失败", UiNoticeKind::error);
         } else {
           showMessage("正在播放");
         }
@@ -2130,12 +2136,12 @@ void loop() {
       if (dispatch.failedRecorderOwner == RecorderOperationOwner::localApp) {
         (void)requestCaptureStop(PendingCaptureStop::localCapsule,
                                  RecorderStopReason::none, true, true);
-        showMessage("录音已中断");
+        showMessage("录音已中断", UiNoticeKind::error);
       } else if (dispatch.voiceDeliveryFailure ||
                  captureRouter.wirelessStreaming()) {
         (void)requestCaptureStop(PendingCaptureStop::wirelessVoice,
                                  RecorderStopReason::none, true, false);
-        showMessage("无线语音已中断");
+        showMessage("无线语音已中断", UiNoticeKind::error);
       }
       // Link-owned recorder failures are durable facts inside WavRecorder.
       // The owning LinkRecordingSession observes them in its own poll and

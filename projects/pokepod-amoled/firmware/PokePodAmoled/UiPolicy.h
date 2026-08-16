@@ -53,6 +53,7 @@ enum class BootGestureAction : uint8_t {
   stopWirelessVoice,
   startWirelessVoice,
   wirelessUnavailable,
+  voiceReadyShortPress,
   bluetoothDisabled,
   stopLocalRecording,
   startLocalRecording,
@@ -120,6 +121,12 @@ class BootGesturePolicy {
     // is the critical guard that prevents a failed long press from starting a
     // local capsule on release.
     if (longActionConsumed_) return BootGestureAction::none;
+    // When the Mac voice path is ready, a short BOOT tap belongs to the
+    // on-screen capsule control.  Keep the physical button's early release
+    // from starting a second capture owner.
+    if (context.wirelessAppReady) {
+      return BootGestureAction::voiceReadyShortPress;
+    }
     return localRecordingAtPress_ ? BootGestureAction::stopLocalRecording
                                   : BootGestureAction::startLocalRecording;
   }

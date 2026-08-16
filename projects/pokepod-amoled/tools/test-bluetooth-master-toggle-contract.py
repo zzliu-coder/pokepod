@@ -135,7 +135,7 @@ start_hold = app[app.index("bool startWirelessHold()"):
 assert start_hold.index("!bleVoice.userEnabled()") < start_hold.index(
     "!bleVoice.appReady()"
 )
-assert 'showMessage("蓝牙已关闭")' in start_hold
+assert 'showMessage("蓝牙已关闭", UiNoticeKind::warning)' in start_hold
 assert "BootGesturePolicy bootGesturePolicy" in app
 assert "bootGesturePolicy.pressed(now, bootGestureContext())" in app
 assert "bootGesturePolicy.held(now, bootGestureContext())" in app
