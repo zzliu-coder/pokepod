@@ -89,6 +89,7 @@ struct DashboardView {
   ProvisioningState portalState = ProvisioningState::ready;
   const ProvisioningDiagnostics *provisioningDiagnostics = nullptr;
   String message;
+  UiNoticeKind messageKind = UiNoticeKind::info;
 };
 
 class Dashboard {
@@ -181,7 +182,7 @@ class Dashboard {
                       bool holding, bool enabled = true,
                       bool bluetoothEnabled = true,
                       const String &disabledDetail = String());
-  void drawToast(const String &message);
+  void drawToast(const String &message, UiNoticeKind kind);
   void drawCenteredText(const String &text, int16_t y, UiTextSize size,
                         uint16_t color, bool bold = false,
                         int16_t maxWidth = 336);

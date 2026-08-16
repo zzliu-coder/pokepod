@@ -332,7 +332,7 @@ void Dashboard::drawBody(const DashboardView &view) {
       shouldDrawToast(!view.message.isEmpty(), view.recording,
                       view.wirelessHolding,
                       state_.screen() == UiScreen::provisioning)) {
-    drawToast(view.message);
+    drawToast(view.message, view.messageKind);
   }
 }
 
@@ -1155,15 +1155,17 @@ void Dashboard::drawCapsuleOrb(int16_t centerY, uint16_t accent,
                   56 * scale / 100, accent, ui::kSurface);
 }
 
-void Dashboard::drawToast(const String &message) {
-  const bool warning = message.indexOf("失败") >= 0 ||
-      message.indexOf("异常") >= 0 || message.indexOf("检查") >= 0 ||
-      message.indexOf("尚未") >= 0 || message.indexOf("无法") >= 0 ||
-      message.indexOf("版本过新") >= 0 || message.indexOf("请插入") >= 0;
-  const uint16_t statusColor = warning ? ui::kError : ui::kAccent;
+void Dashboard::drawToast(const String &message, UiNoticeKind kind) {
+  const bool error = uiNoticeUsesErrorIcon(kind);
+  const bool success = uiNoticeUsesCheckIcon(kind);
+  // Progress and informational notices use a neutral storage glyph.  The
+  // warning triangle is reserved for an explicitly terminal error.
+  const UiIcon icon = error ? UiIcon::warning
+                            : (success ? UiIcon::check : UiIcon::storage);
+  const uint16_t statusColor = error ? ui::kError
+      : (success ? ui::kAccent : ui::kMuted);
   display_->fillRoundRect(20, 366, 328, 52, 18, ui::kSurfaceRaised);
-  drawUiIcon(*display_, warning ? UiIcon::warning : UiIcon::check,
-             34, 380, statusColor);
+  drawUiIcon(*display_, icon, 34, 380, statusColor);
   renderer_.drawText(message, 70, 382, 258, 1,
                      ui::kInk, ui::kSurfaceRaised, 0, false,
                      UiTextSize::compact, true);
@@ -1498,6 +1500,7 @@ uint64_t Dashboard::signature(const DashboardView &view,
   value.add(view.bleVoiceStreamTimeouts);
   value.add(view.wirelessHolding);
   value.add(view.message);
+  value.add(view.messageKind);
   value.add(browserState_.selectionMode());
   value.add(browserState_.selectedCount());
   value.add(view.undoAvailable);

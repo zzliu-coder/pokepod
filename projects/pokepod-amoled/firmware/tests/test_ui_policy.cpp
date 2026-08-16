@@ -4,6 +4,68 @@
 
 int main() {
   using namespace pokepod;
+  assert(!uiNoticeUsesErrorIcon(UiNoticeKind::info));
+  assert(!uiNoticeUsesErrorIcon(UiNoticeKind::progress));
+  assert(!uiNoticeUsesErrorIcon(UiNoticeKind::warning));
+  assert(uiNoticeUsesErrorIcon(UiNoticeKind::error));
+  assert(uiNoticeUsesCheckIcon(UiNoticeKind::success));
+  assert(!uiNoticeUsesCheckIcon(UiNoticeKind::progress));
+  assert(uiNoticeIsProgress(UiNoticeKind::progress));
+  assert(!uiNoticeIsProgress(UiNoticeKind::error));
+
+  // Physical BOOT contract: a short press controls local recording, while a
+  // held press is consumed by wireless voice (including a failed start).
+  BootGesturePolicy boot;
+  BootGestureContext bootContext;
+  assert(boot.pressed(100, bootContext) == BootGestureAction::none);
+  assert(boot.held(100 + ui::kWirelessHoldDelayMs - 1, bootContext) ==
+         BootGestureAction::none);
+  assert(boot.held(100 + ui::kWirelessHoldDelayMs, bootContext) ==
+         BootGestureAction::wirelessUnavailable);
+  assert(boot.released(bootContext) == BootGestureAction::none);
+
+  bootContext.wirelessAppReady = true;
+  assert(boot.pressed(1000, bootContext) == BootGestureAction::none);
+  assert(boot.held(1000 + ui::kWirelessHoldDelayMs - 1, bootContext) ==
+         BootGestureAction::none);
+  assert(boot.held(1000 + ui::kWirelessHoldDelayMs, bootContext) ==
+         BootGestureAction::startWirelessVoice);
+  assert(boot.held(1000 + ui::kWirelessHoldDelayMs + 1, bootContext) ==
+         BootGestureAction::none);
+  bootContext.wirelessHolding = true;
+  assert(boot.released(bootContext) == BootGestureAction::stopWirelessVoice);
+
+  bootContext.wirelessHolding = false;
+  bootContext.wirelessAppReady = false;
+  assert(boot.pressed(2000, bootContext) == BootGestureAction::none);
+  assert(boot.released(bootContext) == BootGestureAction::startLocalRecording);
+  bootContext.localRecording = true;
+  assert(boot.pressed(3000, bootContext) == BootGestureAction::none);
+  assert(boot.released(bootContext) == BootGestureAction::stopLocalRecording);
+
+  bootContext.localRecording = false;
+  bootContext.screenOn = false;
+  assert(boot.pressed(4000, bootContext) == BootGestureAction::wakeScreen);
+  bootContext.screenOn = true;
+  assert(boot.released(bootContext) == BootGestureAction::none);
+
+  bootContext.provisioning = true;
+  bootContext.sensitiveConfirmationPending = true;
+  assert(boot.pressed(5000, bootContext) ==
+         BootGestureAction::confirmProvisioning);
+  assert(boot.released(bootContext) == BootGestureAction::none);
+  bootContext.sensitiveConfirmationPending = false;
+  assert(boot.pressed(6000, bootContext) ==
+         BootGestureAction::armProvisioningExit);
+  assert(boot.released(bootContext) == BootGestureAction::exitProvisioning);
+
+  bootContext.provisioning = false;
+  bootContext.bluetoothEnabled = false;
+  assert(boot.pressed(7000, bootContext) == BootGestureAction::none);
+  assert(boot.held(7000 + ui::kWirelessHoldDelayMs, bootContext) ==
+         BootGestureAction::bluetoothDisabled);
+  assert(boot.released(bootContext) == BootGestureAction::none);
+
   assert(static_cast<int>(RootPage::capsules) == 0);
   assert(static_cast<int>(RootPage::home) == 1);
   assert(static_cast<int>(RootPage::device) == 2);
