@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "AudioCaptureRing.h"
+#include "AudioCaptureService.h"
 #include "AudioCaptureRouter.h"
 #include "RecorderOutcome.h"
 
@@ -49,6 +50,7 @@ struct AudioCaptureDispatchResult {
   uint32_t consumedFrames = 0;
   uint32_t firstSequence = 0;
   uint32_t lastSequence = 0;
+  AudioCaptureFailureCode firstFailure = AudioCaptureFailureCode::none;
 };
 
 struct AudioCaptureDispatcherMetrics {
@@ -59,6 +61,8 @@ struct AudioCaptureDispatcherMetrics {
   uint32_t routingFailures = 0;
   uint32_t recorderDeliveryFailures = 0;
   uint32_t voiceDeliveryFailures = 0;
+  AudioCaptureFailureCode firstFailure = AudioCaptureFailureCode::none;
+  uint32_t firstFailureSequence = 0;
   uint32_t maximumIntervalUs = 0;
   uint32_t intervalSamples = 0;
   uint32_t intervalHistogram[kIntervalHistogramBuckets]{};
@@ -92,6 +96,8 @@ class AudioCaptureDispatcher {
         result.ok = false;
         result.sequenceIncomplete = true;
         ++metrics_.sequenceFailures;
+        noteFirstFailure(result, AudioCaptureFailureCode::dispatchSequenceGap,
+                         frame.sequence);
       }
 
       audio.observeCapturedMono(frame.samples, kAudioCaptureSamplesPerFrame);
@@ -104,6 +110,9 @@ class AudioCaptureDispatcher {
         result.ok = false;
         result.routingFailure = true;
         ++metrics_.routingFailures;
+        noteFirstFailure(result,
+                         AudioCaptureFailureCode::dispatchRoutingFailure,
+                         frame.sequence);
         continue;
       }
 
@@ -114,6 +123,9 @@ class AudioCaptureDispatcher {
           result.ok = false;
           result.voiceDeliveryFailure = true;
           ++metrics_.voiceDeliveryFailures;
+          noteFirstFailure(result,
+                           AudioCaptureFailureCode::bleDeliveryFailure,
+                           frame.sequence);
         }
         continue;
       }
@@ -136,6 +148,9 @@ class AudioCaptureDispatcher {
         result.recorderDeliveryFailure = true;
         result.failedRecorderOwner = recorderOwner;
         ++metrics_.recorderDeliveryFailures;
+        noteFirstFailure(result,
+                         AudioCaptureFailureCode::recorderDeliveryFailure,
+                         frame.sequence);
       }
     }
     return result;
@@ -153,6 +168,18 @@ class AudioCaptureDispatcher {
   const AudioCaptureDispatcherMetrics &metrics() const { return metrics_; }
 
  private:
+  void noteFirstFailure(AudioCaptureDispatchResult &result,
+                        AudioCaptureFailureCode code,
+                        uint32_t sequence) {
+    if (result.firstFailure == AudioCaptureFailureCode::none) {
+      result.firstFailure = code;
+    }
+    if (metrics_.firstFailure == AudioCaptureFailureCode::none) {
+      metrics_.firstFailure = code;
+      metrics_.firstFailureSequence = sequence;
+    }
+  }
+
   static size_t intervalBucket(uint32_t elapsedUs) {
     static constexpr uint32_t limits[
         AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets] = {

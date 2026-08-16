@@ -20,10 +20,18 @@ constexpr uint32_t kAudioLatencyBucketUpperUs[kAudioLatencyHistogramBuckets] = {
 struct AudioSessionTelemetrySnapshot {
   uint32_t generation = 0;
   uint32_t sessionId = 0;
+  uint32_t readCalls = 0;
+  uint32_t shortReads = 0;
+  uint32_t partialMonoSamples = 0;
   uint32_t captureRingHighWaterFrames = 0;
   uint32_t captureRingDroppedFrames = 0;
   uint32_t recorderQueueHighWaterFrames = 0;
   uint32_t recorderQueueDroppedFrames = 0;
+  uint32_t dispatchConsumedFrames = 0;
+  uint32_t dispatchRoutingFailures = 0;
+  uint32_t dispatchRecorderDeliveryFailures = 0;
+  uint32_t dispatchBleDeliveryFailures = 0;
+  uint32_t dispatchSequenceGaps = 0;
   uint32_t dispatcherMaximumIntervalUs = 0;
   uint32_t dispatcherP99IntervalUs = 0;
   uint32_t i2sTimeouts = 0;
@@ -37,6 +45,9 @@ struct AudioSessionTelemetrySnapshot {
   uint32_t storageWriteP999Us = 0;
   uint32_t captureTaskStackHighWaterWords = 0;
   uint32_t recorderTaskStackHighWaterWords = 0;
+  AudioCaptureFailureCode firstFailure = AudioCaptureFailureCode::none;
+  uint32_t firstFailureAtMs = 0;
+  uint32_t firstFailureSequence = 0;
   bool sourceOverrunObservable = false;
   bool frozen = false;
 
@@ -44,7 +55,10 @@ struct AudioSessionTelemetrySnapshot {
     return captureRingDroppedFrames != 0 ||
         recorderQueueDroppedFrames != 0 || i2sTimeouts != 0 ||
         earlyZeroReads != 0 || sourceOverruns != 0 || sourceFailures != 0 ||
-        sequenceGaps != 0;
+        sequenceGaps != 0 || dispatchRoutingFailures != 0 ||
+        dispatchRecorderDeliveryFailures != 0 ||
+        dispatchBleDeliveryFailures != 0 ||
+        firstFailure != AudioCaptureFailureCode::none;
   }
 };
 
@@ -71,8 +85,15 @@ class AudioSessionTelemetry {
     boundCaptureSessionId_.store(0, std::memory_order_relaxed);
     captureRingHighWater_.store(0, std::memory_order_relaxed);
     captureRingDrops_.store(0, std::memory_order_relaxed);
+    readCalls_.store(0, std::memory_order_relaxed);
+    shortReads_.store(0, std::memory_order_relaxed);
     recorderQueueHighWater_.store(0, std::memory_order_relaxed);
     recorderQueueDrops_.store(0, std::memory_order_relaxed);
+    dispatchConsumedFrames_.store(0, std::memory_order_relaxed);
+    dispatchRoutingFailures_.store(0, std::memory_order_relaxed);
+    dispatchRecorderDeliveryFailures_.store(0, std::memory_order_relaxed);
+    dispatchBleDeliveryFailures_.store(0, std::memory_order_relaxed);
+    dispatchSequenceGaps_.store(0, std::memory_order_relaxed);
     dispatcherMaximumIntervalUs_.store(0, std::memory_order_relaxed);
     i2sTimeouts_.store(0, std::memory_order_relaxed);
     i2sLongestReadUs_.store(0, std::memory_order_relaxed);
@@ -82,6 +103,11 @@ class AudioSessionTelemetry {
     sourceFailures_.store(0, std::memory_order_relaxed);
     sourceOverrunObservable_.store(false, std::memory_order_relaxed);
     sequenceGaps_.store(0, std::memory_order_relaxed);
+    firstFailure_.store(
+        static_cast<uint8_t>(AudioCaptureFailureCode::none),
+        std::memory_order_relaxed);
+    firstFailureAtMs_.store(0, std::memory_order_relaxed);
+    firstFailureSequence_.store(0, std::memory_order_relaxed);
     captureTaskStackHighWaterWords_.store(0, std::memory_order_relaxed);
     recorderTaskStackHighWaterWords_.store(0, std::memory_order_relaxed);
     resetHistogram(dispatcherHistogram_);
@@ -114,6 +140,10 @@ class AudioSessionTelemetry {
       endMutation();
       return;
     }
+    readCalls_.store(capture.readCalls, std::memory_order_relaxed);
+    shortReads_.store(capture.shortReads, std::memory_order_relaxed);
+    partialMonoSamples_.store(capture.partialMonoSamples,
+                              std::memory_order_relaxed);
     updateMaximum(captureRingHighWater_, capture.ring.highWaterFrames);
     captureRingDrops_.store(capture.ring.droppedFrames,
                             std::memory_order_relaxed);
@@ -126,13 +156,45 @@ class AudioSessionTelemetry {
     sourceFailures_.store(capture.sourceFailures, std::memory_order_relaxed);
     sourceOverrunObservable_.store(capture.sourceOverrunObservable,
                                    std::memory_order_relaxed);
-    sequenceGaps_.store(dispatcher.sequenceFailures,
-                        std::memory_order_relaxed);
-    updateMaximum(dispatcherMaximumIntervalUs_,
-                  dispatcher.maximumIntervalUs);
+    const bool dispatcherMatches =
+        dispatcher.sessionId == capture.ring.sessionId;
+    const uint32_t dispatchSequenceFailures = dispatcherMatches
+        ? dispatcher.sequenceFailures : 0U;
+    sequenceGaps_.store(dispatchSequenceFailures, std::memory_order_relaxed);
+    dispatchConsumedFrames_.store(
+        dispatcherMatches ? dispatcher.consumedFrames : 0U,
+        std::memory_order_relaxed);
+    dispatchRoutingFailures_.store(
+        dispatcherMatches ? dispatcher.routingFailures : 0U,
+        std::memory_order_relaxed);
+    dispatchRecorderDeliveryFailures_.store(
+        dispatcherMatches ? dispatcher.recorderDeliveryFailures : 0U,
+        std::memory_order_relaxed);
+    dispatchBleDeliveryFailures_.store(
+        dispatcherMatches ? dispatcher.voiceDeliveryFailures : 0U,
+        std::memory_order_relaxed);
+    dispatchSequenceGaps_.store(dispatchSequenceFailures,
+                                std::memory_order_relaxed);
+    if (capture.firstFailure != AudioCaptureFailureCode::none) {
+      firstFailure_.store(static_cast<uint8_t>(capture.firstFailure),
+                          std::memory_order_relaxed);
+      firstFailureAtMs_.store(capture.firstFailureAtMs,
+                              std::memory_order_relaxed);
+      firstFailureSequence_.store(0, std::memory_order_relaxed);
+    } else if (dispatcherMatches &&
+               dispatcher.firstFailure != AudioCaptureFailureCode::none) {
+      firstFailure_.store(static_cast<uint8_t>(dispatcher.firstFailure),
+                          std::memory_order_relaxed);
+      firstFailureAtMs_.store(0, std::memory_order_relaxed);
+      firstFailureSequence_.store(dispatcher.firstFailureSequence,
+                                  std::memory_order_relaxed);
+    }
+    updateMaximum(dispatcherMaximumIntervalUs_, dispatcherMatches
+        ? dispatcher.maximumIntervalUs : 0U);
     for (size_t i = 0; i < kAudioLatencyHistogramBuckets; ++i) {
-      dispatcherHistogram_[i].store(dispatcher.intervalHistogram[i],
-                                    std::memory_order_relaxed);
+      dispatcherHistogram_[i].store(dispatcherMatches
+          ? dispatcher.intervalHistogram[i] : 0U,
+          std::memory_order_relaxed);
     }
     updateMinimumNonZero(captureTaskStackHighWaterWords_,
                          captureTaskStackHighWaterWords);
@@ -173,6 +235,10 @@ class AudioSessionTelemetry {
       if ((before & 1U) != 0) continue;
       value.generation = generation_.load(std::memory_order_relaxed);
       value.sessionId = sessionId_.load(std::memory_order_relaxed);
+      value.readCalls = readCalls_.load(std::memory_order_relaxed);
+      value.shortReads = shortReads_.load(std::memory_order_relaxed);
+      value.partialMonoSamples =
+          partialMonoSamples_.load(std::memory_order_relaxed);
       value.captureRingHighWaterFrames =
           captureRingHighWater_.load(std::memory_order_relaxed);
       value.captureRingDroppedFrames =
@@ -181,6 +247,16 @@ class AudioSessionTelemetry {
           recorderQueueHighWater_.load(std::memory_order_relaxed);
       value.recorderQueueDroppedFrames =
           recorderQueueDrops_.load(std::memory_order_relaxed);
+      value.dispatchConsumedFrames =
+          dispatchConsumedFrames_.load(std::memory_order_relaxed);
+      value.dispatchRoutingFailures =
+          dispatchRoutingFailures_.load(std::memory_order_relaxed);
+      value.dispatchRecorderDeliveryFailures =
+          dispatchRecorderDeliveryFailures_.load(std::memory_order_relaxed);
+      value.dispatchBleDeliveryFailures =
+          dispatchBleDeliveryFailures_.load(std::memory_order_relaxed);
+      value.dispatchSequenceGaps =
+          dispatchSequenceGaps_.load(std::memory_order_relaxed);
       value.dispatcherMaximumIntervalUs =
           dispatcherMaximumIntervalUs_.load(std::memory_order_relaxed);
       value.dispatcherP99IntervalUs = percentile(dispatcherHistogram_, 990U);
@@ -198,6 +274,12 @@ class AudioSessionTelemetry {
           captureTaskStackHighWaterWords_.load(std::memory_order_relaxed);
       value.recorderTaskStackHighWaterWords =
           recorderTaskStackHighWaterWords_.load(std::memory_order_relaxed);
+      value.firstFailure = static_cast<AudioCaptureFailureCode>(
+          firstFailure_.load(std::memory_order_relaxed));
+      value.firstFailureAtMs =
+          firstFailureAtMs_.load(std::memory_order_relaxed);
+      value.firstFailureSequence =
+          firstFailureSequence_.load(std::memory_order_relaxed);
       value.sourceOverrunObservable =
           sourceOverrunObservable_.load(std::memory_order_relaxed);
       value.frozen = frozen_.load(std::memory_order_relaxed);
@@ -276,8 +358,16 @@ class AudioSessionTelemetry {
   }
 
   void resetCaptureFacts() {
+    readCalls_.store(0, std::memory_order_relaxed);
+    shortReads_.store(0, std::memory_order_relaxed);
+    partialMonoSamples_.store(0, std::memory_order_relaxed);
     captureRingHighWater_.store(0, std::memory_order_relaxed);
     captureRingDrops_.store(0, std::memory_order_relaxed);
+    dispatchConsumedFrames_.store(0, std::memory_order_relaxed);
+    dispatchRoutingFailures_.store(0, std::memory_order_relaxed);
+    dispatchRecorderDeliveryFailures_.store(0, std::memory_order_relaxed);
+    dispatchBleDeliveryFailures_.store(0, std::memory_order_relaxed);
+    dispatchSequenceGaps_.store(0, std::memory_order_relaxed);
     dispatcherMaximumIntervalUs_.store(0, std::memory_order_relaxed);
     i2sTimeouts_.store(0, std::memory_order_relaxed);
     i2sLongestReadUs_.store(0, std::memory_order_relaxed);
@@ -287,6 +377,11 @@ class AudioSessionTelemetry {
     sourceFailures_.store(0, std::memory_order_relaxed);
     sourceOverrunObservable_.store(false, std::memory_order_relaxed);
     sequenceGaps_.store(0, std::memory_order_relaxed);
+    firstFailure_.store(
+        static_cast<uint8_t>(AudioCaptureFailureCode::none),
+        std::memory_order_relaxed);
+    firstFailureAtMs_.store(0, std::memory_order_relaxed);
+    firstFailureSequence_.store(0, std::memory_order_relaxed);
     captureTaskStackHighWaterWords_.store(0, std::memory_order_relaxed);
     resetHistogram(dispatcherHistogram_);
   }
@@ -294,11 +389,19 @@ class AudioSessionTelemetry {
   std::atomic<uint32_t> sequence_{0};
   std::atomic<uint32_t> generation_{0};
   std::atomic<uint32_t> sessionId_{0};
+  std::atomic<uint32_t> readCalls_{0};
+  std::atomic<uint32_t> shortReads_{0};
+  std::atomic<uint32_t> partialMonoSamples_{0};
   std::atomic<uint32_t> boundCaptureSessionId_{0};
   std::atomic<uint32_t> captureRingHighWater_{0};
   std::atomic<uint32_t> captureRingDrops_{0};
   std::atomic<uint32_t> recorderQueueHighWater_{0};
   std::atomic<uint32_t> recorderQueueDrops_{0};
+  std::atomic<uint32_t> dispatchConsumedFrames_{0};
+  std::atomic<uint32_t> dispatchRoutingFailures_{0};
+  std::atomic<uint32_t> dispatchRecorderDeliveryFailures_{0};
+  std::atomic<uint32_t> dispatchBleDeliveryFailures_{0};
+  std::atomic<uint32_t> dispatchSequenceGaps_{0};
   std::atomic<uint32_t> dispatcherMaximumIntervalUs_{0};
   std::atomic<uint32_t> i2sTimeouts_{0};
   std::atomic<uint32_t> i2sLongestReadUs_{0};
@@ -310,6 +413,10 @@ class AudioSessionTelemetry {
   std::atomic<uint32_t> sequenceGaps_{0};
   std::atomic<uint32_t> captureTaskStackHighWaterWords_{0};
   std::atomic<uint32_t> recorderTaskStackHighWaterWords_{0};
+  std::atomic<uint8_t> firstFailure_{
+      static_cast<uint8_t>(AudioCaptureFailureCode::none)};
+  std::atomic<uint32_t> firstFailureAtMs_{0};
+  std::atomic<uint32_t> firstFailureSequence_{0};
   Histogram dispatcherHistogram_{};
   Histogram storageHistogram_{};
   std::atomic<bool> frozen_{false};

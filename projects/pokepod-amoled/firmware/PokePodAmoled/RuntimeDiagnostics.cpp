@@ -31,6 +31,8 @@ bool RuntimeDiagnostics::begin(Print &log, uint16_t resetReason) {
   }
 #endif
   lock();
+  audioSessionSnapshot_ = {};
+  audioSessionSnapshotAvailable_ = false;
   open_ = preferences_.begin("pokepod_rt", false);
   initializeRuntimeDiagnosticLog(stored_);
   if (!open_) {
@@ -119,6 +121,8 @@ bool RuntimeDiagnostics::record(RuntimeDiagnosticSubsystem subsystem,
 
 bool RuntimeDiagnostics::clear(Print &log) {
   lock();
+  audioSessionSnapshot_ = {};
+  audioSessionSnapshotAvailable_ = false;
   StoredRuntimeDiagnosticLog proposed{};
   initializeRuntimeDiagnosticLog(proposed);
   finalizeRuntimeDiagnosticLog(proposed);
@@ -133,6 +137,8 @@ bool RuntimeDiagnostics::clear(Print &log) {
 String RuntimeDiagnostics::json() const {
   const_cast<RuntimeDiagnostics *>(this)->lock();
   const StoredRuntimeDiagnosticLog copy = stored_;
+  const AudioSessionTelemetrySnapshot audioSnapshot = audioSessionSnapshot_;
+  const bool audioSnapshotAvailable = audioSessionSnapshotAvailable_;
   const bool open = open_;
   const_cast<RuntimeDiagnostics *>(this)->unlock();
   String json;
@@ -176,8 +182,94 @@ String RuntimeDiagnostics::json() const {
     json += String(static_cast<unsigned>(record->resetReason));
     json += '}';
   }
-  json += "]}";
+  json += "]";
+  json += ",\"audio_session\":";
+  if (!audioSnapshotAvailable) {
+    json += "null";
+  } else {
+    json += "{\"generation\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.generation));
+    json += ",\"session_id\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.sessionId));
+    json += ",\"read_calls\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.readCalls));
+    json += ",\"short_reads\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.shortReads));
+    json += ",\"partial_mono_samples\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.partialMonoSamples));
+    json += ",\"timeouts\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.i2sTimeouts));
+    json += ",\"zero_reads\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.zeroByteReads));
+    json += ",\"early_zero_reads\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.earlyZeroReads));
+    json += ",\"longest_read_us\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.i2sLongestReadUs));
+    json += ",\"ring_high_water_frames\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.captureRingHighWaterFrames));
+    json += ",\"ring_drops\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.captureRingDroppedFrames));
+    json += ",\"dispatch_consumed_frames\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.dispatchConsumedFrames));
+    json += ",\"dispatch_sequence_gaps\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.dispatchSequenceGaps));
+    json += ",\"dispatch_routing_failures\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.dispatchRoutingFailures));
+    json += ",\"dispatch_recorder_delivery_failures\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.dispatchRecorderDeliveryFailures));
+    json += ",\"dispatch_ble_delivery_failures\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.dispatchBleDeliveryFailures));
+    json += ",\"first_failure\":\"";
+    json += audioCaptureFailureCodeName(audioSnapshot.firstFailure);
+    json += "\",\"first_failure_at_ms\":";
+    json += String(static_cast<unsigned long>(audioSnapshot.firstFailureAtMs));
+    json += ",\"first_failure_sequence\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.firstFailureSequence));
+    json += ",\"capture_stack_high_water_words\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.captureTaskStackHighWaterWords));
+    json += ",\"recorder_stack_high_water_words\":";
+    json += String(static_cast<unsigned long>(
+        audioSnapshot.recorderTaskStackHighWaterWords));
+    json += ",\"source_overrun_observable\":";
+    json += audioSnapshot.sourceOverrunObservable ? "true" : "false";
+    json += ",\"frozen\":";
+    json += audioSnapshot.frozen ? "true" : "false";
+    json += '}';
+  }
+  json += "}";
   return json;
+}
+
+void RuntimeDiagnostics::publishAudioSessionSnapshot(
+    const AudioSessionTelemetrySnapshot &snapshot) {
+  lock();
+  audioSessionSnapshot_ = snapshot;
+  audioSessionSnapshotAvailable_ = true;
+  unlock();
+}
+
+bool RuntimeDiagnostics::hasAudioSessionSnapshot() const {
+  const_cast<RuntimeDiagnostics *>(this)->lock();
+  const bool available = audioSessionSnapshotAvailable_;
+  const_cast<RuntimeDiagnostics *>(this)->unlock();
+  return available;
+}
+
+AudioSessionTelemetrySnapshot RuntimeDiagnostics::audioSessionSnapshot() const {
+  const_cast<RuntimeDiagnostics *>(this)->lock();
+  const AudioSessionTelemetrySnapshot snapshot = audioSessionSnapshot_;
+  const_cast<RuntimeDiagnostics *>(this)->unlock();
+  return snapshot;
 }
 
 void RuntimeDiagnostics::lock() {

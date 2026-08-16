@@ -309,13 +309,27 @@ void WavRecorder::updateRecorderTelemetry(bool forceStackSample) {
 void WavRecorder::freezeSessionTelemetry(Print &log) {
   sessionTelemetry_.freeze();
   const AudioSessionTelemetrySnapshot value = sessionTelemetry_.snapshot();
+  #if defined(ARDUINO)
+  if (runtimeDiagnostics_ != nullptr) {
+    // This is an in-memory publication only.  RuntimeDiagnostics deliberately
+    // does not persist the large capture snapshot on the recording path.
+    runtimeDiagnostics_->publishAudioSessionSnapshot(value);
+  }
+  #endif
   log.printf(
       "{\"event\":\"recording_audio_telemetry\","
       "\"generation\":%lu,\"session_id\":%lu,"
+      "\"read_calls\":%lu,\"short_reads\":%lu,"
+      "\"partial_mono_samples\":%lu,"
       "\"capture_ring_high_water_frames\":%lu,"
       "\"capture_ring_dropped_frames\":%lu,"
       "\"recorder_queue_high_water_frames\":%lu,"
       "\"recorder_queue_dropped_frames\":%lu,"
+      "\"dispatch_consumed_frames\":%lu,"
+      "\"dispatch_routing_failures\":%lu,"
+      "\"dispatch_recorder_delivery_failures\":%lu,"
+      "\"dispatch_ble_delivery_failures\":%lu,"
+      "\"dispatch_sequence_gaps\":%lu,"
       "\"dispatcher_max_us\":%lu,\"dispatcher_p99_us\":%lu,"
       "\"i2s_timeouts\":%lu,\"i2s_longest_read_us\":%lu,"
       "\"zero_byte_reads\":%lu,"
@@ -324,13 +338,23 @@ void WavRecorder::freezeSessionTelemetry(Print &log) {
       "\"storage_write_p99_us\":%lu,\"storage_write_p999_us\":%lu,"
       "\"capture_stack_high_water_words\":%lu,"
       "\"recorder_stack_high_water_words\":%lu,"
+      "\"first_failure\":\"%s\",\"first_failure_at_ms\":%lu,"
+      "\"first_failure_sequence\":%lu,"
       "\"source_overrun_observable\":%s,\"frozen\":true}\n",
       static_cast<unsigned long>(value.generation),
       static_cast<unsigned long>(value.sessionId),
+      static_cast<unsigned long>(value.readCalls),
+      static_cast<unsigned long>(value.shortReads),
+      static_cast<unsigned long>(value.partialMonoSamples),
       static_cast<unsigned long>(value.captureRingHighWaterFrames),
       static_cast<unsigned long>(value.captureRingDroppedFrames),
       static_cast<unsigned long>(value.recorderQueueHighWaterFrames),
       static_cast<unsigned long>(value.recorderQueueDroppedFrames),
+      static_cast<unsigned long>(value.dispatchConsumedFrames),
+      static_cast<unsigned long>(value.dispatchRoutingFailures),
+      static_cast<unsigned long>(value.dispatchRecorderDeliveryFailures),
+      static_cast<unsigned long>(value.dispatchBleDeliveryFailures),
+      static_cast<unsigned long>(value.dispatchSequenceGaps),
       static_cast<unsigned long>(value.dispatcherMaximumIntervalUs),
       static_cast<unsigned long>(value.dispatcherP99IntervalUs),
       static_cast<unsigned long>(value.i2sTimeouts),
@@ -344,6 +368,9 @@ void WavRecorder::freezeSessionTelemetry(Print &log) {
       static_cast<unsigned long>(value.storageWriteP999Us),
       static_cast<unsigned long>(value.captureTaskStackHighWaterWords),
       static_cast<unsigned long>(value.recorderTaskStackHighWaterWords),
+      audioCaptureFailureCodeName(value.firstFailure),
+      static_cast<unsigned long>(value.firstFailureAtMs),
+      static_cast<unsigned long>(value.firstFailureSequence),
       value.sourceOverrunObservable ? "true" : "false");
 }
 

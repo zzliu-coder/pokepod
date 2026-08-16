@@ -16,6 +16,9 @@ int main() {
   capture.ring.sessionId = 71;
   capture.ring.highWaterFrames = 5;
   capture.ring.droppedFrames = 1;
+  capture.readCalls = 14;
+  capture.shortReads = 3;
+  capture.partialMonoSamples = 17;
   capture.timeouts = 2;
   capture.longestReadUs = 49000;
   capture.zeroByteReads = 3;
@@ -23,9 +26,17 @@ int main() {
   capture.sourceOverruns = 1;
   capture.sourceFailures = 4;
   capture.sourceOverrunObservable = true;
+  capture.firstFailure = AudioCaptureFailureCode::sourceTimeout;
+  capture.firstFailureAtMs = 1234;
   AudioCaptureDispatcherMetrics dispatcher;
   dispatcher.sessionId = 71;
+  dispatcher.consumedFrames = 9;
+  dispatcher.routingFailures = 2;
+  dispatcher.recorderDeliveryFailures = 3;
+  dispatcher.voiceDeliveryFailures = 4;
   dispatcher.sequenceFailures = 1;
+  dispatcher.firstFailure = AudioCaptureFailureCode::dispatchRoutingFailure;
+  dispatcher.firstFailureSequence = 7;
   dispatcher.maximumIntervalUs = 18000U;
   dispatcher.intervalHistogram[5] = 99;
   dispatcher.intervalHistogram[6] = 1;
@@ -39,10 +50,18 @@ int main() {
 
   AudioSessionTelemetrySnapshot snapshot = telemetry.snapshot();
   assert(snapshot.sessionId == 71);
+  assert(snapshot.readCalls == 14);
+  assert(snapshot.shortReads == 3);
+  assert(snapshot.partialMonoSamples == 17);
   assert(snapshot.captureRingHighWaterFrames == 5);
   assert(snapshot.captureRingDroppedFrames == 1);
   assert(snapshot.recorderQueueHighWaterFrames == 96);
   assert(snapshot.recorderQueueDroppedFrames == 1);
+  assert(snapshot.dispatchConsumedFrames == 9);
+  assert(snapshot.dispatchRoutingFailures == 2);
+  assert(snapshot.dispatchRecorderDeliveryFailures == 3);
+  assert(snapshot.dispatchBleDeliveryFailures == 4);
+  assert(snapshot.dispatchSequenceGaps == 1);
   assert(snapshot.dispatcherMaximumIntervalUs == 18000U);
   assert(snapshot.dispatcherP99IntervalUs == 8000U);
   assert(snapshot.i2sTimeouts == 2);
@@ -55,6 +74,9 @@ int main() {
   assert(snapshot.storageWriteP999Us == 16000U);
   assert(snapshot.captureTaskStackHighWaterWords == 700);
   assert(snapshot.recorderTaskStackHighWaterWords == 900);
+  assert(snapshot.firstFailure == AudioCaptureFailureCode::sourceTimeout);
+  assert(snapshot.firstFailureAtMs == 1234);
+  assert(snapshot.firstFailureSequence == 0);
   assert(snapshot.sourceOverrunObservable);
   assert(snapshot.incomplete());
   assert(snapshot.frozen);
@@ -76,19 +98,45 @@ int main() {
   capture.earlyZeroReads = 0;
   capture.sourceOverruns = 0;
   capture.sourceFailures = 0;
+  capture.firstFailure = AudioCaptureFailureCode::none;
+  capture.firstFailureAtMs = 0;
   dispatcher = {};
   dispatcher.sessionId = 72;
+  dispatcher.firstFailure = AudioCaptureFailureCode::bleDeliveryFailure;
+  dispatcher.firstFailureSequence = 44;
   producer = telemetry.bindCaptureSession(72);
   telemetry.observeCapture(producer, capture, dispatcher, 650);
   capture.ring.sessionId = 73;
   capture.ring.highWaterFrames = 1;
   dispatcher.sessionId = 73;
+  dispatcher.firstFailure = AudioCaptureFailureCode::none;
+  dispatcher.firstFailureSequence = 0;
   producer = telemetry.bindCaptureSession(73);
   telemetry.observeCapture(producer, capture, dispatcher, 640);
   snapshot = telemetry.snapshot();
   assert(snapshot.sessionId == 73);
   assert(snapshot.captureRingHighWaterFrames == 1);
   assert(!snapshot.incomplete());
+
+  // With no source-side loss, the first dispatcher failure is retained with
+  // its frame sequence so the terminal log identifies the failing handoff.
+  telemetry.reset();
+  capture = {};
+  capture.ring.sessionId = 74;
+  capture.readCalls = 2;
+  dispatcher = {};
+  dispatcher.sessionId = 74;
+  dispatcher.voiceDeliveryFailures = 1;
+  dispatcher.firstFailure = AudioCaptureFailureCode::bleDeliveryFailure;
+  dispatcher.firstFailureSequence = 19;
+  producer = telemetry.bindCaptureSession(74);
+  telemetry.observeCapture(producer, capture, dispatcher, 600);
+  telemetry.freeze();
+  snapshot = telemetry.snapshot();
+  assert(snapshot.firstFailure == AudioCaptureFailureCode::bleDeliveryFailure);
+  assert(snapshot.firstFailureSequence == 19);
+  assert(snapshot.dispatchBleDeliveryFailures == 1);
+  assert(snapshot.incomplete());
 
   // Reset racing live observations cannot advance the generation. A terminal
   // freeze is the ownership boundary that permits the next reset.

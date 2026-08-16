@@ -178,6 +178,7 @@ void runProductOrderOverflowAndSecondSession() {
       firstSession, router, audio, recorder, voice, log, 100);
   assert(!appPoll.ok);
   assert(appPoll.recorderDeliveryFailure);
+  assert(appPoll.firstFailure == AudioCaptureFailureCode::recorderDeliveryFailure);
   assert(appPoll.failedRecorderOwner == RecorderOperationOwner::linkUsb);
   assert(recorder.failureTerminal == RecorderTerminal::storageFailure);
   assert(recorder.failureStage ==
@@ -242,6 +243,9 @@ void runBleAndSequenceFailure() {
   assert(gapResult.recorderDeliveryFailure);
   assert(recorder.failureStage == RecorderFailureStage::captureIncomplete);
   assert(dispatcher.metrics().sequenceFailures == 1);
+  assert(dispatcher.metrics().firstFailure ==
+         AudioCaptureFailureCode::dispatchSequenceGap);
+  assert(dispatcher.metrics().firstFailureSequence == 2);
   assert(dispatcher.metrics().maximumIntervalUs == 0);
 
   FakeSource later;

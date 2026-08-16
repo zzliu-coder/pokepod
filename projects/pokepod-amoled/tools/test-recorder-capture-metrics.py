@@ -55,6 +55,7 @@ assert "captureRuntime_->pop(" not in link
 assert "while (source.pop(frame))" in dispatcher
 
 for fact in (
+    "readCalls", "shortReads", "partialMonoSamples",
     "captureRingHighWaterFrames", "captureRingDroppedFrames",
     "recorderQueueHighWaterFrames", "recorderQueueDroppedFrames",
     "dispatcherMaximumIntervalUs", "dispatcherP99IntervalUs",
@@ -63,6 +64,10 @@ for fact in (
     "sourceFailures", "sequenceGaps", "storageWriteP99Us",
     "storageWriteP999Us", "captureTaskStackHighWaterWords",
     "recorderTaskStackHighWaterWords", "sourceOverrunObservable", "frozen",
+    "dispatchConsumedFrames", "dispatchRoutingFailures",
+    "dispatchRecorderDeliveryFailures", "dispatchBleDeliveryFailures",
+    "dispatchSequenceGaps", "firstFailure", "firstFailureAtMs",
+    "firstFailureSequence",
 ):
     assert fact in telemetry
 assert "std::atomic<uint32_t>" in telemetry
@@ -81,6 +86,13 @@ assert "recorderTelemetryLastStackSampleMs_" in wav_h
 assert "forceStackSample" in wav
 assert "observeCaptureTelemetry" in wav_h
 assert "recorder.observeCaptureTelemetry(" in app
+assert "publishAudioSessionSnapshot" in wav
+assert "publishAudioSessionSnapshot" in (firmware / "RuntimeDiagnostics.h").read_text(
+    encoding="utf-8"
+)
+assert "audio_session" in (firmware / "RuntimeDiagnostics.cpp").read_text(
+    encoding="utf-8"
+)
 assert "captureRuntime.taskStackHighWater()" in app
 assert app.count("captureRuntime.taskStackHighWater()") == 1
 assert "captureTelemetryLastStackSampleMs" in app

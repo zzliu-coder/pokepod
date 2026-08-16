@@ -265,6 +265,8 @@ int main() {
   assert(metrics.sourceOverruns == 1);
   assert(metrics.shortReads == 1);
   assert(metrics.longestReadUs == 50000);
+  assert(metrics.firstFailure == AudioCaptureFailureCode::sourceOverrun);
+  assert(metrics.firstFailureAtMs == 22);
 
   assert(service.pop(frame));
   assert(frame.sessionId == 77 && frame.sequence == 0);
@@ -278,6 +280,9 @@ int main() {
   assert(metrics.zeroByteReads == 2);
   assert(metrics.earlyZeroReads == 2);
   assert(metrics.sourceFailures == 1);
+  // The first loss fact is immutable for the session: later timeout/failure
+  // events cannot hide the earlier DMA overrun.
+  assert(metrics.firstFailure == AudioCaptureFailureCode::sourceOverrun);
   service.stopSession();
   assert(!service.running());
   frontEnd = service.frontEndSnapshot();
