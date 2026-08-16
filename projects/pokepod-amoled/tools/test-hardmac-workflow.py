@@ -39,6 +39,7 @@ assert capacity["hardBlockAtOrAbovePercent"] == 85
 assert 'OUTPUT_DIR="$WORK_DIR/output/$BUILD_MODE"' in build
 assert 'FLASH_MODE=release' in flash
 assert 'validate-flash-artifact.py' in flash
+assert '--binary "$FIRMWARE_BIN" --elf "$FIRMWARE_ELF"' in flash
 assert 'artifact_manifest_binary_sha256' in artifact_validator
 assert 'release_artifact_toolchain' in artifact_validator
 assert 'artifact_flash_offset' in artifact_validator

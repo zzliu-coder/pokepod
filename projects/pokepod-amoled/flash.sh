@@ -125,6 +125,7 @@ if [ -z "$FIRMWARE_BIN" ]; then
   MODE_EXPLICIT=1
 fi
 MANIFEST_PATH=$(dirname -- "$FIRMWARE_BIN")/artifact.json
+FIRMWARE_ELF=$(dirname -- "$FIRMWARE_BIN")/PokePodAmoled.ino.elf
 ESPTOOL_BIN=${ESPTOOL_BIN:-$(find "$HOME/Library/Arduino15/packages/esp32/tools/esptool_py" \
   -type f -name esptool -perm +111 -print 2>/dev/null | sort | tail -1)}
 HARDMAC_SKILL_DIR=${HARDMAC_SKILL_DIR:-"${CODEX_HOME:-$HOME/.codex}/skills/hardmac"}
@@ -155,6 +156,10 @@ if [ ! -s "$MANIFEST_PATH" ]; then
   printf 'FAIL artifact_manifest_missing path=%s\n' "$MANIFEST_PATH" >&2
   exit 75
 fi
+if [ ! -s "$FIRMWARE_ELF" ]; then
+  printf 'FAIL firmware_elf_missing path=%s\n' "$FIRMWARE_ELF" >&2
+  exit 75
+fi
 if [ ! -s "$ARTIFACT_VALIDATOR" ]; then
   printf 'FAIL artifact_validator_missing path=%s\n' "$ARTIFACT_VALIDATOR" >&2
   exit 75
@@ -173,10 +178,11 @@ if [ "$MODE_EXPLICIT" -eq 1 ]; then
 fi
 if [ -n "$EXPECTED_MODE" ]; then
   python3 "$ARTIFACT_VALIDATOR" --manifest "$MANIFEST_PATH" \
-    --binary "$FIRMWARE_BIN" --expected-lane "$EXPECTED_MODE"
+    --binary "$FIRMWARE_BIN" --elf "$FIRMWARE_ELF" \
+    --expected-lane "$EXPECTED_MODE"
 else
   python3 "$ARTIFACT_VALIDATOR" --manifest "$MANIFEST_PATH" \
-    --binary "$FIRMWARE_BIN"
+    --binary "$FIRMWARE_BIN" --elf "$FIRMWARE_ELF"
 fi
 FLASH_STARTED_AT=$(date +%s)
 
