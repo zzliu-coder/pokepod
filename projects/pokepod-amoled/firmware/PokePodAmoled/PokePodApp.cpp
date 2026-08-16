@@ -453,10 +453,6 @@ void showMessage(const String &message, UiNoticeKind kind,
   transientUntilMs = millis() + durationMs;
 }
 
-void showMessage(const String &message, uint32_t durationMs = 1800) {
-  showMessage(message, UiNoticeKind::info, durationMs);
-}
-
 String localCapsuleStatusMessage() {
   if (!board.sdReady()) return "SD 卡不可用";
   if (capsuleOperations->mutationCapabilityBlocked()) {
