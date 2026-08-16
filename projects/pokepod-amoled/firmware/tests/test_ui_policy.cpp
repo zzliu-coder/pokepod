@@ -8,6 +8,9 @@ int main() {
   assert(!uiNoticeUsesErrorIcon(UiNoticeKind::progress));
   assert(!uiNoticeUsesErrorIcon(UiNoticeKind::warning));
   assert(uiNoticeUsesErrorIcon(UiNoticeKind::error));
+  assert(uiNoticeUsesWarningIcon(UiNoticeKind::warning));
+  assert(!uiNoticeUsesWarningIcon(UiNoticeKind::info));
+  assert(!uiNoticeUsesWarningIcon(UiNoticeKind::error));
   assert(uiNoticeUsesCheckIcon(UiNoticeKind::success));
   assert(!uiNoticeUsesCheckIcon(UiNoticeKind::progress));
   assert(uiNoticeIsProgress(UiNoticeKind::progress));

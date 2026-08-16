@@ -631,6 +631,17 @@ void ProvisioningPortal::saveRequest() {
     next.provisioningPasswordMode = static_cast<ProvisioningPasswordMode>(
         static_cast<uint8_t>(passwordMode[0] - '0'));
   }
+  if (next.provisioningPasswordMode ==
+          ProvisioningPasswordMode::fixed88888888 &&
+      server_.arg("confirmFixedProvisioningPassword") != "1") {
+    statusMessage_ = "Fixed password mode requires personal-device confirmation";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, next.wifiSsid,
+                         -127, kProvisioningReasonInvalidInput, 0,
+                         validationAttempt_, *log_);
+    sendSaveJson(400, false);
+    return;
+  }
   const String manualSsid = server_.arg("ssidManual");
   next.wifiSsid = manualSsid.isEmpty() ? server_.arg("ssid") : manualSsid;
   next.wifiPassword = server_.arg("wifiPassword");
@@ -1010,8 +1021,9 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
   if (displayedPasswordMode == kStoredProvisioningPasswordFixed88888888) {
     html += " selected";
   }
-  html += ">88888888</option></select></label>";
-  html += F(R"HTML(<p class='privacy'>配网密码将在热点关闭后清除；88888888 is for personal devices only. 配网热点仍会在五分钟后关闭。</p>
+  html += ">Personal fixed mode (88888888)</option></select></label>";
+  html += F(R"HTML(<label class='check'><input type='checkbox' name='confirmFixedProvisioningPassword' value='1'><span>Confirm personal-device fixed password mode</span></label>
+<p class='privacy'>配网密码将在热点关闭后清除；Fixed password is for personal devices only. 配网热点仍会在五分钟后关闭。</p>
 <label class='field'><span class='field-name'>热词 ID <span class='optional'>可选</span></span><input name='hotwordId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' value=')HTML");
   html += htmlEscape(candidate_.hotwordId);
   html += F("'></label>");

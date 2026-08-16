@@ -34,6 +34,9 @@ for expected in (
     "\u7acb\u5373\u5931\u6548\u5e76\u4ece\u5185\u5b58\u4e2d\u6e05\u9664",
     "\u66f4\u6362\u6216\u6e05\u7a7a\u5df2\u4fdd\u5b58\u7684\u817e\u8baf\u4e91\u5bc6\u94a5",
     "\u5fc5\u987b\u6309\u8bbe\u5907\u5b9e\u4f53\u952e",
+    "个人设备固定口令模式",
+    "启用前必须在配网页面明确确认",
+    "固定模式只适合个人设备",
 ):
     assert expected in readme
 

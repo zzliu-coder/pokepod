@@ -1157,13 +1157,15 @@ void Dashboard::drawCapsuleOrb(int16_t centerY, uint16_t accent,
 
 void Dashboard::drawToast(const String &message, UiNoticeKind kind) {
   const bool error = uiNoticeUsesErrorIcon(kind);
+  const bool warning = uiNoticeUsesWarningIcon(kind);
   const bool success = uiNoticeUsesCheckIcon(kind);
-  // Progress and informational notices use a neutral storage glyph.  The
-  // warning triangle is reserved for an explicitly terminal error.
-  const UiIcon icon = error ? UiIcon::warning
+  // Warning and error both use the triangle shape, but their colors remain
+  // distinct. Informational/progress notices stay neutral and cannot look
+  // like a failure.
+  const UiIcon icon = error || warning ? UiIcon::warning
                             : (success ? UiIcon::check : UiIcon::storage);
   const uint16_t statusColor = error ? ui::kError
-      : (success ? ui::kAccent : ui::kMuted);
+      : (warning ? ui::kWaiting : (success ? ui::kAccent : ui::kMuted));
   display_->fillRoundRect(20, 366, 328, 52, 18, ui::kSurfaceRaised);
   drawUiIcon(*display_, icon, 34, 380, statusColor);
   renderer_.drawText(message, 70, 382, 258, 1,

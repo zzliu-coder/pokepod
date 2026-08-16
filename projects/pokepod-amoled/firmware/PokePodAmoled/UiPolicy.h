@@ -22,6 +22,10 @@ inline bool uiNoticeUsesErrorIcon(UiNoticeKind kind) {
   return kind == UiNoticeKind::error;
 }
 
+inline bool uiNoticeUsesWarningIcon(UiNoticeKind kind) {
+  return kind == UiNoticeKind::warning;
+}
+
 inline bool uiNoticeUsesCheckIcon(UiNoticeKind kind) {
   return kind == UiNoticeKind::success;
 }
