@@ -26,6 +26,7 @@ tools_root = Path(environment.arduino_data_dir) / "packages/esp32/tools/esp-x32"
 compilers = sorted(tools_root.glob("*/bin/xtensa-esp32s3-elf-g++"))
 assert compilers, f"ESP32-S3 compiler missing below: {tools_root}"
 compiler = compilers[-1]
+arduino_cli = environment.arduino_cli
 
 epoch = 1_700_000_000
 expected = datetime.fromtimestamp(epoch, timezone.utc)
@@ -52,6 +53,30 @@ with tempfile.TemporaryDirectory(prefix="pokepod-source-date-epoch-") as raw:
             text=True,
         ).strip()
         outputs.append(output)
+
+    source_revision = "a" * 40
+    source_tree = "b" * 40
+    property_value = (
+        f'compiler.cpp.extra_flags=-DPOKEPOD_SOURCE_REVISION="{source_revision}" '
+        f'-DPOKEPOD_SOURCE_TREE="{source_tree}" '
+        '-DPOKEPOD_SOURCE_DIRTY=0 -DPOKEPOD_APP_ELF_SHA256="unknown"'
+    )
+    properties = subprocess.check_output(
+        [
+            arduino_cli, "compile", "--fqbn", "esp32:esp32:esp32s3",
+            "--build-property", property_value,
+            "--show-properties=expanded", str(ROOT / "firmware/PokePodAmoled"),
+        ],
+        text=True,
+    )
+    recipe = next(
+        line for line in properties.splitlines()
+        if line.startswith("recipe.cpp.o.pattern=")
+    )
+    assert f'-DPOKEPOD_SOURCE_REVISION="{source_revision}"' in recipe
+    assert f'-DPOKEPOD_SOURCE_TREE="{source_tree}"' in recipe
+    assert '-DPOKEPOD_APP_ELF_SHA256="unknown"' in recipe
+    assert r'\"' not in recipe
 
 expected_output = f"{epoch} {expected_value}"
 assert outputs == [expected_output, expected_output], (outputs, expected_output)

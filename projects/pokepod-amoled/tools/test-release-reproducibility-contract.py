@@ -22,6 +22,10 @@ assert "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH_VALUE" in BUILD
 assert "export SOURCE_DATE_EPOCH" in BUILD
 assert "BUILD_EPOCH_CPP_FLAG=-DPOKEPOD_BUILD_EPOCH_UTC=$SOURCE_DATE_EPOCH_VALUE" in BUILD
 assert '--build-property "compiler.cpp.extra_flags=$BUILD_EPOCH_CPP_FLAG"' in BUILD
+assert 'POKEPOD_SOURCE_REVISION=\\"$SOURCE_REVISION\\"' in BUILD
+assert 'POKEPOD_SOURCE_TREE=\\"$SOURCE_TREE\\"' in BUILD
+assert 'POKEPOD_APP_ELF_SHA256=\\"unknown\\"' in BUILD
+assert 'POKEPOD_SOURCE_REVISION=\\\\\\"$SOURCE_REVISION' not in BUILD
 assert '--literal "source-date-epoch=$SOURCE_DATE_EPOCH_VALUE"' in BUILD
 assert 'if [ "$BUILD_MODE" = release ]; then\n  for build_argument in "$@"' in BUILD
 assert "--build-property|--build-property=*)" in BUILD
