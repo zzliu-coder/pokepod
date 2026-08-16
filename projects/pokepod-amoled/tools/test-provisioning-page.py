@@ -98,10 +98,12 @@ assert 'constexpr char kFixedProvisioningPassword[] = "88888888";' in policy_sou
 assert "kFixedProvisioningPasswordLength" in policy_source
 assert "name='provisioningPasswordMode'" in source
 assert "重新更新" in source
-assert ">Personal fixed mode (88888888)</option>" in source
+assert ">本设备模式（88888888）</option>" in source
 assert "confirmFixedProvisioningPassword" in source
+assert "enteringFixedPasswordMode" in source
+assert "config_->settings().provisioningPasswordMode !=" in source
 assert 'server_.arg("confirmFixedProvisioningPassword") != "1"' in source
-assert "Fixed password mode requires personal-device confirmation" in source
+assert "请确认设备安全模式" in source
 assert "88888888" not in "\n".join(
     line for line in all_firmware_source.splitlines()
     if "log" in line.lower() or "printf" in line.lower() or

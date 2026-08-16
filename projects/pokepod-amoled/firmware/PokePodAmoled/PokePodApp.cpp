@@ -487,7 +487,8 @@ void armTrashUndo(const std::vector<String> &ids) {
   stableIds.reserve(ids.size());
   for (const String &id : ids) stableIds.emplace_back(id.c_str());
   trashUndo.arm(stableIds, millis());
-  showMessage("已删除 · 点此撤销", CapsuleUndoState::kDurationMs);
+  showMessage("已删除 · 点此撤销", UiNoticeKind::success,
+              CapsuleUndoState::kDurationMs);
 }
 
 bool submitLocalCapsuleOperation(
@@ -497,12 +498,15 @@ bool submitLocalCapsuleOperation(
   if (!capsuleOperations->submit(action, ids, changedAt)) {
     showMessage(capsuleOperations->mutationCapabilityBlocked()
                     ? "本地操作恢复失败，请连接 Mac"
-                    : "本地操作忙，请稍后再试");
+                    : "本地操作忙，请稍后再试",
+                capsuleOperations->mutationCapabilityBlocked()
+                    ? UiNoticeKind::error
+                    : UiNoticeKind::warning);
     return false;
   }
   pendingLocalOperationIds = ids;
   localOperationPresentation = presentation;
-  showMessage("正在安全处理…", 3000);
+  showMessage("正在安全处理…", UiNoticeKind::progress, 3000);
   dashboard.invalidate();
   return true;
 }
@@ -526,24 +530,28 @@ void consumeLocalOperationOutcome() {
     if (presentation == LocalOperationPresentation::undoTrash) {
       const std::vector<std::string> noFailures;
       const CapsuleUndoResult restored = trashUndo.finishAttempt(noFailures);
-      showMessage(String("已恢复 ") + restored.restored + " 条");
+      showMessage(String("已恢复 ") + restored.restored + " 条",
+                  UiNoticeKind::success);
     } else if (presentation == LocalOperationPresentation::purge) {
-      showMessage(String("已永久删除 ") + outcome.changed + " 条");
+      showMessage(String("已永久删除 ") + outcome.changed + " 条",
+                  UiNoticeKind::success);
     } else if (presentation == LocalOperationPresentation::trash) {
       armTrashUndo(pendingLocalOperationIds);
     } else if (presentation == LocalOperationPresentation::archive) {
-      showMessage("已归档");
+      showMessage("已归档", UiNoticeKind::success);
     } else if (presentation == LocalOperationPresentation::unarchive) {
-      showMessage("已移回原目录");
+      showMessage("已移回原目录", UiNoticeKind::success);
     } else if (presentation == LocalOperationPresentation::restore) {
-      showMessage("已恢复");
+      showMessage("已恢复", UiNoticeKind::success);
     } else {
-      showMessage(String("已处理 ") + outcome.changed + " 条");
+      showMessage(String("已处理 ") + outcome.changed + " 条",
+                  UiNoticeKind::success);
     }
   } else if (outcome.rollbackFailed || outcome.authorityPreserved) {
-    showMessage("操作中断，已保留恢复记录，请连接 Mac", 5000);
+    showMessage("操作中断，已保留恢复记录，请连接 Mac",
+                UiNoticeKind::error, 5000);
   } else {
-    showMessage("操作失败，已恢复");
+    showMessage("操作失败，已恢复", UiNoticeKind::error);
   }
   pendingLocalOperationIds.clear();
   dashboard.closeOverlays();
@@ -1097,12 +1105,12 @@ bool consumeRecorderTerminal(bool notifyUser) {
 void toggleRecording() {
   if (localRecordingStart.active()) {
     localRecordingStart.requestCancel();
-    showMessage("正在取消录音…");
+    showMessage("正在取消录音…", UiNoticeKind::progress);
   } else if (recorder.recording() &&
       recorder.ownedBy(RecorderOperationOwner::localApp)) {
     stopLocalCapture(RecorderStopReason::user);
   } else if (recorder.operationActive() || pendingRecorderFinalize) {
-    showMessage("上一段录音仍在保存");
+    showMessage("上一段录音仍在保存", UiNoticeKind::warning);
   } else if (tencentWorker.working()) {
     showMessage("当前胶囊正在转写", UiNoticeKind::warning);
   } else if (!capabilities.allows(kRecordingCapabilities)) {
@@ -1378,7 +1386,7 @@ void pollTouch() {
       touchCapsuleSelectionAttempted = true;
       if (!dashboard.beginCapsuleSelectionAt(touchGesture.startY,
                                              capsuleLibrary.get())) {
-        showMessage("转写中或版本只读，暂时不能选择");
+        showMessage("转写中或版本只读，暂时不能选择", UiNoticeKind::warning);
       }
       drawDashboard();
     }
@@ -1425,7 +1433,7 @@ void pollTouch() {
     const UiAction action = touchAction;
     if (uiActionRequiresCapsuleLibrary(action) &&
         !capabilities.allows(kCapsuleBrowsingCapabilities)) {
-      showMessage(localCapsuleStatusMessage(), 3000);
+      showMessage(localCapsuleStatusMessage(), UiNoticeKind::warning, 3000);
       drawDashboard();
       return;
     }
@@ -1438,7 +1446,8 @@ void pollTouch() {
       if (dashboard.capsuleSelectionMode()) {
         if (!dashboard.toggleCapsuleSelectionAt(
                 startY, capsuleLibrary.get())) {
-          showMessage("转写中或版本只读，暂时不能选择");
+          showMessage("转写中或版本只读，暂时不能选择",
+                      UiNoticeKind::warning);
         }
       } else {
         dashboard.openCapsuleAt(startY, capsuleLibrary.get());
@@ -1467,7 +1476,7 @@ void pollTouch() {
           showMessage("Wi-Fi 已关闭");
         }
       } else if (!deviceConfig.hasWifi()) {
-        showMessage("请先完成手机配网");
+        showMessage("请先完成手机配网", UiNoticeKind::warning);
       } else {
         bool enabled = deviceConfig.settings().wifiEnabled;
         if (!enabled) {
@@ -1476,7 +1485,7 @@ void pollTouch() {
         if (enabled) {
           wifi.requestConnection();
           tencentWorker.wake();
-          showMessage("正在连接 Wi-Fi");
+          showMessage("正在连接 Wi-Fi", UiNoticeKind::progress);
         }
       }
       dashboard.invalidate();
@@ -1523,33 +1532,33 @@ void pollTouch() {
       }
       if (bleVoice.pairingMode(now)) {
         bleVoice.cancelPairingMode();
-        showMessage("已取消配对");
+      showMessage("已取消配对", UiNoticeKind::info);
       } else {
         bleVoice.enterPairingMode(now);
         if (bleVoice.pairingMode(now)) {
           char pairMessage[48];
           snprintf(pairMessage, sizeof(pairMessage), "配对码 %06lu · 长按忘记",
                    static_cast<unsigned long>(bleVoice.passkey()));
-          showMessage(String(pairMessage), 5000);
+          showMessage(String(pairMessage), UiNoticeKind::info, 5000);
         } else {
           // An existing physical connection must close before the pairing
           // attempt owns its new passkey. Never snapshot the previous code.
-          showMessage("正在断开当前连接…", 3000);
+          showMessage("正在断开当前连接…", UiNoticeKind::progress, 3000);
         }
       }
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::forgetBluetoothMac) {
       if (captureRouter.owner() == AudioCaptureOwner::wirelessVoice) {
-        showMessage("语音输入中，请先松开");
+        showMessage("语音输入中，请先松开", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
       if (bleVoice.bonded()) {
         bleVoice.forgetMac();
-        showMessage("已忘记 Mac");
+        showMessage("已忘记 Mac", UiNoticeKind::success);
       } else {
-        showMessage("当前没有已配对 Mac");
+        showMessage("当前没有已配对 Mac", UiNoticeKind::warning);
       }
       dashboard.invalidate();
       drawDashboard();
@@ -1569,7 +1578,7 @@ void pollTouch() {
     } else if (action == UiAction::closeComputerSync) {
       if (wirelessSync->openWindow()) wirelessSync->close();
       dashboard.back();
-      showMessage("电脑同步已关闭");
+      showMessage("电脑同步已关闭", UiNoticeKind::info);
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::openProvisioning) {
@@ -1585,7 +1594,7 @@ void pollTouch() {
       }
       if (wirelessSync->openWindow()) wirelessSync->close();
       if (provisioningCoordinator.request(now)) {
-        showMessage("正在准备配网热点");
+        showMessage("正在准备配网热点", UiNoticeKind::progress);
       } else {
         showMessage("配网启动请求失败", UiNoticeKind::error);
       }
@@ -1593,11 +1602,11 @@ void pollTouch() {
       drawDashboard();
     } else if (action == UiAction::openShutdownConfirm) {
       if (safeShutdownQuiesce.pending()) {
-        showMessage("正在安全关机", 2000);
+        showMessage("正在安全关机", UiNoticeKind::progress, 2000);
       } else {
         dashboard.openShutdownConfirm();
         if (recorder.recording() || captureRuntime.running()) {
-          showMessage("确认后会先保存当前录音", 3000);
+          showMessage("确认后会先保存当前录音", UiNoticeKind::warning, 3000);
         }
       }
       dashboard.invalidate();
@@ -1605,13 +1614,14 @@ void pollTouch() {
     } else if (action == UiAction::confirmShutdown) {
       dashboard.closeOverlays();
       requestSafeShutdown(now);
-      showMessage("正在保存并关机", 3000);
+      showMessage("正在保存并关机", UiNoticeKind::progress, 3000);
       dashboard.invalidate();
       drawDashboard();
     } else if (action == UiAction::raiseToWakeToggle) {
       const bool enabled = !automaticWakeEnabled();
       if (deviceConfig.setRaiseToWake(enabled, usb.log())) {
-        showMessage(enabled ? "自动亮屏已开启" : "自动亮屏已关闭");
+        showMessage(enabled ? "自动亮屏已开启" : "自动亮屏已关闭",
+                    UiNoticeKind::success);
       }
       dashboard.invalidate();
       drawDashboard();
@@ -1648,7 +1658,7 @@ void pollTouch() {
         dashboard.openPurgeConfirm(pendingPurgeIds.size());
       } else {
         pendingPurgeIds.clear();
-        showMessage("版本过新或状态忙，请在 Mac 处理");
+        showMessage("版本过新或状态忙，请在 Mac 处理", UiNoticeKind::warning);
       }
       drawDashboard();
     } else if (action == UiAction::confirmPurge) {
@@ -1678,7 +1688,8 @@ void pollTouch() {
             ids, CapsuleBatchAction::favorite, board.utcNow());
         dashboard.clearCapsuleSelection();
         showMessage(result.ok ? String("已处理 ") + result.changed + " 条"
-                              : "批量收藏未完成");
+                              : "批量收藏未完成",
+                    result.ok ? UiNoticeKind::success : UiNoticeKind::error);
       } else {
         CapsuleOperationAction operation = CapsuleOperationAction::archive;
         LocalOperationPresentation presentation =
@@ -1712,7 +1723,7 @@ void pollTouch() {
           (action == UiAction::favorite || action == UiAction::archive ||
            action == UiAction::trash || action == UiAction::retry ||
            action == UiAction::play)) {
-        showMessage("版本过新，请在 Mac 处理");
+        showMessage("版本过新，请在 Mac 处理", UiNoticeKind::warning);
         drawDashboard();
         return;
       }
@@ -1755,27 +1766,27 @@ void pollTouch() {
         if (capsuleLibrary->requeue(id)) {
           dashboard.closeOverlays();
           tencentWorker.wake();
-          showMessage("已重新加入转写队列");
+          showMessage("已重新加入转写队列", UiNoticeKind::success);
         } else {
           showMessage("重新转写失败", UiNoticeKind::error);
         }
       } else if (action == UiAction::play) {
         if (audio.playing()) {
           audio.stopPlayback(usb.log());
-          showMessage("已停止播放");
+          showMessage("已停止播放", UiNoticeKind::success);
         } else if (!capabilities.allows(kPlaybackCapabilities)) {
           showMessage("播放服务未就绪", UiNoticeKind::warning);
         } else if (!captureRouter.available() || recorder.recording()) {
-          showMessage("麦克风使用中，暂时无法播放");
+          showMessage("麦克风使用中，暂时无法播放", UiNoticeKind::warning);
         } else if (tencentWorker.working()) {
-          showMessage("正在转写，完成后可播放");
+          showMessage("正在转写，完成后可播放", UiNoticeKind::progress);
         } else if (!safeCapsuleFileName(selected->audioFile.c_str()) ||
                    !audio.startPlayback(
                        SD_MMC, selected->directory + "/" + selected->audioFile,
                        usb.log())) {
           showMessage("音频播放失败", UiNoticeKind::error);
         } else {
-          showMessage("正在播放");
+          showMessage("正在播放", UiNoticeKind::progress);
         }
       }
       drawDashboard();
@@ -1874,7 +1885,13 @@ bool advanceStorageBoot(uint32_t nowMs) {
       capabilities.ready(DeviceCapability::recording) ? "true" : "false",
       bootTencentWorkerStarted ? "true" : "false",
       capsuleOperations->phaseName(), startupCapabilityModeName(startup.mode));
-  showMessage(startup.message, 4000);
+  const UiNoticeKind startupKind =
+      startup.mode == StartupCapabilityMode::ready
+          ? UiNoticeKind::success
+          : (startup.mode == StartupCapabilityMode::unavailable
+                 ? UiNoticeKind::error
+                 : UiNoticeKind::warning);
+  showMessage(startup.message, startupKind, 4000);
   dashboard.invalidate();
   drawDashboard();
   emitStatus();
@@ -1914,7 +1931,7 @@ void setup() {
     (void)runtimeDiagnostics.begin(
         usb.log(), static_cast<uint16_t>(esp_reset_reason()));
     dashboard.begin(board.display(), nullptr);
-    showMessage("PSRAM REQUIRED · CHECK MEMORY", 60000);
+    showMessage("PSRAM REQUIRED · CHECK MEMORY", UiNoticeKind::error, 60000);
     drawDashboard();
     return;
   }
@@ -1971,11 +1988,18 @@ void setup() {
   provisioningCoordinator.bindBleVoice(bleVoice);
   const StartupCapabilityPresentation startup =
       startupCapabilityPresentation(capabilities);
+  const UiNoticeKind startupKind =
+      startup.mode == StartupCapabilityMode::ready
+          ? UiNoticeKind::success
+          : (startup.mode == StartupCapabilityMode::unavailable
+                 ? UiNoticeKind::error
+                 : UiNoticeKind::warning);
   dashboard.begin(board.display(), board.sdReady() ? &SD_MMC : nullptr);
   if (provisioningDiagnostics.recoveredInterruptedSession()) {
-    showMessage("上次配网被重启中断 · 见诊断", 5000);
+    showMessage("上次配网被重启中断 · 见诊断", UiNoticeKind::warning, 5000);
   } else {
     showMessage(storageBootAvailable ? "正在恢复本地胶囊…" : startup.message,
+                storageBootAvailable ? UiNoticeKind::progress : startupKind,
                 4000);
   }
   drawDashboard();
@@ -2249,7 +2273,7 @@ void loop() {
   provisioningCoordinator.poll(now);
   if (provisioningCoordinator.takeRestartRequired()) {
     (void)deviceReboot.requestLocal(now);
-    showMessage("配网已退出，正在恢复蓝牙…", 3000);
+    showMessage("配网已退出，正在恢复蓝牙…", UiNoticeKind::progress, 3000);
   }
   if (provisioningCoordinator.takeConfigurationChanged()) {
     tencentWorker.wake();
