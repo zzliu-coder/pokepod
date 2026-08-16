@@ -134,6 +134,9 @@ python3 fixture/pokepod-fixture.py update \
 具备 USB OTA 的固件，之后再用这条命令滚动升级。
 
 主机先计算镜像 SHA-256，并发送 `sourceRevision`、`firmwareVersion`、`appElfSha256`。
+`cdc-status.py --firmware` 在打开串口前调用正式刷写使用的同一个 artifact validator，
+要求 BIN 同目录的 `artifact.json` 和真实 ELF，并校验 lane、工具链、source tree、资源门禁和 ELF 摘要。
+显式三项身份参数只能与清单交叉确认，不能代替或覆盖清单。
 设备拒绝缺字段的 OTA 请求；固件把镜像流式写入未运行的 OTA 槽，逐块确认后从候选
 槽的 ESP 应用描述读取真实 ELF SHA。只有源码版本、固件版本、候选 ELF SHA、长度、
 分区和 SHA-256 全部通过后才调用 `esp_ota_end` 并切换启动槽。提交后的重启属于设备级生命周期请求，

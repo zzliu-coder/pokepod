@@ -55,8 +55,8 @@ application descriptor before `esp_ota_end` and boot-slot selection. A missing,
 zero, or mismatched candidate ELF digest aborts without changing the boot
 partition. The fixture additionally waits for the application to return and
 checks the running partition and all three fields. Direct `cdc-status.py`
-firmware requests therefore require the same three fields (or a validated
-adjacent `artifact.json`).
+firmware requests require the same adjacent artifact and ELF files; optional
+identity arguments can only confirm those validated values.
 
 The current runtime hardening releases the complete BLE allocation before
 SoftAP provisioning, removes NVS writes from the timed SD qualification probe,

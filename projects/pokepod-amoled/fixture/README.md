@@ -19,8 +19,8 @@ python3 fixture/pokepod-fixture.py update \
 普通 OTA 只接受与 BIN 同目录的 `artifact.json`，并自动绑定其中
 `imageIdentity.sourceRevision`、`imageIdentity.firmwareVersion` 和
 `imageIdentity.appElfSha256`。缺少清洁身份、身份字段不完整或清单与 BIN 的 SHA/大小不一致时，
-主机在发送首个数据帧前拒绝更新。直接调用 `cdc-status.py --firmware` 也遵守同一门禁；只有显式
-同时提供 `--source-revision`、`--firmware-version`、`--app-elf-sha256` 才能使用没有相邻清单的镜像。
+主机在发送首个数据帧前拒绝更新。直接调用 `cdc-status.py --firmware` 也执行同一个完整门禁，
+要求 BIN 同目录存在 `artifact.json` 和实际 ELF。三个显式身份参数只能复核清单值，不能绕过清单。
 
 固件先把镜像写入未运行的 OTA 槽，流式计算 SHA-256，并从候选槽的 ESP 应用描述读取
 真实 `app_elf_sha256`。设备在 `esp_ota_end` 和切换启动槽之前强制比较

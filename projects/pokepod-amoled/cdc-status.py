@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import select
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -31,6 +32,8 @@ OUTGOING_CHUNK = 128
 OUTGOING_PACE_SECONDS = 0.001
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 APP_ELF_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+PROJECT_ROOT = Path(__file__).resolve().parent
+ARTIFACT_VALIDATOR = PROJECT_ROOT / "tools" / "validate-flash-artifact.py"
 
 
 def firmware_update_fields(
@@ -39,7 +42,7 @@ def firmware_update_fields(
     firmware_version: str | None = None,
     app_elf_sha256: str | None = None,
 ) -> dict[str, str]:
-    """Build OTA fields with an explicit legacy compatibility boundary."""
+    """Build the identity-bound fields for one validated OTA artifact."""
     if not isinstance(binary_sha256, str) or re.fullmatch(
         r"[0-9a-fA-F]{64}", binary_sha256
     ) is None:
@@ -98,8 +101,32 @@ def validate_firmware_query_fields(fields: dict[str, object] | None) -> None:
 
 
 def load_adjacent_artifact_identity(firmware: Path) -> dict[str, str]:
-    """Load the identity binding for a firmware image next to artifact.json."""
+    """Run the canonical artifact gate, then load its OTA identity binding."""
     manifest_path = firmware.with_name("artifact.json")
+    elf_path = firmware.with_suffix(".elf")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ARTIFACT_VALIDATOR),
+            "--manifest",
+            str(manifest_path),
+            "--binary",
+            str(firmware),
+            "--elf",
+            str(elf_path),
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30.0,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ValueError(
+            "firmware artifact validation failed before USB access: " + detail
+        )
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
@@ -111,6 +138,13 @@ def load_adjacent_artifact_identity(firmware: Path) -> dict[str, str]:
     if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or \
             manifest.get("kind") != "hardmac.artifact":
         raise ValueError("adjacent artifact.json has an invalid schema")
+    toolchain = manifest.get("toolchain")
+    if not isinstance(toolchain, dict) or \
+            toolchain.get("coreProfile") != "production" or \
+            toolchain.get("esp32ArduinoCore") != "3.3.8":
+        raise ValueError(
+            "firmware OTA requires the production ESP32 Arduino core 3.3.8"
+        )
     if manifest.get("sourceDirty") is not False:
         raise ValueError("firmware artifact is dirty; refusing USB update")
     source_revision = manifest.get("sourceRevision")
@@ -151,6 +185,28 @@ def load_adjacent_artifact_identity(firmware: Path) -> dict[str, str]:
         "firmwareVersion": firmware_version,
         "appElfSha256": app_elf_sha256.lower(),
     }
+
+
+def resolve_firmware_artifact_identity(
+    firmware: Path,
+    source_revision: str | None = None,
+    firmware_version: str | None = None,
+    app_elf_sha256: str | None = None,
+) -> dict[str, str]:
+    """Require one closed artifact; optional caller fields may only confirm it."""
+    artifact = load_adjacent_artifact_identity(firmware)
+    supplied = (source_revision, firmware_version, app_elf_sha256)
+    if all(value is None for value in supplied):
+        return artifact
+    explicit = firmware_update_fields(
+        "0" * 64, source_revision, firmware_version, app_elf_sha256
+    )
+    for field in ("sourceRevision", "firmwareVersion", "appElfSha256"):
+        if explicit[field] != artifact[field]:
+            raise ValueError(
+                f"explicit {field} does not match the validated artifact"
+            )
+    return artifact
 
 
 def configure(fd: int) -> None:
@@ -404,23 +460,18 @@ def main() -> int:
             parser.error(str(error))
         if not (1024 <= len(outgoing_binary) <= 0x300000):
             parser.error("firmware image must be between 1 KiB and 3 MiB")
-        if all(
-            value is None
-            for value in (
+        try:
+            artifact_identity = resolve_firmware_artifact_identity(
+                Path(arguments.firmware),
                 arguments.source_revision,
                 arguments.firmware_version,
                 arguments.app_elf_sha256,
             )
-        ):
-            try:
-                artifact_identity = load_adjacent_artifact_identity(
-                    Path(arguments.firmware)
-                )
-            except ValueError as error:
-                parser.error(str(error))
-            arguments.source_revision = artifact_identity["sourceRevision"]
-            arguments.firmware_version = artifact_identity["firmwareVersion"]
-            arguments.app_elf_sha256 = artifact_identity["appElfSha256"]
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            parser.error(str(error))
+        arguments.source_revision = artifact_identity["sourceRevision"]
+        arguments.firmware_version = artifact_identity["firmwareVersion"]
+        arguments.app_elf_sha256 = artifact_identity["appElfSha256"]
         try:
             fields = firmware_update_fields(
                 hashlib.sha256(outgoing_binary).hexdigest(),

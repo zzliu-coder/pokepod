@@ -24,7 +24,6 @@ enum class FirmwareUpdateState : uint8_t {
 // partition and it aborts without changing boot selection on every failure.
 class FirmwareUpdateSession {
  public:
-  bool begin(uint32_t expectedBytes, const char *expectedSha256);
   bool begin(uint32_t expectedBytes, const char *expectedSha256,
              const char *expectedSourceRevision,
              const char *expectedFirmwareVersion,

@@ -90,11 +90,6 @@ bool FirmwareUpdateSession::fail(const char *message) {
   return false;
 }
 
-bool FirmwareUpdateSession::begin(uint32_t expectedBytes,
-                                  const char *expectedSha256) {
-  return begin(expectedBytes, expectedSha256, nullptr, nullptr, nullptr);
-}
-
 bool FirmwareUpdateSession::copyExpectedText(const char *source,
                                              char *destination,
                                              size_t capacity,
