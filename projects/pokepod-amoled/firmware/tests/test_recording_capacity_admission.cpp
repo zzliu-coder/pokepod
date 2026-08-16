@@ -235,6 +235,27 @@ void runDeniedStartAckCleansResources() {
   drain(recorder, log);
 }
 
+void runWideQualificationPublication() {
+  RecordingStorageQualification qualification;
+  constexpr uint32_t generation = 91U;
+  constexpr uint64_t qualifiedAtUs = 0x12345678ABCDEF01ULL;
+  constexpr uint64_t totalUs = 0x23456789BCDEF012ULL;
+  constexpr uint64_t maximumTailUs = 0x3456789ACDEF0123ULL;
+
+  assert(qualification.decision(generation, 1U) ==
+         RecordingQualificationDecision::probe);
+  const uint32_t epoch = qualification.invalidationEpoch();
+  assert(qualification.recordSuccess(generation, qualifiedAtUs, totalUs,
+                                     maximumTailUs, epoch));
+  const RecordingQualificationSnapshot snapshot = qualification.snapshot();
+  assert(snapshot.mountGeneration == generation);
+  assert(snapshot.qualifiedAtUs == qualifiedAtUs);
+  assert(snapshot.probeTotalUs == totalUs);
+  assert(snapshot.probeMaximumTailUs == maximumTailUs);
+  assert(snapshot.qualified);
+  assert(!snapshot.failed);
+}
+
 }  // namespace
 
 int main() {
@@ -243,5 +264,6 @@ int main() {
   runPerformanceAdmission();
   runQualificationCacheAndMountGeneration();
   runDeniedStartAckCleansResources();
+  runWideQualificationPublication();
   return 0;
 }

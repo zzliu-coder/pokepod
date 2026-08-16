@@ -11,6 +11,8 @@ wav = (firmware / "WavRecorder.cpp").read_text(encoding="utf-8")
 app = (firmware / "PokePodApp.cpp").read_text(encoding="utf-8")
 capture = (firmware / "AudioCaptureRuntime.h").read_text(encoding="utf-8")
 storage_queue = (firmware / "RecorderStorageQueue.h").read_text(encoding="utf-8")
+qualification = (firmware / "RecordingStorageQualification.h").read_text(
+    encoding="utf-8")
 dispatcher = (firmware / "AudioCaptureDispatcher.h").read_text(encoding="utf-8")
 
 assert "CapsuleTransactionRunner transactionRunner_" in wav_h
@@ -29,6 +31,8 @@ assert "static constexpr size_t kRingFrames = 6" in capture
 assert "kRecorderStorageQueueFrames = 128" in storage_queue
 assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in wav
 assert '"pokepod_recorder_storage"' in wav
+assert "AtomicUint64Publication" in qualification
+assert "std::atomic<uint64_t>" not in qualification
 assert "storageQueue_.push(data, length)" in wav
 assert "std::atomic<RecorderStopReason> automaticStopReason_" in wav_h
 assert "std::atomic<bool> storageAbortRequested_" in wav_h

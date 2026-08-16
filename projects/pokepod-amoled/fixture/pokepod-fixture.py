@@ -260,6 +260,29 @@ def collect(port: str, operation: str, timeout: float) -> int:
     return 0
 
 
+def latest_boot(runtime: dict[str, object]) -> dict[str, int]:
+    records = runtime.get("records")
+    if not isinstance(records, list):
+        raise RuntimeError("runtime diagnostics have no records")
+    for record in records:
+        if (isinstance(record, dict) and record.get("subsystem") == "boot"
+                and record.get("stage") == "boot"):
+            sequence = record.get("sequence")
+            reset_reason = record.get("reset_reason")
+            if isinstance(sequence, int) and isinstance(reset_reason, int):
+                return {"sequence": sequence, "resetReason": reset_reason}
+    raise RuntimeError("runtime diagnostics have no boot record")
+
+
+def require_same_boot(before: dict[str, int], after: dict[str, int],
+                      phase: str) -> None:
+    if after["sequence"] != before["sequence"]:
+        raise RuntimeError(
+            f"unexpected device restart during {phase}: "
+            f"before={before} after={after}"
+        )
+
+
 def update(port: str, firmware: Path, timeout: float, port_pattern: str,
            app_timeout: float) -> int:
     if not firmware.is_file():
@@ -376,9 +399,13 @@ def exercise(args: argparse.Namespace) -> int:
     hello = cdc(args.port, "hello", output, args.timeout)
     identity = link_identity(args.port, output, args.timeout)
     expected_device_id = str(identity["deviceId"])
+    pre_runtime = cdc(args.port, "get-runtime-diagnostics", output,
+                      args.timeout)
+    pre_boot = latest_boot(pre_runtime)
     write_json(output / "pre.json", {
         "hello": hello, "identity": identity,
         "status": cdc(args.port, "status", output, args.timeout),
+        "runtime": pre_runtime, "boot": pre_boot,
     })
     failure: RuntimeError | None = None
     try:
@@ -389,6 +416,17 @@ def exercise(args: argparse.Namespace) -> int:
         elif args.scenario == "provisioning":
             cdc(args.port, "provisioning-start", output, args.timeout)
             time.sleep(args.hold_seconds)
+            mid_identity = link_identity(args.port, output, args.timeout)
+            mid_runtime = cdc(args.port, "get-runtime-diagnostics", output,
+                              args.timeout)
+            mid_boot = latest_boot(mid_runtime)
+            require_same_boot(pre_boot, mid_boot, "active provisioning")
+            write_json(output / "active.json", {
+                "identity": mid_identity,
+                "status": cdc(args.port, "status", output, args.timeout),
+                "runtime": mid_runtime,
+                "boot": mid_boot,
+            })
             cdc(args.port, "provisioning-stop", output, args.timeout)
         else:
             raise RuntimeError(f"unsupported scenario {args.scenario}")
@@ -397,12 +435,23 @@ def exercise(args: argparse.Namespace) -> int:
             args.port_pattern, expected_device_id, output,
             args.app_timeout, args.timeout,
         )
+        post_runtime = cdc(app_port, "get-runtime-diagnostics", output,
+                           args.timeout)
+        post_boot = latest_boot(post_runtime)
+        if args.scenario == "recording":
+            require_same_boot(pre_boot, post_boot, "recording")
+        elif (post_boot["sequence"] != pre_boot["sequence"]
+              and post_boot["resetReason"] != 3):
+            raise RuntimeError(
+                "provisioning stop produced an unexpected reset: "
+                f"before={pre_boot} after={post_boot}"
+            )
         write_json(output / "post.json", {
             "port": app_port,
             "identity": post_identity,
             "status": cdc(app_port, "status", output, args.timeout),
-            "runtime": cdc(app_port, "get-runtime-diagnostics", output,
-                           args.timeout),
+            "runtime": post_runtime,
+            "boot": post_boot,
         })
     except RuntimeError as error:
         failure = error
@@ -410,6 +459,12 @@ def exercise(args: argparse.Namespace) -> int:
         write_json(output / "result.json", {
             "scenario": args.scenario, "passed": True,
             "automaticRecovery": False,
+            "preBoot": pre_boot,
+            "postBoot": post_boot,
+            "plannedStopRestart": (
+                args.scenario == "provisioning"
+                and post_boot["sequence"] != pre_boot["sequence"]
+            ),
         })
         print(output)
         return 0

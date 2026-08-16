@@ -142,12 +142,10 @@ class RecordingStorageQualification {
       if ((before & 1U) != 0) continue;
       result.mountGeneration =
           publishedMountGeneration_.load(std::memory_order_relaxed);
-      result.qualifiedAtUs =
-          publishedQualifiedAtUs_.load(std::memory_order_relaxed);
-      result.probeTotalUs =
-          publishedProbeTotalUs_.load(std::memory_order_relaxed);
+      result.qualifiedAtUs = publishedQualifiedAtUs_.loadRelaxed();
+      result.probeTotalUs = publishedProbeTotalUs_.loadRelaxed();
       result.probeMaximumTailUs =
-          publishedProbeMaximumTailUs_.load(std::memory_order_relaxed);
+          publishedProbeMaximumTailUs_.loadRelaxed();
       result.invalidationEpoch =
           publishedInvalidationEpoch_.load(std::memory_order_relaxed);
       result.invalidReason = static_cast<RecordingQualificationInvalidReason>(
@@ -176,6 +174,31 @@ class RecordingStorageQualification {
   }
 
  private:
+  // Xtensa is a 32-bit target. A 64-bit std::atomic routes through the
+  // Arduino core's process-wide critical-section shim. The device panic was
+  // observed exactly as the first successful SD qualification was published,
+  // so keep this path on native lock-free 32-bit atomics.
+  // The enclosing odd/even publication sequence already supplies coherence,
+  // so two relaxed 32-bit atomics are sufficient and remain data-race-free.
+  class AtomicUint64Publication {
+   public:
+    void storeRelaxed(uint64_t value) {
+      low_.store(static_cast<uint32_t>(value), std::memory_order_relaxed);
+      high_.store(static_cast<uint32_t>(value >> 32U),
+                  std::memory_order_relaxed);
+    }
+
+    uint64_t loadRelaxed() const {
+      const uint32_t low = low_.load(std::memory_order_relaxed);
+      const uint32_t high = high_.load(std::memory_order_relaxed);
+      return (static_cast<uint64_t>(high) << 32U) | low;
+    }
+
+   private:
+    std::atomic<uint32_t> low_{0};
+    std::atomic<uint32_t> high_{0};
+  };
+
   static uint32_t reasonBit(RecordingQualificationInvalidReason reason) {
     const uint8_t index = static_cast<uint8_t>(reason);
     return index == 0 || index >= 32 ? 0U : (1UL << index);
@@ -220,12 +243,9 @@ class RecordingStorageQualification {
     publishedSequence_.fetch_add(1U, std::memory_order_acq_rel);
     publishedMountGeneration_.store(value_.mountGeneration,
                                     std::memory_order_relaxed);
-    publishedQualifiedAtUs_.store(value_.qualifiedAtUs,
-                                  std::memory_order_relaxed);
-    publishedProbeTotalUs_.store(value_.probeTotalUs,
-                                 std::memory_order_relaxed);
-    publishedProbeMaximumTailUs_.store(value_.probeMaximumTailUs,
-                                       std::memory_order_relaxed);
+    publishedQualifiedAtUs_.storeRelaxed(value_.qualifiedAtUs);
+    publishedProbeTotalUs_.storeRelaxed(value_.probeTotalUs);
+    publishedProbeMaximumTailUs_.storeRelaxed(value_.probeMaximumTailUs);
     publishedInvalidationEpoch_.store(value_.invalidationEpoch,
                                       std::memory_order_relaxed);
     publishedInvalidReason_.store(
@@ -246,9 +266,9 @@ class RecordingStorageQualification {
           RecordingQualificationInvalidReason::mountUnavailable)};
   mutable std::atomic<uint32_t> publishedSequence_{0};
   std::atomic<uint32_t> publishedMountGeneration_{0};
-  std::atomic<uint64_t> publishedQualifiedAtUs_{0};
-  std::atomic<uint64_t> publishedProbeTotalUs_{0};
-  std::atomic<uint64_t> publishedProbeMaximumTailUs_{0};
+  AtomicUint64Publication publishedQualifiedAtUs_;
+  AtomicUint64Publication publishedProbeTotalUs_;
+  AtomicUint64Publication publishedProbeMaximumTailUs_;
   std::atomic<uint32_t> publishedInvalidationEpoch_{0};
   std::atomic<uint32_t> publishedInvalidReason_{
       static_cast<uint32_t>(

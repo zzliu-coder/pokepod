@@ -96,6 +96,11 @@ python3 fixture/pokepod-fixture.py exercise --scenario provisioning \
   --control-profile work/control.json --authority work/device-authority.json
 ```
 
+`recording` 要求整个场景的 boot sequence 不变；任何 panic、watchdog 或软件重启都失败。
+`provisioning` 会在热点仍处于 active 状态时先复核一次身份和 boot sequence，证明“进入配网”
+没有重启，再执行退出。BLE 为配网释放内部 RAM 后，退出时允许一次由设备生命周期协调器
+执行的 reset reason 3 软件重启；其他 reset reason 或 active 阶段重启均失败。
+
 普通 OTA 仍是优先路径；它不需要 BOOT/RESET。控制器承担 OTA 失败、固件崩溃、USB
 Link 无响应时的自动 ROM 救援。仅有普通 USB 线时，电脑无法在电气上拉低 GPIO0 与
 RESET，软件会明确返回 `manual`，不会声称已经具备自动救援。

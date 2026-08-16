@@ -2,7 +2,9 @@
 """Contract test for the computer-side fixture boundary."""
 
 import json
+import importlib.util
 from pathlib import Path
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +39,10 @@ def main() -> int:
     assert "fixture-runs" in script
     assert "enter_rom_loader" in script and "wait_for_application" in script
     assert "exercise" in script and "automaticRecovery" in script
+    assert "def latest_boot" in script and "def require_same_boot" in script
+    assert 'require_same_boot(pre_boot, mid_boot, "active provisioning")' in script
+    assert 'require_same_boot(pre_boot, post_boot, "recording")' in script
+    assert 'post_boot["resetReason"] != 3' in script
     assert "assert_boot" in control and "release_boot" in control
     assert '"ping"' in control and '"release_reset"' in control
     assert "def doctor" in control
@@ -49,6 +55,29 @@ def main() -> int:
     assert "normal" in readme.lower() and "rescue" in readme.lower()
     assert "backup" in readme and "回读" in readme
     assert "artifact.json" in readme and "appElfSha256" in readme
+
+    fixture_dir = ROOT / "fixture"
+    sys.path.insert(0, str(fixture_dir))
+    spec = importlib.util.spec_from_file_location(
+        "pokepod_fixture", fixture_dir / "pokepod-fixture.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    boot = module.latest_boot({"records": [
+        {"subsystem": "recording", "stage": "recording_started",
+         "sequence": 42, "reset_reason": 0},
+        {"subsystem": "boot", "stage": "boot",
+         "sequence": 41, "reset_reason": 4},
+    ]})
+    assert boot == {"sequence": 41, "resetReason": 4}
+    module.require_same_boot(boot, dict(boot), "test")
+    try:
+        module.require_same_boot(
+            boot, {"sequence": 42, "resetReason": 3}, "test")
+    except RuntimeError as error:
+        assert "unexpected device restart during test" in str(error)
+    else:
+        raise AssertionError("fixture restart check accepted a changed boot")
     print("PASS test-pokepod-fixture")
     return 0
 
