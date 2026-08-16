@@ -379,16 +379,28 @@ def diagnose_rom(args: argparse.Namespace, output: Path) -> dict[str, object]:
             (Path.home() / ".espressif" / "python_env").glob(
                 "idf*_py*_env/bin/esp-coredump"))
         if core_tool_candidates:
-            run_evidence_command([
-                str(core_tool_candidates[-1]), "--chip", "esp32s3",
-                "info_corefile", "--core", str(output / "coredump.bin"),
-                "--core-format", "raw", str(args.elf),
-            ], output, "coredump-report", 60.0)
-            evidence["coredumpReport"] = "coredump-report.log"
+            try:
+                run_evidence_command([
+                    str(core_tool_candidates[-1]), "--chip", "esp32s3",
+                    "info_corefile", "--core", str(output / "coredump.bin"),
+                    "--core-format", "raw", str(args.elf),
+                ], output, "coredump-report", 60.0)
+                evidence["coredumpReport"] = {
+                    "status": "decoded", "file": "coredump-report.log"}
+            except RuntimeError as error:
+                # A ROM snapshot can predate the candidate ELF supplied by the
+                # caller. Preserve the raw dump and decoder output so a matching
+                # historical ELF can be applied later; evidence collection must
+                # still finish and write its manifest.
+                evidence["coredumpReport"] = {
+                    "status": "decode_failed",
+                    "file": "coredump-report.log",
+                    "reason": str(error),
+                }
         else:
-            evidence["coredumpReport"] = "decoder_unavailable"
+            evidence["coredumpReport"] = {"status": "decoder_unavailable"}
     else:
-        evidence["coredumpReport"] = "elf_unavailable"
+        evidence["coredumpReport"] = {"status": "elf_unavailable"}
     return evidence
 
 

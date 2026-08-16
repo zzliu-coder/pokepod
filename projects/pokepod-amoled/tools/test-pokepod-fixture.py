@@ -42,6 +42,7 @@ def main() -> int:
     assert "def diagnose" in script and "def diagnose_rom" in script
     assert '"get-runtime-trace"' in script
     assert '"coredump"' in script and '"nvs.private"' in script
+    assert '"status": "decode_failed"' in script
     assert "copy_mac_voice_diagnostic" in script
     assert "def latest_boot" in script and "def require_same_boot" in script
     assert 'require_same_boot(pre_boot, mid_boot, "active provisioning")' in script
