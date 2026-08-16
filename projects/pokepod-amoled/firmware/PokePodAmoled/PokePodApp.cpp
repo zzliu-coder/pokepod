@@ -130,6 +130,7 @@ PsramService<CapsuleLibrary> capsuleLibrary;
 PsramService<CapsuleOperationService> capsuleOperations;
 Dashboard dashboard;
 ButtonDebouncer bootButton;
+BootGesturePolicy bootGesturePolicy;
 DeviceConfig deviceConfig;
 WifiController wifi;
 TencentWorker tencentWorker;
@@ -167,10 +168,10 @@ bool touchCapsuleSelectionAttempted = false;
 bool touchVerticalScrolling = false;
 bool scrollRedrawPending = false;
 bool bootWirelessHolding = false;
-bool bootProvisioningExitArmed = false;
-bool bootProvisioningConfirmationConsumed = false;
-bool bootScreenWakeArmed = false;
 bool wirelessUiActive = false;
+AudioSessionTelemetry wirelessSessionTelemetry;
+AudioSessionTelemetryProducer wirelessTelemetryProducer;
+bool wirelessTelemetryActive = false;
 UiAction touchAction = UiAction::none;
 uint32_t lastTouchMs = 0;
 uint32_t lastDashboardMs = 0;
@@ -181,7 +182,6 @@ uint32_t captureTelemetrySampledSessionId = 0;
 uint32_t captureTelemetryLastStackSampleMs = 0;
 uint32_t captureTelemetryStackHighWaterWords = 0;
 bool captureTelemetryStackSampled = false;
-uint32_t bootPressedAtMs = 0;
 uint32_t lastNetworkTimeSyncRevision = 0;
 uint32_t lastCapsuleLibraryRevision = 0;
 bool ignoreTouchUntilRelease = false;
@@ -189,6 +189,7 @@ bool lastUsbHostConnected = false;
 bool lastVbusPresent = false;
 bool screenDimmed = false;
 String transientMessage;
+UiNoticeKind transientMessageKind = UiNoticeKind::info;
 uint32_t transientUntilMs = 0;
 CapsuleUndoState trashUndo;
 std::vector<String> pendingPurgeIds;
@@ -445,9 +446,15 @@ String deviceId() {
   return String(value);
 }
 
-void showMessage(const String &message, uint32_t durationMs = 1800) {
+void showMessage(const String &message, UiNoticeKind kind,
+                 uint32_t durationMs = 1800) {
   transientMessage = message;
+  transientMessageKind = kind;
   transientUntilMs = millis() + durationMs;
+}
+
+void showMessage(const String &message, uint32_t durationMs = 1800) {
+  showMessage(message, UiNoticeKind::info, durationMs);
 }
 
 String localCapsuleStatusMessage() {
@@ -563,7 +570,10 @@ void drawDashboard() {
     view.usbReady = usb.ready();
     view.usbConnected = usbCableConnected();
     view.provisioningDiagnostics = &provisioningDiagnostics;
-    if (deadlinePending(now, transientUntilMs)) view.message = transientMessage;
+    if (deadlinePending(now, transientUntilMs)) {
+      view.message = transientMessage;
+      view.messageKind = transientMessageKind;
+    }
     dashboard.draw(view);
     return;
   }
@@ -633,7 +643,10 @@ void drawDashboard() {
   view.portalStatus = provisioningPortal.statusMessage();
   view.portalState = provisioningPortal.state();
   view.provisioningDiagnostics = &provisioningDiagnostics;
-  if (deadlinePending(now, transientUntilMs)) view.message = transientMessage;
+  if (deadlinePending(now, transientUntilMs)) {
+    view.message = transientMessage;
+    view.messageKind = transientMessageKind;
+  }
   dashboard.draw(view);
 }
 
@@ -738,6 +751,10 @@ bool startWirelessHold() {
     drawDashboard();
     return false;
   }
+  wirelessSessionTelemetry.reset();
+  wirelessTelemetryProducer =
+      wirelessSessionTelemetry.bindCaptureSession(sessionId);
+  wirelessTelemetryActive = wirelessTelemetryProducer.valid();
   usb.log().printf(
       "{\"event\":\"wireless_capture_started\",\"session_id\":%lu}\n",
       static_cast<unsigned long>(sessionId));
@@ -764,9 +781,10 @@ void observeCaptureMetrics() {
     captureTelemetryStackHighWaterWords = 0;
     captureTelemetryStackSampled = false;
   }
-  if (recorder.operationActive() &&
-      (captureRuntime.running() ||
-       pendingCaptureStop != PendingCaptureStop::none)) {
+  const bool terminalOrActiveCapture = captureRuntime.running() ||
+      pendingCaptureStop != PendingCaptureStop::none;
+  if ((recorder.operationActive() || wirelessTelemetryActive) &&
+      terminalOrActiveCapture) {
     const uint32_t nowMs = millis();
     const bool terminalSample = !captureRuntime.running() &&
         pendingCaptureStop != PendingCaptureStop::none;
@@ -779,9 +797,18 @@ void observeCaptureMetrics() {
       captureTelemetryLastStackSampleMs = nowMs;
       captureTelemetryStackSampled = true;
     }
-    recorder.observeCaptureTelemetry(
-        captureRuntime.metrics(), captureDispatcher.metrics(),
-        captureTelemetryStackHighWaterWords);
+    const AudioCaptureServiceMetrics captureMetrics = captureRuntime.metrics();
+    const AudioCaptureDispatcherMetrics dispatcherMetrics =
+        captureDispatcher.metrics();
+    if (recorder.operationActive()) {
+      recorder.observeCaptureTelemetry(
+          captureMetrics, dispatcherMetrics, captureTelemetryStackHighWaterWords);
+    }
+    if (wirelessTelemetryActive) {
+      wirelessSessionTelemetry.observeCapture(
+          wirelessTelemetryProducer, captureMetrics, dispatcherMetrics,
+          captureTelemetryStackHighWaterWords);
+    }
   }
   // Recorder finalization runs on the storage task. Publish the final metrics
   // before stop() crosses that ownership boundary, then keep the snapshot
@@ -793,6 +820,36 @@ void observeCaptureMetrics() {
       lastLocalCaptureMetrics = snapshot;
     }
   }
+}
+
+void publishWirelessTelemetryTerminal() {
+  if (!wirelessTelemetryActive) return;
+  wirelessSessionTelemetry.freeze();
+  const AudioSessionTelemetrySnapshot snapshot =
+      wirelessSessionTelemetry.snapshot();
+  runtimeDiagnostics.publishAudioSessionSnapshot(snapshot);
+  usb.log().printf(
+      "{\"event\":\"audio_session_terminal\",\"owner\":\"wireless_voice\","
+      "\"session_id\":%lu,\"generation\":%lu,\"frozen\":%s,"
+      "\"incomplete\":%s,\"first_failure\":\"%s\","
+      "\"read_calls\":%lu,\"timeouts\":%lu,\"zero_reads\":%lu,"
+      "\"early_zero_reads\":%lu,\"ring_drops\":%lu,"
+      "\"dispatch_ble_failures\":%lu,\"sequence_gaps\":%lu,"
+      "\"i2s_longest_read_us\":%lu}\n",
+      static_cast<unsigned long>(snapshot.sessionId),
+      static_cast<unsigned long>(snapshot.generation),
+      snapshot.frozen ? "true" : "false", snapshot.incomplete() ? "true" : "false",
+      audioCaptureFailureCodeName(snapshot.firstFailure),
+      static_cast<unsigned long>(snapshot.readCalls),
+      static_cast<unsigned long>(snapshot.i2sTimeouts),
+      static_cast<unsigned long>(snapshot.zeroByteReads),
+      static_cast<unsigned long>(snapshot.earlyZeroReads),
+      static_cast<unsigned long>(snapshot.captureRingDroppedFrames),
+      static_cast<unsigned long>(snapshot.dispatchBleDeliveryFailures),
+      static_cast<unsigned long>(snapshot.sequenceGaps),
+      static_cast<unsigned long>(snapshot.i2sLongestReadUs));
+  wirelessTelemetryActive = false;
+  wirelessTelemetryProducer = {};
 }
 
 bool consumeRecorderTerminal(bool notifyUser);
@@ -856,6 +913,7 @@ bool finishPendingCaptureStop() {
 
   if (owner == PendingCaptureStop::wirelessVoice) {
     const AudioCaptureServiceMetrics captureMetrics = captureRuntime.metrics();
+    publishWirelessTelemetryTerminal();
     recordWirelessRuntime(RuntimeDiagnosticStage::wirelessStop,
                           complete ? RuntimeDiagnosticOutcome::success
                                    : RuntimeDiagnosticOutcome::failure,
@@ -1011,7 +1069,9 @@ bool consumeRecorderTerminal(bool notifyUser) {
       message = outcome.terminal == RecorderTerminal::cancelled
           ? "录音启动已取消" : "存储服务忙，请稍后再试";
     }
-    showMessage(message);
+    const UiNoticeKind kind = completed ? UiNoticeKind::success
+                                        : UiNoticeKind::error;
+    showMessage(message, kind);
   }
   const AudioFrontEndMetrics captureMetrics =
       lastLocalCaptureMetrics.asMetrics();
@@ -1069,7 +1129,7 @@ void toggleRecording() {
         recorder.requestStart(usb.log(), recordingId(), board.utcNow(),
                               RecorderOperationOwner::localApp);
     if (requested) {
-      showMessage("正在检查存储…", 3000);
+      showMessage("正在检查存储…", UiNoticeKind::progress, 3000);
     } else {
       localRecordingStart.reset();
       finishLocalRecordingStartFailure(true, acquired);
@@ -1077,6 +1137,69 @@ void toggleRecording() {
   }
   noteUserActivity();
   drawDashboard();
+}
+
+BootGestureContext bootGestureContext() {
+  BootGestureContext context;
+  context.screenOn = board.status().screenOn;
+  context.provisioning = provisioningCoordinator.visible();
+  context.sensitiveConfirmationPending =
+      provisioningCoordinator.sensitiveConfirmationPending();
+  context.wirelessHolding = bootWirelessHolding;
+  context.localRecording =
+      recorder.ownedBy(RecorderOperationOwner::localApp) &&
+      (recorder.recording() || localRecordingStart.active());
+  context.bluetoothEnabled = bleVoice.userEnabled();
+  context.wirelessAppReady = bleVoice.appReady();
+  return context;
+}
+
+void applyBootGestureAction(BootGestureAction action, uint32_t nowMs) {
+  switch (action) {
+    case BootGestureAction::wakeScreen:
+      noteUserActivity(nowMs);
+      setScreenState(true);
+      return;
+    case BootGestureAction::confirmProvisioning: {
+      const bool confirmed =
+          provisioningCoordinator.confirmSensitiveChange(nowMs);
+      dashboard.invalidate();
+      showMessage(confirmed ? "已确认腾讯密钥操作"
+                            : "实体确认超时，请再次保存",
+                  confirmed ? UiNoticeKind::success : UiNoticeKind::error);
+      return;
+    }
+    case BootGestureAction::exitProvisioning:
+      if (provisioningCoordinator.visible()) provisioningCoordinator.stop();
+      dashboard.back();
+      dashboard.invalidate();
+      showMessage("已退出手机配网", UiNoticeKind::success);
+      return;
+    case BootGestureAction::stopWirelessVoice:
+      bootWirelessHolding = false;
+      (void)stopWirelessHold();
+      return;
+    case BootGestureAction::startWirelessVoice:
+      bootWirelessHolding = startWirelessHold();
+      return;
+    case BootGestureAction::wirelessUnavailable:
+      showMessage("等待 Mac 应用", UiNoticeKind::warning);
+      dashboard.invalidate();
+      return;
+    case BootGestureAction::bluetoothDisabled:
+      showMessage("蓝牙已关闭", UiNoticeKind::warning);
+      dashboard.invalidate();
+      return;
+    case BootGestureAction::stopLocalRecording:
+      (void)stopLocalCapture(RecorderStopReason::user);
+      return;
+    case BootGestureAction::startLocalRecording:
+      toggleRecording();
+      return;
+    case BootGestureAction::armProvisioningExit:
+    case BootGestureAction::none:
+      return;
+  }
 }
 
 void emitStatus() {
@@ -1979,68 +2102,21 @@ void loop() {
     wirelessSync->poll(now, wifi.connected());
     return;
   }
-  if (bootButton.update(digitalRead(kBootButtonPin) == LOW, now)) {
+  const bool bootChanged = bootButton.update(digitalRead(kBootButtonPin) == LOW,
+                                             now);
+  if (bootChanged && bootButton.pressedEdge()) {
     noteUserActivity(now);
-    if (!board.status().screenOn) {
-      bootScreenWakeArmed = true;
-      setScreenState(true);
-      return;
-    }
-    if (bootButton.releasedEdge() && bootScreenWakeArmed) {
-      bootScreenWakeArmed = false;
-      return;
-    }
-    if (bootButton.pressedEdge()) {
-      if (provisioningCoordinator.visible()) {
-        if (provisioningCoordinator.sensitiveConfirmationPending()) {
-          bootProvisioningExitArmed = false;
-          bootProvisioningConfirmationConsumed = true;
-          const bool confirmed =
-              provisioningCoordinator.confirmSensitiveChange(now);
-          dashboard.invalidate();
-          showMessage(confirmed ? "已确认腾讯密钥操作"
-                                : "实体确认超时，请再次保存");
-          drawDashboard();
-          return;
-        }
-        bootProvisioningExitArmed = true;
-        return;
-      }
-      bootPressedAtMs = now;
-    } else if (bootButton.releasedEdge()) {
-      if (bootProvisioningConfirmationConsumed) {
-        bootProvisioningConfirmationConsumed = false;
-        return;
-      }
-      if (bootProvisioningExitArmed) {
-        bootProvisioningExitArmed = false;
-        if (provisioningCoordinator.visible()) provisioningCoordinator.stop();
-        dashboard.back();
-        dashboard.invalidate();
-        showMessage("已退出手机配网");
-        drawDashboard();
-        return;
-      }
-      if (bootWirelessHolding) {
-        bootWirelessHolding = false;
-        stopWirelessHold();
-        return;
-      }
-      if (!bleVoice.userEnabled()) {
-        showMessage("蓝牙已关闭");
-        drawDashboard();
-      } else if (bleVoice.appReady() && !recorder.recording()) {
-        showMessage("请按住说话");
-        drawDashboard();
-      } else {
-        toggleRecording();
-      }
-    }
+    applyBootGestureAction(bootGesturePolicy.pressed(now, bootGestureContext()),
+                           now);
   }
-  if (bootButton.pressed() && bleVoice.appReady() &&
-      !bootWirelessHolding && !recorder.recording() &&
-      now - bootPressedAtMs >= ui::kWirelessHoldDelayMs) {
-    bootWirelessHolding = startWirelessHold();
+  if (bootButton.pressed()) {
+    applyBootGestureAction(bootGesturePolicy.held(now, bootGestureContext()),
+                           now);
+  }
+  if (bootChanged && bootButton.releasedEdge()) {
+    noteUserActivity(now);
+    applyBootGestureAction(
+        bootGesturePolicy.released(bootGestureContext()), now);
   }
 
   if (audio.playing()) {

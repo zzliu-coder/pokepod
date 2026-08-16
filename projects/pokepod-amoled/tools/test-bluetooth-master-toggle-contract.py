@@ -136,10 +136,15 @@ assert start_hold.index("!bleVoice.userEnabled()") < start_hold.index(
     "!bleVoice.appReady()"
 )
 assert 'showMessage("蓝牙已关闭")' in start_hold
-boot_button = app.index("if (bootButton.update(")
-boot_release = app[app.index("if (bootWirelessHolding)", boot_button):
-                   app.index("if (audio.playing())", boot_button)]
-assert "!bleVoice.userEnabled()" in boot_release
-assert 'showMessage("蓝牙已关闭")' in boot_release
+assert "BootGesturePolicy bootGesturePolicy" in app
+assert "bootGesturePolicy.pressed(now, bootGestureContext())" in app
+assert "bootGesturePolicy.held(now, bootGestureContext())" in app
+assert "bootGesturePolicy.released(bootGestureContext())" in app
+boot_action = app[app.index("void applyBootGestureAction"):
+                  app.index("void emitStatus()")]
+assert "BootGestureAction::bluetoothDisabled" in boot_action
+assert 'showMessage("蓝牙已关闭", UiNoticeKind::warning)' in boot_action
+assert "BootGestureAction::startLocalRecording" in boot_action
+assert "BootGestureAction::startWirelessVoice" in boot_action
 
 print("PASS bluetooth_master_toggle_contract")

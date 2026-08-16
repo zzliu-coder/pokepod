@@ -115,9 +115,9 @@ assert "sensitiveConfirmationPending()" in portal_header
 assert "confirmSensitiveChange(uint32_t nowMs)" in portal_header
 assert "sensitiveConfirmationPending()" in coordinator_header
 assert "confirmSensitiveChange(uint32_t nowMs)" in coordinator_header
-assert "bootProvisioningConfirmationConsumed" in main_source
-assert "provisioningCoordinator.confirmSensitiveChange(now)" in main_source
-assert "if (bootProvisioningConfirmationConsumed)" in main_source
+assert "BootGestureAction::confirmProvisioning" in main_source
+assert "provisioningCoordinator.confirmSensitiveChange(nowMs)" in main_source
+assert "bootGesturePolicy.pressed" in main_source
 for log_call in re.findall(r"(?:log_|log\.)(?:printf|print|println)\([^;]*;", source,
                            flags=re.DOTALL):
     assert "password_" not in log_call

@@ -99,6 +99,9 @@ assert "captureTelemetryLastStackSampleMs" in app
 assert "captureTelemetryStackSampled" in app
 assert "metrics_.sequenceFailures" in dispatcher
 assert "maximumIntervalUs" in dispatcher
+assert "AudioSessionTelemetry wirelessSessionTelemetry" in app
+assert "wirelessSessionTelemetry.observeCapture(" in app
+assert "publishWirelessTelemetryTerminal()" in app
 
 local_finish = app[app.index("bool finishPendingCaptureStop() {"):
                    app.index("bool requestCaptureStop(",
@@ -112,6 +115,16 @@ local_abort = local_finish.index("recorder.abortCapture(usb.log())",
 # stopped realtime task -> final drain -> final DSP snapshot -> stop/abort.
 assert local_drain < local_snapshot < local_stop
 assert local_snapshot < local_abort
+
+wireless_finish = app[
+    app.index("if (owner == PendingCaptureStop::wirelessVoice)"):
+    app.index("if (recorder.recording())", app.index(
+        "if (owner == PendingCaptureStop::wirelessVoice)"))
+]
+assert wireless_finish.index("publishWirelessTelemetryTerminal()") < \
+    wireless_finish.index("bleVoice.endSession()")
+assert wireless_finish.index("publishWirelessTelemetryTerminal()") < \
+    wireless_finish.index("captureRouter.release(")
 
 advance = link_recording[
     link_recording.index("LinkRecordingEvent LinkRecordingSession::advanceStop("):
