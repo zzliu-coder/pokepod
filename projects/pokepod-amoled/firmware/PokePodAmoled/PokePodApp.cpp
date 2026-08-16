@@ -867,7 +867,9 @@ void finishLocalRecordingStartFailure(bool notifyUser, bool ownsRouter) {
   const bool terminalConsumed = ownsRecorder &&
       consumeRecorderTerminal(pendingRecorderResultNotify);
   pendingRecorderResultNotify = false;
-  if (notifyUser && !terminalConsumed) showMessage("录音启动失败");
+  if (notifyUser && !terminalConsumed) {
+    showMessage("录音启动失败", UiNoticeKind::error);
+  }
 }
 
 void advanceLocalRecordingStart() {
