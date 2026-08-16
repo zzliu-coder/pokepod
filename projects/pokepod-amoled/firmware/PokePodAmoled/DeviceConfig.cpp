@@ -41,6 +41,7 @@ StoredDeviceConfig encodeConfig(
   stored.raiseToWake = settings.raiseToWake ? 1 : 0;
   stored.reserved[0] = settings.bluetoothEnabled
       ? kStoredBluetoothEnabled : kStoredBluetoothDisabled;
+  stored.reserved[1] = static_cast<uint8_t>(settings.provisioningPasswordMode);
   for (size_t index = 0; index < networks.size(); ++index) {
     copyString(stored.wifi[index].ssid, sizeof(stored.wifi[index].ssid),
                networks[index].ssid);
@@ -80,6 +81,8 @@ bool decodeConfig(const StoredDeviceConfig &stored, DeviceSettings &settings,
   decodedSettings.bluetoothEnabled =
       storedDeviceConfigBluetoothEnabled(stored);
   decodedSettings.raiseToWake = stored.raiseToWake != 0;
+  decodedSettings.provisioningPasswordMode =
+      storedDeviceConfigProvisioningPasswordMode(stored);
   applyPreferredWifi(decodedSettings, decodedNetworks);
   settings = decodedSettings;
   networks = decodedNetworks;
@@ -87,7 +90,8 @@ bool decodeConfig(const StoredDeviceConfig &stored, DeviceSettings &settings,
 }
 
 bool validSettings(const DeviceSettings &settings) {
-  return settings.wifiSsid.length() <= 32 &&
+  return validProvisioningPasswordMode(settings.provisioningPasswordMode) &&
+      settings.wifiSsid.length() <= 32 &&
       settings.wifiPassword.length() <= 63 &&
       settings.secretId.length() <= 128 &&
       settings.secretKey.length() <= 128 &&
@@ -335,6 +339,20 @@ bool DeviceConfig::setRaiseToWake(bool enabled, Print &log) {
   settings_ = proposed;
   log.printf("{\"event\":\"raise_to_wake\",\"enabled\":%s}\n",
              enabled ? "true" : "false");
+  return true;
+}
+
+bool DeviceConfig::setProvisioningPasswordMode(ProvisioningPasswordMode mode,
+                                                Print &log) {
+  if (!open_ || !validProvisioningPasswordMode(mode)) return false;
+  DeviceSettings proposed = settings_;
+  proposed.provisioningPasswordMode = mode;
+  if (!persistState(proposed, wifiNetworks_)) return false;
+  settings_ = proposed;
+  // Never include the provisioning password in logs. The mode is safe to
+  // report and makes field diagnostics explain which policy is active.
+  log.printf("{\"event\":\"provisioning_password_mode\",\"mode\":%u}\n",
+             static_cast<unsigned>(mode));
   return true;
 }
 

@@ -52,13 +52,13 @@ int main() {
   DeterministicRandom smallSource{0, false};
   assert(!generateProvisioningPassword(tooSmall, sizeof(tooSmall),
                                        fillDeterministic, &smallSource));
-  assert(tooSmall[0] == '\0');
+  for (const char character : tooSmall) assert(character == '\0');
 
   char failed[kProvisioningPasswordLength + 1] = {'x'};
   DeterministicRandom failedSource{0, true};
   assert(!generateProvisioningPassword(failed, sizeof(failed),
                                        fillDeterministic, &failedSource));
-  assert(failed[0] == '\0');
+  for (const char character : failed) assert(character == '\0');
   assert(!generateProvisioningPassword(nullptr, sizeof(failed),
                                        fillDeterministic, &firstSource));
 
@@ -75,6 +75,29 @@ int main() {
   assert(session.begin(fillDeterministic, &sessionTwo));
   assert(std::strcmp(firstSession, session.password()) != 0);
   session.close();
+
+  ProvisioningCredentialPolicy fixedSession;
+  assert(fixedSession.begin(ProvisioningPasswordMode::fixed88888888,
+                            fillDeterministic, &sessionOne));
+  assert(std::strcmp(fixedSession.password(), kFixedProvisioningPassword) ==
+         0);
+  fixedSession.close();
+  assert(!fixedSession.active());
+  assert(fixedSession.password()[0] == '\0');
+
+  // Fixed mode does not require entropy, while random mode fails closed when
+  // its entropy source cannot fill a batch.
+  DeterministicRandom failedFixedSource{0, true};
+  assert(fixedSession.begin(ProvisioningPasswordMode::fixed88888888,
+                            fillDeterministic, &failedFixedSource));
+  fixedSession.close();
+  assert(!fixedSession.begin(static_cast<ProvisioningPasswordMode>(3),
+                             fillDeterministic, &sessionOne));
+  assert(!fixedSession.active());
+
+  assert(kFixedProvisioningPasswordLength == 8U);
+  assert(kFixedProvisioningPassword[0] == '8');
+  assert(kFixedProvisioningPassword[7] == '8');
 
   assert(std::strcmp(provisioningStateName(ProvisioningState::ready),
                      "ready") == 0);

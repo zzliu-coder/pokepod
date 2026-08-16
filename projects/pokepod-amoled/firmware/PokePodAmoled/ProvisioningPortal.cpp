@@ -158,7 +158,8 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   char name[24];
   snprintf(name, sizeof(name), "PokePod-%04lX", static_cast<unsigned long>(suffix));
   ssid_ = name;
-  if (!credential_.begin(fillProvisioningRandom, nullptr)) {
+  if (!credential_.begin(config.settings().provisioningPasswordMode,
+                         fillProvisioningRandom, nullptr)) {
     clearProvisioningCredential();
     statusMessage_ = "配网密码失败，请退出后重试";
     return false;
@@ -615,6 +616,21 @@ void ProvisioningPortal::saveRequest() {
     return;
   }
   DeviceSettings next = config_->settings();
+  const String passwordMode = server_.arg("provisioningPasswordMode");
+  if (!passwordMode.isEmpty() && passwordMode != "0" &&
+      passwordMode != "1" && passwordMode != "2") {
+    statusMessage_ = "Password mode error; choose again";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, next.wifiSsid,
+                         -127, kProvisioningReasonInvalidInput, 0,
+                         validationAttempt_, *log_);
+    sendSaveJson(400, false);
+    return;
+  }
+  if (!passwordMode.isEmpty()) {
+    next.provisioningPasswordMode = static_cast<ProvisioningPasswordMode>(
+        static_cast<uint8_t>(passwordMode[0] - '0'));
+  }
   const String manualSsid = server_.arg("ssidManual");
   next.wifiSsid = manualSsid.isEmpty() ? server_.arg("ssid") : manualSsid;
   next.wifiPassword = server_.arg("wifiPassword");
@@ -980,6 +996,22 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
     html += F("</details>");
   }
   html += F(R"HTML(<details class='disclosure'><summary>高级设置</summary><div class='disclosure-body'>
+<label class='field'><span class='field-name'>配网密码</span><select name='provisioningPasswordMode'>)HTML");
+  const uint8_t displayedPasswordMode =
+      candidate_.provisioningPasswordMode ==
+              ProvisioningPasswordMode::fixed88888888
+          ? kStoredProvisioningPasswordFixed88888888
+          : kStoredProvisioningPasswordRandom;
+  html += "<option value='1'";
+  if (displayedPasswordMode == kStoredProvisioningPasswordRandom) {
+    html += " selected";
+  }
+  html += ">重新更新</option><option value='2'";
+  if (displayedPasswordMode == kStoredProvisioningPasswordFixed88888888) {
+    html += " selected";
+  }
+  html += ">88888888</option></select></label>";
+  html += F(R"HTML(<p class='privacy'>配网密码将在热点关闭后清除; 88888888 personal only. 配网热点仍会在五分钟后关闭。</p>
 <label class='field'><span class='field-name'>热词 ID <span class='optional'>可选</span></span><input name='hotwordId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' value=')HTML");
   html += htmlEscape(candidate_.hotwordId);
   html += F("'></label>");
