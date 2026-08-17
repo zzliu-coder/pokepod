@@ -2,12 +2,10 @@
 
 #include <algorithm>
 
-#include "esp32-hal-tinyusb.h"
-
 namespace pokepod {
 namespace {
 
-constexpr uint32_t kUsbLinkTxTimeoutMs = 1;
+constexpr uint32_t kUsbLinkTxTimeoutMs = 2;
 constexpr size_t kUsbLinkWriteSliceBytes = 64;
 
 }  // namespace
@@ -78,14 +76,12 @@ bool UsbLinkBridge::hostConnected() const {
 }
 
 void UsbLinkBridge::discardHostSessionBuffers() {
-  // USBCDC first copies TinyUSB RX packets into its own FreeRTOS queue. Drain
-  // that public Stream queue as well as TinyUSB's lower RX FIFO so a complete
-  // old request cannot be parsed after the next process opens the same device.
+  // Drain only Arduino-ESP32's public FreeRTOS RX queue. Calling TinyUSB FIFO
+  // primitives from the main task races the USB task and can wedge the next
+  // CDC session. The host protocol waits after DTR open, while the main loop
+  // drains a closed session before accepting the next generation.
   while (cdc_.available() > 0) {
     (void)cdc_.read();
-  }
-  if (hostConnected()) {
-    tud_cdc_read_flush();
   }
 }
 

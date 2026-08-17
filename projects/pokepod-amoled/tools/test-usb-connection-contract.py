@@ -41,8 +41,7 @@ assert magic.index("disconnect();") < magic.index("activateConnectionGeneration(
 assert "memcpy(headerBytes_, magic, sizeof(magic));" in magic
 assert "usbHostSessionGeneration_ = 0;" in link
 assert "while (cdc_.available() > 0)" in bridge
-assert "tud_cdc_read_flush();" in bridge
-assert "tud_cdc_write_clear();" not in bridge
+assert "tud_cdc_" not in bridge
 assert "cdc_.setTxTimeoutMs(kUsbLinkTxTimeoutMs);" in bridge
 assert "const size_t written = cdc_.write(data, wanted);" in bridge
 assert "cdc_.availableForWrite()" not in bridge
