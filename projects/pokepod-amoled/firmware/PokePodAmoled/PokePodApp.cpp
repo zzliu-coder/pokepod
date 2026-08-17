@@ -1911,7 +1911,7 @@ bool advanceStorageBoot(uint32_t nowMs) {
           tencentWorker, provisioningDiagnostics, powerDiagnostics,
           runtimePower, usb.log(), &linkCoordinator,
           LinkTransport::usb, &wirelessSync.get(),
-                    nullptr, &provisioningCoordinator, nullptr,
+                    nullptr, &provisioningCoordinator, &usb,
           &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot,
           &runtimeDiagnostics, startWirelessHold, stopWirelessHold);
       storageBootPhase = StorageBootPhase::wirelessLink;
@@ -2200,8 +2200,8 @@ void loop() {
       usbSessionAdvanced, usbSession.generation,
       linkService->usbHostSessionGeneration(), lastUsbSessionGeneration);
   if (usbSessionAction == UsbLinkSessionAction::disconnectAndDiscard) {
-    usb.discardHostSessionBuffers();
     linkService->disconnect();
+    usb.discardHostSessionBuffers();
   } else if (usbSessionAction ==
              UsbLinkSessionAction::disconnectRetainingNewBytes) {
     // A fast close/reopen can happen entirely between two loop turns. Reset

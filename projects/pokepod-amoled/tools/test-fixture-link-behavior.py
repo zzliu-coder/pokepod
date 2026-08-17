@@ -136,6 +136,22 @@ def binary_server(fd: int, operation: str, expect_prepare: bool) -> None:
     })
 
 
+def record_cycle_server(fd: int) -> None:
+    first_type, _, first_id, first_payload = read_frame(fd)
+    assert first_type == cdc.REQUEST_JSON
+    assert json.loads(first_payload)["operation"] == "record"
+    send_frame(fd, cdc.RESPONSE_JSON, first_id, {
+        "status": "ok", "version": 2, "capsuleId": "fixture-capsule",
+    })
+    second_type, _, second_id, second_payload = read_frame(fd)
+    assert second_type == cdc.REQUEST_JSON
+    assert second_id != first_id
+    assert json.loads(second_payload)["operation"] == "stop"
+    send_frame(fd, cdc.RESPONSE_JSON, second_id, {
+        "status": "ok", "version": 2,
+    })
+
+
 def main() -> int:
     identity = run_case(identity_server, lambda port: cdc.query(port, "identity", 2.0))
     assert identity["deviceId"] == "pokepod-001122334455"
@@ -163,6 +179,13 @@ def main() -> int:
         ),
     )
     assert firmware["status"] == "ok"
+    cycle = run_case(
+        record_cycle_server,
+        lambda port: cdc.record_cycle(port, 2.0, 0.01),
+    )
+    assert cycle["status"] == "ok"
+    assert cycle["record"]["capsuleId"] == "fixture-capsule"
+    assert cycle["holdSeconds"] == 0.01
     print("PASS fixture_link_identity_and_binary_handshakes")
     return 0
 

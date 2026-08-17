@@ -79,6 +79,14 @@ def main() -> int:
          "sequence": 41, "reset_reason": 4},
     ]})
     assert boot == {"sequence": 41, "resetReason": 4}
+    trace_boot = module.latest_boot(
+        {"records": [{"subsystem": "recording",
+                       "stage": "recording_started", "sequence": 99,
+                       "reset_reason": 0}]},
+        {"records": [{"subsystem": "boot", "stage": "boot",
+                       "trace_sequence": 7, "reset_reason": 3}]},
+    )
+    assert trace_boot == {"sequence": 7, "resetReason": 3}
     module.require_same_boot(boot, dict(boot), "test")
     try:
         module.require_same_boot(

@@ -48,6 +48,9 @@ uint32_t PokePodLinkService::activateConnectionGeneration() {
 
 String PokePodLinkService::linkProbeJson() const {
   const LinkLivenessSnapshot &probe = liveness_.snapshot();
+  const UsbLinkTransportSnapshot usbTransport =
+      usb_ == nullptr ? UsbLinkTransportSnapshot{} :
+                        usb_->transportSnapshot();
   String value = "\"linkSessionActive\":" +
       String(sessionActive_ ? "true" : "false") +
       ",\"linkGeneration\":" + String(connectionGeneration_) +
@@ -68,7 +71,18 @@ String PokePodLinkService::linkProbeJson() const {
       ",\"linkRecoveryCount\":" + String(probe.recoveryCount) +
       ",\"linkLastRecoveryMs\":" + String(probe.lastRecoveryMs) +
       ",\"linkLastStall\":" +
-      String(static_cast<unsigned>(probe.lastStall));
+      String(static_cast<unsigned>(probe.lastStall)) +
+      ",\"usbDtr\":" + String(usbTransport.dtr ? "true" : "false") +
+      ",\"usbRts\":" + String(usbTransport.rts ? "true" : "false") +
+      ",\"usbWriteAttempts\":" + String(usbTransport.writeAttempts) +
+      ",\"usbWriteProgress\":" + String(usbTransport.writeProgress) +
+      ",\"usbWriteWouldBlock\":" +
+      String(usbTransport.writeWouldBlock) +
+      ",\"usbWriteDisconnected\":" +
+      String(usbTransport.writeDisconnected) +
+      ",\"usbConsecutiveWouldBlock\":" +
+      String(usbTransport.consecutiveWouldBlock) +
+      ",\"usbLastWriteBytes\":" + String(usbTransport.lastWriteBytes);
   return value;
 }
 
@@ -99,10 +113,12 @@ bool PokePodLinkService::recoverStalledLink(uint32_t nowMs) {
         *log_);
   }
   liveness_.recovered(stall, nowMs);
+  // Cancel Link transport ownership before touching session RX. A terminal
+  // frame may still be owned by txStepper_ until disconnect() runs.
+  disconnect();
   if (transport_ == LinkTransport::usb && usb_ != nullptr) {
     usb_->discardHostSessionBuffers();
   }
-  disconnect();
   return true;
 }
 

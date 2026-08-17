@@ -21,6 +21,8 @@ assert "bool hostSessionActive() const" in bridge_header
 assert "UsbCdcSessionSnapshot hostSessionSnapshot() const" in bridge_header
 assert "bool takeHostSessionClosed(uint32_t &generation)" in bridge_header
 assert "void discardHostSessionBuffers()" in bridge_header
+assert "public LinkWriteChannel" in bridge_header
+assert "LinkWriteAttempt writeSome(" in bridge_header
 assert "usb.takeHostSessionClosed(closedUsbSessionGeneration)" in app
 assert "closedUsbSessionGeneration == usbSession.generation" in app
 assert "usbSession.generation != lastUsbSessionGeneration" in app
@@ -40,7 +42,18 @@ assert "memcpy(headerBytes_, magic, sizeof(magic));" in magic
 assert "usbHostSessionGeneration_ = 0;" in link
 assert "while (cdc_.available() > 0)" in bridge
 assert "tud_cdc_read_flush();" in bridge
-assert "tud_cdc_write_clear();" in bridge
+assert "tud_cdc_write_clear();" not in bridge
+assert "cdc_.setTxTimeoutMs(kUsbLinkTxTimeoutMs);" in bridge
+assert "const size_t written = cdc_.write(data, wanted);" in bridge
+assert "cdc_.availableForWrite()" not in bridge
+usb_begin = app.split("LinkTransport::usb, &wirelessSync.get(),", 1)[1]
+assert "nullptr, &provisioningCoordinator, &usb," in usb_begin[:160]
+discard = app.split(
+    "if (usbSessionAction == UsbLinkSessionAction::disconnectAndDiscard)", 1
+)[1].split("} else if", 1)[0]
+assert discard.index("linkService->disconnect();") < discard.index(
+    "usb.discardHostSessionBuffers();"
+)
 assert '#include "UsbPhysicalConnectionPolicy.h"' in app
 assert "return usbPhysicalConnected(usb.hostConnected(), status.pmu," in app
 assert "view.usbConnected = usbCableConnected();" in app

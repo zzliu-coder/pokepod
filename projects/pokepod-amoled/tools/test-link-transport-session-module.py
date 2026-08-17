@@ -37,6 +37,18 @@ assert "advanceLinkOperationSettlement();" in TRANSPORT
 assert "liveness_.noteProgress(millis())" in TRANSPORT
 assert "RuntimeDiagnosticStage::linkStallRecovery" in TRANSPORT
 assert "usb_->discardHostSessionBuffers();" in TRANSPORT
+for field in (
+    "usbDtr", "usbRts", "usbWriteAttempts", "usbWriteProgress",
+    "usbWriteWouldBlock", "usbWriteDisconnected",
+    "usbConsecutiveWouldBlock", "usbLastWriteBytes",
+):
+    assert f'\\\"{field}\\\"' in TRANSPORT
+recovery = TRANSPORT.split(
+    "bool PokePodLinkService::recoverStalledLink", 1
+)[1].split("LinkOperationAdmission", 1)[0]
+assert recovery.index("disconnect();") < recovery.index(
+    "usb_->discardHostSessionBuffers();"
+)
 
 # Frozen Link v2 framing, CRC and response schema remain unchanged.
 assert "{'P', 'P', 'V', '2'}" in TRANSPORT

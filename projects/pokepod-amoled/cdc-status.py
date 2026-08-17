@@ -304,13 +304,17 @@ def read_frame(fd: int, deadline: float):
 
 def query(port: str, operation: str, timeout: float,
           outgoing_binary: bytes | None = None,
-          fields: dict[str, object] | None = None):
+          fields: dict[str, object] | None = None,
+          fd: int | None = None):
     if operation == "firmware-update":
         validate_firmware_query_fields(fields)
-    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    owns_fd = fd is None
+    if fd is None:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
-        configure(fd)
-        time.sleep(LINK_OPEN_SETTLE_SECONDS)
+        if owns_fd:
+            configure(fd)
+            time.sleep(LINK_OPEN_SETTLE_SECONDS)
         request_id = (time.monotonic_ns() & 0xFFFFFFFF) or 1
         request = dict(fields or {})
         request["operation"] = operation
@@ -418,6 +422,39 @@ def query(port: str, operation: str, timeout: float,
                 return response
         raise TimeoutError("PokePod Link v2 response timed out")
     finally:
+        if owns_fd:
+            os.close(fd)
+
+
+def record_cycle(port: str, timeout: float, hold_seconds: float):
+    """Exercise record and stop on one physical Link session.
+
+    Recording ownership is transport-scoped. Closing CDC after the start ACK
+    is an explicit cancellation, so a fixture must retain DTR and the same
+    connection generation until the terminal stop response has drained.
+    """
+    if hold_seconds <= 0 or hold_seconds > 60:
+        raise ValueError("--hold-seconds must be between 0 and 60")
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        configure(fd)
+        time.sleep(LINK_OPEN_SETTLE_SECONDS)
+        started = query(port, "record", timeout, fd=fd)
+        if started.get("status") != "ok":
+            return started
+        time.sleep(hold_seconds)
+        stopped = query(port, "stop", timeout, fd=fd)
+        if stopped.get("status") != "ok":
+            return stopped
+        return {
+            "status": "ok",
+            "version": VERSION,
+            "host_port": port,
+            "record": started,
+            "stop": stopped,
+            "holdSeconds": hold_seconds,
+        }
+    finally:
         os.close(fd)
 
 
@@ -426,6 +463,7 @@ def main() -> int:
     parser.add_argument("ports", nargs="*")
     parser.add_argument("--command", default="status",
                         choices=("hello", "identity", "status", "record", "stop",
+                                 "record-cycle",
                                  "diagnostic-wireless-start",
                                  "diagnostic-wireless-stop",
                                  "link-probe",
@@ -464,6 +502,7 @@ def main() -> int:
     )
     parser.add_argument("--event", default="")  # legacy script compatibility
     parser.add_argument("--timeout", type=float, default=3.0)
+    parser.add_argument("--hold-seconds", type=float, default=3.0)
     parser.add_argument("--trace-offset", type=int, default=0)
     parser.add_argument("--trace-limit", type=int, default=8)
     arguments = parser.parse_args()
@@ -547,7 +586,12 @@ def main() -> int:
     last_error = None
     for port in ports:
         try:
-            result = query(port, operation, arguments.timeout, outgoing_binary, fields)
+            if operation == "record-cycle":
+                result = record_cycle(
+                    port, arguments.timeout, arguments.hold_seconds)
+            else:
+                result = query(
+                    port, operation, arguments.timeout, outgoing_binary, fields)
             if result.get("status") != "ok":
                 last_error = result.get("message", result.get("status", "error"))
                 continue

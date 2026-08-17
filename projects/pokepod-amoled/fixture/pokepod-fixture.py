@@ -102,9 +102,15 @@ def load_firmware_artifact_identity(firmware: Path) -> dict[str, str]:
     }
 
 
-def cdc(port: str, command: str, output: Path, timeout: float) -> dict[str, object]:
+def cdc(port: str, command: str, output: Path, timeout: float,
+        extra_args: list[str] | None = None) -> dict[str, object]:
+    command_line = [
+        sys.executable, str(CDC), port, "--command", command,
+        "--timeout", str(timeout),
+    ]
+    command_line.extend(extra_args or [])
     completed = subprocess.run(
-        [sys.executable, str(CDC), port, "--command", command, "--timeout", str(timeout)],
+        command_line,
         cwd=PROJECT,
         text=True,
         stdout=subprocess.PIPE,
@@ -438,18 +444,43 @@ def diagnose(args: argparse.Namespace) -> int:
     return 3
 
 
-def latest_boot(runtime: dict[str, object]) -> dict[str, int]:
+def latest_boot(runtime: dict[str, object],
+                trace: dict[str, object] | None = None) -> dict[str, int]:
     records = runtime.get("records")
     if not isinstance(records, list):
         raise RuntimeError("runtime diagnostics have no records")
-    for record in records:
+    candidates = list(records)
+    if isinstance(trace, dict) and isinstance(trace.get("records"), list):
+        candidates.extend(trace["records"])
+    for record in candidates:
         if (isinstance(record, dict) and record.get("subsystem") == "boot"
                 and record.get("stage") == "boot"):
-            sequence = record.get("sequence")
+            sequence = record.get("sequence", record.get("trace_sequence"))
             reset_reason = record.get("reset_reason")
             if isinstance(sequence, int) and isinstance(reset_reason, int):
                 return {"sequence": sequence, "resetReason": reset_reason}
     raise RuntimeError("runtime diagnostics have no boot record")
+
+
+def runtime_trace(port: str, output: Path, timeout: float,
+                  label: str) -> dict[str, object]:
+    records: list[object] = []
+    offset = 0
+    while offset < 64:
+        page = cdc(
+            port, "get-runtime-trace", output, timeout,
+            ["--trace-offset", str(offset), "--trace-limit", "8"],
+        )
+        page_records = page.get("records")
+        if isinstance(page_records, list):
+            records.extend(page_records)
+        next_offset = page.get("next_offset")
+        if not isinstance(next_offset, int):
+            break
+        offset = next_offset
+    trace = {"status": "ok", "records": records, "total": len(records)}
+    write_json(output / f"runtime-trace-{label}.json", trace)
+    return trace
 
 
 def require_same_boot(before: dict[str, int], after: dict[str, int],
@@ -579,7 +610,8 @@ def exercise(args: argparse.Namespace) -> int:
     expected_device_id = str(identity["deviceId"])
     pre_runtime = cdc(args.port, "get-runtime-diagnostics", output,
                       args.timeout)
-    pre_boot = latest_boot(pre_runtime)
+    pre_trace = runtime_trace(args.port, output, args.timeout, "pre")
+    pre_boot = latest_boot(pre_runtime, pre_trace)
     write_json(output / "pre.json", {
         "hello": hello, "identity": identity,
         "status": cdc(args.port, "status", output, args.timeout),
@@ -588,9 +620,10 @@ def exercise(args: argparse.Namespace) -> int:
     failure: RuntimeError | None = None
     try:
         if args.scenario == "recording":
-            cdc(args.port, "record", output, args.timeout)
-            time.sleep(args.hold_seconds)
-            cdc(args.port, "stop", output, args.timeout)
+            cdc(
+                args.port, "record-cycle", output, args.timeout,
+                ["--hold-seconds", str(args.hold_seconds)],
+            )
         elif args.scenario == "wireless-voice":
             cdc(args.port, "diagnostic-wireless-start", output, args.timeout)
             time.sleep(args.hold_seconds)
@@ -601,7 +634,9 @@ def exercise(args: argparse.Namespace) -> int:
             mid_identity = link_identity(args.port, output, args.timeout)
             mid_runtime = cdc(args.port, "get-runtime-diagnostics", output,
                               args.timeout)
-            mid_boot = latest_boot(mid_runtime)
+            mid_trace = runtime_trace(
+                args.port, output, args.timeout, "provisioning-active")
+            mid_boot = latest_boot(mid_runtime, mid_trace)
             require_same_boot(pre_boot, mid_boot, "active provisioning")
             write_json(output / "active.json", {
                 "identity": mid_identity,
@@ -619,7 +654,8 @@ def exercise(args: argparse.Namespace) -> int:
         )
         post_runtime = cdc(app_port, "get-runtime-diagnostics", output,
                            args.timeout)
-        post_boot = latest_boot(post_runtime)
+        post_trace = runtime_trace(app_port, output, args.timeout, "post")
+        post_boot = latest_boot(post_runtime, post_trace)
         if args.scenario in ("recording", "wireless-voice"):
             require_same_boot(pre_boot, post_boot, "recording")
         elif (post_boot["sequence"] != pre_boot["sequence"]
