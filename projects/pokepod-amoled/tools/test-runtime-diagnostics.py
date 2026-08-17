@@ -29,6 +29,10 @@ assert 'preferences_.begin("pokepod_rt", false)' in runtime
 assert "provisioningQuiesceBefore" in codec
 assert "wirelessRouterAcquire" in codec
 assert "linkStallRecovery" in codec
+assert "radioDisconnect" in codec
+assert "audioI2sBegin" in codec
+assert "RuntimeDiagnosticSubsystem::radioControl" in codec
+assert "RuntimeDiagnosticSubsystem::audioControl" in codec
 assert "RuntimeDiagnosticSubsystem::link" in codec
 assert '"get-runtime-diagnostics"' in dispatcher
 assert '"get-runtime-trace"' in dispatcher

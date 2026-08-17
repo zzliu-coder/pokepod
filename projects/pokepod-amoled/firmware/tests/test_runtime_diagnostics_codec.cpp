@@ -65,8 +65,20 @@ int main() {
       RuntimeDiagnosticSubsystem::link,
       RuntimeDiagnosticStage::linkStallRecovery,
       RuntimeDiagnosticOutcome::failure));
+  assert(runtimeDiagnosticShouldPersist(
+      RuntimeDiagnosticSubsystem::audioControl,
+      RuntimeDiagnosticStage::audioI2sBegin,
+      RuntimeDiagnosticOutcome::started));
+  assert(runtimeDiagnosticShouldPersist(
+      RuntimeDiagnosticSubsystem::radioControl,
+      RuntimeDiagnosticStage::radioModeOff,
+      RuntimeDiagnosticOutcome::success));
   assert(runtimeDiagnosticSubsystemKey(RuntimeDiagnosticSubsystem::link) !=
          nullptr);
+  assert(runtimeDiagnosticSubsystemKey(
+             RuntimeDiagnosticSubsystem::audioControl) != nullptr);
+  assert(runtimeDiagnosticStageKey(
+             RuntimeDiagnosticStage::radioDisconnect) != nullptr);
 
   log.records[0].detail0 ^= 1U;
   assert(!validateRuntimeDiagnosticLog(log));

@@ -107,6 +107,8 @@ prepare_outside = SESSION[SESSION.index("void LinkRecordingSession::prepareCaptu
 assert "captureRuntime_->prepare(*audio_, *log_)" in prepare_outside
 assert "capturePrepareAttempted_ = true" in prepare_outside
 assert "capturePrepared_" in start_advance
+assert "prepareDeadlineReached" in start_advance
+assert "link_recording_start_timeout" in start_advance
 assert "prepareCaptureOutsideLinkPoll()" in APP
 assert APP.index("wifi.loop(") < APP.index("prepareCaptureOutsideLinkPoll()")
 assert start_advance.index("recorder_->requestStart") < start_advance.index(

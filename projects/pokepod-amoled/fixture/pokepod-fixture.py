@@ -674,6 +674,81 @@ def exercise(args: argparse.Namespace) -> int:
     return 3
 
 
+def exercise_matrix(args: argparse.Namespace) -> int:
+    """Run every user-visible failure lane and retain one aggregate verdict."""
+    output = run_dir("exercise-matrix")
+    identity = link_identity(args.port, output, args.timeout)
+    expected_device_id = str(identity["deviceId"])
+    current_port = args.port
+    results: list[dict[str, object]] = []
+    scenarios = ("recording", "wireless-voice", "provisioning")
+    for index, scenario in enumerate(scenarios, start=1):
+        command = [
+            sys.executable, str(Path(__file__).resolve()), "exercise",
+            "--scenario", scenario, "--port", current_port,
+            "--port-pattern", args.port_pattern,
+            "--timeout", str(args.timeout),
+            "--hold-seconds", str(args.hold_seconds),
+            "--app-timeout", str(args.app_timeout),
+            "--port-timeout", str(args.port_timeout),
+            "--mode", args.mode,
+        ]
+        if args.auto_recover:
+            command.append("--auto-recover")
+        if args.control_profile is not None:
+            command.extend(["--control-profile", str(args.control_profile)])
+        if args.authority is not None:
+            command.extend(["--authority", str(args.authority)])
+        completed = subprocess.run(
+            command, cwd=PROJECT, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(args.app_timeout + args.timeout * 8 + 30.0, 60.0),
+            check=False,
+        )
+        (output / f"{index:02d}-{scenario}.stdout").write_text(
+            completed.stdout, encoding="utf-8")
+        (output / f"{index:02d}-{scenario}.stderr").write_text(
+            completed.stderr, encoding="utf-8")
+        child_evidence = completed.stdout.strip().splitlines()
+        result: dict[str, object] = {
+            "scenario": scenario,
+            "passed": completed.returncode == 0,
+            "exitCode": completed.returncode,
+            "evidence": child_evidence[-1] if child_evidence else None,
+        }
+        results.append(result)
+        try:
+            current_port, recovered_identity = wait_for_application(
+                args.port_pattern, expected_device_id, output,
+                args.app_timeout, args.timeout,
+            )
+            result["postPort"] = current_port
+            result["postIdentity"] = recovered_identity
+        except RuntimeError as error:
+            result["recoveryError"] = str(error)
+            write_json(output / "result.json", {
+                "schema": "pokepod.fixture.matrix.v1",
+                "passed": False,
+                "deviceId": expected_device_id,
+                "results": results,
+                "remainingScenarios": list(scenarios[index:]),
+                "manualInterventionRequired": not args.auto_recover,
+            })
+            print(output)
+            return completed.returncode if completed.returncode != 0 else 3
+
+    passed = all(bool(result["passed"]) for result in results)
+    write_json(output / "result.json", {
+        "schema": "pokepod.fixture.matrix.v1",
+        "passed": passed,
+        "deviceId": expected_device_id,
+        "results": results,
+        "manualInterventionRequired": False,
+    })
+    print(output)
+    return 0 if passed else 3
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="operation", required=True)
@@ -730,6 +805,17 @@ def main() -> int:
     exercise_parser.add_argument("--control-profile", type=Path)
     exercise_parser.add_argument("--authority", type=Path)
     exercise_parser.add_argument("--mode", choices=("fast", "release"), default="fast")
+    matrix_parser = sub.add_parser("matrix")
+    matrix_parser.add_argument("--port", required=True)
+    matrix_parser.add_argument("--port-pattern", default="/dev/cu.usbmodem*")
+    matrix_parser.add_argument("--timeout", type=float, default=5.0)
+    matrix_parser.add_argument("--hold-seconds", type=float, default=2.0)
+    matrix_parser.add_argument("--app-timeout", type=float, default=20.0)
+    matrix_parser.add_argument("--port-timeout", type=float, default=8.0)
+    matrix_parser.add_argument("--auto-recover", action="store_true")
+    matrix_parser.add_argument("--control-profile", type=Path)
+    matrix_parser.add_argument("--authority", type=Path)
+    matrix_parser.add_argument("--mode", choices=("fast", "release"), default="fast")
     args = parser.parse_args()
     try:
         if args.operation == "probe":
@@ -767,6 +853,8 @@ def main() -> int:
             return recover(args)
         if args.operation == "exercise":
             return exercise(args)
+        if args.operation == "matrix":
+            return exercise_matrix(args)
         return rescue_flash(args)
     except (OSError, RuntimeError, FixtureControlError,
             subprocess.TimeoutExpired) as error:

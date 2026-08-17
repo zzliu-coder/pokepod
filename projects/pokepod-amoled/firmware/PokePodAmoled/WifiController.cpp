@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "RememberedWifiPolicy.h"
+#include "RuntimeDiagnostics.h"
 #include "WifiDisconnectDiagnostics.h"
 
 namespace pokepod {
@@ -265,8 +266,27 @@ void WifiController::connectCandidate(uint32_t nowMs) {
 
 void WifiController::stopRadio() {
   if (!radioOn_ && WiFi.getMode() == WIFI_OFF) return;
+  const auto recordBoundary = [&](RuntimeDiagnosticStage stage,
+                                  RuntimeDiagnosticOutcome outcome,
+                                  uint32_t detail0) {
+    if (runtimeDiagnostics_ != nullptr && log_ != nullptr) {
+      (void)runtimeDiagnostics_->record(
+          RuntimeDiagnosticSubsystem::radioControl, stage, outcome, detail0,
+          static_cast<uint32_t>(WiFi.getMode()), *log_);
+    }
+  };
+  recordBoundary(RuntimeDiagnosticStage::radioDisconnect,
+                 RuntimeDiagnosticOutcome::started, radioOn_ ? 1U : 0U);
   WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_OFF);
+  recordBoundary(RuntimeDiagnosticStage::radioDisconnect,
+                 RuntimeDiagnosticOutcome::success, 0);
+  recordBoundary(RuntimeDiagnosticStage::radioModeOff,
+                 RuntimeDiagnosticOutcome::started, 0);
+  const bool modeStopped = WiFi.mode(WIFI_OFF);
+  recordBoundary(RuntimeDiagnosticStage::radioModeOff,
+                 modeStopped ? RuntimeDiagnosticOutcome::success
+                             : RuntimeDiagnosticOutcome::failure,
+                 modeStopped ? 0U : 1U);
   radioOn_ = false;
   powerSaveConfigured_ = false;
   powerSaveEnabled_ = false;
@@ -274,7 +294,11 @@ void WifiController::stopRadio() {
   connectionStartedMs_ = 0;
   ntpStarted_ = false;
   scanning_ = false;
+  recordBoundary(RuntimeDiagnosticStage::radioScanCleanup,
+                 RuntimeDiagnosticOutcome::started, 0);
   WiFi.scanDelete();
+  recordBoundary(RuntimeDiagnosticStage::radioScanCleanup,
+                 RuntimeDiagnosticOutcome::success, 0);
 }
 
 void WifiController::setPowerSave(bool enabled) {

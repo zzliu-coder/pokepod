@@ -62,7 +62,7 @@ LinkRecordingRequestResult LinkRecordingSession::requestStart(
   }
 
   transactionGate.beginOperation(transferGate);
-  if (!start_.begin(requestId, captureSessionId)) {
+  if (!start_.begin(requestId, captureSessionId, millis())) {
     captureRouter_->release(AudioCaptureOwner::localCapsule);
     transactionGate.reset();
     return {LinkRecordingRequestStatus::failed, "recording start failed"};
@@ -155,6 +155,17 @@ LinkRecordingEvent LinkRecordingSession::advanceStart(
       linkTransferPermitted(transferGate, millis());
 
   if (!start_.recorderRequested()) {
+    if (!capturePrepareAttempted_ &&
+        start_.prepareDeadlineReached(millis())) {
+      capturePrepareAttempted_ = true;
+      capturePrepared_ = false;
+      log_->printf(
+          "{\"event\":\"link_recording_start_timeout\","
+          "\"request_id\":%lu,\"stage\":\"capture_prepare\","
+          "\"timeout_ms\":%lu}\n",
+          static_cast<unsigned long>(requestId),
+          static_cast<unsigned long>(LinkRecordingStart::kPrepareTimeoutMs));
+    }
     // App owns the potentially blocking I2S/codec prepare phase. Link waits
     // across turns until that external phase publishes its result.
     if (transportAlive && !capturePrepareAttempted_) return {};

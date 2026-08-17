@@ -2015,6 +2015,8 @@ void setup() {
   bootUsbStarted = usb.begin(board.status().variant);
   runtimeDiagnostics.begin(usb.log(),
                           static_cast<uint16_t>(esp_reset_reason()));
+  audio.bindRuntimeDiagnostics(runtimeDiagnostics);
+  wifi.bindRuntimeDiagnostics(runtimeDiagnostics);
   recorder.bindRuntimeDiagnostics(runtimeDiagnostics);
   runtimePower.begin(usb.log());
   const RuntimePowerSnapshot &bootPower = runtimePower.snapshot();

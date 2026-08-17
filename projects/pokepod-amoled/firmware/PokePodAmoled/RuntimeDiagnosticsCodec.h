@@ -20,6 +20,8 @@ enum class RuntimeDiagnosticSubsystem : uint8_t {
   provisioning = 3,
   wirelessVoice = 4,
   link = 5,
+  radioControl = 6,
+  audioControl = 7,
 };
 
 enum class RuntimeDiagnosticStage : uint8_t {
@@ -55,6 +57,13 @@ enum class RuntimeDiagnosticStage : uint8_t {
   wirelessFailure = 45,
   wirelessStop = 46,
   linkStallRecovery = 60,
+  linkRecordingStartTimeout = 61,
+  radioDisconnect = 70,
+  radioModeOff = 71,
+  radioScanCleanup = 72,
+  audioI2sBegin = 80,
+  audioCodecCreate = 81,
+  audioCodecInit = 82,
 };
 
 enum class RuntimeDiagnosticOutcome : uint8_t {
@@ -150,7 +159,7 @@ inline bool validateRuntimeDiagnosticLog(
   for (size_t index = 0; index < kRuntimeDiagnosticsCapacity; ++index) {
     const StoredRuntimeDiagnosticRecord &record = log.records[index];
     if (record.subsystem > static_cast<uint8_t>(
-            RuntimeDiagnosticSubsystem::link) ||
+            RuntimeDiagnosticSubsystem::audioControl) ||
         record.outcome > static_cast<uint8_t>(
             RuntimeDiagnosticOutcome::interrupted)) {
       return false;
@@ -233,6 +242,17 @@ inline bool runtimeDiagnosticShouldPersist(
       stage == RuntimeDiagnosticStage::wirelessStop) {
     return true;
   }
+  // These calls cross into radio, DMA and codec drivers. Persist both sides
+  // of the boundary so a watchdog/manual reset can distinguish "never
+  // entered", "did not return" and "returned failure" without a live Link.
+  if (subsystem == RuntimeDiagnosticSubsystem::radioControl ||
+      subsystem == RuntimeDiagnosticSubsystem::audioControl) {
+    return true;
+  }
+  if (subsystem == RuntimeDiagnosticSubsystem::link &&
+      stage == RuntimeDiagnosticStage::linkRecordingStartTimeout) {
+    return true;
+  }
   return false;
 }
 
@@ -244,6 +264,8 @@ inline const char *runtimeDiagnosticSubsystemKey(
     case RuntimeDiagnosticSubsystem::provisioning: return "provisioning";
     case RuntimeDiagnosticSubsystem::wirelessVoice: return "wireless_voice";
     case RuntimeDiagnosticSubsystem::link: return "link";
+    case RuntimeDiagnosticSubsystem::radioControl: return "radio_control";
+    case RuntimeDiagnosticSubsystem::audioControl: return "audio_control";
   }
   return "unknown";
 }
@@ -312,6 +334,20 @@ inline const char *runtimeDiagnosticStageKey(RuntimeDiagnosticStage stage) {
       return "wireless_stop";
     case RuntimeDiagnosticStage::linkStallRecovery:
       return "link_stall_recovery";
+    case RuntimeDiagnosticStage::linkRecordingStartTimeout:
+      return "link_recording_start_timeout";
+    case RuntimeDiagnosticStage::radioDisconnect:
+      return "radio_disconnect";
+    case RuntimeDiagnosticStage::radioModeOff:
+      return "radio_mode_off";
+    case RuntimeDiagnosticStage::radioScanCleanup:
+      return "radio_scan_cleanup";
+    case RuntimeDiagnosticStage::audioI2sBegin:
+      return "audio_i2s_begin";
+    case RuntimeDiagnosticStage::audioCodecCreate:
+      return "audio_codec_create";
+    case RuntimeDiagnosticStage::audioCodecInit:
+      return "audio_codec_init";
   }
   return "unknown";
 }

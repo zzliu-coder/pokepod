@@ -14,9 +14,14 @@
 
 namespace pokepod {
 
+class RuntimeDiagnostics;
+
 class AudioPipeline {
  public:
   bool begin(BoardVariant variant, Print &log);
+  void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
+    runtimeDiagnostics_ = &diagnostics;
+  }
   bool startCapture(Print &log);
   void stopHardware(Print &log);
   size_t read(uint8_t *buffer, size_t capacity);
@@ -90,6 +95,7 @@ class AudioPipeline {
   uint32_t playbackMaxFileReadUs_ = 0;
   uint8_t playbackInput_[kPlaybackReadAheadBytes] = {};
   uint8_t playbackOutput_[kPlaybackFeedBytes * 2] = {};
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
 };
 
 }  // namespace pokepod

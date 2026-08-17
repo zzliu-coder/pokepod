@@ -9,6 +9,7 @@
 
 #include "AudioI2sRoute.h"
 #include "PlaybackPcm.h"
+#include "RuntimeDiagnostics.h"
 #include "WavFormat.h"
 
 namespace pokepod {
@@ -58,23 +59,70 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   // internal memory, even though the requested direction still fits.
   i2s_.setPins(kI2sBclk, kI2sWordSelect, dataPins.dataOut,
                dataPins.dataIn, kI2sMclk);
+  if (runtimeDiagnostics_ != nullptr) {
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::audioControl,
+        RuntimeDiagnosticStage::audioI2sBegin,
+        RuntimeDiagnosticOutcome::started, static_cast<uint32_t>(mode),
+        sampleRate, log);
+  }
   if (!i2s_.begin(I2S_MODE_STD, sampleRate, I2S_DATA_BIT_WIDTH_16BIT,
                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
     lastHardwareError_ = "i2s_begin";
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"i2s\"}");
+    if (runtimeDiagnostics_ != nullptr) {
+      (void)runtimeDiagnostics_->record(
+          RuntimeDiagnosticSubsystem::audioControl,
+          RuntimeDiagnosticStage::audioI2sBegin,
+          RuntimeDiagnosticOutcome::failure, static_cast<uint32_t>(mode),
+          sampleRate, log);
+    }
     return false;
+  }
+  if (runtimeDiagnostics_ != nullptr) {
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::audioControl,
+        RuntimeDiagnosticStage::audioI2sBegin,
+        RuntimeDiagnosticOutcome::success, static_cast<uint32_t>(mode),
+        sampleRate, log);
   }
   // ESP_I2S applies one Stream timeout to the complete hardware session; it
   // does not accept a per-read timeout. The capture adapter and stop budget
   // therefore share this exact fixed value.
   i2s_.setTimeout(kAudioCaptureReadTimeoutMs);
 
+  if (runtimeDiagnostics_ != nullptr) {
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::audioControl,
+        RuntimeDiagnosticStage::audioCodecCreate,
+        RuntimeDiagnosticOutcome::started, static_cast<uint32_t>(mode), 0,
+        log);
+  }
   es8311_handle_t codec = es8311_create(0, ES8311_ADDRESS_0);
   if (codec == nullptr) {
     i2s_.end();
     lastHardwareError_ = "codec_create";
     log.println("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_create\"}");
+    if (runtimeDiagnostics_ != nullptr) {
+      (void)runtimeDiagnostics_->record(
+          RuntimeDiagnosticSubsystem::audioControl,
+          RuntimeDiagnosticStage::audioCodecCreate,
+          RuntimeDiagnosticOutcome::failure, static_cast<uint32_t>(mode), 0,
+          log);
+    }
     return false;
+  }
+  if (runtimeDiagnostics_ != nullptr) {
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::audioControl,
+        RuntimeDiagnosticStage::audioCodecCreate,
+        RuntimeDiagnosticOutcome::success, static_cast<uint32_t>(mode), 0,
+        log);
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::audioControl,
+        RuntimeDiagnosticStage::audioCodecInit,
+        RuntimeDiagnosticOutcome::started, static_cast<uint32_t>(mode),
+        sampleRate, log);
   }
   const es8311_clock_config_t clock = {
       .mclk_inverted = false,
@@ -106,7 +154,21 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
     i2s_.end();
     lastHardwareError_ = "codec_init";
     log.printf("{\"event\":\"audio\",\"ok\":false,\"stage\":\"codec_init\",\"error\":%d}\n", error);
+    if (runtimeDiagnostics_ != nullptr) {
+      (void)runtimeDiagnostics_->record(
+          RuntimeDiagnosticSubsystem::audioControl,
+          RuntimeDiagnosticStage::audioCodecInit,
+          RuntimeDiagnosticOutcome::failure, static_cast<uint32_t>(mode),
+          static_cast<uint32_t>(error), log);
+    }
     return false;
+  }
+  if (runtimeDiagnostics_ != nullptr) {
+    (void)runtimeDiagnostics_->record(
+        RuntimeDiagnosticSubsystem::audioControl,
+        RuntimeDiagnosticStage::audioCodecInit,
+        RuntimeDiagnosticOutcome::success, static_cast<uint32_t>(mode),
+        sampleRate, log);
   }
   codec_ = codec;
   hardwareActive_ = true;

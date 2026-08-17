@@ -39,6 +39,9 @@ def main() -> int:
     assert "fixture-runs" in script
     assert "enter_rom_loader" in script and "wait_for_application" in script
     assert "exercise" in script and "automaticRecovery" in script
+    assert "def exercise_matrix" in script
+    assert "pokepod.fixture.matrix.v1" in script
+    assert '("recording", "wireless-voice", "provisioning")' in script
     assert "def diagnose" in script and "def diagnose_rom" in script
     assert '"get-runtime-trace"' in script
     assert '"coredump"' in script and '"nvs.private"' in script
