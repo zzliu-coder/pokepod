@@ -42,7 +42,10 @@ class LinkDiagnostics {
             const CapabilityRegistry *capabilities,
             RuntimeDiagnostics *runtimeDiagnostics = nullptr);
 
-  String statusJson() const;
+  // The returned reference remains valid until the next statusJson() call.
+  // Its backing allocation is reserved once during bind so repeated status
+  // requests cannot fragment the small internal heap.
+  const String &statusJson() const;
   String provisioningJson() const;
   String powerJson() const;
   String runtimeJson() const;
@@ -68,6 +71,7 @@ class LinkDiagnostics {
   ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
   const CapabilityRegistry *capabilities_ = nullptr;
   RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
+  mutable String statusBuffer_;
 };
 
 }  // namespace pokepod
