@@ -55,11 +55,11 @@ for required_test_path in (
     if required_test_path not in host_test:
         raise SystemExit("FAIL host test misses production path: " + required_test_path)
 
-if app.count("capsuleLibrary.pollScan()") != 1:
+if app.count("capsuleLibrary->pollScan()") != 1:
     raise SystemExit("FAIL app must poll the capsule scan exactly once per loop")
-if "capsuleLibrary.scan()" in app:
+if "capsuleLibrary->scan()" in app:
     raise SystemExit("FAIL app runtime still invokes synchronous capsule scan")
-if "capsuleLibrary.requestScan()" not in app:
+if "capsuleLibrary->requestScan()" not in app:
     raise SystemExit("FAIL recorder fallback does not queue an async refresh")
 if "library_->scan()" in link:
     raise SystemExit("FAIL Link runtime still invokes synchronous capsule scan")
@@ -69,7 +69,7 @@ if 'strcmp(batchJournalState_.operation, "rescan") == 0' not in link or \
         '(queued ? "queued" : "committed")' not in link:
     raise SystemExit("FAIL Link rescan response claims synchronous completion")
 
-if "capsuleLibrary.pollStartup(nowMs)" not in app:
+if "capsuleLibrary->pollStartup(nowMs)" not in app:
     raise SystemExit("FAIL app does not cooperatively advance library startup")
 if "while (scanStepper_.active())" in library:
     raise SystemExit("FAIL startup/runtime scan still contains a synchronous drain loop")

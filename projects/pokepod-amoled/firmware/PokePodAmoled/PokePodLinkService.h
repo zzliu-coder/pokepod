@@ -10,17 +10,21 @@
 #include "LinkFrame.h"
 #include "LinkFileTransfer.h"
 #include "LinkCapsuleTransactionGate.h"
+#include "LinkBoundedTextRead.h"
 #include "LinkRecordingSession.h"
 #include "LinkDiagnostics.h"
 #include "LinkPolicy.h"
 #include "LinkServiceCoordinator.h"
 #include "LinkManifestStepper.h"
+#include "LinkLivenessProbe.h"
+#include "LinkPollBudget.h"
 #include "LinkCommandExecutor.h"
 #include "LinkOperation.h"
 #include "LinkTreeStepper.h"
 #include "LinkTransferGate.h"
 #include "LinkTransferStepper.h"
 #include "MaintenanceCompletionTracker.h"
+#include "FirmwareUpdateSession.h"
 #include "CapsuleTransaction.h"
 #include "CapsuleBatchJournalStore.h"
 #include "CapabilityRegistry.h"
@@ -28,6 +32,8 @@
 #include "StorageCoordinator.h"
 
 namespace pokepod {
+
+using LinkDeviceExerciseAction = bool (*)();
 
 class BoardServices;
 class AudioPipeline;
@@ -47,6 +53,8 @@ class PowerDiagnostics;
 class ProvisioningCoordinator;
 class RuntimePowerManager;
 class WirelessSyncPairingProvider;
+class DeviceRebootCoordinator;
+class RuntimeDiagnostics;
 
 class PokePodLinkService : private LinkFileTransferHost {
  public:
@@ -69,7 +77,16 @@ class PokePodLinkService : private LinkFileTransferHost {
              LinkWriteChannel *writeChannel = nullptr,
              AudioCaptureRuntime *captureRuntime = nullptr,
              AudioCaptureDispatcher *captureDispatcher = nullptr,
-             const CapabilityRegistry *capabilities = nullptr);
+             const CapabilityRegistry *capabilities = nullptr,
+             DeviceRebootCoordinator *rebootCoordinator = nullptr,
+             RuntimeDiagnostics *runtimeDiagnostics = nullptr,
+             LinkDeviceExerciseAction wirelessVoiceStart = nullptr,
+             LinkDeviceExerciseAction wirelessVoiceStop = nullptr,
+             bool deferStorageStartup = false);
+  // Start the USB transport before durable capsule recovery, then attach the
+  // filesystem backend only after App-owned recovery reaches a terminal
+  // boundary. Identity, diagnostics and OTA remain reachable meanwhile.
+  bool attachStorage();
   void poll(uint32_t nowMs);
   // Finishes read-only handle cleanup after an immediate transport cancel.
   // This never reads frames or writes responses, so a Wi-Fi service can call
@@ -82,8 +99,26 @@ class PokePodLinkService : private LinkFileTransferHost {
   void requestQuiesce();
   bool quiesced() const;
   bool active() const { return sessionActive_; }
-  bool receivingBinary() const { return incomingKind_ != IncomingKind::none; }
+  bool receivingBinary() const {
+    return incomingKind_ != IncomingKind::none || firmwareUpdate_.active();
+  }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
+  bool capturePreparePending() const {
+    return recordingSession_.capturePreparePending();
+  }
+  void prepareCaptureOutsideLinkPoll() {
+    recordingSession_.prepareCaptureOutsideLinkPoll();
+  }
+  bool captureStopPending() const {
+    return recordingSession_.captureStopPending();
+  }
+  void stopCaptureOutsideLinkPoll() {
+    recordingSession_.stopCaptureOutsideLinkPoll();
+  }
+  uint32_t usbHostSessionGeneration() const {
+    return usbHostSessionGeneration_;
+  }
+  bool deviceLifecycleRestartReady() const;
   uint32_t maintenanceStartRevision() const {
     return maintenanceCompletion_.startRevision();
   }
@@ -115,9 +150,17 @@ class PokePodLinkService : private LinkFileTransferHost {
     persistResult,
     cleanupTree,
     cleanupArtifacts,
+    metadataRead,
   };
   enum class BatchStart : uint8_t { notApplicable, started, rejected };
   enum class CommandLoadState : uint8_t { none, reading, dispatch };
+  enum class BatchReadContinuation : uint8_t {
+    none,
+    importCapsule,
+    importProcessing,
+    metadataCapsule,
+    metadataProcessing,
+  };
 
   class StringByteSource final : public CapsuleTransactionByteSource {
    public:
@@ -147,14 +190,18 @@ class PokePodLinkService : private LinkFileTransferHost {
 
   // LinkTransportSession.cpp owns connection generations, request admission,
   // frame parsing/transmit, terminal response draining and disconnect settlement.
-  void consumeByte(uint8_t value);
+  void consumeByte(uint8_t value, LinkPollPhaseGate *gate = nullptr);
   uint32_t activateConnectionGeneration();
   LinkOperationAdmission admitLinkOperation(uint32_t requestId);
   bool operationOwns(uint32_t requestId) const;
+  bool cleanupDrained() const;
   void cancelLinkOperation(LinkOperationCancelReason reason);
   void advanceLinkOperationSettlement();
+  bool recoverStalledLink(uint32_t nowMs);
+  String linkProbeJson() const;
   void resetFrame();
-  void processFrame();
+  void processFrame(LinkPollPhaseGate *gate = nullptr);
+  enum class MetadataReadResult : uint8_t { pending, ready, failed };
   void processRequest(uint32_t requestId, const uint8_t *payload, size_t size);
   void processData(uint32_t requestId, uint16_t flags,
                    const uint8_t *payload, size_t size);
@@ -169,6 +216,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   void failIncoming(const char *message);
   bool cleanupIncomingStorage();
   void finishIncomingCleanup();
+  void finishFirmwareUpdate(bool ok);
+  void failFirmwareUpdate(const char *message);
 
   void handleImmediate(uint32_t requestId, void *jsonRoot);
   void handleRead(uint32_t requestId, void *jsonRoot);
@@ -230,6 +279,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool buildBatchMetadata(const StoredCapsuleBatchPlan &plan,
                           String &value, String &message);
   bool startBatchResultPersistence();
+  MetadataReadResult parseMetadataStep(const String &path, void *&root);
+  void clearBatchReadContinuation();
   void applyBatchResultSideEffects();
   bool cleanupBatchArtifacts();
   void finishBatchCommand();
@@ -289,6 +340,7 @@ class PokePodLinkService : private LinkFileTransferHost {
                              bool fullySent) override;
 
   void handleLinkRecordingEvent(const LinkRecordingEvent &event);
+  bool pollDeferredCleanup(LinkPollPhaseGate &gate);
 
   bool beginIncoming(IncomingKind kind, uint32_t requestId,
                      uint32_t expectedBytes, const String &temporaryPath,
@@ -297,7 +349,9 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool ensureDirectoryTree(const String &path);
   bool writeTextAtomic(const String &path, const String &text);
   bool validFontFile(const String &path) const;
-  String readText(const String &path, size_t limit) const;
+  MetadataReadResult readMetadataStep(const String &path, size_t limit,
+                                      const uint8_t *&data, size_t &bytes);
+  void resetMetadataRead();
   String deviceId() const;
   bool foregroundBusy() const;
   bool safeFolder(const char *value, bool allowBuiltIn = true) const;
@@ -339,13 +393,19 @@ class PokePodLinkService : private LinkFileTransferHost {
   ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
   Print *log_ = nullptr;
   LinkServiceCoordinator *coordinator_ = nullptr;
+  DeviceRebootCoordinator *rebootCoordinator_ = nullptr;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
+  LinkDeviceExerciseAction wirelessVoiceStart_ = nullptr;
+  LinkDeviceExerciseAction wirelessVoiceStop_ = nullptr;
   LinkTransport transport_ = LinkTransport::none;
   WirelessSyncPairingProvider *pairingProvider_ = nullptr;
   LinkTransferGate *transferGate_ = nullptr;
   LinkWriteChannel *writeChannel_ = nullptr;
   LinkOperation operation_;
+  LinkLivenessProbe liveness_;
   uint32_t connectionGeneration_ = 0;
   uint32_t nextConnectionGeneration_ = 0;
+  uint32_t usbHostSessionGeneration_ = 0;
   CapsuleTransaction transaction_;
   CapsuleTransactionRunner transactionRunner_;
   LinkCapsuleTransactionGate transactionGate_;
@@ -409,6 +469,10 @@ class PokePodLinkService : private LinkFileTransferHost {
   LinkCommandExecutor::Work batchWork_{};
   BatchPending batchPending_ = BatchPending::none;
   uint8_t batchPendingStep_ = 0;
+  BatchReadContinuation batchReadContinuation_ =
+      BatchReadContinuation::none;
+  void *batchReadJson_ = nullptr;
+  String batchMetadataFirstPendingValue_;
   size_t batchCleanupIndex_ = 0;
   uint32_t batchRequestId_ = 0;
   String batchCommandPath_;
@@ -423,6 +487,8 @@ class PokePodLinkService : private LinkFileTransferHost {
   StringByteSource batchByteSource_;
   StringByteSource batchSecondByteSource_;
   LinkRecordingSession recordingSession_;
+  FirmwareUpdateSession firmwareUpdate_;
+  uint32_t firmwareUpdateRequestId_ = 0;
   LinkDiagnostics diagnostics_;
   LinkFileTransfer fileTransfer_;
 
@@ -435,13 +501,20 @@ class PokePodLinkService : private LinkFileTransferHost {
   // Wi-Fi driver of large contiguous blocks when the provisioning AP starts.
   // The board has mandatory PSRAM, so allocate these long-lived buffers there.
   uint8_t *payload_ = nullptr;
+  uint8_t *metadataReadBuffer_ = nullptr;
+  LinkBoundedTextRead metadataRead_;
+  File metadataReadFile_;
+  String metadataReadPath_;
   uint8_t *txFrame_ = nullptr;
   uint8_t *pendingControlFrame_ = nullptr;
   size_t payloadUsed_ = 0;
+  int16_t deferredRxByte_ = -1;
   uint8_t magicMatched_ = 0;
   bool frameProcessedThisPoll_ = false;
   bool sessionActive_ = false;
   bool quiesceRequested_ = false;
+  bool storageBacked_ = false;
+  bool storageAttachTerminal_ = false;
   LinkRequestHistory completed_;
 
   IncomingKind incomingKind_ = IncomingKind::none;
@@ -454,7 +527,6 @@ class PokePodLinkService : private LinkFileTransferHost {
   String incomingFinalPath_;
   String incomingTransactionId_;
   uint32_t incomingLastByteMs_ = 0;
-  uint32_t rebootAtMs_ = 0;
   String activeMaintenance_;
   MaintenanceCompletionTracker maintenanceCompletion_;
 

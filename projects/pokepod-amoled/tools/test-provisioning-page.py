@@ -15,8 +15,20 @@ main_source = (firmware_dir / "PokePodApp.cpp").read_text(encoding="utf-8")
 dashboard_source = (firmware_dir / "Dashboard.cpp").read_text(encoding="utf-8")
 dashboard_header = (firmware_dir / "Dashboard.h").read_text(encoding="utf-8")
 portal_header = (firmware_dir / "ProvisioningPortal.h").read_text(encoding="utf-8")
+diagnostics_header = (firmware_dir / "ProvisioningDiagnostics.h").read_text(
+    encoding="utf-8"
+)
 coordinator_header = (firmware_dir / "ProvisioningCoordinator.h").read_text(encoding="utf-8")
+diagnostics_source = (firmware_dir / "ProvisioningDiagnostics.cpp").read_text(
+    encoding="utf-8"
+)
+probe_codec = (firmware_dir / "ProvisioningProbeCodec.h").read_text(
+    encoding="utf-8"
+)
 policy_source = (firmware_dir / "ProvisioningPolicy.h").read_text(encoding="utf-8")
+config_source = (firmware_dir / "DeviceConfig.cpp").read_text(encoding="utf-8")
+config_header = (firmware_dir / "DeviceConfig.h").read_text(encoding="utf-8")
+config_blob = (firmware_dir / "DeviceConfigBlob.h").read_text(encoding="utf-8")
 startup_policy_source = (firmware_dir / "ProvisioningStartupPolicy.h").read_text(
     encoding="utf-8"
 )
@@ -70,12 +82,62 @@ assert 'constexpr size_t kProvisioningPasswordLength = 10;' in policy_source
 assert '"23456789ABCDEFGHJKLMNPQRSTUVWXYZ"' in policy_source
 assert "ProvisioningCredentialPolicy" in policy_source
 assert "ProvisioningSensitiveConfirmationPolicy" in policy_source
+assert "kStoredProvisioningPasswordLegacy = 0" in config_blob
+assert "kStoredProvisioningPasswordRandom = 1" in config_blob
+assert "kStoredProvisioningPasswordFixed88888888 = 2" in config_blob
+assert "stored.reserved[1] = static_cast<uint8_t>(settings.provisioningPasswordMode)" in config_source
+assert "decodedSettings.provisioningPasswordMode" in config_source
+assert "validProvisioningPasswordMode(settings.provisioningPasswordMode)" in config_source
+assert "ProvisioningPasswordMode provisioningPasswordMode" in config_header
+assert 'cJSON_GetObjectItemCaseSensitive(values, "provisioningPasswordMode")' in link_dispatcher
+assert "kStoredProvisioningPasswordFixed88888888" in link_dispatcher
+assert "invalid provisioning password mode" in link_dispatcher
+assert 'strcmp(operation, "set-provisioning-password-mode") == 0' in link_dispatcher
+password_mode_operation = link_dispatcher[
+    link_dispatcher.index('strcmp(operation, "set-provisioning-password-mode")'):
+    link_dispatcher.index('strcmp(operation, "provisioning-start")')
+]
+assert "config_->setProvisioningPasswordMode" in password_mode_operation
+assert "wifi_->configurationChanged()" not in password_mode_operation
+assert "tencent_->wake()" not in password_mode_operation
+assert "--provisioning-password-mode" in (
+    firmware_dir.parents[1] / "cdc-status.py"
+).read_text(encoding="utf-8")
+cdc_status = (firmware_dir.parents[1] / "cdc-status.py").read_text(
+    encoding="utf-8"
+)
+font_argument = cdc_status[
+    cdc_status.index("    if arguments.install_font:"):
+    cdc_status.index("    if arguments.provisioning_password_mode:")
+]
+password_argument = cdc_status[
+    cdc_status.index("    if arguments.provisioning_password_mode:"):
+    cdc_status.index("    if arguments.firmware:")
+]
+assert "open(arguments.install_font" in font_argument
+assert "open(arguments.install_font" not in password_argument
+assert 'operation = "set-provisioning-password-mode"' in password_argument
+assert '"mode": 2 if arguments.provisioning_password_mode == "fixed" else 1' in password_argument
 assert "esp_fill_random(destination, length);" in source
-assert "credential_.begin(fillProvisioningRandom, nullptr)" in source
+assert "credential_.begin(config.settings().provisioningPasswordMode," in source
 assert "password_ = credential_.password();" in source
 assert "credential_.close();" in source
 assert 'password_ = "";' not in source
-assert "88888888" not in all_firmware_source
+assert 'constexpr char kFixedProvisioningPassword[] = "88888888";' in policy_source
+assert "kFixedProvisioningPasswordLength" in policy_source
+assert "name='provisioningPasswordMode'" in source
+assert "重新更新" in source
+assert ">本设备模式（88888888）</option>" in source
+assert "confirmFixedProvisioningPassword" in source
+assert "enteringFixedPasswordMode" in source
+assert "config_->settings().provisioningPasswordMode !=" in source
+assert 'server_.arg("confirmFixedProvisioningPassword") != "1"' in source
+assert "请确认设备安全模式" in source
+assert "88888888" not in "\n".join(
+    line for line in all_firmware_source.splitlines()
+    if "log" in line.lower() or "printf" in line.lower() or
+    "println" in line.lower()
+)
 assert 'server_.on("/confirm"' not in source
 assert 'confirmationRequired' in source
 assert 'confirmationAction' in source
@@ -87,9 +149,9 @@ assert "sensitiveConfirmationPending()" in portal_header
 assert "confirmSensitiveChange(uint32_t nowMs)" in portal_header
 assert "sensitiveConfirmationPending()" in coordinator_header
 assert "confirmSensitiveChange(uint32_t nowMs)" in coordinator_header
-assert "bootProvisioningConfirmationConsumed" in main_source
-assert "provisioningCoordinator.confirmSensitiveChange(now)" in main_source
-assert "if (bootProvisioningConfirmationConsumed)" in main_source
+assert "BootGestureAction::confirmProvisioning" in main_source
+assert "provisioningCoordinator.confirmSensitiveChange(nowMs)" in main_source
+assert "bootGesturePolicy.pressed" in main_source
 for log_call in re.findall(r"(?:log_|log\.)(?:printf|print|println)\([^;]*;", source,
                            flags=re.DOTALL):
     assert "password_" not in log_call
@@ -133,13 +195,18 @@ assert "view.provisioning = provisioningCoordinator.visible();" in draw_dashboar
 # The ternary above therefore publishes null after stop instead of retaining a
 # pointer across portal credential wiping or across frames.
 coordinator_stop = coordinator[
-    coordinator.index("void ProvisioningCoordinator::stop()"):
+    coordinator.index("void ProvisioningCoordinator::stop("):
     coordinator.index("bool ProvisioningCoordinator::active() const")
 ]
-assert "portal_->stop();" in coordinator_stop
-assert coordinator_stop.index("portal_->stop();") < coordinator_stop.index(
+assert "portal_->stop(reason);" in coordinator_stop
+assert coordinator_stop.index("portal_->stop(reason);") < coordinator_stop.index(
     "startup_.reset();"
 )
+assert "ProvisioningStopReason::bootButton" in main_source
+assert "ProvisioningStopReason::touchBack" in main_source
+assert "provisioningStopReasonKey(reason)" in source
+assert "ProvisioningStopReason::startupTimeout" in source
+assert "migrateProvisioningPasswordMode(storedMode)" in config_source
 assert "bool visible() const { return startup_.visible(); }" in coordinator_header
 startup_reset = startup_policy_source[
     startup_policy_source.index("void reset()"):
@@ -186,7 +253,7 @@ confirm_handler = source[source.index(
     source.index("void ProvisioningPortal::discardSensitiveCandidate")]
 assert confirm_handler.index("acceptPhysicalPress") < confirm_handler.index(
     "armStationValidation")
-assert "stop();" in confirm_handler
+assert "stop(ProvisioningStopReason::lifetimeExpired);" in confirm_handler
 assert "void ProvisioningPortal::beginStationValidation()" in source
 assert "void ProvisioningPortal::restorePortalForRetry()" in source
 assert "restorePortalForRetry();" in source
@@ -198,6 +265,9 @@ prepare_handler = source[source.index("bool ProvisioningPortal::prepare"):
 start_handler = source[source.index("bool ProvisioningPortal::switchToAccessPointMode"):
                        source.index("void ProvisioningPortal::failStartupTimeout")]
 assert "statusMessage_ = \"正在准备配网热点\";" in prepare_handler
+assert prepare_handler.index("ProvisioningProbeStage::prepareEntered") < (
+    prepare_handler.index("credential_.begin")
+)
 assert "WiFi.mode" not in prepare_handler
 assert "WiFi.softAP" not in prepare_handler
 assert "startScan();" not in prepare_handler
@@ -209,32 +279,77 @@ assert "bool ProvisioningPortal::startServices()" in start_handler
 assert "ProvisioningLogStage::radioModeStarted" in start_handler
 assert "ProvisioningLogStage::accessPointStarted" in start_handler
 assert "logProvisioningMemory" in start_handler
+for before, call, after in (
+    ("ProvisioningProbeStage::beforeModeAp", "WiFi.mode(WIFI_AP)",
+     "ProvisioningProbeStage::afterModeAp"),
+    ("ProvisioningProbeStage::beforeSoftAp", "WiFi.softAP",
+     "ProvisioningProbeStage::afterSoftAp"),
+    ("ProvisioningProbeStage::beforePowerSaveOff", "esp_wifi_set_ps",
+     "ProvisioningProbeStage::afterPowerSaveOff"),
+    ("ProvisioningProbeStage::beforeRouteInstall", "installRoutes()",
+     "ProvisioningProbeStage::afterRouteInstall"),
+    ("ProvisioningProbeStage::beforeDnsStart", "dns_.start",
+     "ProvisioningProbeStage::afterDnsStart"),
+    ("ProvisioningProbeStage::beforeServerBegin", "server_.begin",
+     "ProvisioningProbeStage::afterServerBegin"),
+):
+    assert start_handler.index(before) < start_handler.index(call)
+    assert start_handler.index(call) < start_handler.index(after)
+show_portal = source[source.index("void ProvisioningPortal::showPortal()"):
+                     source.index("void ProvisioningPortal::saveRequest()")]
+assert show_portal.index("ProvisioningProbeStage::beforePageBuild") < (
+    show_portal.index("pageHtml()")
+)
+assert show_portal.index("pageHtml()") < show_portal.index(
+    "ProvisioningProbeStage::afterPageBuild"
+)
+page_send = 'server_.send(200, "text/html; charset=utf-8", html);'
+assert show_portal.index("ProvisioningProbeStage::beforePageSend") < (
+    show_portal.index(page_send)
+)
+assert show_portal.index(page_send) < show_portal.index(
+    "ProvisioningProbeStage::afterPageSend"
+)
+assert "beforeRequestParse" in source
+assert "_parseRequest(_currentClient)" in source
+assert "afterRequestParse" in source
+assert source.index("beforeRequestParse") < source.index(
+    "_parseRequest(_currentClient)"
+)
+assert source.index("_parseRequest(_currentClient)") < source.index(
+    "afterRequestParse"
+)
+assert "requestProbeCount_ < 8" in source
+assert "++requestProbeCount_;" in source
+assert 'constexpr char kProvisioningProbeKey[] = "wifi_probe_v1";' in diagnostics_source
+assert "printProbeBoot(log, resetReason, probeLoaded);" in diagnostics_source
+assert "ssid" not in probe_codec.lower()
+assert "password" not in probe_codec.lower()
+assert "token" not in probe_codec.lower()
+assert "StoredProvisioningProbe" in probe_codec
 assert "statusMessage_ = \"请选择附近的 2.4 GHz 网络或手工输入\";" in start_handler
 state_handler = source[source.index("ProvisioningState ProvisioningPortal::state() const"):
                        source.index("const char *ProvisioningPortal::portalState")]
 assert 'statusMessage_.indexOf("仍在")' in state_handler
-stop_handler = source[source.index("void ProvisioningPortal::stop()"):
+stop_handler = source[source.index("void ProvisioningPortal::stop("):
                       source.index("bool ProvisioningPortal::takeConfigurationChanged")]
 assert "const bool wasPrepared = prepared_;" in stop_handler
 assert "wasActive || wasPrepared" in stop_handler
 assert "clearProvisioningCredential();" in stop_handler
 
-# Arduino-ESP32 String::clear() only resets its logical length. Provisioning
-# credentials must be overwritten through the writable buffer before clear,
-# including startup failures, normal stop, object destruction, and the start of
-# a later session.
-clear_helper = source[source.index("void secureClearString"):
-                      source.index("String validationFailureMessage")]
-assert "const size_t length = secret.length();" in clear_helper
-assert "volatile char *const wipe = secret.begin();" in clear_helper
-assert "wipe[index] = '\\0';" in clear_helper
-assert clear_helper.index("wipe[index] = '\\0';") < clear_helper.index(
-    "secret.clear();")
+# The common volatile wipe helper overwrites every live secret byte before
+# logical reset. Portal secrets use that helper on every terminal path.
+secure_wipe = (firmware_dir / "SecureWipe.h").read_text()
+assert "volatile uint8_t *cursor" in secure_wipe
+assert "secureWipeBytes(secret.begin(), secret.length())" in secure_wipe
+assert secure_wipe.index("secureWipeBytes(secret.begin(), secret.length())") < (
+    secure_wipe.index('secret = "";'))
 clear_credential = source[source.index(
     "void ProvisioningPortal::clearProvisioningCredential"):
     source.index("bool ProvisioningPortal::takeConfigurationChanged")]
-assert clear_credential.index("secureClearString(password_);") < (
+assert clear_credential.index("secureWipe(password_);") < (
     clear_credential.index("credential_.close();"))
+assert "clearCandidateSecrets();" in stop_handler
 destructor = source[source.index("ProvisioningPortal::~ProvisioningPortal"):
                     source.index("bool ProvisioningPortal::prepare")]
 assert "clearProvisioningCredential();" in destructor
@@ -243,7 +358,7 @@ assert "~ProvisioningPortal();" in portal_header
 # A generation failure can leave partially generated bytes in the policy
 # buffer. The common cleanup must run on that branch. A later session also
 # scrubs any stale portal copy before generating and publishing a new value.
-credential_begin = "credential_.begin(fillProvisioningRandom, nullptr)"
+credential_begin = "credential_.begin(config.settings().provisioningPasswordMode,"
 begin_failure = prepare_handler[prepare_handler.index(credential_begin):
                                 prepare_handler.index(
                                     "password_ = credential_.password();")]
@@ -266,7 +381,8 @@ timeout_handler = source[source.index(
 assert switch_handler.count("clearProvisioningCredential();") == 3
 assert access_point_handler.count("clearProvisioningCredential();") == 2
 assert services_handler.count("clearProvisioningCredential();") == 1
-assert timeout_handler.count("clearProvisioningCredential();") == 2
+assert timeout_handler.count("clearProvisioningCredential();") == 1
+assert "stop(ProvisioningStopReason::startupTimeout);" in timeout_handler
 request_handler = coordinator[coordinator.index("bool ProvisioningCoordinator::request"):
                               coordinator.index("void ProvisioningCoordinator::poll")]
 assert "quiesceForProvisioning" not in request_handler
@@ -293,15 +409,61 @@ assert "WiFi.mode(WIFI_OFF)" not in quiesce_handler
 assert "WiFi.status()" not in start_handler
 portal_loop = "provisioningCoordinator.poll(now);"
 assert portal_loop in main_source
-assert main_source.index(portal_loop) < main_source.index(
-    "wifi.loop(now", main_source.index(portal_loop))
+assert "bootUsbLinkStarted = linkService->begin(" in main_source
+assert "bootUsbLinkStarted = board.sdReady() && linkService->begin(" not in main_source
+assert "bootWifiSyncStarted = board.sdReady() && wirelessSync->begin(" in main_source
+assert "if (bootUsbLinkStarted)" in main_source
+assert "if (bootWifiSyncStarted && board.sdReady())" in main_source
+for service_type, service_name in (
+    ("CapsuleLibrary", "capsuleLibrary"),
+    ("CapsuleOperationService", "capsuleOperations"),
+    ("PokePodLinkService", "linkService"),
+    ("WirelessSyncService", "wirelessSync"),
+):
+    assert f"PsramService<{service_type}> {service_name};" in main_source
+    assert f'{service_name}.allocate("' in main_source
+assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in main_source
+assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in main_source[
+    main_source.index("class PsramService"):
+    main_source.index("class SdMmcRecordingCapacitySource")
+]
+assert "psramDegradedBoot" in main_source
+assert "large_services_started\\\":false" in main_source
+assert main_source.index("serviceObjectsAllocated") < main_source.index(
+    "bleVoice.begin("
+)
+full_portal_poll = main_source.rindex(portal_loop)
+assert full_portal_poll < main_source.index("wifi.loop(now", full_portal_poll)
 network_section = main_source[
-    main_source.index(portal_loop):main_source.index(
-        "if (now - lastTouchMs", main_source.index(portal_loop)
-    )
+    full_portal_poll:main_source.index("PowerInputs finalPowerInputs",
+                                      full_portal_poll)
 ]
 assert "wifi.loop(now" in network_section
 assert "tencentWorker.loop(now" in network_section
+touch_before_portal = main_source[
+    main_source.rfind("if (now - lastTouchMs", 0, full_portal_poll):
+    full_portal_poll
+]
+assert "pollTouch();" in touch_before_portal
+assert portal_loop not in touch_before_portal
+assert "BoundedProvisioningWebServer" in portal_header
+assert "esp_arduino_version.h" in portal_header
+assert "ESP_ARDUINO_VERSION_MAJOR != 3" in portal_header
+assert "ESP_ARDUINO_VERSION_MINOR != 3" in portal_header
+assert "ESP_ARDUINO_VERSION_PATCH != 8" in portal_header
+assert "ProvisioningPollScope" in diagnostics_header
+assert "ProvisioningPollScope pollScope(diagnostics_, log_);" in source
+assert "provisioningProbePersists" in diagnostics_source
+assert "provisioningLogPersists" in diagnostics_source
+assert "kProvisioningMaxPersistentWritesPerSession" in diagnostics_source
+assert "_currentClient.setTimeout(kIoSliceMs);" in source
+bounded_server = source[
+    source.index("void BoundedProvisioningWebServer::handleClient()"):
+    source.index("ProvisioningPortal::ProvisioningPortal()")
+]
+assert "HTTP_MAX_DATA_WAIT" not in bounded_server
+assert "HTTP_MAX_SEND_WAIT" not in bounded_server
+assert "kIdleClientLifetimeMs" in bounded_server
 assert "portal_->loop(millis())" in coordinator
 assert "nowMs = millis();" in source
 assert "if (validating_ && !transitionPending_)" in source

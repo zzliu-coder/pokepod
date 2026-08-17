@@ -126,6 +126,10 @@ void drawUiIcon(Arduino_GFX &display, UiIcon icon, int16_t x, int16_t y,
       display.drawLine(x + 3, y + 13, x + 9, y + 19, color);
       display.drawLine(x + 9, y + 19, x + 21, y + 5, color);
       break;
+    case UiIcon::power:
+      display.drawCircle(x + 12, y + 12, 9, color);
+      display.drawFastVLine(x + 12, y + 1, 11, color);
+      break;
   }
 }
 

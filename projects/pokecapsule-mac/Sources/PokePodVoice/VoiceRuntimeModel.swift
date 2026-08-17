@@ -44,6 +44,7 @@ final class VoiceRuntimeModel: ObservableObject {
     @Published private(set) var accessibilityReady = false
     @Published private(set) var connectionQuality = VoiceLinkQualityFormatter.summary(
         nil, context: .disconnected)
+    @Published private(set) var sessionDiagnostic = "尚无语音会话指标"
     @Published private(set) var deviceQueueQuality = DeviceSendQueueQualityFormatter.summary(nil)
     @Published private(set) var deviceName = "PokePod"
     @Published var launchAtLogin = false
@@ -54,11 +55,18 @@ final class VoiceRuntimeModel: ObservableObject {
     private var machine = VoiceSessionMachine()
     private var completion = VoiceSessionCompletionCoordinator()
     private var jitter = VoiceJitterBuffer()
+    private var timeline = VoiceSessionTimeline()
     private var latestQuality: VoiceLinkQualitySnapshot?
     private var timer: Timer?
     private var transportReady = false
     private var firmwareReady = false
     private var isShuttingDown = false
+    private var blackHolePackage: URL?
+    private var blackHoleDiscoveryTask: Task<URL?, Never>?
+    private var blackHoleDiscoveryStarted = false
+    private let diagnosticURL = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+    )[0].appendingPathComponent("PokePodVoice/last-session.json")
 
     init(
         ble: any BLECentralControlling = BLECentralAdapter(),
@@ -77,6 +85,7 @@ final class VoiceRuntimeModel: ObservableObject {
         }
         platform.input.repairAfterPreviousCrash()
         launchAtLogin = SMAppService.mainApp.status == .enabled
+        startBlackHoleDiscovery()
         refreshPrerequisites()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -164,6 +173,8 @@ final class VoiceRuntimeModel: ObservableObject {
         guard !isShuttingDown else { return }
         isShuttingDown = true
         timer?.invalidate()
+        blackHoleDiscoveryTask?.cancel()
+        blackHoleDiscoveryTask = nil
         safeAbort(reason: "应用退出", report: false, rejectCode: nil)
         ble.disconnect()
     }
@@ -224,7 +235,11 @@ final class VoiceRuntimeModel: ObservableObject {
                 showError("运行环境尚未就绪")
                 return
             }
-            guard VoiceSessionStartCoordinator.start(
+            if machine.phase == .idle {
+                timeline.begin(sessionId: sessionId, at: monotonicNow)
+                publishTimeline()
+            }
+            let accepted = VoiceSessionStartCoordinator.start(
                 sessionId: sessionId,
                 now: monotonicNow,
                 machine: &machine,
@@ -233,49 +248,121 @@ final class VoiceRuntimeModel: ObservableObject {
                 sendSessionReady: { [ble] in ble.declareSessionReady(sessionId: $0) },
                 reject: { [ble] in ble.reject(
                     sessionId: $0,
-                    code: BLEVoiceRejectCode.platformSetupFailed.rawValue) }) else { return }
+                    code: BLEVoiceRejectCode.platformSetupFailed.rawValue) })
+            guard accepted else {
+                let failure = executor.lastFailure?.sessionFailure
+                    ?? VoiceSessionFailure(
+                        kind: .platformSetupFailed,
+                        detail: "会话启动被拒绝")
+                recordInputRestored(at: monotonicNow)
+                timeline.fail(failure, at: monotonicNow)
+                publishTimeline()
+                return
+            }
+            timeline.record(.platformPrepared, at: monotonicNow)
+            timeline.record(.sessionReadySent, at: monotonicNow)
+            publishTimeline()
             latestQuality = jitter.qualitySnapshot
             updateQuality(context: .active)
             state = .listening
             detail = "正在准备 120 ms 音频缓冲"
+        case let .audioNotification(sessionId, sequence, byteCount, at):
+            guard let sessionId,
+                  VoiceSessionSignalPolicy.remoteErrorTargetsActive(
+                      reportedSessionId: sessionId,
+                      activeSessionId: machine.activeSessionId) else { return }
+            timeline.record(
+                .audioNotification,
+                at: at,
+                sequence: sequence,
+                count: byteCount)
+            publishTimeline()
         case let .audio(frame):
             do {
                 for output in try jitter.ingest(frame) {
+                    if frame.sessionId == timeline.sessionId {
+                        timeline.record(
+                            output.concealed ? .sequenceGap : .audioDecoded,
+                            at: monotonicNow,
+                            sequence: output.sequence,
+                            count: output.samples.count,
+                            detail: output.concealed ? "静音补帧" : nil)
+                    }
                     let actions = machine.receive(
                         sessionId: frame.sessionId,
                         samples: output.samples,
                         now: monotonicNow)
                     guard executor.execute(actions) else {
+                        let failure = executor.lastFailure?.sessionFailure
+                            ?? VoiceSessionFailure(
+                                kind: .blackHoleWriteFailed,
+                                detail: "音频输出执行器未提供原因")
                         safeAbort(
-                            reason: "音频输出失败",
+                            reason: failure.userDescription,
+                            failure: failure,
                             report: false,
                             rejectCode: BLEVoiceRejectCode.audioOutputFailed.rawValue)
                         return
                     }
+                    recordTimelineActions(actions, at: monotonicNow)
                 }
                 latestQuality = jitter.qualitySnapshot
                 updateQuality(context: .active)
                 if case .streaming = machine.phase { detail = "正在向微信输入法传送语音" }
+                publishTimeline()
             } catch {
+                let failure: VoiceSessionFailure
+                if case let VoiceJitterError.excessiveGap(gap) = error {
+                    failure = VoiceSessionFailure(
+                        kind: .sequenceGap,
+                        detail: "缺口 \(gap) 帧")
+                } else {
+                    failure = VoiceSessionFailure(
+                        kind: .audioDecodeFailed,
+                        detail: error.localizedDescription)
+                }
                 safeAbort(
-                    reason: "音频序列异常：\(error.localizedDescription)",
+                    reason: failure.userDescription,
+                    failure: failure,
                     rejectCode: BLEVoiceRejectCode.audioSequenceInvalid.rawValue)
             }
+        case let .audioDecodeFailure(sessionId, detail):
+            guard let active = machine.activeSessionId,
+                  sessionId == nil || sessionId == active else { return }
+            let failure = VoiceSessionFailure(kind: .audioDecodeFailed, detail: detail)
+            safeAbort(
+                reason: failure.userDescription,
+                failure: failure,
+                rejectCode: BLEVoiceRejectCode.audioSequenceInvalid.rawValue)
         case let .sessionEnded(sessionId):
+            guard machine.activeSessionId == sessionId else { return }
+            timeline.record(.sessionEnded, at: monotonicNow)
+            publishTimeline()
             switch completion.beginEnding(
                 sessionId: sessionId,
                 now: monotonicNow,
                 machine: &machine,
                 executor: executor) {
             case .accepted:
+                recordTimelineActions(completion.lastActions, at: monotonicNow)
+                publishTimeline()
                 detail = "正在排空尾部音频"
             case let .failed(failedSessionId):
+                let failure = executor.lastFailure?.sessionFailure
+                    ?? VoiceSessionFailure(
+                        kind: .platformSetupFailed,
+                        detail: "结束会话时音频恢复失败")
+                recordTimelineActions(completion.lastActions, at: monotonicNow)
+                recordInputRestored(at: monotonicNow)
+                timeline.fail(failure, at: monotonicNow)
+                publishTimeline()
                 ble.reject(
                     sessionId: failedSessionId,
                     code: BLEVoiceRejectCode.audioOutputFailed.rawValue)
                 applyCompletionPresentation(.aborted(
                     failedSessionId,
-                    .executionFailure))
+                    .executionFailure),
+                    failure: failure)
             case .ignored:
                 break
             }
@@ -285,14 +372,28 @@ final class VoiceRuntimeModel: ObservableObject {
             guard VoiceSessionSignalPolicy.remoteErrorTargetsActive(
                 reportedSessionId: sessionId,
                 activeSessionId: machine.activeSessionId) else { return }
-            safeAbort(reason: "PokePod 会话错误码 \(code)")
+            let failure = VoiceSessionFailure(
+                kind: timeline.firstAudioNotificationAt == nil
+                    ? .deviceDidNotSendFrames
+                    : .unknown,
+                detail: "PokePod 会话错误码 \(code)")
+            safeAbort(
+                reason: failure.userDescription,
+                failure: failure)
             if DeviceInfoRefreshPolicy.shouldRefresh(after: .sessionFailed) {
                 ble.requestDeviceInfoRefresh()
             }
         case let .error(message):
             safeAbort(reason: message)
         case let .disconnected(message):
-            safeAbort(reason: message, report: false, rejectCode: nil)
+            let kind: VoiceSessionFailureKind = timeline.firstAudioNotificationAt == nil
+                ? .audioNotificationNotReceived
+                : .disconnected
+            safeAbort(
+                reason: message,
+                failure: VoiceSessionFailure(kind: kind, detail: message),
+                report: false,
+                rejectCode: nil)
             updateQuality(context: .disconnected)
             firmwareReady = false
             transportReady = false
@@ -307,19 +408,33 @@ final class VoiceRuntimeModel: ObservableObject {
             machine: &machine,
             executor: executor,
             acknowledgeStop: { [ble] in ble.acknowledgeStop(sessionId: $0) })
+        recordTimelineActions(completion.lastActions, at: monotonicNow)
         switch outcome {
         case .completed:
+            recordInputRestored(at: monotonicNow)
+            timeline.finish(at: monotonicNow)
+            publishTimeline()
             applyCompletionPresentation(outcome)
             if DeviceInfoRefreshPolicy.shouldRefresh(after: .sessionCompleted) {
                 ble.requestDeviceInfoRefresh()
             }
         case let .aborted(sessionId, reason):
+            let failure = reason == .watchdog && timeline.firstAudioNotificationAt == nil
+                ? VoiceSessionFailure(
+                    kind: .deviceDidNotSendFrames,
+                    detail: "400 ms watchdog")
+                : VoiceSessionFailure(
+                    kind: reason == .watchdog ? .watchdog : .unknown,
+                    detail: nil)
+            recordInputRestored(at: monotonicNow)
+            timeline.fail(failure, at: monotonicNow)
+            publishTimeline()
             ble.reject(
                 sessionId: sessionId,
                 code: reason == .executionFailure
                     ? BLEVoiceRejectCode.audioOutputFailed.rawValue
                     : BLEVoiceRejectCode.sessionAborted.rawValue)
-            applyCompletionPresentation(outcome)
+            applyCompletionPresentation(outcome, failure: failure)
             return
         case .none:
             break
@@ -346,10 +461,14 @@ final class VoiceRuntimeModel: ObservableObject {
         }
     }
 
-    private func applyCompletionPresentation(_ outcome: VoiceSessionCompletionOutcome) {
+    private func applyCompletionPresentation(
+        _ outcome: VoiceSessionCompletionOutcome,
+        failure: VoiceSessionFailure? = nil
+    ) {
         if outcome != .none { updateQuality(context: .recent) }
         applyPresentationUpdate(VoiceSessionPresentationPolicy.completion(
             outcome,
+            failure: failure,
             environmentReady: firmwareReady && prerequisitesReady))
     }
 
@@ -371,6 +490,7 @@ final class VoiceRuntimeModel: ObservableObject {
 
     private func safeAbort(
         reason: String,
+        failure: VoiceSessionFailure? = nil,
         report: Bool = true,
         rejectCode: UInt16? = BLEVoiceRejectCode.sessionAborted.rawValue
     ) {
@@ -379,7 +499,7 @@ final class VoiceRuntimeModel: ObservableObject {
         let wirePolicy: VoiceSessionAbortWirePolicy
         if let rejectCode { wirePolicy = .reject(code: rejectCode) }
         else { wirePolicy = .silent }
-        _ = VoiceSessionAbortCoordinator.abort(
+        let sessionId = VoiceSessionAbortCoordinator.abort(
             reason: reason,
             report: false,
             wirePolicy: wirePolicy,
@@ -387,7 +507,54 @@ final class VoiceRuntimeModel: ObservableObject {
             completion: &completion,
             executor: executor,
             reject: { [ble] in ble.reject(sessionId: $0, code: $1) })
-        if report { showError(reason) }
+        if sessionId != nil {
+            recordInputRestored(at: monotonicNow)
+            let effectiveFailure = failure ?? VoiceSessionFailure(
+                kind: .unknown,
+                detail: reason)
+            timeline.fail(effectiveFailure, at: monotonicNow)
+            publishTimeline()
+        }
+        if report || failure != nil {
+            showError(failure?.userDescription ?? reason)
+        }
+    }
+
+    private func recordTimelineActions(
+        _ actions: [VoiceSessionAction],
+        at: TimeInterval
+    ) {
+        for action in actions {
+            switch action {
+            case .writeSamples(let samples):
+                timeline.record(.blackHoleWritten, at: at, count: samples.count)
+            case .shortcutDown:
+                timeline.record(.shortcutDown, at: at)
+            case .shortcutUp:
+                timeline.record(.shortcutUp, at: at)
+            case .restoreDefaultInput:
+                timeline.record(.inputRestored, at: at)
+            case .saveDefaultInput, .switchToBlackHole, .startAudioSink,
+                 .stopAudioSink, .reportFailure:
+                break
+            }
+        }
+    }
+
+    private func publishTimeline() {
+        sessionDiagnostic = timeline.summary
+        do {
+            try VoiceSessionDiagnosticStore.write(timeline, to: diagnosticURL)
+        } catch {
+            // Diagnostics must never alter realtime session state. The live UI
+            // remains authoritative; fixture collection reports a missing
+            // file as an explicit host-side evidence gap.
+        }
+    }
+
+    private func recordInputRestored(at: TimeInterval) {
+        guard !timeline.inputWasRestored else { return }
+        timeline.record(.inputRestored, at: at)
     }
 
     private func updateQuality(context: VoiceLinkQualityContext) {
@@ -457,7 +624,8 @@ final class VoiceRuntimeModel: ObservableObject {
     private var prerequisiteMessage: String {
         if !bluetoothReady { return "请打开蓝牙并允许 PokePod Voice 使用蓝牙" }
         if !blackHoleReady {
-            return localBlackHolePackage() == nil
+            if blackHoleDiscoveryTask != nil { return "正在检查 BlackHole 安装包" }
+            return blackHolePackage == nil
                 ? "未找到安装包；点击“安装”会后台下载并打开系统安装器"
                 : "已找到 BlackHole 安装包，点击“安装”完成系统安装"
         }
@@ -465,32 +633,50 @@ final class VoiceRuntimeModel: ObservableObject {
         return "准备完成"
     }
 
-    private func localBlackHolePackage() -> URL? {
+    private func installerDiscoveryRoots() -> [URL] {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask)[0]
-            .appendingPathComponent("PokePod Voice/Installers", isDirectory: true)
-        let roots = ["Downloads", "Desktop", "Documents"].map {
-            home.appendingPathComponent($0, isDirectory: true)
-        } + [appSupport]
-        var candidates = [URL]()
-        for root in roots where FileManager.default.fileExists(atPath: root.path) {
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
-            for case let url as URL in enumerator {
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
-                      values.isRegularFile == true else { continue }
-                candidates.append(url)
-            }
+        return BlackHoleInstallPolicy.discoveryRoots(
+            homeDirectory: home,
+            applicationSupportDirectory: appSupport)
+    }
+
+    private func startBlackHoleDiscovery(force: Bool = false) {
+        if !force, blackHoleDiscoveryStarted { return }
+        guard blackHoleDiscoveryTask == nil else { return }
+        blackHoleDiscoveryStarted = true
+        let roots = installerDiscoveryRoots()
+        let task = Task.detached(priority: .utility) {
+            BlackHoleInstallPolicy.discoverPackage(in: roots)
         }
-        return BlackHoleInstallPolicy.selectPackage(from: candidates)
+        blackHoleDiscoveryTask = task
+        Task { @MainActor [weak self] in
+            let package = await task.value
+            guard let self, !self.isShuttingDown else { return }
+            self.blackHolePackage = package
+            self.blackHoleDiscoveryTask = nil
+            self.refreshPrerequisites()
+        }
+    }
+
+    private func rescanBlackHolePackage() async -> URL? {
+        startBlackHoleDiscovery(force: true)
+        guard let task = blackHoleDiscoveryTask else { return blackHolePackage }
+        let package = await task.value
+        guard !isShuttingDown else { return nil }
+        blackHolePackage = package
+        blackHoleDiscoveryTask = nil
+        refreshPrerequisites()
+        return package
     }
 
     private func obtainBlackHolePackage() async throws -> URL {
-        if let local = localBlackHolePackage() { return local }
+        if let local = await rescanBlackHolePackage() {
+            try await verifyBlackHolePackage(local)
+            return local
+        }
 
         var request = URLRequest(url: BlackHoleInstallPolicy.latestReleaseAPIURL)
         request.setValue("PokePodVoice/1.0", forHTTPHeaderField: "User-Agent")
@@ -515,6 +701,10 @@ final class VoiceRuntimeModel: ObservableObject {
         } else {
             throw BlackHoleDownloadError.twoChannelAssetMissing
         }
+        guard BlackHoleInstallPolicy.isOfficialDownloadURL(asset.downloadURL),
+              BlackHoleInstallPolicy.isSafePackageName(asset.name) else {
+            throw BlackHoleDownloadError.untrustedDownloadSource
+        }
 
         var downloadRequest = URLRequest(url: asset.downloadURL)
         downloadRequest.setValue("PokePodVoice/1.0", forHTTPHeaderField: "User-Agent")
@@ -531,16 +721,69 @@ final class VoiceRuntimeModel: ObservableObject {
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
 
-        if let digest = asset.digest?.lowercased(), digest.hasPrefix("sha256:") {
-            let expected = String(digest.dropFirst("sha256:".count))
-            let actual = SHA256.hash(data: try Data(contentsOf: destination))
-                .map { String(format: "%02x", $0) }.joined()
+        if let digest = asset.digest {
+            guard let expected = BlackHoleInstallPolicy.normalizedSHA256Digest(digest) else {
+                try? FileManager.default.removeItem(at: destination)
+                throw BlackHoleDownloadError.invalidDigest
+            }
+            let actual = try await Task.detached(priority: .utility) {
+                try Self.sha256Hex(at: destination)
+            }.value
             guard actual == expected else {
                 try? FileManager.default.removeItem(at: destination)
                 throw BlackHoleDownloadError.digestMismatch
             }
         }
+        try await verifyBlackHolePackage(destination)
         return destination
+    }
+
+    private func verifyBlackHolePackage(_ package: URL) async throws {
+        let roots = installerDiscoveryRoots()
+        guard BlackHoleInstallPolicy.isPackagePathAllowed(package, within: roots) else {
+            throw BlackHoleDownloadError.untrustedPackageLocation
+        }
+        let expectedPath = package.resolvingSymlinksInPath().standardizedFileURL.path
+        let trusted = await Task.detached(priority: .utility) {
+            Self.checkPackageSignature(at: package)
+        }.value
+        guard package.resolvingSymlinksInPath().standardizedFileURL.path == expectedPath else {
+            throw BlackHoleDownloadError.packagePathChanged
+        }
+        guard trusted else { throw BlackHoleDownloadError.signatureVerificationFailed }
+    }
+
+    private nonisolated static func checkPackageSignature(at package: URL) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/pkgutil")
+        process.arguments = ["--check-signature", package.path]
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while process.isRunning {
+            if Date() >= deadline {
+                process.terminate()
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let stdout = output.fileHandleForReading.readDataToEndOfFile()
+        let stderr = error.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else { return false }
+        let combined = String(data: stdout + stderr, encoding: .utf8) ?? ""
+        return BlackHoleInstallPolicy.signatureOutputIsTrusted(combined)
+    }
+
+    private nonisolated static func sha256Hex(at file: URL) throws -> String {
+        SHA256.hash(data: try Data(contentsOf: file))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     private func openSystemInstaller(_ package: URL) {
@@ -584,6 +827,11 @@ final class VoiceRuntimeModel: ObservableObject {
         case twoChannelAssetMissing
         case downloadFailed
         case digestMismatch
+        case invalidDigest
+        case untrustedDownloadSource
+        case signatureVerificationFailed
+        case untrustedPackageLocation
+        case packagePathChanged
 
         var errorDescription: String? {
             switch self {
@@ -591,6 +839,11 @@ final class VoiceRuntimeModel: ObservableObject {
             case .twoChannelAssetMissing: return "官方版本没有找到 BlackHole 2ch 安装包"
             case .downloadFailed: return "官方安装包下载失败"
             case .digestMismatch: return "安装包校验失败，已删除不完整文件"
+            case .invalidDigest: return "官方安装包摘要格式无效，已拒绝安装"
+            case .untrustedDownloadSource: return "安装包来源或文件名不受信任，已拒绝安装"
+            case .signatureVerificationFailed: return "安装包签名或开发者身份校验失败，已拒绝安装"
+            case .untrustedPackageLocation: return "安装包位置不受信任，已拒绝打开"
+            case .packagePathChanged: return "安装包路径在校验期间发生变化，已拒绝打开"
             }
         }
     }

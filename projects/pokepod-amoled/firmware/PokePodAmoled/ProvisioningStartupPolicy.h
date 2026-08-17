@@ -58,7 +58,8 @@ class ProvisioningStartupPolicy {
     return true;
   }
 
-  ProvisioningStartupAction update(uint32_t nowMs) {
+  ProvisioningStartupAction update(uint32_t nowMs,
+                                   bool radiosQuiesced = true) {
     if (phase_ == ProvisioningStartupPhase::idle ||
         phase_ == ProvisioningStartupPhase::active ||
         phase_ == ProvisioningStartupPhase::failed) {
@@ -80,7 +81,7 @@ class ProvisioningStartupPolicy {
       quiescedAtMs_ = nowMs;
       return ProvisioningStartupAction::quiesceRadio;
     }
-    if (phase_ == ProvisioningStartupPhase::quiescing &&
+    if (phase_ == ProvisioningStartupPhase::quiescing && radiosQuiesced &&
         monotonicElapsedAtLeast(nowMs, quiescedAtMs_, kMinimumSettleMs)) {
       pendingAction_ = ProvisioningStartupAction::switchRadioMode;
       return pendingAction_;

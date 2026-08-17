@@ -426,6 +426,7 @@ int main() {
   assert(!overflow.publish(command(7, BleVoiceCommandType::ready, 0)));
   assert(overflow.overflowed());
   assert(!overflow.accepting());
+  assert(!overflow.empty());
   assert(!overflow.publish(event(BleVoiceCallbackEventType::disconnect, 7)));
   // Admission stays closed until the separately latched physical disconnect
   // confirms the exact overflowing connection generation. A stale disconnect
@@ -441,21 +442,21 @@ int main() {
   assert(physicalDisconnect.latest(observedEpoch));
   assert(observedEpoch.matches(overflowingEpoch));
   assert(overflow.resetAfterOverflow());
-  assert(!overflow.overflowed() && overflow.accepting());
+  assert(!overflow.overflowed() && overflow.accepting() && overflow.empty());
   assert(overflow.publish(event(BleVoiceCallbackEventType::connect, 8)));
 
   // Disable may change the desired intent while overflow teardown is waiting.
   // The physical connection remains a blocker until the exact epoch arrives;
   // a stale generation cannot complete teardown or authorize re-advertising.
   BleCallbackOverflowPolicy overflowPolicy;
-  overflowPolicy.begin(overflowingEpoch);
-  assert(overflowPolicy.pending());
+  assert(overflowPolicy.begin(overflowingEpoch, 100));
+  assert(overflowPolicy.active());
   assert(overflowPolicy.physicalConnectionPending());
   assert(!overflowPolicy.confirm(BleVoiceConnectionEpoch{7, 69}));
   assert(overflowPolicy.confirm(BleVoiceConnectionEpoch{7, 70}));
   const BleVoiceConnectionEpoch closedEpoch = overflowPolicy.finish();
   assert(closedEpoch.matches(overflowingEpoch));
-  assert(!overflowPolicy.pending());
+  assert(!overflowPolicy.active());
   assert(!overflowPolicy.physicalConnectionPending());
   return 0;
 }

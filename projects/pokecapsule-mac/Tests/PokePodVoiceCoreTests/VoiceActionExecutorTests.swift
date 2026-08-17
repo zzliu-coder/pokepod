@@ -28,6 +28,28 @@ final class VoiceActionExecutorTests: XCTestCase {
         ])
         XCTAssertFalse(message.isEmpty)
     }
+
+    func testWriteFailureIsTypedAsBlackHoleFailure() {
+        let platform = FakeVoicePlatform(failAt: "write-2")
+        let executor = VoiceActionExecutor(platform: platform)
+
+        XCTAssertFalse(executor.execute([.writeSamples([1, 2])]))
+        XCTAssertEqual(executor.lastFailure?.kind, .writeSamples)
+        XCTAssertEqual(
+            executor.lastFailure?.sessionFailure.kind,
+            .blackHoleWriteFailed)
+    }
+
+    func testShortcutFailureIsTypedSeparatelyFromAudioOutputFailure() {
+        let platform = FakeVoicePlatform(failAt: "key-down")
+        let executor = VoiceActionExecutor(platform: platform)
+
+        XCTAssertFalse(executor.execute([.shortcutDown]))
+        XCTAssertEqual(executor.lastFailure?.kind, .shortcutDown)
+        XCTAssertEqual(
+            executor.lastFailure?.sessionFailure.kind,
+            .shortcutFailed)
+    }
 }
 
 private final class FakeVoicePlatform: VoicePlatformAdapter {

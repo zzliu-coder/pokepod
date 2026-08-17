@@ -62,34 +62,47 @@ LinkRecordingRequestResult LinkRecordingSession::requestStart(
   }
 
   transactionGate.beginOperation(transferGate);
-  const bool accepted = recorder_->requestStart(
-      *log_, capsuleId, createdAt, recorderOwner);
-  if (!accepted) {
-    if (recorder_->ownedBy(recorderOwner) || recorder_->operationActive() ||
-        recorder_->terminalResult().pending()) {
-      owned_ = true;
-      (void)requestStop(requestId, false, true, true, operation,
-                        transactionGate);
-      return {LinkRecordingRequestStatus::cleanupPending,
-              "recording start cleanup pending"};
-    }
+  if (!start_.begin(requestId, captureSessionId, millis())) {
     captureRouter_->release(AudioCaptureOwner::localCapsule);
     transactionGate.reset();
     return {LinkRecordingRequestStatus::failed, "recording start failed"};
   }
-
   owned_ = true;
+  capturePrepareAttempted_ = false;
+  capturePrepared_ = false;
+  captureStopIssued_ = false;
   (void)operation.advance(LinkOperationState::processing);
   operation.ownResource(LinkOperationResource::router);
   operation.ownResource(LinkOperationResource::transaction);
-  if (!start_.begin(requestId, captureSessionId)) {
-    (void)requestStop(requestId, false, true, true, operation,
-                      transactionGate);
-    return {LinkRecordingRequestStatus::cleanupPending,
-            "recording start cleanup pending"};
-  }
   capsuleId_ = capsuleId;
+  createdAt_ = createdAt;
+  recorderOwner_ = recorderOwner;
   return {LinkRecordingRequestStatus::accepted, nullptr};
+}
+
+bool LinkRecordingSession::capturePreparePending() const {
+  return owned_ && start_.active() && !start_.recorderRequested() &&
+      !capturePrepareAttempted_;
+}
+
+void LinkRecordingSession::prepareCaptureOutsideLinkPoll() {
+  if (!capturePreparePending()) return;
+  capturePrepareAttempted_ = true;
+  capturePrepared_ = audio_ != nullptr && captureRuntime_ != nullptr &&
+      log_ != nullptr && captureRuntime_->prepare(*audio_, *log_);
+}
+
+bool LinkRecordingSession::captureStopPending() const {
+  return owned_ && stop_.active() && !captureStopIssued_ &&
+      captureRuntime_ != nullptr && captureRuntime_->running();
+}
+
+void LinkRecordingSession::stopCaptureOutsideLinkPoll() {
+  if (!captureStopPending() || log_ == nullptr) return;
+  captureStopIssued_ = true;
+  // A bounded I2S read may still be in flight.  stop() may therefore return
+  // false while leaving a finalize token for later cooperative polling.
+  (void)captureRuntime_->stop(*log_);
 }
 
 bool LinkRecordingSession::requestStop(
@@ -108,12 +121,18 @@ bool LinkRecordingSession::requestStop(
   if (!stop_.begin(requestId, commit, respond)) return false;
   if (requestId != 0 && operationOwnsRequest) {
     (void)operation.advance(LinkOperationState::processing);
-    operation.ownResource(LinkOperationResource::router);
-    operation.ownResource(LinkOperationResource::transaction);
+    if (ownsTransferredResources()) {
+      operation.ownResource(LinkOperationResource::recordingSession);
+      stopOperationTracksSession_ = true;
+    } else {
+      operation.ownResource(LinkOperationResource::router);
+      operation.ownResource(LinkOperationResource::transaction);
+    }
   }
-  // stop() may time out while the task completes its bounded I2S read.
-  // Ownership remains in this session until poll() observes both terminals.
-  (void)captureRuntime_->stop(*log_);
+  captureStopIssued_ = false;
+  // The App loop issues the potentially blocking capture stop outside Link's
+  // 2 ms budget. Ownership remains here until both capture and recorder reach
+  // terminal state.
   return true;
 }
 
@@ -130,22 +149,92 @@ LinkRecordingEvent LinkRecordingSession::advanceStart(
       transport == LinkTransport::wifi || !sessionActive || quiesceRequested
           ? &transactionGate
           : nullptr;
+  const uint32_t requestId = start_.requestId();
+  const uint32_t captureSessionId = start_.captureSessionId();
+  const bool transportAlive = sessionActive && !quiesceRequested &&
+      linkTransferPermitted(transferGate, millis());
+
+  if (!start_.recorderRequested()) {
+    if (!capturePrepareAttempted_ &&
+        start_.prepareDeadlineReached(millis())) {
+      capturePrepareAttempted_ = true;
+      capturePrepared_ = false;
+      log_->printf(
+          "{\"event\":\"link_recording_start_timeout\","
+          "\"request_id\":%lu,\"stage\":\"capture_prepare\","
+          "\"timeout_ms\":%lu}\n",
+          static_cast<unsigned long>(requestId),
+          static_cast<unsigned long>(LinkRecordingStart::kPrepareTimeoutMs));
+    }
+    // App owns the potentially blocking I2S/codec prepare phase. Link waits
+    // across turns until that external phase publishes its result.
+    if (transportAlive && !capturePrepareAttempted_) return {};
+    const bool accepted = transportAlive && capturePrepared_ &&
+        recorder_->requestStart(
+        *log_, capsuleId_, createdAt_, recorderOwner_);
+    if (accepted) {
+      (void)start_.markRecorderRequested();
+      capturePrepareAttempted_ = false;
+      capturePrepared_ = false;
+      return {};
+    }
+    if (recorder_->ownedBy(recorderOwner_) || recorder_->operationActive() ||
+        recorder_->terminalResult().pending()) {
+      (void)start_.markRecorderRequested();
+      start_.finish();
+      capturePrepareAttempted_ = false;
+      capturePrepared_ = false;
+      capsuleId_ = "";
+      createdAt_ = "";
+      recorderOwner_ = RecorderOperationOwner::none;
+      (void)requestStop(requestId, false, transportAlive, true, operation,
+                        transactionGate);
+      return {};
+    }
+    start_.finish();
+    capturePrepareAttempted_ = false;
+    capturePrepared_ = false;
+    capsuleId_ = "";
+    createdAt_ = "";
+    recorderOwner_ = RecorderOperationOwner::none;
+    captureRouter_->release(AudioCaptureOwner::localCapsule);
+    transactionGate.reset();
+    owned_ = false;
+    operation.releaseResource(LinkOperationResource::router);
+    operation.releaseResource(LinkOperationResource::transaction);
+    if (!transportAlive && operation.active()) {
+      operation.cancel(quiesceRequested
+          ? LinkOperationCancelReason::quiesce
+          : LinkOperationCancelReason::deadline);
+    }
+    LinkRecordingEvent event;
+    event.kind = LinkRecordingEventKind::startFailed;
+    event.requestId = requestId;
+    event.respond = transportAlive;
+    return event;
+  }
   const RecorderStartPollResult result = recorder_->pollStart(
       *log_, millis(), gate);
   if (result == RecorderStartPollResult::pending) return {};
 
-  const uint32_t requestId = start_.requestId();
-  const uint32_t captureSessionId = start_.captureSessionId();
   const String capsuleId = capsuleId_;
   start_.finish();
+  capturePrepareAttempted_ = false;
+  capturePrepared_ = false;
+  captureStopIssued_ = false;
   capsuleId_ = "";
+  createdAt_ = "";
+  recorderOwner_ = RecorderOperationOwner::none;
 
-  const bool transportAlive = sessionActive && !quiesceRequested &&
-      linkTransferPermitted(transferGate, millis());
   if (result == RecorderStartPollResult::started && transportAlive &&
-      captureRuntime_->start(*audio_, captureSessionId, *log_)) {
-    operation.releaseResource(LinkOperationResource::transaction);
-    operation.releaseResource(LinkOperationResource::router);
+      captureRuntime_->startPrepared(*audio_, captureSessionId, *log_)) {
+    if (!operation.transferResourcesToRecordingSession()) {
+      (void)requestStop(requestId, false, transportAlive, true, operation,
+                        transactionGate);
+      return {};
+    }
+    routerOwned_ = true;
+    transactionOwned_ = true;
     LinkRecordingEvent event;
     event.kind = LinkRecordingEventKind::startReady;
     event.requestId = requestId;
@@ -189,12 +278,9 @@ LinkRecordingEvent LinkRecordingSession::advanceStop(
   if (!stop_.active()) return {};
 
   if (stop_.awaitsCapture()) {
-    if (captureRuntime_->running()) {
-      if (captureRuntime_->finalizePending()) {
-        (void)captureRuntime_->pollFinalize(*log_);
-      }
-      if (captureRuntime_->running()) return {};
-    }
+    // App polls the capture terminal before every Link/UI early return. Link
+    // observes only the published state and never finalizes hardware here.
+    if (captureRuntime_->running()) return {};
     AudioCaptureDispatchResult dispatch;
     if (captureDispatcher_ != nullptr && audio_ != nullptr &&
         bleVoice_ != nullptr) {
@@ -213,6 +299,9 @@ LinkRecordingEvent LinkRecordingSession::advanceStop(
     recorder_->observeAudioMetrics(finalMetrics.sessionId,
                                    finalMetrics.generation,
                                    finalMetrics.asMetrics());
+    recorder_->observeCaptureTelemetry(
+        captureRuntime_->metrics(), captureDispatcher_->metrics(),
+        static_cast<uint32_t>(captureRuntime_->taskStackHighWater()));
     if (recorder_->recording()) {
       if (complete) {
         (void)recorder_->stop(*log_, recorder_->stopRequested()
@@ -237,11 +326,19 @@ LinkRecordingEvent LinkRecordingSession::advanceStop(
       linkTransferPermitted(transferGate, millis());
   const bool committed = outcome.success();
   captureRouter_->release(AudioCaptureOwner::localCapsule);
+  routerOwned_ = false;
   owned_ = false;
-  operation.releaseResource(LinkOperationResource::router);
-  operation.releaseResource(LinkOperationResource::transaction);
-  stop_.finish();
   transactionGate.reset();
+  transactionOwned_ = false;
+  if (stopOperationTracksSession_) {
+    operation.releaseResource(LinkOperationResource::recordingSession);
+  } else {
+    operation.releaseResource(LinkOperationResource::router);
+    operation.releaseResource(LinkOperationResource::transaction);
+  }
+  stopOperationTracksSession_ = false;
+  captureStopIssued_ = false;
+  stop_.finish();
 
   LinkRecordingEvent event;
   event.requestId = requestId;
@@ -281,6 +378,21 @@ void LinkRecordingSession::observeAutomaticStop(
 
 void LinkRecordingSession::disconnect(
     LinkOperation &operation, LinkCapsuleTransactionGate &transactionGate) {
+  if (owned_ && start_.active() && !start_.recorderRequested()) {
+    start_.finish();
+    capturePrepareAttempted_ = false;
+    capturePrepared_ = false;
+    captureStopIssued_ = false;
+    capsuleId_ = "";
+    createdAt_ = "";
+    recorderOwner_ = RecorderOperationOwner::none;
+    captureRouter_->release(AudioCaptureOwner::localCapsule);
+    transactionGate.reset();
+    operation.releaseResource(LinkOperationResource::router);
+    operation.releaseResource(LinkOperationResource::transaction);
+    owned_ = false;
+    return;
+  }
   if (stop_.active()) {
     stop_.suppressResponseAndAbort();
   } else if (owned_) {

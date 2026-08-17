@@ -15,6 +15,7 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.LayoutInflater;
@@ -37,6 +38,7 @@ import com.zheliu.pokecapsule.R;
 import com.zheliu.pokecapsule.model.CapsuleRecord;
 import com.zheliu.pokecapsule.service.DeviceCapabilities;
 import com.zheliu.pokecapsule.service.InternalBroadcasts;
+import com.zheliu.pokecapsule.service.LibraryStorageAccess;
 import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
 import com.zheliu.pokecapsule.service.OverlayService;
 import com.zheliu.pokecapsule.service.RecordingService;
@@ -79,6 +81,7 @@ public final class MainActivity extends Activity {
     private boolean cloudConfigured;
     private boolean libraryReceiverRegistered;
     private boolean inlineRecording;
+    private boolean allFilesAccessPrompted;
     private CapsuleRecordButtonView inlineRecordButton;
 
     private final BroadcastReceiver libraryChangeReceiver = new BroadcastReceiver() {
@@ -117,6 +120,9 @@ public final class MainActivity extends Activity {
 
     @Override public void onResume() {
         super.onResume();
+        // Settings may return without granting all-files access. Allow one
+        // explicit retry from the status strip on the next foreground pass.
+        allFilesAccessPrompted = false;
         cloudConfigured = TencentAsrConfig.isConfigured(this);
         refresh();
         if (cloudConfigured) TranscriptionScheduler.scheduleAutomatic(this);
@@ -191,7 +197,10 @@ public final class MainActivity extends Activity {
             if (selectionMode) selectAllVisible();
             else showOverflowMenu();
         });
-        statusStrip.setOnClickListener(v -> showFilterChooser());
+        statusStrip.setOnClickListener(v -> {
+            if (hasLibraryStorageAccess()) showFilterChooser();
+            else requestRequiredPermissions();
+        });
         list.setDividerHeight(dp(1));
         list.setBackgroundColor(ViewKit.surface(this));
         adapter = new CapsuleListAdapter(this, selected);
@@ -271,12 +280,31 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private boolean hasLibraryStorageAccess() {
+        return LibraryStorageAccess.has(this);
+    }
+
     private void requestRequiredPermissions() {
         ArrayList<String> missing = new ArrayList<>();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.RECORD_AUDIO);
         }
-        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        if (Build.VERSION.SDK_INT >= 33
+                && getApplicationInfo().targetSdkVersion >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+        if (Build.VERSION.SDK_INT >= 30
+                && getApplicationInfo().targetSdkVersion >= 30) {
+            if (!Environment.isExternalStorageManager() && !allFilesAccessPrompted) {
+                allFilesAccessPrompted = true;
+                Intent access = new Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:" + getPackageName()));
+                startActivity(access);
+            }
+        } else if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
         }
@@ -300,6 +328,13 @@ public final class MainActivity extends Activity {
     }
 
     private void refresh() {
+        if (!hasLibraryStorageAccess()) {
+            if (statusStrip != null) {
+                statusStrip.setText("请授权 PokeCapsule 文件访问权限");
+                statusStrip.setVisibility(View.VISIBLE);
+            }
+            return;
+        }
         repository.load(snapshot -> {
             List<CapsuleRecord> source = controller.isTrash()
                     ? snapshot.trash : snapshot.active;

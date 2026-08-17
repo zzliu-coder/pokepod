@@ -18,7 +18,7 @@ required = {
     "publish before requeue": "assert(reachedPublishPhase);",
     "unknown schema immutable": "state->text(records[7].directory",
     "quarantine": "bad-one.journal.blocked",
-    "app poll": "capsuleLibrary.pollStartup(nowMs)",
+    "app poll": "capsuleLibrary->pollStartup(nowMs)",
 }
 combined = header + source + app + test
 missing = [name for name, needle in required.items() if needle not in combined]

@@ -7,6 +7,161 @@
 
 namespace pokepod {
 
+// A transient notice carries its visual severity explicitly.  The renderer
+// must never infer severity from translated message text: copy changes and
+// localization must not turn a progress message into an error.
+enum class UiNoticeKind : uint8_t {
+  info = 0,
+  progress,
+  success,
+  warning,
+  error,
+};
+
+inline bool uiNoticeUsesErrorIcon(UiNoticeKind kind) {
+  return kind == UiNoticeKind::error;
+}
+
+inline bool uiNoticeUsesWarningIcon(UiNoticeKind kind) {
+  return kind == UiNoticeKind::warning;
+}
+
+inline bool uiNoticeUsesCheckIcon(UiNoticeKind kind) {
+  return kind == UiNoticeKind::success;
+}
+
+inline bool uiNoticeIsProgress(UiNoticeKind kind) {
+  return kind == UiNoticeKind::progress;
+}
+
+// BOOT is a physical two-function control.  A short press owns local
+// recording; a held press owns wireless voice once the hold threshold is
+// crossed.  This policy keeps the decision independent from the application
+// services so it can be tested without Arduino or hardware mocks.
+struct BootGestureContext {
+  bool screenOn = true;
+  bool provisioning = false;
+  bool sensitiveConfirmationPending = false;
+  bool wirelessHolding = false;
+  bool localRecording = false;
+  bool bluetoothEnabled = true;
+  bool wirelessAppReady = false;
+};
+
+enum class BootGestureAction : uint8_t {
+  none = 0,
+  wakeScreen,
+  confirmProvisioning,
+  armProvisioningExit,
+  exitProvisioning,
+  stopWirelessVoice,
+  startWirelessVoice,
+  wirelessUnavailable,
+  voiceReadyShortPress,
+  bluetoothDisabled,
+  stopLocalRecording,
+  startLocalRecording,
+};
+
+class BootGesturePolicy {
+ public:
+  BootGestureAction pressed(uint32_t nowMs,
+                            const BootGestureContext &context) {
+    reset();
+    active_ = true;
+    startedAtMs_ = nowMs;
+    localRecordingAtPress_ = context.localRecording;
+    if (!context.screenOn) {
+      wakeOnly_ = true;
+      return BootGestureAction::wakeScreen;
+    }
+    if (context.provisioning) {
+      provisioning_ = true;
+      if (context.sensitiveConfirmationPending) {
+        provisioningConfirmationConsumed_ = true;
+        return BootGestureAction::confirmProvisioning;
+      }
+      provisioningExitArmed_ = true;
+      return BootGestureAction::armProvisioningExit;
+    }
+    if (context.wirelessHolding) {
+      wirelessHoldingAtPress_ = true;
+    }
+    return BootGestureAction::none;
+  }
+
+  BootGestureAction held(uint32_t nowMs,
+                         const BootGestureContext &context) {
+    if (!active_ || wakeOnly_ || provisioning_ ||
+        wirelessHoldingAtPress_ || localRecordingAtPress_ ||
+        context.wirelessHolding || context.localRecording ||
+        longActionConsumed_ || nowMs - startedAtMs_ < ui::kWirelessHoldDelayMs) {
+      return BootGestureAction::none;
+    }
+    longActionConsumed_ = true;
+    if (!context.bluetoothEnabled) return BootGestureAction::bluetoothDisabled;
+    if (!context.wirelessAppReady) {
+      return BootGestureAction::wirelessUnavailable;
+    }
+    return BootGestureAction::startWirelessVoice;
+  }
+
+  BootGestureAction released(const BootGestureContext &context) {
+    if (!active_) return BootGestureAction::none;
+    active_ = false;
+    if (wakeOnly_) return BootGestureAction::none;
+    if (provisioningConfirmationConsumed_) {
+      provisioningConfirmationConsumed_ = false;
+      return BootGestureAction::none;
+    }
+    if (provisioningExitArmed_) {
+      provisioningExitArmed_ = false;
+      return BootGestureAction::exitProvisioning;
+    }
+    if (wirelessHoldingAtPress_ || context.wirelessHolding) {
+      return BootGestureAction::stopWirelessVoice;
+    }
+    // A long gesture that could not start wireless input is consumed.  This
+    // is the critical guard that prevents a failed long press from starting a
+    // local capsule on release.
+    if (longActionConsumed_) return BootGestureAction::none;
+    // When the Mac voice path is ready, a short BOOT tap belongs to the
+    // on-screen capsule control.  Keep the physical button's early release
+    // from starting a second capture owner.
+    if (localRecordingAtPress_) return BootGestureAction::stopLocalRecording;
+    if (context.wirelessAppReady) {
+      return BootGestureAction::voiceReadyShortPress;
+    }
+    return BootGestureAction::startLocalRecording;
+  }
+
+  bool active() const { return active_; }
+  bool longActionConsumed() const { return longActionConsumed_; }
+
+  void reset() {
+    active_ = false;
+    wakeOnly_ = false;
+    provisioning_ = false;
+    provisioningExitArmed_ = false;
+    provisioningConfirmationConsumed_ = false;
+    wirelessHoldingAtPress_ = false;
+    localRecordingAtPress_ = false;
+    longActionConsumed_ = false;
+    startedAtMs_ = 0;
+  }
+
+ private:
+  bool active_ = false;
+  bool wakeOnly_ = false;
+  bool provisioning_ = false;
+  bool provisioningExitArmed_ = false;
+  bool provisioningConfirmationConsumed_ = false;
+  bool wirelessHoldingAtPress_ = false;
+  bool localRecordingAtPress_ = false;
+  bool longActionConsumed_ = false;
+  uint32_t startedAtMs_ = 0;
+};
+
 // Page values encode their physical order. Home is deliberately the center.
 enum class RootPage : uint8_t { capsules = 0, home = 1, device = 2 };
 enum class HomeMode : uint8_t { idle, recording, committing, queued, transcribing, success, failed };
@@ -33,6 +188,7 @@ struct UiState {
   bool detailTrashEnabled = false;
   bool detailMoreOverlay = false;
   bool purgeConfirmOverlay = false;
+  bool shutdownConfirmOverlay = false;
   bool capsuleScopeOverlay = false;
   bool capsuleSelectionMode = false;
   bool capsuleTrashScope = false;
@@ -184,6 +340,8 @@ enum class UiAction : uint8_t {
   toggleBluetoothPairing,
   forgetBluetoothMac,
   openComputerSync,
+  openShutdownConfirm,
+  confirmShutdown,
   closeComputerSync,
   raiseToWakeToggle,
   openCapsule,
@@ -327,6 +485,17 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
     }
     return UiAction::none;
   }
+  if (state.shutdownConfirmOverlay) {
+    if (x < ui::kShutdownConfirmLeft || x >= ui::kShutdownConfirmRight ||
+        y < ui::kShutdownConfirmTop || y >= ui::kShutdownConfirmBottom) {
+      return UiAction::closeOverlay;
+    }
+    if (y >= ui::kShutdownConfirmActionsTop) {
+      return x < ui::kShutdownConfirmActionSplit
+          ? UiAction::closeOverlay : UiAction::confirmShutdown;
+    }
+    return UiAction::none;
+  }
   if (state.detailMoreOverlay) {
     if (x < ui::kDetailMoreLeft || x >= ui::kDetailMoreRight ||
         y < ui::kDetailMoreTop || y >= ui::kDetailMoreBottom) {
@@ -369,7 +538,8 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
   }
   if (screen == UiScreen::device) {
     if (y >= ui::kDeviceWifiTop && y < ui::kDeviceMacTop) {
-      return UiAction::wifiToggle;
+      return x >= ui::kDeviceBluetoothToggleLeft
+          ? UiAction::wifiToggle : UiAction::openProvisioning;
     }
     if (y >= ui::kDeviceMacTop && y < ui::kDeviceStorageTop) {
       return x >= ui::kDeviceBluetoothToggleLeft
@@ -382,7 +552,7 @@ inline UiAction uiActionAt(const UiState &state, int16_t x, int16_t y,
       return UiAction::raiseToWakeToggle;
     }
     if (y >= ui::kDeviceProvisionTop && y < ui::kDeviceRowsBottom) {
-      return UiAction::openProvisioning;
+      return UiAction::openShutdownConfirm;
     }
     return UiAction::none;
   }

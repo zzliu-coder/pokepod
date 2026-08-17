@@ -117,13 +117,17 @@ status_dispatch = DISPATCHER[status_start:status_end]
 assert "requestLinkRecordingStop" not in status_dispatch
 assert "diagnostics_.statusJson()" in status_dispatch
 assert "sendTerminalOrDisconnect(requestId" in status_dispatch
-status = DIAGNOSTICS[DIAGNOSTICS.index("String LinkDiagnostics::statusJson() const"):
+status = DIAGNOSTICS[DIAGNOSTICS.index("const String &LinkDiagnostics::statusJson() const"):
                      DIAGNOSTICS.index("String LinkDiagnostics::provisioningJson() const")]
-assert "kStatusExtraBytes" in status
 assert "diagnosticsTruncated" in status
-assert "String response =" in status
-assert r'\"status\":\"ok\"' in status
-assert r'\"version\":2' in status
+assert "String &extra = statusBuffer_" in status
+assert "String extra" not in status
+assert "statusBuffer_.reserve(kLinkMaxControlBytes)" in DIAGNOSTICS
+assert "jsonEscaped" not in DIAGNOSTICS
+assert 'extra = kStatusPrefix' in status
+assert "extra += '}'" in status
+assert r'\"status\":\"ok\"' in DIAGNOSTICS
+assert r'\"version\":2' in DIAGNOSTICS
 
 fallback_start = TRANSPORT.index("bool PokePodLinkService::sendTerminalOrDisconnect")
 fallback_end = TRANSPORT.index("bool PokePodLinkService::sendEvent", fallback_start)

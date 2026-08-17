@@ -14,6 +14,8 @@ assert '--after hard-reset run' not in source
 assert 'FLASH_MODE=release' in source
 assert 'output/$FLASH_MODE/PokePodAmoled.ino.bin' in source
 assert 'validate-flash-artifact.py' in source
+assert 'FIRMWARE_ELF=$(dirname -- "$FIRMWARE_BIN")/PokePodAmoled.ino.elf' in source
+assert '--binary "$FIRMWARE_BIN" --elf "$FIRMWARE_ELF"' in source
 assert 'artifact_manifest_binary_sha256' in validator
 assert 'artifact_resource_policy_mismatch' in validator
 assert 'resource_review_invalid' in validator

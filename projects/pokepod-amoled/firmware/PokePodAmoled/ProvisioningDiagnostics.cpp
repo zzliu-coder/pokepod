@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <time.h>
 
 #include "WifiFailurePolicy.h"
@@ -10,6 +12,7 @@ namespace pokepod {
 namespace {
 
 constexpr char kProvisioningLogKey[] = "wifi_log_v1";
+constexpr char kProvisioningProbeKey[] = "wifi_probe_v1";
 
 void copySsid(char *destination, size_t capacity, const String &ssid) {
   const size_t length = std::min(ssid.length(), capacity - 1);
@@ -17,11 +20,27 @@ void copySsid(char *destination, size_t capacity, const String &ssid) {
   destination[length] = '\0';
 }
 
+uint8_t pollBucket(uint32_t elapsedMs) {
+  if (elapsedMs <= 1) return 0;
+  if (elapsedMs <= 2) return 1;
+  if (elapsedMs <= 4) return 2;
+  if (elapsedMs <= 8) return 3;
+  if (elapsedMs <= 16) return 4;
+  if (elapsedMs <= 32) return 5;
+  if (elapsedMs <= 64) return 6;
+  return 7;
+}
+
 }  // namespace
 
 bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
+  persistentWrites_ = 0;
+  pollCount_ = 0;
+  pollMaxMs_ = 0;
+  std::memset(pollBuckets_, 0, sizeof(pollBuckets_));
   open_ = preferences_.begin("pokepod_diag", false);
   initializeProvisioningLog(stored_);
+  initializeProvisioningProbe(probe_);
   if (!open_) {
     log.println("{\"event\":\"provisioning_log\",\"ok\":false,\"stage\":\"nvs_open\"}");
     return false;
@@ -32,6 +51,15 @@ bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
       preferences_.getBytes(kProvisioningLogKey, &loaded, sizeof(loaded)) ==
           sizeof(loaded) && validateProvisioningLog(loaded);
   if (loadedOk) stored_ = loaded;
+  StoredProvisioningProbe loadedProbe{};
+  const bool probeLoaded =
+      preferences_.getBytesLength(kProvisioningProbeKey) ==
+          sizeof(loadedProbe) &&
+      preferences_.getBytes(kProvisioningProbeKey, &loadedProbe,
+                            sizeof(loadedProbe)) == sizeof(loadedProbe) &&
+      validateProvisioningProbe(loadedProbe);
+  if (probeLoaded) probe_ = loadedProbe;
+  printProbeBoot(log, resetReason, probeLoaded);
   recoveredInterruptedSession_ = false;
   const StoredProvisioningLogRecord *latest = provisioningLogNewest(stored_, 0);
   if (latest != nullptr) {
@@ -62,9 +90,103 @@ bool ProvisioningDiagnostics::begin(Print &log, uint16_t resetReason) {
   return true;
 }
 
+void ProvisioningDiagnostics::recordPollDuration(uint32_t elapsedMs,
+                                                 Print &log) {
+  ++pollCount_;
+  if (elapsedMs > pollMaxMs_) pollMaxMs_ = elapsedMs;
+  const uint8_t bucket = pollBucket(elapsedMs);
+  if (pollBuckets_[bucket] != 0xffffU) ++pollBuckets_[bucket];
+  log.printf(
+      "{\"event\":\"provisioning_poll\",\"elapsed_ms\":%lu,"
+      "\"max_ms\":%lu,\"bucket\":%u,\"count\":%lu}\n",
+      static_cast<unsigned long>(elapsedMs),
+      static_cast<unsigned long>(pollMaxMs_), static_cast<unsigned>(bucket),
+      static_cast<unsigned long>(pollCount_));
+}
+
 bool ProvisioningDiagnostics::persist(const StoredProvisioningLog &proposed) {
   return open_ && preferences_.putBytes(
       kProvisioningLogKey, &proposed, sizeof(proposed)) == sizeof(proposed);
+}
+
+bool ProvisioningDiagnostics::persistProbe(
+    const StoredProvisioningProbe &proposed) {
+  return open_ && preferences_.putBytes(
+      kProvisioningProbeKey, &proposed, sizeof(proposed)) == sizeof(proposed);
+}
+
+void ProvisioningDiagnostics::printProbeBoot(
+    Print &log, uint16_t currentResetReason, bool recovered) const {
+  log.printf(
+      "{\"event\":\"provisioning_probe_boot\",\"recovered\":%s,"
+      "\"stage\":\"%s\",\"sequence\":%lu,\"uptime_ms\":%lu,"
+      "\"internal_free\":%lu,\"internal_largest\":%lu,"
+      "\"psram_free\":%lu,\"psram_largest\":%lu,\"psram_total\":%lu,"
+      "\"record_reset_reason\":%u,\"current_reset_reason\":%u}\n",
+      recovered ? "true" : "false",
+      provisioningProbeStageKey(
+          static_cast<ProvisioningProbeStage>(probe_.stage)),
+      static_cast<unsigned long>(probe_.sequence),
+      static_cast<unsigned long>(probe_.uptimeMs),
+      static_cast<unsigned long>(probe_.internalFree),
+      static_cast<unsigned long>(probe_.internalLargest),
+      static_cast<unsigned long>(probe_.psramFree),
+      static_cast<unsigned long>(probe_.psramLargest),
+      static_cast<unsigned long>(probe_.psramTotal),
+      static_cast<unsigned>(probe_.recordResetReason),
+      static_cast<unsigned>(currentResetReason));
+}
+
+bool ProvisioningDiagnostics::recordProbe(
+    ProvisioningProbeStage stage, Print &log) {
+  if (!open_) return false;
+  StoredProvisioningProbe proposed = probe_;
+  if (!validateProvisioningProbe(proposed)) {
+    initializeProvisioningProbe(proposed);
+  }
+  ++proposed.sequence;
+  if (proposed.sequence == 0) proposed.sequence = 1;
+  proposed.stage = static_cast<uint8_t>(stage);
+  proposed.uptimeMs = millis();
+  proposed.internalFree = heap_caps_get_free_size(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  proposed.internalLargest = heap_caps_get_largest_free_block(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  proposed.psramFree = heap_caps_get_free_size(
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  proposed.psramLargest = heap_caps_get_largest_free_block(
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  proposed.psramTotal = heap_caps_get_total_size(
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  proposed.recordResetReason = static_cast<uint16_t>(esp_reset_reason());
+  finalizeProvisioningProbe(proposed);
+  const bool persistRequired = provisioningProbePersists(stage);
+  bool ok = true;
+  if (persistRequired) {
+    if (persistentWrites_ >= kProvisioningMaxPersistentWritesPerSession) {
+      ok = false;
+    } else {
+      ok = persistProbe(proposed);
+      if (ok) ++persistentWrites_;
+    }
+  }
+  // RAM always receives the newest breadcrumb, even when its persistence
+  // budget is exhausted. The live USB log carries the exact failure.
+  probe_ = proposed;
+  log.printf(
+      "{\"event\":\"provisioning_probe\",\"ok\":%s,\"persisted\":%s,"
+      "\"stage\":\"%s\",\"sequence\":%lu,\"internal_free\":%lu,"
+      "\"internal_largest\":%lu,\"psram_free\":%lu,"
+      "\"psram_largest\":%lu,\"psram_total\":%lu}\n",
+      ok ? "true" : "false", persistRequired && ok ? "true" : "false",
+      provisioningProbeStageKey(stage),
+      static_cast<unsigned long>(proposed.sequence),
+      static_cast<unsigned long>(proposed.internalFree),
+      static_cast<unsigned long>(proposed.internalLargest),
+      static_cast<unsigned long>(proposed.psramFree),
+      static_cast<unsigned long>(proposed.psramLargest),
+      static_cast<unsigned long>(proposed.psramTotal));
+  return ok;
 }
 
 bool ProvisioningDiagnostics::record(
@@ -85,11 +207,18 @@ bool ProvisioningDiagnostics::record(
   copySsid(record.ssid, sizeof(record.ssid), ssid);
   appendProvisioningLog(proposed, record);
   finalizeProvisioningLog(proposed);
-  const bool ok = persist(proposed);
-  if (ok) {
-    stored_ = proposed;
-    ++revision_;
+  const bool persistRequired = provisioningLogPersists(stage);
+  bool ok = true;
+  if (persistRequired) {
+    if (persistentWrites_ >= kProvisioningMaxPersistentWritesPerSession) {
+      ok = false;
+    } else {
+      ok = persist(proposed);
+      if (ok) ++persistentWrites_;
+    }
   }
+  stored_ = proposed;
+  ++revision_;
   log.printf("{\"event\":\"provisioning_diagnostic\",\"ok\":%s,\"stage\":\"%s\",\"outcome\":%u,\"reason\":%u,\"rssi\":%d,\"elapsed_ms\":%lu}\n",
              ok ? "true" : "false", provisioningLogStageKey(stage),
              static_cast<unsigned>(outcome), static_cast<unsigned>(reason),
@@ -106,9 +235,16 @@ bool ProvisioningDiagnostics::clear(Print &log) {
     stored_ = proposed;
     ++revision_;
   }
-  log.printf("{\"event\":\"provisioning_log_cleared\",\"ok\":%s}\n",
-             ok ? "true" : "false");
-  return ok;
+  StoredProvisioningProbe clearedProbe{};
+  initializeProvisioningProbe(clearedProbe);
+  finalizeProvisioningProbe(clearedProbe);
+  const bool probeOk = persistProbe(clearedProbe);
+  if (probeOk) probe_ = clearedProbe;
+  log.printf(
+      "{\"event\":\"provisioning_log_cleared\",\"ok\":%s,"
+      "\"probe_ok\":%s}\n",
+      ok ? "true" : "false", probeOk ? "true" : "false");
+  return ok && probeOk;
 }
 
 const char *provisioningLogStageKey(ProvisioningLogStage stage) {

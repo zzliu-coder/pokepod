@@ -114,6 +114,16 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   }
   uint32_t startupPolls() const { return startupPolls_; }
   size_t startupMaximumIoBytes() const { return startupMaximumIoBytes_; }
+  size_t startupIsolatedCount() const { return startupIsolatedCount_; }
+  const String &startupLastIsolatedId() const {
+    return startupLastIsolatedId_;
+  }
+  const String &startupLastIsolationStage() const {
+    return startupLastIsolationStage_;
+  }
+  const String &startupLastIsolationError() const {
+    return startupLastIsolationError_;
+  }
   bool scan();
   // Queue a full rebuild without doing filesystem work in the caller. The
   // request is sticky: if a scan is running, or a mutation currently prevents
@@ -184,6 +194,7 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   static const char *statusName(CapsuleStatus status);
 
  private:
+  friend struct CapsuleLibraryStartupTestAccess;
   struct ScanDirectoryTask {
     String path;
     String folder;
@@ -236,6 +247,12 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
    private:
     const String *value_ = nullptr;
   };
+  struct StartupIsolationDiagnostic {
+    char id[37]{};
+    char stage[32]{};
+    char error[48]{};
+  };
+  static constexpr size_t kStartupIsolationDiagnosticCapacity = 16;
 
   bool readRecordText(const String &directory, const String &folder,
                       const String &capsuleText,
@@ -266,9 +283,20 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
                              bool incrementAttempts, String &encoded,
                              const char *expectedCapsuleId = nullptr);
   void failStartup(const char *stage);
+  void isolateStartupRequeue(const char *stage, const char *error);
+  void deferStartupRequeueIsolation(const char *stage, const char *error);
   void clearStartupRequeue();
   bool selectStartupRequeue();
   bool updateStartupRequeuedLocator();
+  bool startupCommitCanBeIsolated() const;
+  void rememberStartupIsolation(const String &id, const char *stage,
+                                const char *error);
+  const StartupIsolationDiagnostic *startupIsolationDiagnostic(
+      const char *id) const;
+  void populateStartupIsolatedRecord(const CapsuleLocator &locator,
+                                    const String &directory,
+                                    const String &folder,
+                                    CapsuleSummary &record) const;
   size_t internalPendingCount() const;
   bool updateFavorite(const String &id, bool favorite);
   bool removeTree(const String &path);
@@ -331,6 +359,16 @@ class CapsuleLibrary : public CapsuleOperationCatalog {
   File startupRequeueFile_;
   StartupStringByteSource startupRequeueSource_;
   CapsuleTransactionInput startupRequeueInput_;
+  const char *startupDeferredIsolationStage_ = nullptr;
+  const char *startupDeferredIsolationError_ = nullptr;
+  size_t startupIsolatedCount_ = 0;
+  String startupLastIsolatedId_;
+  String startupLastIsolationStage_;
+  String startupLastIsolationError_;
+  std::array<StartupIsolationDiagnostic,
+             kStartupIsolationDiagnosticCapacity> startupIsolationDiagnostics_{};
+  size_t startupIsolationDiagnosticCount_ = 0;
+  size_t startupIsolationDiagnosticNext_ = 0;
   uint32_t startupPolls_ = 0;
   size_t startupMaximumIoBytes_ = 0;
   CapsuleLocator *locators_ = nullptr;

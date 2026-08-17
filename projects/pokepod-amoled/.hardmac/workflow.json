@@ -121,6 +121,21 @@
       "changed Wi-Fi or BLE behavior is tested when in scope"
     ]
   },
+  "fixtureControl": {
+    "schema": "pokepod.fixture.control.v1",
+    "doctorCommand": "python3 fixture/pokepod-fixture.py doctor --control-profile {control_profile}",
+    "automaticRecoveryCommand": "python3 fixture/pokepod-fixture.py recover --control-profile {control_profile} --authority {identity_authority} --expected-device-id {device_identity} --mode fast",
+    "normalUpdateNeedsBootReset": false,
+    "rescueNeedsPhysicalController": true,
+    "referenceControllerFirmware": "fixture/controller-firmware/pokepod_fixture_controller.ino",
+    "requiredEvidence": [
+      "control profile reports command backend",
+      "BOOT is released after every attempted transition",
+      "ROM identity passes the private device authority before write",
+      "app0 backup and complete readback pass",
+      "the same Link deviceId returns after recovery"
+    ]
+  },
   "safety": {
     "storesSecrets": false,
     "storesInstanceIdentifiers": false

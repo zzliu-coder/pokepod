@@ -1,0 +1,24 @@
+{
+  "schema": "pokepod.fixture.control.v1",
+  "backend": "manual",
+  "actions": {
+    "ping": null,
+    "assert_boot": null,
+    "release_boot": null,
+    "release_reset": null,
+    "pulse_reset": null,
+    "power_off": null,
+    "power_on": null
+  },
+  "timings": {
+    "actionTimeoutSeconds": 5.0,
+    "bootSettleSeconds": 0.1,
+    "resetSettleSeconds": 0.35,
+    "powerOffSeconds": 0.5
+  },
+  "notes": [
+    "Set backend to command only after each action is wired to an argv array.",
+    "The controller hardware must drive BOOT and RESET as protected open-drain outputs.",
+    "Configure power_off and power_on together when the fixture can switch VBUS."
+  ]
+}

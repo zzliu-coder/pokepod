@@ -43,6 +43,14 @@ require(worker, "TencentCancelReason::watchdog",
         "ASR worker watchdog cancellation is missing")
 require(worker, "TencentJobState::committing",
         "ASR success is not separated from atomic commit")
+require(worker, "clearTaskSecrets();",
+        "ASR task-local credentials are not erased on terminal paths")
+require(worker, "secureWipeSecrets(taskSettings_);",
+        "ASR task-local settings do not use the shared wipe helper")
+require(asr, "SecureWipeGuard secretDateWipe",
+        "TC3 date key is not erased on every authorization exit")
+require(asr, "SecureStringWipeGuard initialKeyWipe",
+        "TC3 initial key is not erased on every authorization exit")
 require(worker_header, "TencentJobRuntime runtime_;",
         "production worker does not own the host-tested lifecycle runtime")
 for lifecycle_call in (
@@ -102,14 +110,22 @@ shutdown = main[main.index("bool advanceSafeShutdown("):
                 main.index("String recordingId()")]
 require(shutdown, "if (progress != SafeShutdownProgress::ready)",
         "safe shutdown does not gate teardown on actual ASR quiescence")
-if shutdown.index("SD_MMC.end()") < shutdown.index(
+if shutdown.index("board.endSdMount()") < shutdown.index(
         "if (progress != SafeShutdownProgress::ready)"):
     raise SystemExit(
         "FAIL tencent_network_contract: SD is unmounted before ASR quiescence")
 require(main, "if (!safeShutdownQuiesce.pending() &&\n"
               "      currentPowerDecision.requestDeepSleep",
         "a deferred safe shutdown can fall through into deep sleep")
-require(link + link_transport, "tencent_->quiesce(",
-        "Link reboot can restart while ASR still owns resources")
+require(main, "tencentWorker.beginQuiesce(",
+        "device reboot must begin ASR quiescence without blocking")
+require(main, "tencentWorker.pollQuiesce(",
+        "device reboot must retain ASR ownership until quiesced")
+require(main, "DeviceRebootPhase::waitingForServices",
+        "device reboot lacks a persistent nonblocking ASR phase")
+require(main, "tencentWorker.abandonResultForReboot()",
+        "device reboot must avoid synchronous ASR result settlement")
+if "delay(5)" in link_transport:
+    raise SystemExit("FAIL tencent_network_contract: Link transport still sleeps in poll")
 
 print("PASS tencent_network_contract")

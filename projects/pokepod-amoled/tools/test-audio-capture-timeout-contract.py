@@ -36,4 +36,8 @@ assert "(void)timeoutMs" not in runtime_cpp
 assert "readStereo48(\n        raw_ + rawUsed_, sizeof(raw_) - rawUsed_)" in service
 assert "kAudioCaptureReadTimeoutMs == 50U" in test
 assert "kAudioCaptureStopReadWindows" in test
+assert "sourceEarlyZero" in service
+assert "earlyZeroReads_" in service
+assert "cycle == AudioCaptureCycleResult::sourceEarlyZero" in runtime_cpp
+assert "taskYIELD()" in runtime_cpp
 print("PASS test_audio_capture_timeout_contract")

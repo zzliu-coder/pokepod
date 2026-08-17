@@ -34,9 +34,11 @@ struct DashboardView {
   bool audioReady = false;
   bool capsuleLibraryReady = false;
   bool localCapsulesReady = false;
+  String localCapsuleStatus;
   bool recorderReady = false;
   bool transcriptionReady = false;
   bool bleVoiceServiceReady = false;
+  bool shutdownPending = false;
   bool bluetoothEnabled = false;
   bool bleVoiceDisablePending = false;
   bool linkReady = false;
@@ -45,6 +47,7 @@ struct DashboardView {
   bool usbConnected = false;
   bool bleVoiceConnected = false;
   bool bleVoiceReady = false;
+  bool bleVoiceHandshakeDisconnectPending = false;
   bool bleVoiceBonded = false;
   bool bleVoicePairing = false;
   uint32_t bleVoicePasskey = 0;
@@ -86,6 +89,7 @@ struct DashboardView {
   ProvisioningState portalState = ProvisioningState::ready;
   const ProvisioningDiagnostics *provisioningDiagnostics = nullptr;
   String message;
+  UiNoticeKind messageKind = UiNoticeKind::info;
 };
 
 class Dashboard {
@@ -117,6 +121,7 @@ class Dashboard {
   void openProvisioningLog();
   void openBluetoothPairing();
   void openComputerSync();
+  void openShutdownConfirm();
   void closeOverlays();
   void back();
   void navigate(RootPage page);
@@ -160,6 +165,7 @@ class Dashboard {
   void drawScopePicker(const DashboardView &view);
   void drawDetailMore(const DashboardView &view);
   void drawPurgeConfirm();
+  void drawShutdownConfirm();
   void drawDevice(const DashboardView &view);
   void drawComputerSync(const DashboardView &view);
   void drawBluetoothPairing(const DashboardView &view);
@@ -174,8 +180,9 @@ class Dashboard {
                       uint16_t dimAccent, int16_t scale = 100);
   void drawHomeAction(int16_t top, int16_t bottom, bool wireless,
                       bool holding, bool enabled = true,
-                      bool bluetoothEnabled = true);
-  void drawToast(const String &message);
+                      bool bluetoothEnabled = true,
+                      const String &disabledDetail = String());
+  void drawToast(const String &message, UiNoticeKind kind);
   void drawCenteredText(const String &text, int16_t y, UiTextSize size,
                         uint16_t color, bool bold = false,
                         int16_t maxWidth = 336);

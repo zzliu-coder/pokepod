@@ -16,6 +16,8 @@ board = source("BoardServices.cpp")
 main = source("PokePodApp.cpp")
 recorder = source("WavRecorder.cpp") + source("WavRecorder.h")
 capture = source("AudioCaptureService.h") + source("AudioCaptureRuntime.h")
+pipeline = source("AudioPipeline.cpp") + source("AudioPipeline.h")
+wifi = source("WifiController.cpp") + source("WifiController.h")
 voice = source("VoiceSessionController.h")
 link = source("PokePodLinkService.cpp")
 link_diagnostics = source("LinkDiagnostics.cpp")
@@ -57,6 +59,13 @@ assert "audio_frontend_noise_floor" in main
 assert "audio_frontend_noise_floor" in link_diagnostics
 assert "audio_frontend_suppressed_samples" in main
 assert "audio_frontend_suppressed_samples" in link_diagnostics
+assert "audio_capture_last_hardware_error" in link_diagnostics
+assert "audio_capture_heap_free_before_start" in link_diagnostics
+assert "audio_capture_heap_largest_before_start" in link_diagnostics
+assert "audio_capture_admission" in pipeline
+assert "pauseForAudioCapture" in wifi
+assert "audioCaptureExclusive && !provisioning" in wifi
+assert "linkCoordinator.owner() != LinkTransport::wifi" in main
 
 assert "PageTransition pageTransition_" in source("Dashboard.h")
 assert "dashboard.advancePageTransition(now)" in main

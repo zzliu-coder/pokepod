@@ -53,26 +53,38 @@ bool AudioCaptureRuntime::begin(BoardVariant variant, Print &log) {
 bool AudioCaptureRuntime::start(AudioPipeline &audio, uint32_t sessionId,
                                 Print &log) {
   if (!ready_ || running() || sessionId == 0) return false;
+  if (!prepare(audio, log)) return false;
+  if (startPrepared(audio, sessionId, log)) return true;
+  audio.stopHardware(log);
+  return false;
+}
+
+bool AudioCaptureRuntime::startPrepared(AudioPipeline &audio,
+                                        uint32_t sessionId, Print &log) {
+  (void)log;
+  if (!ready_ || running() || sessionId == 0 || !audio.active()) return false;
   while (xSemaphoreTake(stopped_, 0) == pdTRUE) {}
-  if (!audio.startCapture(log)) return false;
   audio_ = &audio;
   source_.bind(audio_);
   if (!service_.startSession(sessionId, source_)) {
     source_.bind(nullptr);
     audio_ = nullptr;
-    audio.stopHardware(log);
     return false;
   }
   if (!sessionState_.begin()) {
     service_.stopSession();
     source_.bind(nullptr);
     audio_ = nullptr;
-    audio.stopHardware(log);
     return false;
   }
   incomplete_.store(false, std::memory_order_release);
   xTaskNotifyGive(task_);
   return true;
+}
+
+bool AudioCaptureRuntime::prepare(AudioPipeline &audio, Print &log) {
+  if (!ready_ || running()) return false;
+  return audio.startCapture(log);
 }
 
 bool AudioCaptureRuntime::stop(Print &log) {
@@ -132,11 +144,16 @@ void AudioCaptureRuntime::taskMain() {
       const AudioCaptureCycleResult cycle = service_.captureOnce(millis());
       if (cycle == AudioCaptureCycleResult::frameDropped ||
           cycle == AudioCaptureCycleResult::sourceTimeout ||
+          cycle == AudioCaptureCycleResult::sourceEarlyZero ||
           cycle == AudioCaptureCycleResult::sourceOverrun ||
           cycle == AudioCaptureCycleResult::sourceFailure) {
         incomplete_.store(true, std::memory_order_release);
       }
-      if (cycle == AudioCaptureCycleResult::sourceFailure) taskYIELD();
+      if (cycle == AudioCaptureCycleResult::sourceFailure ||
+          cycle == AudioCaptureCycleResult::sourceEarlyZero) taskYIELD();
+      if (cycle == AudioCaptureCycleResult::sourceWarmingUp) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
     }
     if (sessionState_.taskStopped()) {
       xSemaphoreGive(stopped_);

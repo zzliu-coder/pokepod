@@ -13,6 +13,7 @@
 #include "StorageCoordinator.h"
 #include "Tc3Policy.h"
 #include "TencentRootCa.h"
+#include "SecureWipe.h"
 
 namespace pokepod {
 namespace {
@@ -198,7 +199,8 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
   log.printf("{\"event\":\"tencent_asr_stage\",\"stage\":\"hashed\",\"elapsed_ms\":%lu,\"audio_bytes\":%lu}\n",
              static_cast<unsigned long>(millis() - startedAtMs),
              static_cast<unsigned long>(audioBytes));
-  const String auth = authorization(settings, timestamp, payloadHash);
+  String auth = authorization(settings, timestamp, payloadHash);
+  SecureStringWipeGuard authWipe(auth);
   bool seekOk = false;
   {
     StorageIoLease lease = StorageCoordinator::instance().acquireIo(
@@ -286,6 +288,7 @@ bool TencentAsr::transcribe(fs::FS &fs, const String &audioPath,
              static_cast<unsigned long>(millis() - startedAtMs));
   const size_t contentLength = prefix.length() + encodedBytes + suffix.length();
   String headers;
+  SecureStringWipeGuard headersWipe(headers);
   headers.reserve(768);
   headers += "POST / HTTP/1.1\r\nHost: ";
   headers += kHost;
@@ -483,11 +486,16 @@ String TencentAsr::authorization(const DeviceSettings &settings,
   const String timestampText(static_cast<unsigned long long>(timestamp));
   const String toSign = tc3StringToSign<String>(
       timestampText.c_str(), scope, hex(canonicalHash, 32));
-  const String initialKey = "TC3" + settings.secretKey;
-  uint8_t secretDate[32];
-  uint8_t secretService[32];
-  uint8_t secretSigning[32];
-  uint8_t signature[32];
+  String initialKey = "TC3" + settings.secretKey;
+  SecureStringWipeGuard initialKeyWipe(initialKey);
+  uint8_t secretDate[32] = {};
+  uint8_t secretService[32] = {};
+  uint8_t secretSigning[32] = {};
+  uint8_t signature[32] = {};
+  SecureWipeGuard secretDateWipe(secretDate, sizeof(secretDate));
+  SecureWipeGuard secretServiceWipe(secretService, sizeof(secretService));
+  SecureWipeGuard secretSigningWipe(secretSigning, sizeof(secretSigning));
+  SecureWipeGuard signatureWipe(signature, sizeof(signature));
   if (!hmacSha256(reinterpret_cast<const uint8_t *>(initialKey.c_str()),
                   initialKey.length(), reinterpret_cast<const uint8_t *>(date),
                   strlen(date), secretDate) ||

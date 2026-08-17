@@ -17,6 +17,45 @@ enum class AudioCaptureReadStatus : uint8_t {
   failure,
 };
 
+// A terminal capture snapshot uses one stable vocabulary across the realtime
+// source and the main-loop dispatcher.  The value is deliberately a small
+// enum: it is copied atomically by the source and never requires a string or
+// allocation on the capture task.
+enum class AudioCaptureFailureCode : uint8_t {
+  none = 0,
+  sourceTimeout,
+  zeroByteRead,
+  earlyZeroRead,
+  sourceOverrun,
+  sourceFailure,
+  captureRingDrop,
+  dispatchSequenceGap,
+  dispatchRoutingFailure,
+  recorderDeliveryFailure,
+  bleDeliveryFailure,
+};
+
+inline const char *audioCaptureFailureCodeName(AudioCaptureFailureCode code) {
+  switch (code) {
+    case AudioCaptureFailureCode::none: return "none";
+    case AudioCaptureFailureCode::sourceTimeout: return "source_timeout";
+    case AudioCaptureFailureCode::zeroByteRead: return "zero_byte_read";
+    case AudioCaptureFailureCode::earlyZeroRead: return "early_zero_read";
+    case AudioCaptureFailureCode::sourceOverrun: return "source_overrun";
+    case AudioCaptureFailureCode::sourceFailure: return "source_failure";
+    case AudioCaptureFailureCode::captureRingDrop: return "capture_ring_drop";
+    case AudioCaptureFailureCode::dispatchSequenceGap:
+      return "dispatch_sequence_gap";
+    case AudioCaptureFailureCode::dispatchRoutingFailure:
+      return "dispatch_routing_failure";
+    case AudioCaptureFailureCode::recorderDeliveryFailure:
+      return "recorder_delivery_failure";
+    case AudioCaptureFailureCode::bleDeliveryFailure:
+      return "ble_delivery_failure";
+  }
+  return "unknown";
+}
+
 struct AudioCaptureReadResult {
   AudioCaptureReadStatus status = AudioCaptureReadStatus::failure;
   size_t bytes = 0;
@@ -46,6 +85,8 @@ enum class AudioCaptureCycleResult : uint8_t {
   frameQueued,
   frameDropped,
   sourceTimeout,
+  sourceEarlyZero,
+  sourceWarmingUp,
   sourceOverrun,
   sourceFailure,
 };
@@ -56,11 +97,16 @@ struct AudioCaptureServiceMetrics {
   uint32_t readCalls = 0;
   uint32_t shortReads = 0;
   uint32_t timeouts = 0;
+  uint32_t zeroByteReads = 0;
+  uint32_t earlyZeroReads = 0;
+  uint32_t warmupZeroReads = 0;
   uint32_t sourceOverruns = 0;
   uint32_t sourceFailures = 0;
   uint32_t longestReadUs = 0;
   uint32_t lastReadUs = 0;
   uint32_t partialMonoSamples = 0;
+  AudioCaptureFailureCode firstFailure = AudioCaptureFailureCode::none;
+  uint32_t firstFailureAtMs = 0;
 };
 
 // Cross-core diagnostics are published separately from AudioFrontEnd's live
@@ -220,11 +266,20 @@ class AudioCaptureService {
     readCalls_.store(0, std::memory_order_relaxed);
     shortReads_.store(0, std::memory_order_relaxed);
     timeouts_.store(0, std::memory_order_relaxed);
+    zeroByteReads_.store(0, std::memory_order_relaxed);
+    earlyZeroReads_.store(0, std::memory_order_relaxed);
+    warmupZeroReads_.store(0, std::memory_order_relaxed);
     sourceOverruns_.store(0, std::memory_order_relaxed);
     sourceFailures_.store(0, std::memory_order_relaxed);
     longestReadUs_.store(0, std::memory_order_relaxed);
     lastReadUs_.store(0, std::memory_order_relaxed);
     partialMonoSamples_.store(0, std::memory_order_relaxed);
+    firstFailure_.store(
+        static_cast<uint8_t>(AudioCaptureFailureCode::none),
+        std::memory_order_relaxed);
+    firstFailureAtMs_.store(0, std::memory_order_relaxed);
+    captureClockStarted_ = false;
+    captureStartedAtMs_ = 0;
     frontEnd_.reset();
     ring_.resetSession(sessionId);
     frontEndPublisher_.publish(sessionId_, true, frontEnd_.metrics());
@@ -243,6 +298,10 @@ class AudioCaptureService {
 
   AudioCaptureCycleResult captureOnce(uint32_t nowMs) {
     if (!running_ || source_ == nullptr) return AudioCaptureCycleResult::idle;
+    if (!captureClockStarted_) {
+      captureClockStarted_ = true;
+      captureStartedAtMs_ = nowMs;
+    }
     AudioCaptureReadResult read = source_->readStereo48(
         raw_ + rawUsed_, sizeof(raw_) - rawUsed_);
     readCalls_.fetch_add(1, std::memory_order_relaxed);
@@ -253,23 +312,51 @@ class AudioCaptureService {
                longest, read.elapsedUs, std::memory_order_relaxed,
                std::memory_order_relaxed)) {}
     if (read.bytes > sizeof(raw_) - rawUsed_ || read.bytes % 4 != 0) {
+      noteFirstFailure(AudioCaptureFailureCode::sourceFailure, nowMs);
       sourceFailures_.fetch_add(1, std::memory_order_relaxed);
       return AudioCaptureCycleResult::sourceFailure;
     }
+    const bool zeroByteRead = read.bytes == 0;
+    const bool earlyZero = zeroByteRead &&
+        read.elapsedUs < kAudioCaptureReadTimeoutMs * 1000U;
+    const bool warmingUp = earlyZero && rawUsed_ == 0 &&
+        ring_.metrics().pushedFrames == 0 &&
+        static_cast<int32_t>(nowMs - captureStartedAtMs_) <
+            static_cast<int32_t>(kAudioCaptureWarmupMs);
+    if (zeroByteRead) {
+      zeroByteReads_.fetch_add(1, std::memory_order_relaxed);
+      if (earlyZero) {
+        earlyZeroReads_.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (warmingUp) {
+        warmupZeroReads_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     if (read.status == AudioCaptureReadStatus::timeout) {
       timeouts_.fetch_add(1, std::memory_order_relaxed);
-      return AudioCaptureCycleResult::sourceTimeout;
+      if (warmingUp) return AudioCaptureCycleResult::sourceWarmingUp;
+      noteFirstFailure(earlyZero ? AudioCaptureFailureCode::earlyZeroRead
+                                 : AudioCaptureFailureCode::sourceTimeout,
+                       nowMs);
+      return earlyZero ? AudioCaptureCycleResult::sourceEarlyZero
+                       : AudioCaptureCycleResult::sourceTimeout;
     }
     if (read.status == AudioCaptureReadStatus::failure) {
+      noteFirstFailure(AudioCaptureFailureCode::sourceFailure, nowMs);
       sourceFailures_.fetch_add(1, std::memory_order_relaxed);
       return AudioCaptureCycleResult::sourceFailure;
     }
     if (read.status == AudioCaptureReadStatus::overrun) {
+      noteFirstFailure(AudioCaptureFailureCode::sourceOverrun, nowMs);
       sourceOverruns_.fetch_add(1, std::memory_order_relaxed);
     }
-    if (read.bytes == 0) {
+    if (zeroByteRead) {
       shortReads_.fetch_add(1, std::memory_order_relaxed);
-      return read.status == AudioCaptureReadStatus::overrun
+      if (!earlyZero && read.status != AudioCaptureReadStatus::overrun) {
+        noteFirstFailure(AudioCaptureFailureCode::zeroByteRead, nowMs);
+      }
+      return earlyZero ? AudioCaptureCycleResult::sourceEarlyZero
+          : read.status == AudioCaptureReadStatus::overrun
           ? AudioCaptureCycleResult::sourceOverrun
           : AudioCaptureCycleResult::partialInput;
     }
@@ -293,7 +380,10 @@ class AudioCaptureService {
     if (read.status == AudioCaptureReadStatus::overrun) {
       return AudioCaptureCycleResult::sourceOverrun;
     }
-    if (lastFrameDropped_) return AudioCaptureCycleResult::frameDropped;
+    if (lastFrameDropped_) {
+      noteFirstFailure(AudioCaptureFailureCode::captureRingDrop, nowMs);
+      return AudioCaptureCycleResult::frameDropped;
+    }
     if (lastFrameQueued_) return AudioCaptureCycleResult::frameQueued;
     return AudioCaptureCycleResult::partialInput;
   }
@@ -312,12 +402,20 @@ class AudioCaptureService {
     value.readCalls = readCalls_.load(std::memory_order_relaxed);
     value.shortReads = shortReads_.load(std::memory_order_relaxed);
     value.timeouts = timeouts_.load(std::memory_order_relaxed);
+    value.zeroByteReads = zeroByteReads_.load(std::memory_order_relaxed);
+    value.earlyZeroReads = earlyZeroReads_.load(std::memory_order_relaxed);
+    value.warmupZeroReads =
+        warmupZeroReads_.load(std::memory_order_relaxed);
     value.sourceOverruns = sourceOverruns_.load(std::memory_order_relaxed);
     value.sourceFailures = sourceFailures_.load(std::memory_order_relaxed);
     value.longestReadUs = longestReadUs_.load(std::memory_order_relaxed);
     value.lastReadUs = lastReadUs_.load(std::memory_order_relaxed);
     value.partialMonoSamples =
         partialMonoSamples_.load(std::memory_order_relaxed);
+    value.firstFailure = static_cast<AudioCaptureFailureCode>(
+        firstFailure_.load(std::memory_order_relaxed));
+    value.firstFailureAtMs =
+        firstFailureAtMs_.load(std::memory_order_relaxed);
     return value;
   }
 
@@ -346,6 +444,16 @@ class AudioCaptureService {
                               std::memory_order_relaxed);
   }
 
+  void noteFirstFailure(AudioCaptureFailureCode code, uint32_t nowMs) {
+    if (code == AudioCaptureFailureCode::none) return;
+    uint8_t expected = static_cast<uint8_t>(AudioCaptureFailureCode::none);
+    if (firstFailure_.compare_exchange_strong(
+            expected, static_cast<uint8_t>(code), std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
+      firstFailureAtMs_.store(nowMs, std::memory_order_relaxed);
+    }
+  }
+
   AudioCaptureSource *source_ = nullptr;
   AudioFrontEnd frontEnd_;
   AudioCaptureFrontEndPublisher frontEndPublisher_;
@@ -364,11 +472,19 @@ class AudioCaptureService {
   std::atomic<uint32_t> readCalls_{0};
   std::atomic<uint32_t> shortReads_{0};
   std::atomic<uint32_t> timeouts_{0};
+  std::atomic<uint32_t> zeroByteReads_{0};
+  std::atomic<uint32_t> earlyZeroReads_{0};
+  std::atomic<uint32_t> warmupZeroReads_{0};
   std::atomic<uint32_t> sourceOverruns_{0};
   std::atomic<uint32_t> sourceFailures_{0};
   std::atomic<uint32_t> longestReadUs_{0};
   std::atomic<uint32_t> lastReadUs_{0};
   std::atomic<uint32_t> partialMonoSamples_{0};
+  std::atomic<uint8_t> firstFailure_{
+      static_cast<uint8_t>(AudioCaptureFailureCode::none)};
+  std::atomic<uint32_t> firstFailureAtMs_{0};
+  bool captureClockStarted_ = false;
+  uint32_t captureStartedAtMs_ = 0;
 };
 
 }  // namespace pokepod

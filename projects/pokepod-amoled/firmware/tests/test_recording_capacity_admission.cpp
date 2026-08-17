@@ -13,6 +13,8 @@ namespace {
 
 constexpr char kId[] = "12345678-1234-4abc-8def-1234567890ab";
 constexpr char kSecondId[] = "abcdef12-3456-4abc-8def-1234567890ab";
+constexpr char kThirdId[] = "fedcba98-7654-4abc-8def-1234567890ab";
+constexpr char kFourthId[] = "11223344-5566-4abc-8def-1234567890ab";
 constexpr char kCreatedAt[] = "2026-08-11T05:40:21Z";
 
 class QuietPrint final : public Print {};
@@ -135,8 +137,9 @@ void runPerformanceAdmission() {
     auto state = std::make_shared<fakefs::State>();
     fs::FS storage(state);
     TestRecordingCapacitySource source;
-    // Call 3 is the first write+flush completion timestamp.
-    source.delayedCall = 3U;
+    // Qualification time is read before the probe; call 4 is the first
+    // write+flush completion timestamp.
+    source.delayedCall = 4U;
     source.delayedStepUs = kRecordingProbeMaximumTailUs + 1U;
     WavRecorder recorder;
     assert(recorder.begin(storage, source, log));
@@ -164,6 +167,49 @@ void runPerformanceAdmission() {
   }
 }
 
+void runQualificationCacheAndMountGeneration() {
+  QuietPrint log;
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS storage(state);
+  TestRecordingCapacitySource source;
+  WavRecorder recorder;
+  assert(recorder.begin(storage, source, log));
+  finishRecovery(recorder, log);
+
+  assert(recorder.start(log, kThirdId, kCreatedAt));
+  const uint32_t firstProbeCalls = source.monotonicCalls;
+  assert(firstProbeCalls > 60U);
+  assert(source.queryCalls == 1U);
+  assert(recorder.qualificationSnapshot().qualified);
+  assert(recorder.abortCapture(log));
+  drain(recorder, log);
+  RecorderOutcome first;
+  assert(recorder.takeTerminalResult(first));
+
+  assert(recorder.start(log, kSecondId, kCreatedAt));
+  assert(source.queryCalls == 2U);
+  assert(source.monotonicCalls == firstProbeCalls + 1U);
+  assert(recorder.abortCapture(log));
+  drain(recorder, log);
+  RecorderOutcome second;
+  assert(recorder.takeTerminalResult(second));
+
+  ++source.generation;
+  assert(recorder.start(log, kId, kCreatedAt));
+  assert(source.queryCalls == 3U);
+  assert(source.monotonicCalls > firstProbeCalls * 2U);
+  assert(recorder.abortCapture(log));
+  drain(recorder, log);
+  RecorderOutcome third;
+  assert(recorder.takeTerminalResult(third));
+
+  source.generation = 0;
+  assert(!recorder.start(log, kFourthId, kCreatedAt));
+  drain(recorder, log);
+  assert(recorder.terminalResult().failureStage ==
+         RecorderFailureStage::capacityUnknown);
+}
+
 void runDeniedStartAckCleansResources() {
   QuietPrint log;
   auto state = std::make_shared<fakefs::State>();
@@ -189,12 +235,35 @@ void runDeniedStartAckCleansResources() {
   drain(recorder, log);
 }
 
+void runWideQualificationPublication() {
+  RecordingStorageQualification qualification;
+  constexpr uint32_t generation = 91U;
+  constexpr uint64_t qualifiedAtUs = 0x12345678ABCDEF01ULL;
+  constexpr uint64_t totalUs = 0x23456789BCDEF012ULL;
+  constexpr uint64_t maximumTailUs = 0x3456789ACDEF0123ULL;
+
+  assert(qualification.decision(generation, 1U) ==
+         RecordingQualificationDecision::probe);
+  const uint32_t epoch = qualification.invalidationEpoch();
+  assert(qualification.recordSuccess(generation, qualifiedAtUs, totalUs,
+                                     maximumTailUs, epoch));
+  const RecordingQualificationSnapshot snapshot = qualification.snapshot();
+  assert(snapshot.mountGeneration == generation);
+  assert(snapshot.qualifiedAtUs == qualifiedAtUs);
+  assert(snapshot.probeTotalUs == totalUs);
+  assert(snapshot.probeMaximumTailUs == maximumTailUs);
+  assert(snapshot.qualified);
+  assert(!snapshot.failed);
+}
+
 }  // namespace
 
 int main() {
   runCapacityBoundaries();
   runStorageOwnershipAndChangingCapacity();
   runPerformanceAdmission();
+  runQualificationCacheAndMountGeneration();
   runDeniedStartAckCleansResources();
+  runWideQualificationPublication();
   return 0;
 }

@@ -40,4 +40,17 @@ final class VoiceSessionPresentationPolicyTests: XCTestCase {
                 detail: "麦克风已恢复").state,
             .setup)
     }
+
+    func testTypedFailureReachesUserWithoutCollapsingToGenericTimeout() {
+        let update = VoiceSessionPresentationPolicy.completion(
+            .aborted(84, .executionFailure),
+            failure: VoiceSessionFailure(
+                kind: .blackHoleWriteFailed,
+                detail: "OSStatus -50"),
+            environmentReady: true)
+
+        XCTAssertEqual(update.state, .ready)
+        XCTAssertTrue(update.detail?.contains("BlackHole 音频写入失败") == true)
+        XCTAssertTrue(update.detail?.contains("OSStatus -50") == true)
+    }
 }

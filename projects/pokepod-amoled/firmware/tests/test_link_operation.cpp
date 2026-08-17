@@ -350,5 +350,30 @@ int main() {
   blocked.releaseResource(LinkOperationResource::file);
   acknowledgeSettlement(blocked, false, true);
 
+  // A successful recording start explicitly transfers physical router and
+  // transaction ownership to the long-lived recording session.  A later stop
+  // request uses one aggregate settlement token until the session confirms
+  // both physical resources are gone.
+  LinkOperation recordingStart;
+  assert(recordingStart.admit(1000, LinkTransport::wifi, 60, true) ==
+         LinkOperationAdmission::accepted);
+  recordingStart.ownResource(LinkOperationResource::router);
+  recordingStart.ownResource(LinkOperationResource::transaction);
+  assert(recordingStart.transferResourcesToRecordingSession());
+  assert(!recordingStart.ownsResource(LinkOperationResource::router));
+  assert(!recordingStart.ownsResource(LinkOperationResource::transaction));
+  assert(!recordingStart.transferResourcesToRecordingSession());
+  drainTerminal(recordingStart, 60, 1);
+  acknowledgeSettlement(recordingStart, true, true);
+
+  LinkOperation recordingStop;
+  assert(recordingStop.admit(1001, LinkTransport::wifi, 60, true) ==
+         LinkOperationAdmission::accepted);
+  recordingStop.ownResource(LinkOperationResource::recordingSession);
+  drainTerminal(recordingStop, 60, 2);
+  assert(!recordingStop.settlement().ready);
+  recordingStop.releaseResource(LinkOperationResource::recordingSession);
+  acknowledgeSettlement(recordingStop, true, true);
+
   return 0;
 }

@@ -2,6 +2,42 @@
 
 面向 BOOX Poke3 和普通 Android 手机的本地优先语音胶囊应用。保留文石原厂系统，不修改分区和全局息屏设置；手机端支持移动数据和手机扬声器。
 
+## 产品线与权限边界
+
+工程输出两条明确的产品线：
+
+- `poke3Legacy`：`targetSdk 28`，保留 Poke3 的共享存储行为和 `/sdcard/PokeCapsule` 资料库兼容性。
+- `phoneModern`：`targetSdk 34`，使用现代 Android 权限模型；首次打开前必须在系统设置授予“所有文件访问”权限，未授权时不会启动资料库扫描、录音、转写或电脑命令处理。
+
+两条产品线共用资料库协议和业务代码，权限声明放在各自的 manifest source set 中。Release 构建不绑定 debug key；正式签名只能通过外部 Gradle 属性注入：
+
+```text
+releaseStoreFile=/path/to/release.keystore
+releaseStorePassword=...
+releaseKeyAlias=...
+releaseKeyPassword=...
+requireReleaseSigning=true   # 发布流水线建议开启
+```
+
+使用 `build.sh` 时也可以通过 `POKECAPSULE_RELEASE_STORE_FILE`、
+`POKECAPSULE_RELEASE_STORE_PASSWORD`、`POKECAPSULE_RELEASE_KEY_ALIAS` 和
+`POKECAPSULE_RELEASE_KEY_PASSWORD` 注入；入口会在不打印值的情况下转换成
+Gradle 参数。命令行显式的 `-P` 参数优先于同名环境变量。
+
+## 可复现构建
+
+仓库固定使用 Gradle `8.14.5`。本机先准备 Android SDK 34 和 Java 17，再执行：
+
+```bash
+JAVA_HOME=/path/to/jdk-17 \
+POKECAPSULE_GRADLE_BIN=/path/to/gradle-8.14.5/bin/gradle \
+./build.sh
+```
+
+不传任务时，入口会依次执行两条产品线的 unit test、lint、debug assemble 和 release assemble。需要单独构建时直接把 Gradle 任务传给 `build.sh`，入口会先拒绝错误 Gradle 版本。
+
+在 macOS 上，`artifacts/安装-PokeCapsule-1.7.command` 会相对自身目录寻找 APK；旁边存在多个变体时必须显式传入 APK 路径，避免把 phoneModern 包装进 Poke3。安装前会确认 ADB、在线设备、Poke3 身份并备份资料库与旧 APK。
+
 ## 已实现
 
 - 统一资料库语义：Inbox、全部、收藏、待转写、转写失败、两级目录、标签和回收站。

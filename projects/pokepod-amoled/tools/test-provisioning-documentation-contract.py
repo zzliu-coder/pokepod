@@ -27,18 +27,21 @@ assert "constexpr uint32_t kPortalLifetimeMs = 5UL * 60UL * 1000UL;" in portal
 
 # The written operating instructions must state every user-visible security fact.
 for expected in (
-    "\u6bcf\u6b21\u542f\u52a8\u914d\u7f6e\u70ed\u70b9\u90fd\u4f1a\u751f\u6210\u65b0\u7684 10 \u4f4d\u975e\u6df7\u6dc6\u968f\u673a\u5bc6\u7801",
-    "\u53ea\u663e\u793a\u5728\u8bbe\u5907\n\u5c4f\u5e55\u4e0a",
+    "个人设备默认使用固定口令模式",
+    "旧版尚未选择口令模式的配置会在首次\n启动时迁移到该模式",
+    "每次启动生成新的 10 位非混淆随机密码",
     "\u4e94\u5206\u949f\u5185\u6709\u6548",
     "\u7a97\u53e3\u5173\u95ed\u6216\u5230\u671f\u540e",
-    "\u7acb\u5373\u5931\u6548\u5e76\u4ece\u5185\u5b58\u4e2d\u6e05\u9664",
-    "\u66f4\u6362\u6216\u6e05\u7a7a\u5df2\u4fdd\u5b58\u7684\u817e\u8baf\u4e91\u5bc6\u94a5",
+    "口令副本立即从运行内存\n清除",
+    "\u66f4\u6362\u6216\u6e05\u7a7a\u5df2\u4fdd\u5b58\u7684\u817e\u8baf\u4e91\n\u5bc6\u94a5",
     "\u5fc5\u987b\u6309\u8bbe\u5907\u5b9e\u4f53\u952e",
+    "切换到固定模式前必须在配网页面明确确认",
+    "共享设备和公开部署\n应选择随机模式",
 ):
     assert expected in readme
 
 assert "88888888" not in readme
-assert "\u914d\u7f6e\u70ed\u70b9\u5bc6\u7801\u56fa\u5b9a" not in readme
+assert "运行日志与诊断包不会保存" in readme
 
 # The UI composition is illustrative, while its sample still obeys the real
 # 10-character alphabet and labels the five-minute/physical-confirmation rules.

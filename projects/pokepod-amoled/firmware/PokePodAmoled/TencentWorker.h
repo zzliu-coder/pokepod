@@ -37,6 +37,13 @@ class TencentWorker {
     return runtime_.generation();
   }
   bool cancel(TencentCancelReason reason);
+  TencentQuiesceStatus beginQuiesce(uint32_t nowMs, uint32_t timeoutMs,
+                                    TencentCancelReason reason);
+  TencentQuiesceStatus pollQuiesce(uint32_t nowMs);
+  // Reboot deliberately drops a published network result without touching
+  // CapsuleLibrary.  Startup recovery will requeue the durable transcribing
+  // capsule after restart; this method is memory-only and bounded.
+  bool abandonResultForReboot();
   bool quiesce(uint32_t nowMs, uint32_t timeoutMs,
                TencentCancelReason reason);
   bool waitingForWake() const { return waitingForWake_; }
@@ -61,6 +68,7 @@ class TencentWorker {
   void taskLoop();
   void runAttempt(uint32_t generation);
   void finishAttempt(uint32_t nowMs);
+  void clearTaskSecrets();
   void logState(const char *event, TencentJobState state,
                 uint32_t generation) const;
 

@@ -169,8 +169,9 @@ with tempfile.TemporaryDirectory(prefix="pokepod-source-audit-roundtrip-") as ra
     assert "requires a clean" in dirty.stderr
     (project / "untracked.txt").unlink()
 
-    write(project / ".env", "TOKEN=secret\n")
-    run("git", "add", ".", cwd=repo)
+    sensitive_fixture = project / "tracked-secret.pem"
+    write(sensitive_fixture, "not-a-real-key\n")
+    run("git", "add", "-f", str(sensitive_fixture), cwd=repo)
     run("git", "commit", "-qm", "sensitive path fixture", cwd=repo)
     sensitive = run(
         sys.executable,
@@ -185,7 +186,7 @@ with tempfile.TemporaryDirectory(prefix="pokepod-source-audit-roundtrip-") as ra
     assert sensitive.returncode == 6
     assert "sensitive files refuse" in sensitive.stderr
 
-    run("git", "rm", "-q", str(PROJECT_RELATIVE / ".env"), cwd=repo)
+    run("git", "rm", "-q", str(PROJECT_RELATIVE / "tracked-secret.pem"), cwd=repo)
     write(project / "private.txt", "-----BEGIN " + "PRIVATE KEY-----\nsecret\n")
     run("git", "add", ".", cwd=repo)
     run("git", "commit", "-qm", "sensitive content fixture", cwd=repo)

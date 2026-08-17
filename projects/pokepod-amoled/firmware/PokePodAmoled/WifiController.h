@@ -9,13 +9,20 @@
 
 namespace pokepod {
 
+class RuntimeDiagnostics;
+
 class WifiController {
  public:
   bool begin(DeviceConfig &config, Print &log);
+  void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
+    runtimeDiagnostics_ = &diagnostics;
+  }
   void loop(uint32_t nowMs, bool recording, bool pendingWork, bool charging,
-            bool provisioning, bool wirelessSync);
+            bool provisioning, bool wirelessSync,
+            bool audioCaptureExclusive = false);
   void configurationChanged();
   void requestConnection();
+  void pauseForAudioCapture(Print &log);
   void quiesceForProvisioning(Print &log);
   void prepareForSleep();
 
@@ -72,6 +79,7 @@ class WifiController {
   bool powerSaveEnabled_ = false;
   int32_t powerSaveError_ = 0;
   NetworkTimeSyncState timeSyncState_;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
 };
 
 }  // namespace pokepod

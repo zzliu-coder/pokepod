@@ -1,8 +1,10 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "AudioCaptureRing.h"
+#include "AudioCaptureService.h"
 #include "AudioCaptureRouter.h"
 #include "RecorderOutcome.h"
 
@@ -48,15 +50,22 @@ struct AudioCaptureDispatchResult {
   uint32_t consumedFrames = 0;
   uint32_t firstSequence = 0;
   uint32_t lastSequence = 0;
+  AudioCaptureFailureCode firstFailure = AudioCaptureFailureCode::none;
 };
 
 struct AudioCaptureDispatcherMetrics {
+  static constexpr size_t kIntervalHistogramBuckets = 12;
   uint32_t sessionId = 0;
   uint32_t consumedFrames = 0;
   uint32_t sequenceFailures = 0;
   uint32_t routingFailures = 0;
   uint32_t recorderDeliveryFailures = 0;
   uint32_t voiceDeliveryFailures = 0;
+  AudioCaptureFailureCode firstFailure = AudioCaptureFailureCode::none;
+  uint32_t firstFailureSequence = 0;
+  uint32_t maximumIntervalUs = 0;
+  uint32_t intervalSamples = 0;
+  uint32_t intervalHistogram[kIntervalHistogramBuckets]{};
 };
 
 // The sole consumer of AudioCaptureRuntime's SPSC ring. App and Link may both
@@ -76,16 +85,19 @@ class AudioCaptureDispatcher {
     while (source.pop(frame)) {
       result.hadFrames = true;
       ++result.consumedFrames;
-      ++metrics_.consumedFrames;
       if (result.consumedFrames == 1U) result.firstSequence = frame.sequence;
       result.lastSequence = frame.sequence;
       result.sessionId = frame.sessionId;
 
       const bool sequenceOk = observeSequence(frame);
+      ++metrics_.consumedFrames;
+      if (result.consumedFrames == 1U) observeDispatchInterval(nowMs);
       if (!sequenceOk) {
         result.ok = false;
         result.sequenceIncomplete = true;
         ++metrics_.sequenceFailures;
+        noteFirstFailure(result, AudioCaptureFailureCode::dispatchSequenceGap,
+                         frame.sequence);
       }
 
       audio.observeCapturedMono(frame.samples, kAudioCaptureSamplesPerFrame);
@@ -98,6 +110,9 @@ class AudioCaptureDispatcher {
         result.ok = false;
         result.routingFailure = true;
         ++metrics_.routingFailures;
+        noteFirstFailure(result,
+                         AudioCaptureFailureCode::dispatchRoutingFailure,
+                         frame.sequence);
         continue;
       }
 
@@ -108,6 +123,9 @@ class AudioCaptureDispatcher {
           result.ok = false;
           result.voiceDeliveryFailure = true;
           ++metrics_.voiceDeliveryFailures;
+          noteFirstFailure(result,
+                           AudioCaptureFailureCode::bleDeliveryFailure,
+                           frame.sequence);
         }
         continue;
       }
@@ -130,6 +148,9 @@ class AudioCaptureDispatcher {
         result.recorderDeliveryFailure = true;
         result.failedRecorderOwner = recorderOwner;
         ++metrics_.recorderDeliveryFailures;
+        noteFirstFailure(result,
+                         AudioCaptureFailureCode::recorderDeliveryFailure,
+                         frame.sequence);
       }
     }
     return result;
@@ -140,18 +161,61 @@ class AudioCaptureDispatcher {
     lastSequence_ = 0;
     sequenceObserved_ = false;
     metrics_ = {};
+    lastDispatchMs_ = 0;
+    dispatchIntervalObserved_ = false;
   }
 
   const AudioCaptureDispatcherMetrics &metrics() const { return metrics_; }
 
  private:
+  void noteFirstFailure(AudioCaptureDispatchResult &result,
+                        AudioCaptureFailureCode code,
+                        uint32_t sequence) {
+    if (result.firstFailure == AudioCaptureFailureCode::none) {
+      result.firstFailure = code;
+    }
+    if (metrics_.firstFailure == AudioCaptureFailureCode::none) {
+      metrics_.firstFailure = code;
+      metrics_.firstFailureSequence = sequence;
+    }
+  }
+
+  static size_t intervalBucket(uint32_t elapsedUs) {
+    static constexpr uint32_t limits[
+        AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets] = {
+        250U, 500U, 1000U, 2000U, 4000U, 8000U,
+        16000U, 32000U, 64000U, 128000U, 512000U, UINT32_MAX};
+    for (size_t i = 0;
+         i < AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets; ++i) {
+      if (elapsedUs <= limits[i]) return i;
+    }
+    return AudioCaptureDispatcherMetrics::kIntervalHistogramBuckets - 1U;
+  }
+
+  void observeDispatchInterval(uint32_t nowMs) {
+    // The metric is the gap between drain calls that actually delivered at
+    // least one frame. Empty loop polls carry no audio work and are excluded.
+    if (dispatchIntervalObserved_) {
+      const uint32_t elapsedUs = (nowMs - lastDispatchMs_) * 1000U;
+      if (elapsedUs > metrics_.maximumIntervalUs) {
+        metrics_.maximumIntervalUs = elapsedUs;
+      }
+      ++metrics_.intervalSamples;
+      ++metrics_.intervalHistogram[intervalBucket(elapsedUs)];
+    }
+    lastDispatchMs_ = nowMs;
+    dispatchIntervalObserved_ = true;
+  }
+
   bool observeSequence(const AudioCaptureFrame &frame) {
     if (frame.sessionId == 0) return false;
     if (frame.sessionId != sessionId_) {
       sessionId_ = frame.sessionId;
       lastSequence_ = frame.sequence;
       sequenceObserved_ = true;
+      metrics_ = {};
       metrics_.sessionId = frame.sessionId;
+      dispatchIntervalObserved_ = false;
       return true;
     }
     if (!sequenceObserved_) {
@@ -167,6 +231,8 @@ class AudioCaptureDispatcher {
   uint32_t sessionId_ = 0;
   uint32_t lastSequence_ = 0;
   bool sequenceObserved_ = false;
+  uint32_t lastDispatchMs_ = 0;
+  bool dispatchIntervalObserved_ = false;
   AudioCaptureDispatcherMetrics metrics_;
 };
 

@@ -7,11 +7,73 @@
 #include <esp_wifi.h>
 
 #include "ProvisioningPolicy.h"
+#include "DeviceSecretWipe.h"
 #include "MonotonicTime.h"
 #include "WifiDisconnectDiagnostics.h"
 #include "WifiFailurePolicy.h"
 
 namespace pokepod {
+
+void BoundedProvisioningWebServer::handleClient() {
+  if (_currentStatus == HC_NONE) {
+    _currentClient = _server.accept();
+    if (!_currentClient) return;
+    _currentClient.setTimeout(kIoSliceMs);
+    _currentStatus = HC_WAIT_READ;
+    _statusChange = millis();
+  }
+
+  bool keepCurrentClient = false;
+  if (_currentClient.connected()) {
+    if (_currentStatus == HC_WAIT_READ) {
+      if (_currentClient.available()) {
+        _currentClient.setTimeout(kIoSliceMs);
+        const bool probeRequest = diagnostics_ != nullptr && log_ != nullptr &&
+            requestProbeCount_ < 8;
+        if (probeRequest) {
+          diagnostics_->recordProbe(
+              ProvisioningProbeStage::beforeRequestParse, *log_);
+        }
+        const bool parsed = _parseRequest(_currentClient);
+        if (probeRequest) {
+          diagnostics_->recordProbe(
+              ProvisioningProbeStage::afterRequestParse, *log_);
+          ++requestProbeCount_;
+        }
+        if (parsed) {
+          _contentLength = CONTENT_LENGTH_NOT_SET;
+          _responseCode = 0;
+          _clearResponseHeaders();
+          if (_chain != nullptr) {
+            _chain->runChain(*this, [this]() { return _handleRequest(); });
+          } else {
+            _handleRequest();
+          }
+          if (_currentClient.isSSE()) {
+            _currentStatus = HC_WAIT_CLOSE;
+            _statusChange = millis();
+            keepCurrentClient = true;
+          }
+        }
+      } else if (millis() - _statusChange <= kIdleClientLifetimeMs) {
+        keepCurrentClient = true;
+      }
+    } else if (_currentStatus == HC_WAIT_CLOSE &&
+               _currentClient.isSSE() &&
+               millis() - _statusChange <= kIdleClientLifetimeMs) {
+      keepCurrentClient = true;
+    }
+  }
+
+  if (!keepCurrentClient) {
+    _currentClient = NetworkClient();
+    _currentStatus = HC_NONE;
+    _currentUpload.reset();
+    _currentRaw.reset();
+  } else {
+    yield();
+  }
+}
 namespace {
 
 constexpr uint32_t kPortalLifetimeMs = 5UL * 60UL * 1000UL;
@@ -27,15 +89,6 @@ bool fillProvisioningRandom(void *, uint8_t *destination, size_t length) {
   return true;
 }
 
-void secureClearString(String &secret) {
-  const size_t length = secret.length();
-  volatile char *const wipe = secret.begin();
-  if (wipe != nullptr) {
-    for (size_t index = 0; index < length; ++index) wipe[index] = '\0';
-  }
-  secret.clear();
-}
-
 std::string newProvisioningCsrfToken() {
   static constexpr char hex[] = "0123456789abcdef";
   uint8_t bytes[kProvisioningCsrfBytes];
@@ -45,6 +98,7 @@ std::string newProvisioningCsrfToken() {
     token[index * 2] = hex[bytes[index] >> 4];
     token[index * 2 + 1] = hex[bytes[index] & 0x0f];
   }
+  secureWipeBytes(bytes, sizeof(bytes));
   return token;
 }
 
@@ -96,12 +150,16 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   config_ = &config;
   diagnostics_ = &diagnostics;
   log_ = &log;
+  server_.attachProvisioningProbe(diagnostics, log);
+  diagnostics_->recordProbe(ProvisioningProbeStage::prepareEntered, log);
   candidate_ = config.settings();
+  clearCandidateSecrets();
   const uint32_t suffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xffff);
   char name[24];
   snprintf(name, sizeof(name), "PokePod-%04lX", static_cast<unsigned long>(suffix));
   ssid_ = name;
-  if (!credential_.begin(fillProvisioningRandom, nullptr)) {
+  if (!credential_.begin(config.settings().provisioningPasswordMode,
+                         fillProvisioningRandom, nullptr)) {
     clearProvisioningCredential();
     statusMessage_ = "配网密码失败，请退出后重试";
     return false;
@@ -117,6 +175,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   changed_ = false;
   saved_ = false;
   closeAtMs_ = 0;
+  lastStopReason_ = ProvisioningStopReason::none;
   candidateRssi_ = -127;
   validationAttempt_ = 0;
   sensitiveConfirmation_.reset();
@@ -126,6 +185,7 @@ bool ProvisioningPortal::prepare(DeviceConfig &config,
   diagnostics_->record(ProvisioningLogStage::portalRequested,
                        ProvisioningLogOutcome::info, ssid_, 0, 0, 0, 0,
                        log);
+  diagnostics_->recordProbe(ProvisioningProbeStage::portalRequested, log);
   log.printf("{\"event\":\"provisioning\",\"phase\":\"requested\",\"ssid\":\"%s\"}\n",
              ssid_.c_str());
   return true;
@@ -149,6 +209,7 @@ bool ProvisioningPortal::switchToAccessPointMode() {
     return false;
   }
   logProvisioningMemory(*log_, "before-mode-ap");
+  diagnostics_->recordProbe(ProvisioningProbeStage::beforeModeAp, *log_);
   if (!WiFi.mode(WIFI_AP)) {
     starting_ = false;
     statusMessage_ = "无线模式切换失败，请退出后重试";
@@ -160,6 +221,7 @@ bool ProvisioningPortal::switchToAccessPointMode() {
     clearProvisioningCredential();
     return false;
   }
+  diagnostics_->recordProbe(ProvisioningProbeStage::afterModeAp, *log_);
   diagnostics_->record(ProvisioningLogStage::radioModeStarted,
                        ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
                        *log_);
@@ -175,6 +237,7 @@ bool ProvisioningPortal::startAccessPoint() {
     return false;
   }
   logProvisioningMemory(*log_, "before-softap");
+  diagnostics_->recordProbe(ProvisioningProbeStage::beforeSoftAp, *log_);
   if (!WiFi.softAP(ssid_.c_str(), password_.c_str())) {
     starting_ = false;
     statusMessage_ = "配网热点启动失败，请退出后重试";
@@ -186,7 +249,12 @@ bool ProvisioningPortal::startAccessPoint() {
     clearProvisioningCredential();
     return false;
   }
+  diagnostics_->recordProbe(ProvisioningProbeStage::afterSoftAp, *log_);
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::beforePowerSaveOff, *log_);
   esp_wifi_set_ps(WIFI_PS_NONE);
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::afterPowerSaveOff, *log_);
   diagnostics_->record(ProvisioningLogStage::accessPointStarted,
                        ProvisioningLogOutcome::success, ssid_, 0, 0, 0, 0,
                        *log_);
@@ -202,9 +270,19 @@ bool ProvisioningPortal::startServices() {
     return false;
   }
   logProvisioningMemory(*log_, "before-services");
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::beforeRouteInstall, *log_);
   installRoutes();
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::afterRouteInstall, *log_);
+  diagnostics_->recordProbe(ProvisioningProbeStage::beforeDnsStart, *log_);
   dns_.start(53, "*", WiFi.softAPIP());
+  diagnostics_->recordProbe(ProvisioningProbeStage::afterDnsStart, *log_);
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::beforeServerBegin, *log_);
   server_.begin();
+  diagnostics_->recordProbe(
+      ProvisioningProbeStage::afterServerBegin, *log_);
   startedMs_ = millis();
   csrf_.begin(csrf_.token(), startedMs_, kPortalLifetimeMs);
   active_ = true;
@@ -229,11 +307,12 @@ void ProvisioningPortal::failStartupTimeout() {
   diagnostics_->record(ProvisioningLogStage::failed,
                        ProvisioningLogOutcome::failure, ssid_, 0,
                        kProvisioningReasonStartupTimeout, 0, 0, *log_);
-  clearProvisioningCredential();
+  stop(ProvisioningStopReason::startupTimeout);
 }
 
 void ProvisioningPortal::loop(uint32_t nowMs) {
   if (!active_) return;
+  ProvisioningPollScope pollScope(diagnostics_, log_);
   dns_.processNextRequest();
   server_.handleClient();
   // HTTP handlers can create a new validation timestamp. Refresh the clock
@@ -269,6 +348,7 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
                              ProvisioningLogOutcome::success,
                              candidate_.wifiSsid, WiFi.RSSI(), 0, elapsed,
                              validationAttempt_, *log_);
+        clearCandidateSecrets();
       } else {
         saved_ = false;
         statusMessage_ = "写入配置失败，请重试";
@@ -296,11 +376,12 @@ void ProvisioningPortal::loop(uint32_t nowMs) {
   }
   if ((closeAtMs_ != 0 && static_cast<int32_t>(nowMs - closeAtMs_) >= 0) ||
       monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
-    stop();
+    stop(closeAtMs_ != 0 ? ProvisioningStopReason::saved
+                         : ProvisioningStopReason::lifetimeExpired);
   }
 }
 
-void ProvisioningPortal::stop() {
+void ProvisioningPortal::stop(ProvisioningStopReason reason) {
   const bool wasActive = active_;
   const bool wasPrepared = prepared_;
   if (wasActive) {
@@ -326,24 +407,37 @@ void ProvisioningPortal::stop() {
   transitionPending_ = false;
   networks_.clear();
   closeAtMs_ = 0;
+  lastStopReason_ = reason;
   csrf_.close();
   sensitiveConfirmation_.reset();
+  clearCandidateSecrets();
   candidate_ = DeviceSettings{};
   clearProvisioningCredential();
   if ((wasActive || wasPrepared) && diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::portalStopped, *log_);
     diagnostics_->record(ProvisioningLogStage::portalStopped,
-                         ProvisioningLogOutcome::info, ssid_, 0, 0,
+                         ProvisioningLogOutcome::info, ssid_, 0,
+                         static_cast<uint16_t>(reason),
                          wasActive ? millis() - startedMs_ : 0,
                          validationAttempt_, *log_);
   }
   if ((wasActive || wasPrepared) && log_ != nullptr) {
-    log_->println("{\"event\":\"provisioning_stopped\"}");
+    log_->printf(
+        "{\"event\":\"provisioning_stopped\",\"reason\":\"%s\","
+        "\"reason_code\":%u}\n",
+        provisioningStopReasonKey(reason), static_cast<unsigned>(reason));
   }
 }
 
 void ProvisioningPortal::clearProvisioningCredential() {
-  secureClearString(password_);
+  clearCandidateSecrets();
+  csrf_.close();
+  secureWipe(password_);
   credential_.close();
+}
+
+void ProvisioningPortal::clearCandidateSecrets() {
+  secureWipeSecrets(candidate_);
 }
 
 bool ProvisioningPortal::takeConfigurationChanged() {
@@ -497,7 +591,18 @@ void ProvisioningPortal::scanRequest() {
 
 void ProvisioningPortal::showPortal() {
   server_.sendHeader("Cache-Control", "no-store");
-  server_.send(200, "text/html; charset=utf-8", pageHtml());
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::beforePageBuild, *log_);
+  }
+  const String html = pageHtml();
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::afterPageBuild, *log_);
+    diagnostics_->recordProbe(ProvisioningProbeStage::beforePageSend, *log_);
+  }
+  server_.send(200, "text/html; charset=utf-8", html);
+  if (diagnostics_ != nullptr && log_ != nullptr) {
+    diagnostics_->recordProbe(ProvisioningProbeStage::afterPageSend, *log_);
+  }
 }
 
 void ProvisioningPortal::saveRequest() {
@@ -518,6 +623,36 @@ void ProvisioningPortal::saveRequest() {
     return;
   }
   DeviceSettings next = config_->settings();
+  const String passwordMode = server_.arg("provisioningPasswordMode");
+  if (!passwordMode.isEmpty() && passwordMode != "0" &&
+      passwordMode != "1" && passwordMode != "2") {
+    statusMessage_ = "配网密码模式不正确，请重新选择";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, next.wifiSsid,
+                         -127, kProvisioningReasonInvalidInput, 0,
+                         validationAttempt_, *log_);
+    sendSaveJson(400, false);
+    return;
+  }
+  if (!passwordMode.isEmpty()) {
+    next.provisioningPasswordMode = static_cast<ProvisioningPasswordMode>(
+        static_cast<uint8_t>(passwordMode[0] - '0'));
+  }
+  const bool enteringFixedPasswordMode =
+      config_->settings().provisioningPasswordMode !=
+          ProvisioningPasswordMode::fixed88888888 &&
+      next.provisioningPasswordMode ==
+          ProvisioningPasswordMode::fixed88888888;
+  if (enteringFixedPasswordMode &&
+      server_.arg("confirmFixedProvisioningPassword") != "1") {
+    statusMessage_ = "请确认设备安全模式";
+    diagnostics_->record(ProvisioningLogStage::failed,
+                         ProvisioningLogOutcome::failure, next.wifiSsid,
+                         -127, kProvisioningReasonInvalidInput, 0,
+                         validationAttempt_, *log_);
+    sendSaveJson(400, false);
+    return;
+  }
   const String manualSsid = server_.arg("ssidManual");
   next.wifiSsid = manualSsid.isEmpty() ? server_.arg("ssid") : manualSsid;
   next.wifiPassword = server_.arg("wifiPassword");
@@ -527,8 +662,13 @@ void ProvisioningPortal::saveRequest() {
   }
   next.hotwordId = server_.arg("hotwordId");
   next.wifiEnabled = true;
-  const String secretId = server_.arg("secretId");
-  const String secretKey = server_.arg("secretKey");
+  String secretId = server_.arg("secretId");
+  String secretKey = server_.arg("secretKey");
+  const auto clearRequestSecrets = [&]() {
+    secureWipe(secretId);
+    secureWipe(secretKey);
+    secureWipeSecrets(next);
+  };
   ProvisioningSensitiveAction sensitiveAction =
       ProvisioningSensitiveAction::none;
   if (server_.hasArg("clearTencent")) {
@@ -546,6 +686,7 @@ void ProvisioningPortal::saveRequest() {
                            -127, kProvisioningReasonInvalidInput, 0,
                            validationAttempt_, *log_);
       sendSaveJson(400, false);
+      clearRequestSecrets();
       return;
     }
     const DeviceSettings &current = config_->settings();
@@ -564,9 +705,12 @@ void ProvisioningPortal::saveRequest() {
                          -127, kProvisioningReasonInvalidInput, 0,
                          validationAttempt_, *log_);
     sendSaveJson(400, false);
+    clearRequestSecrets();
     return;
   }
+  clearCandidateSecrets();
   candidate_ = next;
+  clearRequestSecrets();
   candidateRssi_ = -127;
   const auto scanned = std::find_if(
       networks_.begin(), networks_.end(),
@@ -608,7 +752,7 @@ bool ProvisioningPortal::confirmSensitiveChange(uint32_t nowMs) {
   if (!active_) return false;
   if (monotonicElapsedAtLeast(nowMs, startedMs_, kPortalLifetimeMs)) {
     discardSensitiveCandidate();
-    stop();
+    stop(ProvisioningStopReason::lifetimeExpired);
     return false;
   }
   if (!sensitiveConfirmation_.acceptPhysicalPress(nowMs)) {
@@ -622,11 +766,13 @@ bool ProvisioningPortal::confirmSensitiveChange(uint32_t nowMs) {
 
 void ProvisioningPortal::discardSensitiveCandidate() {
   sensitiveConfirmation_.reset();
+  clearCandidateSecrets();
   if (config_ != nullptr) {
     candidate_ = config_->settings();
   } else {
     candidate_ = DeviceSettings{};
   }
+  clearCandidateSecrets();
 }
 
 void ProvisioningPortal::beginStationValidation() {
@@ -654,6 +800,7 @@ void ProvisioningPortal::restorePortalForRetry() {
   if (WiFi.softAP(ssid_.c_str(), password_.c_str())) {
     dns_.start(53, "*", WiFi.softAPIP());
   }
+  discardSensitiveCandidate();
 }
 
 void ProvisioningPortal::forgetRequest() {
@@ -677,14 +824,19 @@ void ProvisioningPortal::forgetRequest() {
     return;
   }
   candidate_ = config_->settings();
+  clearCandidateSecrets();
   changed_ = true;
   statusMessage_ = "已忘记所选网络";
   showNetworks();
 }
 
 bool ProvisioningPortal::authorizeMutation() {
-  const String candidate = server_.header(kProvisioningCsrfHeader);
-  if (csrf_.accepts(std::string(candidate.c_str()), millis())) return true;
+  String candidate = server_.header(kProvisioningCsrfHeader);
+  std::string token(candidate.c_str());
+  const bool accepted = csrf_.accepts(token, millis());
+  secureWipe(token);
+  secureWipe(candidate);
+  if (accepted) return true;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(403, "application/json; charset=utf-8",
                "{\"error\":\"配网页无法使用，请重新进入手机配网\"}");
@@ -866,6 +1018,23 @@ select{appearance:none;padding-right:40px;background-image:linear-gradient(45deg
     html += F("</details>");
   }
   html += F(R"HTML(<details class='disclosure'><summary>高级设置</summary><div class='disclosure-body'>
+<label class='field'><span class='field-name'>配网密码</span><select name='provisioningPasswordMode'>)HTML");
+  const uint8_t displayedPasswordMode =
+      candidate_.provisioningPasswordMode ==
+              ProvisioningPasswordMode::fixed88888888
+          ? kStoredProvisioningPasswordFixed88888888
+          : kStoredProvisioningPasswordRandom;
+  html += "<option value='1'";
+  if (displayedPasswordMode == kStoredProvisioningPasswordRandom) {
+    html += " selected";
+  }
+  html += ">重新更新</option><option value='2'";
+  if (displayedPasswordMode == kStoredProvisioningPasswordFixed88888888) {
+    html += " selected";
+  }
+  html += ">本设备模式（88888888）</option></select></label>";
+  html += F(R"HTML(<label class='check'><input type='checkbox' name='confirmFixedProvisioningPassword' value='1'><span>确认使用设备安全模式</span></label>
+<p class='privacy'>配网密码将在热点关闭后清除；本设备模式仅限本机使用。配网热点仍会在五分钟后关闭。</p>
 <label class='field'><span class='field-name'>热词 ID <span class='optional'>可选</span></span><input name='hotwordId' maxlength='128' autocomplete='off' autocapitalize='none' spellcheck='false' value=')HTML");
   html += htmlEscape(candidate_.hotwordId);
   html += F("'></label>");

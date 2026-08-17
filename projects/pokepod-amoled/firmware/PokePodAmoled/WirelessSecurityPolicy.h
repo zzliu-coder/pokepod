@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
+#include <utility>
+
+#include "SecureWipe.h"
 
 namespace pokepod {
 
@@ -26,16 +29,18 @@ inline bool securityTokenEqual(const std::string &left,
 
 class ProvisioningCsrfPolicy {
  public:
-  void begin(const std::string &token, uint32_t nowMs, uint32_t lifetimeMs) {
-    token_ = token;
+  void begin(std::string token, uint32_t nowMs, uint32_t lifetimeMs) {
+    close();
+    token_ = std::move(token);
     deadlineMs_ = nowMs + lifetimeMs;
-    active_ = !token.empty() && lifetimeMs != 0;
+    active_ = !token_.empty() && lifetimeMs != 0;
+    secureWipe(token);
   }
 
   void close() {
     active_ = false;
     deadlineMs_ = 0;
-    token_.clear();
+    secureWipe(token_);
   }
 
   bool accepts(const std::string &candidate, uint32_t nowMs) const {

@@ -7,6 +7,7 @@ import android.content.Intent;
 import com.zheliu.pokecapsule.core.Ids;
 import com.zheliu.pokecapsule.core.TimeFormat;
 import com.zheliu.pokecapsule.service.LibraryChangeNotifier;
+import com.zheliu.pokecapsule.service.LibraryStorageAccess;
 import com.zheliu.pokecapsule.storage.AtomicFiles;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.MaintenanceSession;
@@ -44,6 +45,10 @@ public final class CommandReceiver extends BroadcastReceiver {
     }
 
     static void process(Context context, String fileName) {
+        // A modern phone may receive a stale broadcast before the user has
+        // granted all-files access. Leave the command queued and fail closed;
+        // no shared-library path is created or scanned in that state.
+        if (!LibraryStorageAccess.has(context)) return;
         PokePaths paths = new PokePaths();
         String commandId = commandId(fileName);
         JSONObject result = new JSONObject();

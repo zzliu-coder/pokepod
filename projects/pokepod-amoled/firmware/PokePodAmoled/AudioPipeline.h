@@ -14,9 +14,14 @@
 
 namespace pokepod {
 
+class RuntimeDiagnostics;
+
 class AudioPipeline {
  public:
   bool begin(BoardVariant variant, Print &log);
+  void bindRuntimeDiagnostics(RuntimeDiagnostics &diagnostics) {
+    runtimeDiagnostics_ = &diagnostics;
+  }
   bool startCapture(Print &log);
   void stopHardware(Print &log);
   size_t read(uint8_t *buffer, size_t capacity);
@@ -41,6 +46,13 @@ class AudioPipeline {
   }
   void resetPeakWindow() { peakWindow_.reset(); }
   const char *lastPlaybackError() const { return lastPlaybackError_; }
+  const char *lastHardwareError() const { return lastHardwareError_; }
+  uint32_t captureHeapFreeBeforeStart() const {
+    return captureHeapFreeBeforeStart_;
+  }
+  uint32_t captureHeapLargestBeforeStart() const {
+    return captureHeapLargestBeforeStart_;
+  }
   uint32_t playbackStartFailures() const { return playbackStartFailures_; }
   uint32_t playbackHeapLargestBeforeStart() const {
     return playbackHeapLargestBeforeStart_;
@@ -62,6 +74,8 @@ class AudioPipeline {
   AudioBoardProfile boardProfile_;
   uint32_t hardwareSampleRate_ = 0;
   const char *lastHardwareError_ = "none";
+  uint32_t captureHeapFreeBeforeStart_ = 0;
+  uint32_t captureHeapLargestBeforeStart_ = 0;
   uint64_t bytesRead_ = 0;
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;
@@ -81,6 +95,7 @@ class AudioPipeline {
   uint32_t playbackMaxFileReadUs_ = 0;
   uint8_t playbackInput_[kPlaybackReadAheadBytes] = {};
   uint8_t playbackOutput_[kPlaybackFeedBytes * 2] = {};
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
 };
 
 }  // namespace pokepod

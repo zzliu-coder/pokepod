@@ -12,6 +12,7 @@
 #endif
 
 #include "AudioCaptureRouter.h"
+#include "BleAppHandshakePolicy.h"
 #include "BlePeerPolicy.h"
 #include "BleConnectionPowerPolicy.h"
 #include "BleCallbackOverflowPolicy.h"
@@ -51,6 +52,11 @@ class BleVoiceService {
   void setBatteryPercent(int batteryPercent);
   bool pauseForIdleSleep();
   void resumeAfterIdleSleep();
+  // Provisioning temporarily releases the complete BLE controller allocation
+  // before enabling SoftAP. GATT wrapper objects are deliberately not rebuilt
+  // in-place; the App performs one safe device restart after the portal closes.
+  bool suspendForProvisioning();
+  bool provisioningSuspended() const { return provisioningSuspended_; }
   void prepareForDeepSleep();
 
   bool connected() const { return connected_; }
@@ -58,11 +64,51 @@ class BleVoiceService {
   bool disablePending() const { return enablePolicy_.transitionPending(); }
   bool idlePaused() const { return idlePaused_; }
   bool radioActive() const {
-    return disablePending() || physicalConnectionPending() ||
+    if (provisioningSuspended_) return false;
+    return !quiescedForSleep() ||
         (userEnabled() && !idlePaused_);
   }
+  bool quiescedForSleep() const {
+    if (provisioningSuspended_) return true;
+    return bleVoiceQuiescedForSleep(sleepQuiescenceFacts());
+  }
+  bool callbackOverflowHardFailed() const {
+    return callbackOverflow_.hardFailed();
+  }
+  bool callbackOverflowRecoveryRequired() const {
+    return callbackOverflow_.requiresProcessRecovery();
+  }
+  bool appHandshakeDisconnectPending() const {
+    return appHandshake_.disconnectPending();
+  }
+  bool appHandshakeRecoveryRequired() const {
+    return appHandshake_.recoveryRequired();
+  }
+  bool claimAppHandshakeRecoveryRestart() {
+    if (!appHandshakeRecoveryRequired() ||
+        appHandshakeRecoveryRestartClaimed_) {
+      return false;
+    }
+    appHandshakeRecoveryRestartClaimed_ = true;
+    return true;
+  }
+  bool claimCallbackOverflowRecoveryRestart() {
+    if (!callbackOverflowRecoveryRequired() ||
+        callbackOverflowRecoveryRestartClaimed_) {
+      return false;
+    }
+    callbackOverflowRecoveryRestartClaimed_ = true;
+    return true;
+  }
+  uint16_t callbackOverflowAttempts() const {
+    return callbackOverflow_.attempts();
+  }
+  uint32_t callbackOverflowHardFailures() const {
+    return callbackOverflow_.hardFailureCount();
+  }
   bool appReady() const {
-    return enablePolicy_.acceptsNewWork() && connected_ && appReady_ &&
+    return enablePolicy_.acceptsNewWork() && !callbackOverflow_.active() &&
+        !appHandshake_.disconnectPending() && connected_ && appReady_ &&
         mtuReady();
   }
   bool mtuReady() const { return bleVoiceMtuReady(mtu_); }
@@ -130,7 +176,8 @@ class BleVoiceService {
   void processCallbackEvent(const BleVoiceCallbackEvent &event,
                             uint32_t nowMs);
   void processConnect(uint16_t connectionId, uint32_t connectionGeneration,
-                      const uint8_t *peerAddress, bool peerBonded);
+                      const uint8_t *peerAddress, bool peerBonded,
+                      uint32_t nowMs);
   void processDisconnect(uint16_t connectionId,
                          uint32_t connectionGeneration, uint32_t nowMs);
   void processMtu(uint16_t connectionId, uint32_t connectionGeneration,
@@ -149,7 +196,9 @@ class BleVoiceService {
   void processPasskey(uint32_t passkey);
   void failClosedCallbackOverflow(uint32_t nowMs,
                                   const BleVoiceConnectionEpoch &epoch);
+  void advanceCallbackOverflow(uint32_t nowMs);
   bool finishCallbackOverflowIfDisconnected(uint32_t nowMs);
+  bool recoverInvalidCallbackOverflow(uint32_t nowMs);
   void refreshCallbackSnapshot(uint32_t nowMs);
   void clearControlNotify();
   void restartAdvertising();
@@ -165,15 +214,30 @@ class BleVoiceService {
                           uint32_t nowMs);
   void clearDisabledRuntime(uint32_t nowMs);
   bool physicalConnectionPending() const {
-    return connected_ || callbackOverflow_.physicalConnectionPending();
+    return connected_ || connectionPolicy_.hasCurrent() ||
+        callbackSecurity_.connectionId() != kInvalidBleConnectionId ||
+        callbackOverflow_.physicalConnectionPending();
   }
   uint16_t physicalConnectionId() const {
     if (callbackOverflow_.physicalConnectionPending()) {
       return callbackOverflow_.epoch().connectionId;
     }
-    return connectionPolicy_.hasCurrent()
-        ? connectionPolicy_.currentConnectionId()
-        : kInvalidBleConnectionId;
+    if (connectionPolicy_.hasCurrent()) {
+      return connectionPolicy_.currentConnectionId();
+    }
+    return callbackSecurity_.connectionId();
+  }
+  BleSleepQuiescenceFacts sleepQuiescenceFacts() const {
+    BleSleepQuiescenceFacts facts;
+    facts.sessionActive = controller_.active();
+    facts.pairingActive = pairingUntilMs_ != 0;
+    facts.enableTransitionPending = enablePolicy_.transitionPending();
+    facts.overflowCleanupActive = callbackOverflow_.active();
+    facts.physicalConnectionPending = physicalConnectionPending();
+    facts.notifyPending = controlNotifyPending_ || audioNotifyPending_;
+    facts.callbackMailboxEmpty = callbackEvents_.empty();
+    facts.notifyMailboxEmpty = notifyStatusEvents_.empty();
+    return facts;
   }
 
   BLEServer *server_ = nullptr;
@@ -182,6 +246,7 @@ class BleVoiceService {
   BLECharacteristic *event_ = nullptr;
   BLECharacteristic *audio_ = nullptr;
   BlePeerPolicy peerPolicy_;
+  BleAppHandshakePolicy appHandshake_;
   BleSingleConnectionPolicy connectionPolicy_;
   BleServiceEnablePolicy enablePolicy_;
   VoiceSessionController controller_;
@@ -230,6 +295,9 @@ class BleVoiceService {
       BleConnectionPowerMode::idle;
   bool idlePaused_ = false;
   BleSessionStopRequestLatch sessionStopRequest_;
+  bool callbackOverflowRecoveryRestartClaimed_ = false;
+  bool appHandshakeRecoveryRestartClaimed_ = false;
+  bool provisioningSuspended_ = false;
 };
 
 }  // namespace pokepod

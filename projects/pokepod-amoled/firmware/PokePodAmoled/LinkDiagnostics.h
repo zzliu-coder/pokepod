@@ -15,6 +15,7 @@ class PowerDiagnostics;
 class ProvisioningCoordinator;
 class ProvisioningDiagnostics;
 class RuntimePowerManager;
+class RuntimeDiagnostics;
 class TencentWorker;
 class UsbLinkBridge;
 class WavRecorder;
@@ -38,13 +39,20 @@ class LinkDiagnostics {
             PowerDiagnostics &powerDiagnostics,
             RuntimePowerManager &power,
             ProvisioningCoordinator *provisioningCoordinator,
-            const CapabilityRegistry *capabilities);
+            const CapabilityRegistry *capabilities,
+            RuntimeDiagnostics *runtimeDiagnostics = nullptr);
 
-  String statusJson() const;
+  // The returned reference remains valid until the next statusJson() call.
+  // Its backing allocation is reserved once during bind so repeated status
+  // requests cannot fragment the small internal heap.
+  const String &statusJson() const;
   String provisioningJson() const;
   String powerJson() const;
+  String runtimeJson() const;
+  String runtimeTraceJson(size_t newestOffset, size_t limit) const;
   bool clearProvisioning(Print &log) const;
   bool clearPower(Print &log) const;
+  bool clearRuntime(Print &log) const;
 
  private:
   BoardServices *board_ = nullptr;
@@ -62,6 +70,8 @@ class LinkDiagnostics {
   RuntimePowerManager *power_ = nullptr;
   ProvisioningCoordinator *provisioningCoordinator_ = nullptr;
   const CapabilityRegistry *capabilities_ = nullptr;
+  RuntimeDiagnostics *runtimeDiagnostics_ = nullptr;
+  mutable String statusBuffer_;
 };
 
 }  // namespace pokepod

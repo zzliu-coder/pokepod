@@ -83,6 +83,7 @@ public final class TranscriptionJobService extends JobService {
                 return;
             }
             if (state.stopped.get()) return;
+            if (!LibraryStorageAccess.has(this)) return;
             PokePaths paths = new PokePaths();
             CapsuleStore store = new CapsuleStore(paths);
             paths.ensureBase();

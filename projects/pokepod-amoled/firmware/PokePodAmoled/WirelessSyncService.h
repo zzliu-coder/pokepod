@@ -23,6 +23,7 @@ class BoardServices;
 class CapsuleLibrary;
 class Dashboard;
 class DeviceConfig;
+class DeviceRebootCoordinator;
 class ProvisioningDiagnostics;
 class PowerDiagnostics;
 class RuntimePowerManager;
@@ -43,7 +44,8 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
              ProvisioningDiagnostics &provisioningDiagnostics,
              PowerDiagnostics &powerDiagnostics,
              RuntimePowerManager &power, WirelessSyncIdentity &identity,
-             LinkServiceCoordinator &coordinator, Print &log,
+             LinkServiceCoordinator &coordinator,
+             DeviceRebootCoordinator &rebootCoordinator, Print &log,
              AudioCaptureRuntime *captureRuntime = nullptr,
              AudioCaptureDispatcher *captureDispatcher = nullptr,
              const CapabilityRegistry *capabilities = nullptr);
@@ -61,6 +63,19 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
     return link_.receivingBinary() || link_.maintenanceActive();
   }
   bool receivingBinary() const { return link_.receivingBinary(); }
+  bool capturePreparePending() const {
+    return link_.capturePreparePending();
+  }
+  void prepareCaptureOutsideLinkPoll() {
+    link_.prepareCaptureOutsideLinkPoll();
+  }
+  bool captureStopPending() const { return link_.captureStopPending(); }
+  void stopCaptureOutsideLinkPoll() {
+    link_.stopCaptureOutsideLinkPoll();
+  }
+  bool deviceLifecycleRestartReady() const {
+    return link_.deviceLifecycleRestartReady();
+  }
   bool bonjourActive() const { return bonjour_.active(); }
   bool listenerActive() const { return listenerActive_; }
   bool secureReady() const;

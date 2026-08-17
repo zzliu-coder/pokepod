@@ -152,11 +152,34 @@ bool BoardServices::beginTouch(Print &log) {
 
 bool BoardServices::beginSd(Print &log) {
   SD_MMC.setPins(kSdClock, kSdCommand, kSdData0);
-  const bool ok = SD_MMC.begin("/sdcard", true);
+  constexpr uint8_t kMountAttempts = 3;
+  bool ok = false;
+  for (uint8_t attempt = 1; attempt <= kMountAttempts; ++attempt) {
+    ok = SD_MMC.begin("/sdcard", true);
+    log.printf(
+        "{\"event\":\"sd_mount_attempt\",\"attempt\":%u,\"max\":%u,\"ok\":%s}\n",
+        static_cast<unsigned>(attempt),
+        static_cast<unsigned>(kMountAttempts), ok ? "true" : "false");
+    if (ok) break;
+    // A watchdog/ROM reset can leave the card-side state machine busy while
+    // the ESP32 peripheral is re-created. Fully retire the failed mount and
+    // give the card a bounded recovery interval before trying again.
+    SD_MMC.end();
+    if (attempt < kMountAttempts) delay(100U * attempt);
+  }
+  if (ok) {
+    ++sdMountGeneration_;
+    if (sdMountGeneration_ == 0) ++sdMountGeneration_;
+  }
   log.printf("{\"event\":\"sd\",\"ok\":%s,\"size_mb\":%llu}\n",
              ok ? "true" : "false",
              ok ? static_cast<unsigned long long>(SD_MMC.cardSize() / (1024ULL * 1024ULL)) : 0ULL);
   return ok;
+}
+
+void BoardServices::endSdMount() {
+  if (status_.sdCard) SD_MMC.end();
+  status_.sdCard = false;
 }
 
 void BoardServices::beginSensors(Print &log) {

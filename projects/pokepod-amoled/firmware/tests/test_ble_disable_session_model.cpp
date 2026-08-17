@@ -77,9 +77,18 @@ int main() {
   assert(actions.requestSessionStop);
   BleCallbackOverflowPolicy overflowPolicy;
   const BleVoiceConnectionEpoch overflowEpoch{9, 4};
-  overflowPolicy.begin(overflowEpoch);
+  assert(overflowPolicy.begin(overflowEpoch, 3003));
+  assert(overflowPolicy.poll(3003).disconnect);
   session.abort(VoiceSessionError::disconnected);
+  assert(session.state() == VoiceSessionState::failed);
+  assert(session.error() == VoiceSessionError::disconnected);
+  assert(router.owner() == AudioCaptureOwner::wirelessVoice);
+  assert(!session.markSessionEndSent(3003));
+  // The callback cleanup marks the BLE session failed. App remains the sole
+  // owner of capture/router teardown and releases it at its existing drain
+  // boundary, so overflow cannot manufacture a successful completion.
   router.release(AudioCaptureOwner::wirelessVoice);
+  assert(router.available());
   actions = enable.poll(session.active(),
                         overflowPolicy.physicalConnectionPending(), 3003);
   assert(actions.disconnect);
@@ -88,9 +97,11 @@ int main() {
   actions = enable.poll(session.active(),
                         overflowPolicy.physicalConnectionPending(), 3252);
   assert(!actions.disconnect);
+  assert(!overflowPolicy.poll(3252).disconnect);
   actions = enable.poll(session.active(),
                         overflowPolicy.physicalConnectionPending(), 3253);
   assert(actions.disconnect);
+  assert(overflowPolicy.poll(3253).disconnect);
   enable.requestEnable(true);
   assert(enable.transitionPending());
   assert(!enable.acceptsNewWork());

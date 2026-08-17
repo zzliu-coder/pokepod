@@ -8,6 +8,7 @@ import android.util.Log;
 
 import com.zheliu.pokecapsule.service.OverlayService;
 import com.zheliu.pokecapsule.service.DeviceCapabilities;
+import com.zheliu.pokecapsule.service.LibraryStorageAccess;
 import com.zheliu.pokecapsule.storage.CapsuleStore;
 import com.zheliu.pokecapsule.storage.DeviceIdentity;
 import com.zheliu.pokecapsule.storage.PokePaths;
@@ -40,6 +41,9 @@ public final class PokeCapsuleApp extends Application {
         }
         startupExecutor.execute(() -> {
             try {
+                // The modern phone flavor must never scan or mutate the
+                // shared library before the user grants all-files access.
+                if (!LibraryStorageAccess.has(this)) return;
                 PokePaths paths = new PokePaths();
                 RootWriteLock.clearLockFromPreviousProcess(paths);
                 DeviceIdentity.ensure(this, paths);

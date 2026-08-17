@@ -18,6 +18,34 @@
 
 using namespace pokepod;
 
+namespace pokepod {
+
+struct CapsuleLibraryStartupTestAccess {
+  static const char *transactionPhaseName(const CapsuleLibrary &library) {
+    return library.startupTransactionRunner_.phaseName();
+  }
+
+  static void corruptSelectedPath(CapsuleLibrary &library) {
+    assert(library.startupRequeueLocatorIndex_ < library.locatorCount_);
+    CapsuleLocator &locator =
+        library.locators_[library.startupRequeueLocatorIndex_];
+    locator.directoryHash ^= UINT64_C(0x6d5a56da3b2e1f09);
+  }
+
+  static void corruptSelectedIdentity(CapsuleLibrary &library) {
+    assert(library.startupRequeueLocatorIndex_ < library.locatorCount_);
+    library.locators_[library.startupRequeueLocatorIndex_].id[0] =
+        library.locators_[library.startupRequeueLocatorIndex_].id[0] == 'a'
+            ? 'b' : 'a';
+  }
+
+  static void invalidateCommitInput(CapsuleLibrary &library) {
+    library.startupRequeueInput_.targetPath = "";
+  }
+};
+
+}  // namespace pokepod
+
 namespace {
 
 struct FixtureRecord {
@@ -214,6 +242,63 @@ void finishStartup(CapsuleLibrary &library,
   assert(library.startupReady());
   assert(!library.startupBlocked());
   assert(filesystem->openHandles == 0);
+}
+
+void finishStartupBlocked(CapsuleLibrary &library,
+                          const std::shared_ptr<fakefs::State> &filesystem) {
+  size_t polls = 0;
+  while (library.startupActive()) {
+    library.pollStartup(static_cast<uint32_t>(polls));
+    assert(library.startupMaximumIoBytes() <= 4096);
+    assert(++polls < 200000);
+  }
+  assert(library.startupBlocked());
+  assert(!library.startupReady());
+  assert(filesystem->openHandles == 0);
+  assert(StorageCoordinator::instance().idle());
+}
+
+void finishStartupAfterPublish(
+    CapsuleLibrary &library,
+    const std::shared_ptr<fakefs::State> &filesystem) {
+  size_t polls = 0;
+  while (library.startupActive()) {
+    const uint32_t before = filesystem->operations;
+    const uint64_t beforeNext = filesystem->openNextFileCalls;
+    library.pollStartup(static_cast<uint32_t>(polls));
+    const uint32_t primitives = filesystem->operations - before;
+    const uint64_t enumerations =
+        filesystem->openNextFileCalls - beforeNext;
+    assert(static_cast<uint64_t>(primitives) + enumerations <= 1);
+    assert(library.startupMaximumIoBytes() <= 4096);
+    assert(++polls < 200000);
+  }
+  assert(library.startupReady());
+  assert(!library.startupBlocked());
+  assert(filesystem->openHandles == 0);
+  assert(StorageCoordinator::instance().idle());
+}
+
+void advanceStartupUntil(CapsuleLibrary &library,
+                         CapsuleLibraryStartupState target,
+                         size_t &polls) {
+  while (library.startupActive() && library.startupState() != target) {
+    library.pollStartup(static_cast<uint32_t>(polls));
+    assert(++polls < 200000);
+  }
+  assert(library.startupState() == target);
+}
+
+void assertIsolated(CapsuleLibrary &library, const FixtureRecord &expected,
+                    const char *stage) {
+  CapsuleSummary record;
+  assert(library.hydrate(expected.id.c_str(), record));
+  assert(record.status == CapsuleStatus::damaged);
+  assert(record.readOnly);
+  assert(record.errorStage == stage);
+  assert(!library.requeue(expected.id.c_str()));
+  const CapsuleSummary *queued = library.nextQueued();
+  assert(queued == nullptr || queued->id != expected.id.c_str());
 }
 
 void assertHydrated(CapsuleLibrary &library, const FixtureRecord &expected) {
@@ -545,6 +630,312 @@ void runProductionCooperativeStartup() {
       "/PokeCapsule/.system/transactions/bad-two.journal.blocked"));
 }
 
+void runStartupMixedIsolationFixture() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  auto records = seedFixture(0, kCapsuleLocatorCapacity,
+                             kCapsuleLocatorCapacity - 1, state);
+  const size_t validInterrupted[] = {11, 173, 301, 411, 507};
+  for (const size_t index : validInterrupted) {
+    state->seed(records[index].directory + "/processing.json",
+                processingJson(records[index].id, "transcribing",
+                               records[index].wav ? "audio.wav" : "audio.m4a"));
+  }
+
+  const size_t missing = 20;
+  const size_t empty = 21;
+  const size_t badJson = 22;
+  const size_t unknownSchema = 23;
+  state->files.erase(records[missing].directory + "/processing.json");
+  state->seed(records[empty].directory + "/processing.json", "");
+  state->seed(records[badJson].directory + "/processing.json", "{broken");
+  const std::string unknownBytes = processingJson(
+      records[unknownSchema].id, "transcribing",
+      records[unknownSchema].wav ? "audio.wav" : "audio.m4a", 77);
+  state->seed(records[unknownSchema].directory + "/processing.json",
+              unknownBytes);
+
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  finishStartup(library, state);
+  assert(library.indexedCount() == kCapsuleLocatorCapacity);
+  assert(library.startupIsolatedCount() == 0);
+  assert(StorageCoordinator::instance().idle());
+
+  for (const size_t index : validInterrupted) {
+    CapsuleSummary record;
+    assert(library.hydrate(records[index].id.c_str(), record));
+    assert(record.status == CapsuleStatus::queued);
+    assert(!record.readOnly);
+  }
+  for (const size_t index : {missing, empty, badJson, unknownSchema}) {
+    CapsuleSummary record;
+    assert(library.hydrate(records[index].id.c_str(), record));
+    assert(record.status == CapsuleStatus::damaged || record.readOnly);
+    assert(record.readOnly);
+  }
+  assert(state->text(records[unknownSchema].directory + "/processing.json") ==
+         unknownBytes);
+
+  // Rebooting the exact mixed fixture is idempotent. Unknown schema bytes stay
+  // authoritative and ordinary records remain visible in stable count/order.
+  CapsuleLibrary rebooted;
+  assert(rebooted.begin(filesystem, log));
+  finishStartup(rebooted, state);
+  assert(rebooted.indexedCount() == kCapsuleLocatorCapacity);
+  assert(state->text(records[unknownSchema].directory + "/processing.json") ==
+         unknownBytes);
+  assert(StorageCoordinator::instance().idle());
+}
+
+void runStartupOpenFailureIsolation() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const auto records = seedFixture(0, 3, 2, state);
+  state->seed(records[1].directory + "/processing.json",
+              processingJson(records[1].id, "transcribing", "audio.m4a"));
+
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  size_t polls = 0;
+  advanceStartupUntil(library, CapsuleLibraryStartupState::openingProcessing,
+                      polls);
+  const uint32_t nextOpen = state->fault.seen + 1U;
+  state->fail(fakefs::Operation::open, nextOpen,
+              fakefs::FaultAction::returnFailure);
+  finishStartupAfterPublish(library, state);
+  assert(library.startupIsolatedCount() == 1);
+  assertIsolated(library, records[1], "requeue-open");
+  CapsuleSummary queued;
+  assert(library.hydrate(records[2].id.c_str(), queued));
+  assert(queued.status == CapsuleStatus::queued);
+  assert(StorageCoordinator::instance().idle());
+}
+
+void runStartupReadFailureIsolation() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const auto records = seedFixture(0, 3, 2, state);
+  state->seed(records[1].directory + "/processing.json",
+              processingJson(records[1].id, "transcribing", "audio.m4a"));
+
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  size_t polls = 0;
+  advanceStartupUntil(library, CapsuleLibraryStartupState::readingProcessing,
+                      polls);
+  state->fail(fakefs::Operation::read, 1,
+              fakefs::FaultAction::returnFailure);
+  finishStartupAfterPublish(library, state);
+  assert(library.startupIsolatedCount() == 1);
+  assertIsolated(library, records[1], "requeue-read");
+  assert(StorageCoordinator::instance().idle());
+}
+
+void runStartupChangedMetadataIsolation() {
+  struct Scenario {
+    const char *name;
+    std::string replacement;
+    const char *stage;
+  };
+  const std::string id = uuidFor(0);
+  const Scenario scenarios[] = {
+      {"missing", std::string(), "requeue-open"},
+      {"empty", "", "requeue-open"},
+      {"bad-json", "{broken", "requeue-prepare"},
+      {"unknown-schema", processingJson(id, "transcribing", "audio.wav", 99),
+       "requeue-prepare"},
+  };
+  for (const Scenario &scenario : scenarios) {
+    auto state = std::make_shared<fakefs::State>();
+    fs::FS filesystem(state);
+    Print log;
+    const auto records = seedFixture(0, 2, 1, state);
+    const std::string path = records[0].directory + "/processing.json";
+    state->seed(path, processingJson(records[0].id, "transcribing",
+                                     "audio.wav"));
+    CapsuleLibrary library;
+    assert(library.begin(filesystem, log));
+    size_t polls = 0;
+    advanceStartupUntil(library,
+                        CapsuleLibraryStartupState::openingProcessing, polls);
+    if (std::strcmp(scenario.name, "missing") == 0) {
+      state->files.erase(path);
+    } else {
+      state->seed(path, scenario.replacement);
+    }
+    const std::string authoritativeBytes = state->text(path);
+    finishStartupAfterPublish(library, state);
+    assert(library.startupIsolatedCount() == 1);
+    assertIsolated(library, records[0], scenario.stage);
+    assert(state->text(path) == authoritativeBytes);
+    assert(StorageCoordinator::instance().idle());
+  }
+}
+
+void runStartupCommitStartIsolation() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const auto records = seedFixture(0, 2, 1, state);
+  state->seed(records[0].directory + "/processing.json",
+              processingJson(records[0].id, "transcribing", "audio.wav"));
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  size_t polls = 0;
+  advanceStartupUntil(library,
+                      CapsuleLibraryStartupState::startingRequeueCommit, polls);
+  CapsuleLibraryStartupTestAccess::invalidateCommitInput(library);
+  library.pollStartup(static_cast<uint32_t>(polls++));
+  finishStartupAfterPublish(library, state);
+  assert(library.startupIsolatedCount() == 1);
+  assertIsolated(library, records[0], "requeue-commit-start");
+  assert(StorageCoordinator::instance().idle());
+}
+
+void runStartupPreMutationIsolationCases() {
+  struct Scenario {
+    const char *name;
+    std::string payload;
+    const char *stage;
+  };
+  const std::string id = uuidFor(0);
+  const Scenario scenarios[] = {
+      {"missing", std::string(), "requeue-open"},
+      {"empty", "", "requeue-open"},
+      {"bad-json", "{broken", "requeue-prepare"},
+      {"unknown-schema", processingJson(id, "transcribing", "audio.wav", 99),
+       "requeue-prepare"},
+  };
+  for (const Scenario &scenario : scenarios) {
+    auto state = std::make_shared<fakefs::State>();
+    fs::FS filesystem(state);
+    Print log;
+    const auto records = seedFixture(0, 2, 1, state);
+    const std::string path = records[0].directory + "/processing.json";
+    if (std::strcmp(scenario.name, "missing") == 0) {
+      state->files.erase(path);
+    } else {
+      state->seed(path, scenario.payload);
+    }
+    const std::string original = state->text(path);
+
+    CapsuleLibrary library;
+    assert(library.begin(filesystem, log));
+    finishStartup(library, state);
+    // The first scan already classified these source facts damaged/read-only;
+    // startup therefore never mutates their bytes or expands them globally.
+    CapsuleSummary record;
+    assert(library.hydrate(records[0].id.c_str(), record));
+    assert(record.status == CapsuleStatus::damaged || record.readOnly);
+    assert(record.readOnly);
+    assert(state->text(path) == original);
+    assert(StorageCoordinator::instance().idle());
+  }
+}
+
+void runStartupCustomPathIsolation() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const FixtureRecord record = seedCustomRecord(0, state);
+  state->seed(record.directory + "/processing.json",
+              processingJson(record.id, "transcribing",
+                             record.wav ? "audio.wav" : "audio.m4a"));
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  size_t polls = 0;
+  advanceStartupUntil(library,
+                      CapsuleLibraryStartupState::selectingInterrupted, polls);
+  CapsuleLibraryStartupTestAccess::corruptSelectedPath(library);
+  library.pollStartup(static_cast<uint32_t>(polls++));
+  finishStartupAfterPublish(library, state);
+  assert(library.startupIsolatedCount() == 1);
+  assertIsolated(library, record, "requeue-path");
+  assert(StorageCoordinator::instance().idle());
+}
+
+void runStartupCleanCommitFailureIsolation() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const auto records = seedFixture(0, 2, 1, state);
+  state->seed(records[0].directory + "/processing.json",
+              processingJson(records[0].id, "transcribing", "audio.wav"));
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  size_t polls = 0;
+  advanceStartupUntil(library,
+                      CapsuleLibraryStartupState::pollingRequeueCommit, polls);
+  while (std::string(CapsuleLibraryStartupTestAccess::transactionPhaseName(
+             library)) != "write-stage") {
+    library.pollStartup(static_cast<uint32_t>(polls++));
+    assert(library.startupActive());
+    assert(polls < 200000);
+  }
+  state->fail(fakefs::Operation::write, 1,
+              fakefs::FaultAction::returnFailure);
+  finishStartupAfterPublish(library, state);
+  assert(library.startupIsolatedCount() == 1);
+  assertIsolated(library, records[0], "requeue-commit");
+  assert(StorageCoordinator::instance().idle());
+}
+
+void runStartupAuthorityFailuresBlockGlobally() {
+  for (const bool recoveryBlocked : {false, true}) {
+    auto state = std::make_shared<fakefs::State>();
+    fs::FS filesystem(state);
+    Print log;
+    const auto records = seedFixture(0, 2, 1, state);
+    state->seed(records[0].directory + "/processing.json",
+                processingJson(records[0].id, "transcribing", "audio.wav"));
+    CapsuleLibrary library;
+    assert(library.begin(filesystem, log));
+    size_t polls = 0;
+    advanceStartupUntil(library,
+                        CapsuleLibraryStartupState::pollingRequeueCommit, polls);
+    const char *targetPhase = recoveryBlocked ? "crc" : "cleanup";
+    bool faultInstalled = false;
+    while (library.startupActive()) {
+      const std::string phase =
+          CapsuleLibraryStartupTestAccess::transactionPhaseName(library);
+      if (!faultInstalled && phase == targetPhase) {
+        state->failAlways(recoveryBlocked ? fakefs::Operation::read
+                                          : fakefs::Operation::remove,
+                          fakefs::FaultAction::returnFailure);
+        faultInstalled = true;
+      }
+      library.pollStartup(static_cast<uint32_t>(polls++));
+      assert(polls < 200000);
+    }
+    assert(faultInstalled);
+    assert(library.startupBlocked());
+    assert(state->openHandles == 0);
+    assert(StorageCoordinator::instance().idle());
+  }
+}
+
+void runStartupCommittedLocatorFailureBlocks() {
+  auto state = std::make_shared<fakefs::State>();
+  fs::FS filesystem(state);
+  Print log;
+  const auto records = seedFixture(0, 2, 1, state);
+  state->seed(records[0].directory + "/processing.json",
+              processingJson(records[0].id, "transcribing", "audio.wav"));
+  CapsuleLibrary library;
+  assert(library.begin(filesystem, log));
+  size_t polls = 0;
+  advanceStartupUntil(library,
+                      CapsuleLibraryStartupState::pollingRequeueCommit, polls);
+  CapsuleLibraryStartupTestAccess::corruptSelectedIdentity(library);
+  finishStartupBlocked(library, state);
+  assert(state->text(records[0].directory + "/processing.json").find(
+             "\"status\":\"queued\"") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -555,6 +946,16 @@ int main() {
   runProductionQueuedRescanGate();
   runProductionHeapSoak();
   runProductionCooperativeStartup();
+  runStartupMixedIsolationFixture();
+  runStartupOpenFailureIsolation();
+  runStartupReadFailureIsolation();
+  runStartupChangedMetadataIsolation();
+  runStartupCommitStartIsolation();
+  runStartupPreMutationIsolationCases();
+  runStartupCustomPathIsolation();
+  runStartupCleanCommitFailureIsolation();
+  runStartupAuthorityFailuresBlockGlobally();
+  runStartupCommittedLocatorFailureBlocks();
   assert(fake_heap_caps::liveBytes() == 0);
   return 0;
 }

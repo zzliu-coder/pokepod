@@ -44,7 +44,27 @@ assert "BatchStart::started" in handle
 assert "BatchStart::rejected" in handle
 assert "beginCommandLoad" in handle
 assert "executeCommand" not in CPP
-assert "readText(path, 128U * 1024U)" not in CPP
+assert "readText(" not in COMMANDS
+# Metadata reads own one capped PSRAM slot and advance exactly one <=1 KiB
+# read per poll; no Arduino String reserve/concat path remains.
+read_text = body(SERVICE, "PokePodLinkService::readMetadataStep(",
+                 "void PokePodLinkService::resetMetadataRead(")
+assert "LinkBoundedTextRead::kMaximumBytes" in read_text
+assert "metadataRead_.nextReadBytes()" in read_text
+assert "metadataReadFile_.read(metadataReadBuffer_ + offset, wanted)" in read_text
+assert read_text.count("metadataReadFile_.read(") == 1
+assert ".concat(" not in read_text
+reset_text = body(SERVICE, "void PokePodLinkService::resetMetadataRead(",
+                  "String PokePodLinkService::deviceId(")
+assert "metadataReadFile_.close()" in reset_text
+assert "metadataReadFile_ = File();" not in reset_text
+assert "memset(metadataReadBuffer_" in reset_text
+assert "resetMetadataRead();" in body(
+    (ROOT / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text(),
+    "void PokePodLinkService::disconnect()",
+    "void PokePodLinkService::consumeByte(")
+assert "batchPending_ = BatchPending::metadataRead;\n        return false;" in CPP
+assert "metadataCommit\n        ? startBatchMetadataCommit(batchPlan_, false)" in CPP
 assert "loadStatus(transactionId, owner, state)" in CPP
 assert "startupBatchCandidateInvalid_" in CPP
 assert "mutationRecoveryBlocked_ && !alreadyComplete" in CPP

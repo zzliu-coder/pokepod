@@ -3,6 +3,7 @@
 #include <esp_heap_caps.h>
 
 #include "CapsulePolicy.h"
+#include "DeviceSecretWipe.h"
 #include "WifiPolicy.h"
 
 namespace pokepod {
@@ -77,6 +78,7 @@ void TencentWorker::loop(uint32_t nowMs, bool networkReady, bool timeReady,
   const uint32_t generation = runtime_.request(nowMs + kAttemptWatchdogMs);
   if (generation == 0) {
     library_->markRetryable(id, "transcription", "转写任务正忙");
+    clearTaskSecrets();
     return;
   }
   logState("queued", TencentJobState::queued, generation);
@@ -95,15 +97,40 @@ bool TencentWorker::cancel(TencentCancelReason reason) {
 
 bool TencentWorker::quiesce(uint32_t nowMs, uint32_t timeoutMs,
                             TencentCancelReason reason) {
-  TencentQuiesceStatus status =
-      runtime_.beginQuiesce(nowMs, timeoutMs, reason);
+  TencentQuiesceStatus status = beginQuiesce(nowMs, timeoutMs, reason);
   while (status == TencentQuiesceStatus::waiting) {
+    // The legacy synchronous shutdown API retains its historical durable
+    // settlement semantics.  Link reboot uses pollQuiesce directly and never
+    // enters this path.
     if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
-    status = runtime_.pollQuiesce(millis());
+    status = pollQuiesce(millis());
     if (status == TencentQuiesceStatus::waiting) delay(5);
   }
-  if (resultReady_.load(std::memory_order_acquire)) finishAttempt(millis());
-  return runtime_.pollQuiesce(millis()) == TencentQuiesceStatus::complete;
+  return status == TencentQuiesceStatus::complete;
+}
+
+TencentQuiesceStatus TencentWorker::beginQuiesce(
+    uint32_t nowMs, uint32_t timeoutMs, TencentCancelReason reason) {
+  return runtime_.beginQuiesce(nowMs, timeoutMs, reason);
+}
+
+TencentQuiesceStatus TencentWorker::pollQuiesce(uint32_t nowMs) {
+  return runtime_.pollQuiesce(nowMs);
+}
+
+bool TencentWorker::abandonResultForReboot() {
+  if (!resultReady_.exchange(false, std::memory_order_acq_rel)) return false;
+  const uint32_t generation =
+      resultGeneration_.load(std::memory_order_acquire);
+  clearTaskSecrets();
+  if (generation == 0 || !runtime_.matchesGeneration(generation)) return false;
+  const bool abandoned = runtime_.abandonForReboot(generation);
+  if (abandoned && log_ != nullptr) {
+    log_->printf(
+        "{\"event\":\"asr_result_abandoned_for_reboot\",\"generation\":%lu}\n",
+        static_cast<unsigned long>(generation));
+  }
+  return abandoned;
 }
 
 void TencentWorker::taskEntry(void *context) {
@@ -136,6 +163,10 @@ void TencentWorker::runAttempt(uint32_t generation) {
     asr_.transcribe(*fs_, taskAudioPath_, taskSettings_, taskResult_, *log_,
                     &control);
   }
+  // The network task has made every copy it needs.  Erase the shared
+  // task-local credentials before publishing any terminal result, including
+  // cancellation and stale-generation results.
+  clearTaskSecrets();
   resultGeneration_.store(generation, std::memory_order_relaxed);
   resultReady_.store(true, std::memory_order_release);
 }
@@ -146,6 +177,7 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
       resultGeneration_.load(std::memory_order_acquire);
   if (generation == 0 ||
       !runtime_.matchesGeneration(generation)) {
+    clearTaskSecrets();
     if (log_ != nullptr) {
       log_->printf(
           "{\"event\":\"asr_stale_result\",\"generation\":%lu}\n",
@@ -156,6 +188,7 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
 
   const String id = taskCapsuleId_;
   const TencentAsrResult result = taskResult_;
+  clearTaskSecrets();
   const TencentCancelReason cancelReason = runtime_.cancelReason();
   lastHashElapsedMs_ = result.hashElapsedMs;
   lastConnectElapsedMs_ = result.connectElapsedMs;
@@ -244,6 +277,10 @@ void TencentWorker::finishAttempt(uint32_t nowMs) {
         id.c_str(), static_cast<unsigned long>(delayMs));
   }
   logState("retryable", TencentJobState::retryable, generation);
+}
+
+void TencentWorker::clearTaskSecrets() {
+  secureWipeSecrets(taskSettings_);
 }
 
 void TencentWorker::logState(const char *event, TencentJobState state,

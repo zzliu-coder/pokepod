@@ -35,6 +35,7 @@ struct LinkRecordingRequestResult {
 enum class LinkRecordingEventKind : uint8_t {
   none = 0,
   startReady,
+  startFailed,
   stopCommitted,
   stopCommittedIndexFailed,
   stopFailed,
@@ -67,6 +68,17 @@ class LinkRecordingSession {
                    bool operationOwnsRequest, LinkOperation &operation,
                    LinkCapsuleTransactionGate &transactionGate);
 
+  // Audio hardware allocation is intentionally driven by the App loop, never
+  // from the Link 2 ms poll budget.  The Link poll only observes this result
+  // and advances the asynchronous recorder state machine.
+  bool capturePreparePending() const;
+  bool capturePrepareAttempted() const { return capturePrepareAttempted_; }
+  bool capturePrepared() const { return capturePrepared_; }
+  void prepareCaptureOutsideLinkPoll();
+  bool captureStopPending() const;
+  bool captureStopIssued() const { return captureStopIssued_; }
+  void stopCaptureOutsideLinkPoll();
+
   LinkRecordingEvent poll(LinkOperation &operation,
                           LinkCapsuleTransactionGate &transactionGate,
                           LinkTransport transport,
@@ -82,6 +94,9 @@ class LinkRecordingSession {
     return start_.ownsRequest(requestId) || stop_.ownsRequest(requestId);
   }
   bool owned() const { return owned_; }
+  bool ownsTransferredResources() const {
+    return routerOwned_ && transactionOwned_;
+  }
   bool stopActive() const { return stop_.active(); }
   bool recordingActive() const;
   bool quiesced() const {
@@ -108,8 +123,16 @@ class LinkRecordingSession {
   Print *log_ = nullptr;
 
   bool owned_ = false;
+  bool routerOwned_ = false;
+  bool transactionOwned_ = false;
+  bool stopOperationTracksSession_ = false;
+  bool capturePrepareAttempted_ = false;
+  bool capturePrepared_ = false;
+  bool captureStopIssued_ = false;
   LinkRecordingStart start_;
   String capsuleId_;
+  String createdAt_;
+  RecorderOperationOwner recorderOwner_ = RecorderOperationOwner::none;
   LinkRecordingStop stop_;
 };
 

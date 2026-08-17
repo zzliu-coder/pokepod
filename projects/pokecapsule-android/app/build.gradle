@@ -1,5 +1,34 @@
 apply plugin: 'com.android.application'
 
+def releaseStoreFile = project.findProperty('releaseStoreFile')
+def releaseStorePassword = project.findProperty('releaseStorePassword')
+def releaseKeyAlias = project.findProperty('releaseKeyAlias')
+def releaseKeyPassword = project.findProperty('releaseKeyPassword')
+def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias,
+                         releaseKeyPassword].every { value -> value != null && !value.toString().isEmpty() }
+if (project.findProperty('requireReleaseSigning')?.toString() == 'true' && !hasReleaseSigning) {
+    throw new GradleException(
+            'requireReleaseSigning=true requires all four external release signer properties')
+}
+
+def requireReleaseSigner = {
+    if (!hasReleaseSigning) {
+        throw new GradleException(
+                'Release tasks require all four external signer properties: '
+                + 'releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword')
+    }
+}
+
+// AGP has changed its default handling of an unconfigured release signing
+// config across versions. Make the product policy independent of that detail:
+// every release task must receive a complete external signer, while debug
+// tasks remain usable without credentials.
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { task -> task.name.toLowerCase().contains('release') }) {
+        requireReleaseSigner()
+    }
+}
+
 android {
     namespace 'com.zheliu.pokecapsule'
     compileSdk 34
@@ -7,7 +36,6 @@ android {
     defaultConfig {
         applicationId 'com.zheliu.pokecapsule'
         minSdk 23
-        targetSdk 28
         versionCode 22
         versionName '1.7.0'
 
@@ -15,10 +43,37 @@ android {
 
     }
 
+    flavorDimensions 'device'
+    productFlavors {
+        // BOOX Poke3 keeps the legacy shared-storage contract used by the
+        // existing /sdcard/PokeCapsule library and its old Android system.
+        poke3Legacy {
+            dimension 'device'
+            targetSdk 28
+        }
+        // Ordinary Android phones use current permission behavior. The app
+        // gates all library access on MANAGE_EXTERNAL_STORAGE before startup.
+        phoneModern {
+            dimension 'device'
+            targetSdk 34
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            if (hasReleaseSigning) signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
@@ -44,10 +99,16 @@ dependencies {
     // unit tests offline avoids depending on the Mac's optional HTTP proxy.
     def gradleTestLib = System.getenv('POKECAPSULE_GRADLE_TEST_LIB')
             ?: '../../../work/toolchains/gradle@8/8.14.5/libexec/lib'
-    testImplementation files(
-            "${gradleTestLib}/junit-4.13.2.jar",
-            "${gradleTestLib}/hamcrest-core-1.3.jar")
-    androidTestImplementation files(
-            "${gradleTestLib}/junit-4.13.2.jar",
-            "${gradleTestLib}/hamcrest-core-1.3.jar")
+    if (file("${gradleTestLib}/junit-4.13.2.jar").isFile()
+            && file("${gradleTestLib}/hamcrest-core-1.3.jar").isFile()) {
+        testImplementation files(
+                "${gradleTestLib}/junit-4.13.2.jar",
+                "${gradleTestLib}/hamcrest-core-1.3.jar")
+        androidTestImplementation files(
+                "${gradleTestLib}/junit-4.13.2.jar",
+                "${gradleTestLib}/hamcrest-core-1.3.jar")
+    } else {
+        testImplementation 'junit:junit:4.13.2'
+        androidTestImplementation 'junit:junit:4.13.2'
+    }
 }

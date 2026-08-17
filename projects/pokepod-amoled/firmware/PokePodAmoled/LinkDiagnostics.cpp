@@ -16,6 +16,7 @@
 #include "ProvisioningCoordinator.h"
 #include "ProvisioningDiagnostics.h"
 #include "RuntimePowerManager.h"
+#include "RuntimeDiagnostics.h"
 #include "TencentWorker.h"
 #include "UsbLinkBridge.h"
 #include "WavRecorder.h"
@@ -25,33 +26,14 @@
 namespace pokepod {
 namespace {
 
-constexpr size_t kStatusExtraBytes = kLinkMaxControlBytes - 96U;
 constexpr size_t kStatusDiagnosticStringBytes = 192U;
+constexpr char kStatusPrefix[] = "{\"status\":\"ok\",\"version\":2";
 
 String printed(cJSON *root) {
   char *value = cJSON_PrintUnformatted(root);
   const String result = value == nullptr ? String() : String(value);
   cJSON_free(value);
   return result;
-}
-
-String jsonEscaped(const String &value) {
-  String escaped;
-  escaped.reserve(value.length() + 8);
-  for (size_t index = 0; index < value.length(); ++index) {
-    const char character = value[index];
-    switch (character) {
-      case '\\': escaped += "\\\\"; break;
-      case '"': escaped += "\\\""; break;
-      case '\n': escaped += "\\n"; break;
-      case '\r': escaped += "\\r"; break;
-      case '\t': escaped += "\\t"; break;
-      default:
-        if (static_cast<uint8_t>(character) >= 0x20) escaped += character;
-        break;
-    }
-  }
-  return escaped;
 }
 
 String utf8Prefix(const String &value, size_t maximumBytes) {
@@ -105,7 +87,19 @@ void appendJsonNumber(String &json, const char *key, int64_t value) {
 void appendJsonString(String &json, const char *key, const String &value) {
   appendJsonKey(json, key);
   json += '"';
-  json += jsonEscaped(value);
+  for (size_t index = 0; index < value.length(); ++index) {
+    const char character = value[index];
+    switch (character) {
+      case '\\': json += "\\\\"; break;
+      case '"': json += "\\\""; break;
+      case '\n': json += "\\n"; break;
+      case '\r': json += "\\r"; break;
+      case '\t': json += "\\t"; break;
+      default:
+        if (static_cast<uint8_t>(character) >= 0x20) json += character;
+        break;
+    }
+  }
   json += '"';
 }
 
@@ -119,7 +113,8 @@ void LinkDiagnostics::bind(
     ProvisioningDiagnostics &provisioningDiagnostics,
     PowerDiagnostics &powerDiagnostics, RuntimePowerManager &power,
     ProvisioningCoordinator *provisioningCoordinator,
-    const CapabilityRegistry *capabilities) {
+    const CapabilityRegistry *capabilities,
+    RuntimeDiagnostics *runtimeDiagnostics) {
   board_ = &board;
   audio_ = &audio;
   usb_ = &usb;
@@ -135,21 +130,27 @@ void LinkDiagnostics::bind(
   power_ = &power;
   provisioningCoordinator_ = provisioningCoordinator;
   capabilities_ = capabilities;
+  runtimeDiagnostics_ = runtimeDiagnostics;
+  // Reserve once while boot still has a large contiguous internal heap. The
+  // buffer is retained for the service lifetime and reused for every status
+  // response instead of allocating/freeing 3-4 KiB on each host query.
+  (void)statusBuffer_.reserve(kLinkMaxControlBytes);
 }
 
-String LinkDiagnostics::statusJson() const {
+const String &LinkDiagnostics::statusJson() const {
   if (board_ == nullptr || audio_ == nullptr || usb_ == nullptr ||
       bleVoice_ == nullptr || dashboard_ == nullptr || library_ == nullptr ||
       recorder_ == nullptr || config_ == nullptr || wifi_ == nullptr ||
       tencent_ == nullptr || provisioningDiagnostics_ == nullptr ||
       powerDiagnostics_ == nullptr || power_ == nullptr) {
-    return "{\"status\":\"error\",\"version\":2,"
-           "\"message\":\"diagnostics unavailable\"}";
+    statusBuffer_ = "{\"status\":\"error\",\"version\":2,"
+                    "\"message\":\"diagnostics unavailable\"}";
+    return statusBuffer_;
   }
 
   const BoardStatus &status = board_->status();
-  String extra;
-  extra.reserve(3072);
+  String &extra = statusBuffer_;
+  extra = kStatusPrefix;
   appendJsonBool(extra, "recording", recorder_->recording());
   appendJsonBool(extra, "transcribing", tencent_->working());
   appendJsonNumber(extra, "batteryPercent", status.batteryPercent);
@@ -220,6 +221,13 @@ String LinkDiagnostics::statusJson() const {
   appendJsonNumber(extra, "audio_read_bytes", audio_->bytesRead());
   appendJsonNumber(extra, "audio_read_failures", audio_->readFailures());
   appendJsonNumber(extra, "audio_peak", audio_->peakSample());
+  appendJsonString(extra, "audio_capture_last_hardware_error",
+                   utf8Prefix(audio_->lastHardwareError(),
+                              kStatusDiagnosticStringBytes));
+  appendJsonNumber(extra, "audio_capture_heap_free_before_start",
+                   audio_->captureHeapFreeBeforeStart());
+  appendJsonNumber(extra, "audio_capture_heap_largest_before_start",
+                   audio_->captureHeapLargestBeforeStart());
   appendJsonString(extra, "playback_last_error",
                    utf8Prefix(audio_->lastPlaybackError(),
                               kStatusDiagnosticStringBytes));
@@ -314,22 +322,24 @@ String LinkDiagnostics::statusJson() const {
                  power.bleModemSleepSupported);
   appendJsonNumber(extra, "provisioningDiagnosticCount",
                    provisioningDiagnostics_->count());
+  appendJsonNumber(extra, "runtimeDiagnosticCount",
+                   runtimeDiagnostics_ == nullptr ? 0
+                                                   : runtimeDiagnostics_->count());
   appendJsonString(extra, "provisioningStartupPhase",
                    provisioningCoordinator_ == nullptr
                        ? "unavailable"
                        : provisioningCoordinator_->phaseName());
-  if (extra.length() > kStatusExtraBytes) {
-    extra = "\"diagnosticsTruncated\":true";
+  if (extra.length() + 1U > kLinkMaxControlBytes) {
+    extra = kStatusPrefix;
+    appendJsonBool(extra, "diagnosticsTruncated", true);
     appendJsonBool(extra, "recording", recorder_->recording());
     appendJsonBool(extra, "transcribing", tencent_->working());
     appendJsonNumber(extra, "batteryPercent", status.batteryPercent);
     appendJsonString(extra, "wifi", wifi_->phaseName());
     appendJsonBool(extra, "sdReady", status.sdCard);
   }
-  String response = "{\"status\":\"ok\",\"version\":2,";
-  response += extra;
-  response += '}';
-  return response;
+  extra += '}';
+  return statusBuffer_;
 }
 
 String LinkDiagnostics::provisioningJson() const {
@@ -409,6 +419,21 @@ String LinkDiagnostics::powerJson() const {
   return result;
 }
 
+String LinkDiagnostics::runtimeJson() const {
+  if (runtimeDiagnostics_ == nullptr) {
+    return "{\"status\":\"unavailable\",\"version\":1,\"records\":[]}";
+  }
+  return runtimeDiagnostics_->json();
+}
+
+String LinkDiagnostics::runtimeTraceJson(size_t newestOffset,
+                                         size_t limit) const {
+  if (runtimeDiagnostics_ == nullptr) {
+    return "{\"status\":\"unavailable\",\"version\":1,\"records\":[]}";
+  }
+  return runtimeDiagnostics_->traceJson(newestOffset, limit);
+}
+
 bool LinkDiagnostics::clearProvisioning(Print &log) const {
   return provisioningDiagnostics_ != nullptr &&
       provisioningDiagnostics_->clear(log);
@@ -416,6 +441,10 @@ bool LinkDiagnostics::clearProvisioning(Print &log) const {
 
 bool LinkDiagnostics::clearPower(Print &log) const {
   return powerDiagnostics_ != nullptr && powerDiagnostics_->clear(log);
+}
+
+bool LinkDiagnostics::clearRuntime(Print &log) const {
+  return runtimeDiagnostics_ != nullptr && runtimeDiagnostics_->clear(log);
 }
 
 }  // namespace pokepod

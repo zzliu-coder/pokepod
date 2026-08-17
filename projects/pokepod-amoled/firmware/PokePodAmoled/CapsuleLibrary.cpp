@@ -5,6 +5,7 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <esp_system.h>
+#include <strings.h>
 #include <utility>
 
 #include "CapsuleCompatibilityPolicy.h"
@@ -16,6 +17,10 @@ namespace {
 
 constexpr size_t kMaxMetadataBytes = 8192;
 constexpr size_t kPreviewBytes = 360;
+// Kept private to CapsuleLibrary so the public locator/wire contracts do not
+// change. The bit identifies records isolated during startup after the atomic
+// scan generation was built.
+constexpr uint16_t kStartupIsolatedLocatorFlag = UINT16_C(1) << 15;
 
 CapsuleStatus parseStatus(const char *value) {
   if (value == nullptr) return CapsuleStatus::damaged;
@@ -49,6 +54,16 @@ void copyFixed(char (&destination)[Capacity], const String &source) {
   const size_t count = source.length() < Capacity - 1
       ? source.length() : Capacity - 1;
   if (count > 0) memcpy(destination, source.c_str(), count);
+  destination[count] = '\0';
+}
+
+template <size_t Capacity>
+void copyFixed(char (&destination)[Capacity], const char *source) {
+  if (Capacity == 0) return;
+  const char *value = source == nullptr ? "" : source;
+  const size_t length = strlen(value);
+  const size_t count = length < Capacity - 1 ? length : Capacity - 1;
+  if (count > 0) memcpy(destination, value, count);
   destination[count] = '\0';
 }
 
@@ -109,6 +124,13 @@ bool CapsuleLibrary::begin(fs::FS &fs, Print &log,
   startupRequeueInterrupted_ = requeueInterruptedTranscription;
   startupPolls_ = 0;
   startupMaximumIoBytes_ = 0;
+  startupIsolatedCount_ = 0;
+  startupLastIsolatedId_ = "";
+  startupLastIsolationStage_ = "";
+  startupLastIsolationError_ = "";
+  startupIsolationDiagnostics_ = {};
+  startupIsolationDiagnosticCount_ = 0;
+  startupIsolationDiagnosticNext_ = 0;
   startupRequeueIndex_ = 0;
   clearStartupRequeue();
   startupState_ = CapsuleLibraryStartupState::waitingForAuthority;
@@ -184,17 +206,27 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
           StorageOwner::recovery, StorageAccess::read, 0);
       if (!lease) return startupState_;
       startupRequeueFile_ = fs_->open(startupRequeuePath_, FILE_READ);
-      if (!startupRequeueFile_ || startupRequeueFile_.isDirectory() ||
-          startupRequeueFile_.size() == 0 ||
-          startupRequeueFile_.size() > kMaxMetadataBytes ||
-          !startupRequeueText_.reserve(startupRequeueFile_.size() + 1)) {
+      if (!startupRequeueFile_) {
+        isolateStartupRequeue("requeue-open", "open-failed");
+      } else if (startupRequeueFile_.isDirectory()) {
+        deferStartupRequeueIsolation("requeue-open", "is-directory");
+      } else if (startupRequeueFile_.size() == 0) {
+        deferStartupRequeueIsolation("requeue-open", "empty");
+      } else if (startupRequeueFile_.size() > kMaxMetadataBytes) {
+        deferStartupRequeueIsolation("requeue-open", "too-large");
+      } else if (!startupRequeueText_.reserve(
+                     startupRequeueFile_.size() + 1)) {
+        deferStartupRequeueIsolation("requeue-open", "allocation-failed");
+      } else {
+        startupState_ = CapsuleLibraryStartupState::readingProcessing;
+      }
+      if (startupDeferredIsolationStage_ != nullptr) {
         if (startupRequeueFile_) {
           startupState_ = CapsuleLibraryStartupState::closingBlockedFile;
         } else {
-          failStartup("requeue-open");
+          isolateStartupRequeue(startupDeferredIsolationStage_,
+                                startupDeferredIsolationError_);
         }
-      } else {
-        startupState_ = CapsuleLibraryStartupState::readingProcessing;
       }
       return startupState_;
     }
@@ -207,16 +239,21 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
       const size_t wanted = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
       const int count = wanted == 0 ? 0 : startupRequeueFile_.read(chunk, wanted);
       if (count < 0 || (count == 0 && startupRequeueFile_.available())) {
+        deferStartupRequeueIsolation("requeue-read", "read-failed");
         startupState_ = CapsuleLibraryStartupState::closingBlockedFile;
       } else {
         if (count > 0) {
-          startupRequeueText_.concat(
-              reinterpret_cast<const char *>(chunk), static_cast<size_t>(count));
-          if (static_cast<size_t>(count) > startupMaximumIoBytes_) {
+          if (!startupRequeueText_.concat(
+                  reinterpret_cast<const char *>(chunk),
+                  static_cast<size_t>(count))) {
+            deferStartupRequeueIsolation("requeue-read", "allocation-failed");
+            startupState_ = CapsuleLibraryStartupState::closingBlockedFile;
+          } else if (static_cast<size_t>(count) > startupMaximumIoBytes_) {
             startupMaximumIoBytes_ = static_cast<size_t>(count);
           }
         }
-        if (!startupRequeueFile_.available()) {
+        if (startupDeferredIsolationStage_ == nullptr &&
+            !startupRequeueFile_.available()) {
           startupState_ = CapsuleLibraryStartupState::closingProcessing;
         }
       }
@@ -229,7 +266,7 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
       startupRequeueFile_.close();
       startupRequeueText_.trim();
       if (startupRequeueText_.isEmpty()) {
-        failStartup("requeue-empty");
+        isolateStartupRequeue("requeue-read", "empty");
       } else {
         startupState_ = CapsuleLibraryStartupState::preparingRequeue;
       }
@@ -240,7 +277,7 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
                                  "", "", "", false,
                                  startupRequeueEncoded_,
                                  startupRequeueId_.c_str())) {
-        failStartup("requeue-prepare");
+        isolateStartupRequeue("requeue-prepare", "metadata-invalid");
       } else {
         startupRequeueSource_.bind(&startupRequeueEncoded_);
         startupRequeueInput_.targetPath = startupRequeuePath_;
@@ -260,7 +297,11 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
         }
         startupState_ = CapsuleLibraryStartupState::pollingRequeueCommit;
       } else {
-        failStartup("requeue-commit-start");
+        if (startupCommitCanBeIsolated()) {
+          isolateStartupRequeue("requeue-commit-start", "not-started");
+        } else {
+          failStartup("requeue-commit-start");
+        }
       }
       return startupState_;
     case CapsuleLibraryStartupState::pollingRequeueCommit: {
@@ -277,8 +318,16 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
           startupState_ = CapsuleLibraryStartupState::selectingInterrupted;
         }
       } else if (result == CapsuleTransactionPollResult::failed ||
-                 result == CapsuleTransactionPollResult::cancelled ||
-                 result == CapsuleTransactionPollResult::cleanupBlocked ||
+                 result == CapsuleTransactionPollResult::cancelled) {
+        if (startupCommitCanBeIsolated()) {
+          isolateStartupRequeue(
+              "requeue-commit",
+              result == CapsuleTransactionPollResult::cancelled
+                  ? "cancelled-clean" : "failed-clean");
+        } else {
+          failStartup("requeue-commit-authority");
+        }
+      } else if (result == CapsuleTransactionPollResult::cleanupBlocked ||
                  result == CapsuleTransactionPollResult::recoveryBlocked) {
         failStartup("requeue-commit");
       }
@@ -306,7 +355,12 @@ CapsuleLibraryStartupState CapsuleLibrary::pollStartup(uint32_t nowMs) {
           StorageOwner::recovery, StorageAccess::read, 0);
       if (!lease) return startupState_;
       if (startupRequeueFile_) startupRequeueFile_.close();
-      failStartup("requeue-read");
+      if (startupDeferredIsolationStage_ == nullptr) {
+        failStartup("requeue-close-without-isolation");
+      } else {
+        isolateStartupRequeue(startupDeferredIsolationStage_,
+                              startupDeferredIsolationError_);
+      }
       return startupState_;
     }
     case CapsuleLibraryStartupState::idle:
@@ -333,6 +387,49 @@ void CapsuleLibrary::failStartup(const char *stage) {
   startupState_ = CapsuleLibraryStartupState::blocked;
 }
 
+void CapsuleLibrary::deferStartupRequeueIsolation(const char *stage,
+                                                  const char *error) {
+  startupDeferredIsolationStage_ = stage == nullptr ? "unknown" : stage;
+  startupDeferredIsolationError_ = error == nullptr ? "unknown" : error;
+}
+
+void CapsuleLibrary::isolateStartupRequeue(const char *stage,
+                                           const char *error) {
+  if (startupRequeueFile_ || startupRequeueLocatorIndex_ >= locatorCount_ ||
+      startupRequeueId_.isEmpty() ||
+      !startupRequeueId_.equalsIgnoreCase(
+          locators_[startupRequeueLocatorIndex_].id)) {
+    failStartup("requeue-isolation-authority");
+    return;
+  }
+
+  CapsuleLocator &locator = locators_[startupRequeueLocatorIndex_];
+  locator.status = static_cast<uint8_t>(CapsuleStatus::damaged);
+  locator.flags |= static_cast<uint16_t>(
+      locatorReadOnly | locatorDamaged | kStartupIsolatedLocatorFlag);
+  locator.flags &= static_cast<uint16_t>(
+      ~static_cast<uint16_t>(locatorPending | locatorFailed));
+  invalidateRecordCache(startupRequeueId_);
+
+  ++startupIsolatedCount_;
+  startupLastIsolatedId_ = startupRequeueId_;
+  startupLastIsolationStage_ = stage == nullptr ? "unknown" : stage;
+  startupLastIsolationError_ = error == nullptr ? "unknown" : error;
+  rememberStartupIsolation(startupLastIsolatedId_,
+                           startupLastIsolationStage_.c_str(),
+                           startupLastIsolationError_.c_str());
+  if (log_ != nullptr) {
+    log_->printf(
+        "{\"event\":\"capsule_startup_isolated\","
+        "\"capsule_id\":\"%s\",\"stage\":\"%s\",\"error\":\"%s\"}\n",
+        startupLastIsolatedId_.c_str(),
+        startupLastIsolationStage_.c_str(),
+        startupLastIsolationError_.c_str());
+  }
+  clearStartupRequeue();
+  startupState_ = CapsuleLibraryStartupState::selectingInterrupted;
+}
+
 void CapsuleLibrary::clearStartupRequeue() {
   startupRequeueFile_ = File();
   startupRequeueId_ = "";
@@ -341,6 +438,8 @@ void CapsuleLibrary::clearStartupRequeue() {
   startupRequeueEncoded_ = "";
   startupRequeueSource_.bind(nullptr);
   startupRequeueInput_ = {};
+  startupDeferredIsolationStage_ = nullptr;
+  startupDeferredIsolationError_ = nullptr;
 }
 
 bool CapsuleLibrary::selectStartupRequeue() {
@@ -352,17 +451,89 @@ bool CapsuleLibrary::selectStartupRequeue() {
       !capsuleStatusNeedsStartupRequeue(statusName(status))) {
     return false;
   }
-  String directory;
-  if (!customPath(locator, directory)) {
-    failStartup("requeue-path");
-    return false;
-  }
   startupRequeueLocatorIndex_ = index;
   startupRequeueId_ = locator.id;
+  String directory;
+  if (!customPath(locator, directory)) {
+    isolateStartupRequeue("requeue-path", "invalid-locator-path");
+    return false;
+  }
   startupRequeuePath_ = directory + "/processing.json";
   startupRequeueText_ = "";
   startupRequeueEncoded_ = "";
   return true;
+}
+
+bool CapsuleLibrary::startupCommitCanBeIsolated() const {
+  return !startupTransactionRunner_.active() &&
+      !startupTransactionRunner_.reservationHeld() &&
+      startupTransactionRunner_.state() !=
+          CapsuleTransactionRunState::cleanupBlocked &&
+      startupTransactionRunner_.state() !=
+          CapsuleTransactionRunState::recoveryBlocked;
+}
+
+void CapsuleLibrary::populateStartupIsolatedRecord(
+    const CapsuleLocator &locator, const String &directory,
+    const String &folder, CapsuleSummary &record) const {
+  record = CapsuleSummary();
+  record.id = locator.id;
+  record.directory = directory;
+  record.folder = folder;
+  record.title = "胶囊需要检查";
+  record.createdAt = locator.createdAt;
+  record.status = CapsuleStatus::damaged;
+  record.favorite = capsuleLocatorHasFlag(locator, locatorFavorite);
+  record.archived = capsuleLocatorHasFlag(locator, locatorArchived);
+  record.trashed = capsuleLocatorHasFlag(locator, locatorTrashed);
+  record.readOnly = true;
+  const CapsuleAudioKind audioKind =
+      static_cast<CapsuleAudioKind>(locator.audioKind);
+  if (audioKind == CapsuleAudioKind::wav) {
+    record.audioFile = "audio.wav";
+    record.audioFormat = "wav-pcm-s16le";
+  } else if (audioKind == CapsuleAudioKind::m4a) {
+    record.audioFile = "audio.m4a";
+    record.audioFormat = "m4a-aac-lc";
+  }
+  const StartupIsolationDiagnostic *diagnostic =
+      startupIsolationDiagnostic(locator.id);
+  record.errorStage = diagnostic == nullptr ? "startup-requeue" :
+      diagnostic->stage;
+  record.error = diagnostic == nullptr ? "胶囊启动恢复失败" :
+      diagnostic->error;
+}
+
+void CapsuleLibrary::rememberStartupIsolation(const String &id,
+                                              const char *stage,
+                                              const char *error) {
+  StartupIsolationDiagnostic &diagnostic =
+      startupIsolationDiagnostics_[startupIsolationDiagnosticNext_];
+  diagnostic = {};
+  copyFixed(diagnostic.id, id);
+  copyFixed(diagnostic.stage, stage);
+  copyFixed(diagnostic.error, error);
+  startupIsolationDiagnosticNext_ =
+      (startupIsolationDiagnosticNext_ + 1U) %
+      kStartupIsolationDiagnosticCapacity;
+  if (startupIsolationDiagnosticCount_ <
+      kStartupIsolationDiagnosticCapacity) {
+    ++startupIsolationDiagnosticCount_;
+  }
+}
+
+const CapsuleLibrary::StartupIsolationDiagnostic *
+CapsuleLibrary::startupIsolationDiagnostic(const char *id) const {
+  if (id == nullptr) return nullptr;
+  for (size_t offset = 0; offset < startupIsolationDiagnosticCount_; ++offset) {
+    const size_t index =
+        (startupIsolationDiagnosticNext_ + kStartupIsolationDiagnosticCapacity -
+         1U - offset) % kStartupIsolationDiagnosticCapacity;
+    if (strcasecmp(startupIsolationDiagnostics_[index].id, id) == 0) {
+      return &startupIsolationDiagnostics_[index];
+    }
+  }
+  return nullptr;
 }
 
 bool CapsuleLibrary::updateStartupRequeuedLocator() {
@@ -1706,6 +1877,23 @@ bool CapsuleLibrary::hydrateLocator(const CapsuleLocator &locator,
                                     CapsuleSummary &record) const {
   String directory;
   String folder;
+  if ((locator.flags & kStartupIsolatedLocatorFlag) != 0) {
+    const CapsuleStorageArea area =
+        static_cast<CapsuleStorageArea>(locator.storageArea);
+    if (area == CapsuleStorageArea::inbox) folder = "Inbox";
+    else if (area == CapsuleStorageArea::archive) folder = "Archive";
+    else if (area == CapsuleStorageArea::trash) folder = ".trash";
+    if (customPath(locator, directory)) {
+      const String rootPrefix = String(kCapsuleRoot) + "/";
+      const int lastSlash = directory.lastIndexOf('/');
+      if (lastSlash > static_cast<int>(rootPrefix.length()) &&
+          directory.startsWith(rootPrefix.c_str())) {
+        folder = directory.substring(rootPrefix.length(), lastSlash);
+      }
+    }
+    populateStartupIsolatedRecord(locator, directory, folder, record);
+    return true;
+  }
   return resolveLocator(locator, directory, folder) &&
       readRecord(directory, folder, record) &&
       record.id.equalsIgnoreCase(locator.id);

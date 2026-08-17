@@ -82,6 +82,8 @@ void fillSamples(int16_t *samples, int16_t base) {
 int main() {
   static_assert(kAudioCaptureReadTimeoutMs == 50U,
                 "hardware I2S timeout contract changed");
+  static_assert(kAudioCaptureWarmupMs == 150U,
+                "bounded hardware warm-up contract changed");
   static_assert(kAudioCaptureStopTimeoutMs ==
                     kAudioCaptureReadTimeoutMs *
                         kAudioCaptureStopReadWindows,
@@ -265,17 +267,24 @@ int main() {
   assert(metrics.sourceOverruns == 1);
   assert(metrics.shortReads == 1);
   assert(metrics.longestReadUs == 50000);
+  assert(metrics.firstFailure == AudioCaptureFailureCode::sourceOverrun);
+  assert(metrics.firstFailureAtMs == 22);
 
   assert(service.pop(frame));
   assert(frame.sessionId == 77 && frame.sequence == 0);
   assert(service.pop(frame));
   assert(frame.sequence == 1);
   assert(!service.pop(frame));
-  assert(service.captureOnce(82) == AudioCaptureCycleResult::sourceTimeout);
+  assert(service.captureOnce(82) == AudioCaptureCycleResult::sourceEarlyZero);
   assert(service.captureOnce(102) == AudioCaptureCycleResult::sourceFailure);
   metrics = service.metrics();
   assert(metrics.timeouts == 1);
+  assert(metrics.zeroByteReads == 2);
+  assert(metrics.earlyZeroReads == 2);
   assert(metrics.sourceFailures == 1);
+  // The first loss fact is immutable for the session: later timeout/failure
+  // events cannot hide the earlier DMA overrun.
+  assert(metrics.firstFailure == AudioCaptureFailureCode::sourceOverrun);
   service.stopSession();
   assert(!service.running());
   frontEnd = service.frontEndSnapshot();
@@ -285,6 +294,38 @@ int main() {
   const uint16_t previousPeak = frontEnd.outputPeak;
   assert(source.starts == 1 && source.stops == 1);
   assert(service.captureOnce(122) == AudioCaptureCycleResult::idle);
+
+  FakeCaptureSource warmingSource({
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+      {AudioCaptureReadStatus::ok, raw, 4000},
+  });
+  AudioCaptureService<2> warmingService;
+  assert(warmingService.startSession(79, warmingSource));
+  assert(warmingService.captureOnce(1000) ==
+         AudioCaptureCycleResult::sourceWarmingUp);
+  assert(warmingService.captureOnce(1100) ==
+         AudioCaptureCycleResult::sourceWarmingUp);
+  assert(warmingService.metrics().firstFailure ==
+         AudioCaptureFailureCode::none);
+  assert(warmingService.metrics().warmupZeroReads == 2);
+  assert(warmingService.captureOnce(1120) ==
+         AudioCaptureCycleResult::partialInput);
+  warmingService.stopSession();
+
+  FakeCaptureSource failedWarmupSource({
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+      {AudioCaptureReadStatus::timeout, 0, 1000},
+  });
+  AudioCaptureService<2> failedWarmupService;
+  assert(failedWarmupService.startSession(80, failedWarmupSource));
+  assert(failedWarmupService.captureOnce(2000) ==
+         AudioCaptureCycleResult::sourceWarmingUp);
+  assert(failedWarmupService.captureOnce(2150) ==
+         AudioCaptureCycleResult::sourceEarlyZero);
+  assert(failedWarmupService.metrics().firstFailure ==
+         AudioCaptureFailureCode::earlyZeroRead);
+  failedWarmupService.stopSession();
 
   // A new runtime session publishes the caller-provided ID and a fully reset
   // DSP snapshot before capture work can begin. No terminal metrics leak into

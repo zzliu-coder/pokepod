@@ -6,5 +6,8 @@
   "destination": "工作/项目A",
   "capsuleIds": [
     "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f"
-  ]
+  ],
+  "expectedRevisions": {
+    "0d95b7c1-7ce9-4a91-aea2-b64707a05c9f": 1
+  }
 }

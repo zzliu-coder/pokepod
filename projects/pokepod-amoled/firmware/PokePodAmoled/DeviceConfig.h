@@ -17,6 +17,8 @@ struct DeviceSettings {
   bool wifiEnabled = true;
   bool bluetoothEnabled = true;
   bool raiseToWake = true;
+  ProvisioningPasswordMode provisioningPasswordMode =
+      kDefaultProvisioningPasswordMode;
 };
 
 struct WifiCredential {
@@ -45,6 +47,7 @@ class DeviceConfig {
   bool setWifiEnabled(bool enabled, Print &log);
   bool setBluetoothEnabled(bool enabled, Print &log);
   bool setRaiseToWake(bool enabled, Print &log);
+  bool setProvisioningPasswordMode(ProvisioningPasswordMode mode, Print &log);
 
  private:
   bool persistState(const DeviceSettings &settings,

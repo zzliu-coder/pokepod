@@ -16,7 +16,7 @@ def require(source: str, needle: str, message: str) -> None:
         raise SystemExit(f"FAIL capability_wiring: {message}")
 
 
-require(APP, "bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary.begin(",
+require(APP, "bootCapsuleLibraryStarted = board.sdReady() && capsuleLibrary->begin(",
         "CapsuleLibrary::begin result is not captured")
 require(APP, "bootTencentWorkerStarted = bootCapsuleLibraryStarted &&",
         "TencentWorker::begin result is not captured")
@@ -26,7 +26,7 @@ require(APP, "capabilities.record(DeviceCapability::recording,",
         "recorder/capture capability fact is not recorded")
 require(APP, "capabilities.record(DeviceCapability::transcription,",
         "ASR worker capability fact is not recorded")
-require(APP, "view.library = view.capsuleLibraryReady ? &capsuleLibrary : nullptr;",
+require(APP, "view.library = view.capsuleLibraryReady ? &capsuleLibrary.get() : nullptr;",
         "dashboard can observe an unavailable capsule library")
 require(APP, "startupCapabilityPresentation(capabilities)",
         "startup UI does not consume the shared capability registry")

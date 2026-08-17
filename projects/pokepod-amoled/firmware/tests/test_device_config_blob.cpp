@@ -21,6 +21,34 @@ int main() {
   // historical enabled behavior without changing blob size or version.
   assert(empty.reserved[0] == kStoredBluetoothLegacyEnabled);
   assert(storedDeviceConfigBluetoothEnabled(empty));
+  // Zero-filled v1 blobs remain the legacy/random provisioning behavior.
+  assert(storedDeviceConfigProvisioningPasswordMode(empty) ==
+         ProvisioningPasswordMode::legacy);
+  assert(migrateProvisioningPasswordMode(
+             ProvisioningPasswordMode::legacy) ==
+         ProvisioningPasswordMode::fixed88888888);
+  assert(kDefaultProvisioningPasswordMode ==
+         ProvisioningPasswordMode::fixed88888888);
+
+  StoredDeviceConfig random = empty;
+  random.reserved[1] = kStoredProvisioningPasswordRandom;
+  finalizeDeviceConfigBlob(random);
+  assert(validateDeviceConfigBlob(random));
+  assert(storedDeviceConfigProvisioningPasswordMode(random) ==
+         ProvisioningPasswordMode::random);
+
+  StoredDeviceConfig fixed = empty;
+  fixed.reserved[1] = kStoredProvisioningPasswordFixed88888888;
+  finalizeDeviceConfigBlob(fixed);
+  assert(validateDeviceConfigBlob(fixed));
+  assert(storedDeviceConfigProvisioningPasswordMode(fixed) ==
+         ProvisioningPasswordMode::fixed88888888);
+
+  StoredDeviceConfig invalidProvisioningMode = empty;
+  invalidProvisioningMode.reserved[1] =
+      kStoredProvisioningPasswordFixed88888888 + 1;
+  finalizeDeviceConfigBlob(invalidProvisioningMode);
+  assert(!validateDeviceConfigBlob(invalidProvisioningMode));
 
   StoredDeviceConfig bluetoothOn = empty;
   bluetoothOn.reserved[0] = kStoredBluetoothEnabled;
@@ -65,6 +93,11 @@ int main() {
               sizeof(unterminated.wifi[0].ssid));
   finalizeDeviceConfigBlob(unterminated);
   assert(!validateDeviceConfigBlob(unterminated));
+
+  assert(validProvisioningPasswordMode(ProvisioningPasswordMode::legacy));
+  assert(validProvisioningPasswordMode(ProvisioningPasswordMode::random));
+  assert(validProvisioningPasswordMode(
+      ProvisioningPasswordMode::fixed88888888));
 
   return 0;
 }

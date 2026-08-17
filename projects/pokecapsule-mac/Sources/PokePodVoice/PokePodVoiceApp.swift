@@ -119,6 +119,18 @@ private struct VoiceMenuView: View {
             }
 
             HStack(alignment: .top) {
+                Image(systemName: "timeline.selection")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("最近会话诊断")
+                        .font(.caption.weight(.semibold))
+                    Text(model.sessionDiagnostic)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(alignment: .top) {
                 Image(systemName: "arrow.up.forward.square")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("设备发送队列")

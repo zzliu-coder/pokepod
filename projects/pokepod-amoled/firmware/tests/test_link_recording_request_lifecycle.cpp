@@ -19,7 +19,7 @@ struct LifecycleHarness {
 
   bool accept(uint32_t requestId, uint32_t sessionId, uint32_t nowMs) {
     if (request.ownsRequest(requestId)) return true;
-    if (request.active() || !request.begin(requestId, sessionId) ||
+    if (request.active() || !request.begin(requestId, sessionId, nowMs) ||
         !storage.begin(nowMs)) return false;
     leaseHeld = true;
     ++starts;
@@ -63,6 +63,18 @@ struct LifecycleHarness {
 }  // namespace
 
 int main() {
+  LinkRecordingStart staged;
+  assert(staged.begin(69, 690, 100));
+  assert(!staged.prepareDeadlineReached(8099));
+  assert(staged.prepareDeadlineReached(8100));
+  assert(!staged.recorderRequested());
+  assert(staged.markRecorderRequested());
+  assert(staged.recorderRequested());
+  assert(!staged.prepareDeadlineReached(9000));
+  assert(!staged.markRecorderRequested());
+  staged.finish();
+  assert(!staged.recorderRequested());
+
   // Dispatch acceptance is not completion. A duplicate frame is coalesced
   // into the same in-flight request and cannot start a second recorder.
   LifecycleHarness success;

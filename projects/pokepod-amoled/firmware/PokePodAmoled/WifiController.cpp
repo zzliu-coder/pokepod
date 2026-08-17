@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "RememberedWifiPolicy.h"
+#include "RuntimeDiagnostics.h"
 #include "WifiDisconnectDiagnostics.h"
 
 namespace pokepod {
@@ -38,8 +39,13 @@ bool WifiController::begin(DeviceConfig &config, Print &log) {
 
 void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
                           bool charging, bool provisioning,
-                          bool wirelessSync) {
+                          bool wirelessSync, bool audioCaptureExclusive) {
   if (config_ == nullptr) return;
+  if (audioCaptureExclusive && !provisioning) {
+    stopRadio();
+    previousDemand_ = false;
+    return;
+  }
   connected_ = WiFi.status() == WL_CONNECTED;
   timeSyncState_.noteConnected(connected_);
   if (connected_) manualWakeRequested_ = false;
@@ -109,6 +115,15 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
       static_cast<int32_t>(nowMs - retryAtMs_) >= 0)) {
     startConnection(nowMs);
   }
+}
+
+void WifiController::pauseForAudioCapture(Print &log) {
+  const bool wasActive = radioOn_ || WiFi.getMode() != WIFI_OFF;
+  stopRadio();
+  previousDemand_ = false;
+  log.printf(
+      "{\"event\":\"wifi_audio_capture_pause\",\"was_active\":%s}\n",
+      wasActive ? "true" : "false");
 }
 
 void WifiController::configurationChanged() {
@@ -251,8 +266,27 @@ void WifiController::connectCandidate(uint32_t nowMs) {
 
 void WifiController::stopRadio() {
   if (!radioOn_ && WiFi.getMode() == WIFI_OFF) return;
+  const auto recordBoundary = [&](RuntimeDiagnosticStage stage,
+                                  RuntimeDiagnosticOutcome outcome,
+                                  uint32_t detail0) {
+    if (runtimeDiagnostics_ != nullptr && log_ != nullptr) {
+      (void)runtimeDiagnostics_->record(
+          RuntimeDiagnosticSubsystem::radioControl, stage, outcome, detail0,
+          static_cast<uint32_t>(WiFi.getMode()), *log_);
+    }
+  };
+  recordBoundary(RuntimeDiagnosticStage::radioDisconnect,
+                 RuntimeDiagnosticOutcome::started, radioOn_ ? 1U : 0U);
   WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_OFF);
+  recordBoundary(RuntimeDiagnosticStage::radioDisconnect,
+                 RuntimeDiagnosticOutcome::success, 0);
+  recordBoundary(RuntimeDiagnosticStage::radioModeOff,
+                 RuntimeDiagnosticOutcome::started, 0);
+  const bool modeStopped = WiFi.mode(WIFI_OFF);
+  recordBoundary(RuntimeDiagnosticStage::radioModeOff,
+                 modeStopped ? RuntimeDiagnosticOutcome::success
+                             : RuntimeDiagnosticOutcome::failure,
+                 modeStopped ? 0U : 1U);
   radioOn_ = false;
   powerSaveConfigured_ = false;
   powerSaveEnabled_ = false;
@@ -260,7 +294,11 @@ void WifiController::stopRadio() {
   connectionStartedMs_ = 0;
   ntpStarted_ = false;
   scanning_ = false;
+  recordBoundary(RuntimeDiagnosticStage::radioScanCleanup,
+                 RuntimeDiagnosticOutcome::started, 0);
   WiFi.scanDelete();
+  recordBoundary(RuntimeDiagnosticStage::radioScanCleanup,
+                 RuntimeDiagnosticOutcome::success, 0);
 }
 
 void WifiController::setPowerSave(bool enabled) {

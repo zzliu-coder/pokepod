@@ -40,7 +40,7 @@ assert "bleVoice.acknowledgeSessionStopRequest()" in app
 assert "captureRouter.owner() == AudioCaptureOwner::wirelessVoice" in app
 loop_poll = app.index("bleVoice.poll(now);")
 stop_adapter = app[app.index("if (bleVoice.sessionStopRequested())", loop_poll):
-                   app.index("if (wirelessUiActive && !bleVoice.streaming())",
+                   app.index("if (wirelessUiActive && !wirelessCaptureStart.active()",
                              loop_poll)]
 assert stop_adapter.index("requestCaptureStop(") < stop_adapter.index(
     "acknowledgeSessionStopRequest()"
@@ -55,7 +55,7 @@ assert "router_" not in controller
 assert "router.owner() != AudioCaptureOwner::wirelessVoice" in controller
 assert "!enablePolicy_.acceptsNewWork()" in service
 assert "enablePolicy_.transitionPending()" in service_h
-assert "if (!enablePolicy_.acceptsNewWork() || idlePaused_" in service
+assert "if (!enablePolicy_.acceptsNewWork() || callbackOverflow_.active()" in service
 assert "bool physicalConnectionPending() const" in service_h
 assert "uint16_t physicalConnectionId() const" in service_h
 for entrypoint in (
@@ -70,6 +70,7 @@ enable_actions = service[service.index(
     "void BleVoiceService::applyEnableActions("
 ):service.index("void BleVoiceService::clearDisabledRuntime(")]
 assert "actions.disconnect && physicalConnectionPending()" in enable_actions
+assert "!callbackOverflow_.active()" in enable_actions
 assert "const uint16_t connectionId = physicalConnectionId();" in enable_actions
 assert "server_->disconnect(connectionId);" in enable_actions
 assert "actions.disconnect && connected_" not in enable_actions
@@ -88,6 +89,40 @@ assert "callbackEvents_.resetAfterOverflow();" in overflow_finish
 assert "notifyStatusEvents_.resetAfterOverflow();" in overflow_finish
 
 assert 'UiIcon::bluetooth, "蓝牙"' in dashboard
+assert "BLESecurity::regenPassKeyOnConnect(false);" in service
+passkey_handler = service[
+    service.index("void BleVoiceService::processPasskey"):
+    service.index("bool BleVoiceService::notifyControl")
+]
+assert "passkey_ = passkey" not in passkey_handler
+assert "ble_voice_stale_passkey_ignored" in passkey_handler
+assert "ble_voice_handshake_timeout_disconnect" in service
+assert "appHandshake_.connected(nowMs);" in service
+handshake_timeout = service[
+    service.index("if (connected_ && appHandshake_.requestDisconnect("):
+    service.index("if (controlNotifyPending_", service.index(
+        "if (connected_ && appHandshake_.requestDisconnect("))
+]
+assert "server_->disconnect(connectionId);" in handshake_timeout
+assert "processDisconnect(" not in handshake_timeout
+assert "appHandshakeRecoveryRequired()" in app
+assert "claimAppHandshakeRecoveryRestart()" in app
+assert "ble_voice_handshake_recovery_restart" in app
+assert "!appHandshake_.disconnectPending() && connected_ && appReady_" in service_h
+assert "appReady_ = !appHandshake_.disconnectPending() && authenticated_" in service
+assert 'String("等待 Mac 应用")' in dashboard
+assert '"正在断开 Mac"' in dashboard
+assert '"已连接 · 质量不足"' not in dashboard
+pairing_action = app[
+    app.index("action == UiAction::toggleBluetoothPairing"):
+    app.index("action == UiAction::forgetBluetoothMac")
+]
+pairing_start = pairing_action.index("bleVoice.enterPairingMode(now);")
+pairing_active_check = pairing_action.index("if (bleVoice.pairingMode(now))",
+                                            pairing_start)
+assert pairing_start < pairing_active_check
+assert "正在断开当前连接" in pairing_action
+assert pairing_active_check < pairing_action.index("bleVoice.passkey()")
 assert '"请先开启蓝牙"' in dashboard
 assert '"蓝牙已关闭"' in dashboard
 assert "view.bluetoothEnabled" in dashboard
@@ -100,11 +135,16 @@ start_hold = app[app.index("bool startWirelessHold()"):
 assert start_hold.index("!bleVoice.userEnabled()") < start_hold.index(
     "!bleVoice.appReady()"
 )
-assert 'showMessage("蓝牙已关闭")' in start_hold
-boot_button = app.index("if (bootButton.update(")
-boot_release = app[app.index("if (bootWirelessHolding)", boot_button):
-                   app.index("if (audio.playing())", boot_button)]
-assert "!bleVoice.userEnabled()" in boot_release
-assert 'showMessage("蓝牙已关闭")' in boot_release
+assert 'showMessage("蓝牙已关闭", UiNoticeKind::warning)' in start_hold
+assert "BootGesturePolicy bootGesturePolicy" in app
+assert "bootGesturePolicy.pressed(now, bootGestureContext())" in app
+assert "bootGesturePolicy.held(now, bootGestureContext())" in app
+assert "bootGesturePolicy.released(bootGestureContext())" in app
+boot_action = app[app.index("void applyBootGestureAction"):
+                  app.index("void emitStatus()")]
+assert "BootGestureAction::bluetoothDisabled" in boot_action
+assert 'showMessage("蓝牙已关闭", UiNoticeKind::warning)' in boot_action
+assert "BootGestureAction::startLocalRecording" in boot_action
+assert "BootGestureAction::startWirelessVoice" in boot_action
 
 print("PASS bluetooth_master_toggle_contract")

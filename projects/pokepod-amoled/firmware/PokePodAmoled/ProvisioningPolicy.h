@@ -3,11 +3,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <cstring>
+
+#include "DeviceConfigBlob.h"
 #include "MonotonicTime.h"
 
 namespace pokepod {
 
 constexpr size_t kProvisioningPasswordLength = 10;
+constexpr char kFixedProvisioningPassword[] = "88888888";
+constexpr size_t kFixedProvisioningPasswordLength =
+    sizeof(kFixedProvisioningPassword) - 1U;
+static_assert(kFixedProvisioningPasswordLength >= 8U &&
+                  kFixedProvisioningPasswordLength <= 63U,
+              "fixed provisioning password must satisfy WPA2 length");
 constexpr char kProvisioningPasswordAlphabet[] =
     "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 constexpr size_t kProvisioningPasswordAlphabetLength =
@@ -18,6 +27,12 @@ static_assert(kProvisioningPasswordAlphabetLength == 32U,
 using ProvisioningRandomFill = bool (*)(void *context, uint8_t *destination,
                                         size_t length);
 
+inline void wipeProvisioningPassword(char *destination, size_t capacity) {
+  if (destination == nullptr) return;
+  volatile char *wipe = destination;
+  for (size_t index = 0; index < capacity; ++index) wipe[index] = '\0';
+}
+
 // Production passes esp_fill_random through this narrow adapter. The bounded
 // rejection loop fails closed if a source cannot provide acceptable bytes.
 inline bool generateProvisioningPassword(char *destination, size_t capacity,
@@ -25,7 +40,7 @@ inline bool generateProvisioningPassword(char *destination, size_t capacity,
                                          void *context) {
   if (destination == nullptr || capacity <= kProvisioningPasswordLength ||
       fill == nullptr) {
-    if (destination != nullptr && capacity > 0U) destination[0] = '\0';
+    wipeProvisioningPassword(destination, capacity);
     return false;
   }
   destination[0] = '\0';
@@ -40,7 +55,7 @@ inline bool generateProvisioningPassword(char *destination, size_t capacity,
        written < kProvisioningPasswordLength && batch < kMaximumBatches;
        ++batch) {
     if (!fill(context, random, sizeof(random))) {
-      destination[0] = '\0';
+      wipeProvisioningPassword(destination, capacity);
       return false;
     }
     for (const uint8_t value : random) {
@@ -53,7 +68,7 @@ inline bool generateProvisioningPassword(char *destination, size_t capacity,
     }
   }
   if (written != kProvisioningPasswordLength) {
-    destination[0] = '\0';
+    wipeProvisioningPassword(destination, capacity);
     return false;
   }
   destination[written] = '\0';
@@ -62,11 +77,29 @@ inline bool generateProvisioningPassword(char *destination, size_t capacity,
 
 class ProvisioningCredentialPolicy {
  public:
-  bool begin(ProvisioningRandomFill fill, void *context) {
+  bool begin(ProvisioningPasswordMode mode, ProvisioningRandomFill fill,
+             void *context) {
     close();
-    active_ = generateProvisioningPassword(password_, sizeof(password_), fill,
-                                           context);
-    return active_;
+    switch (mode) {
+      case ProvisioningPasswordMode::legacy:
+      case ProvisioningPasswordMode::random:
+        active_ = generateProvisioningPassword(password_, sizeof(password_),
+                                               fill, context);
+        if (!active_) close();
+        return active_;
+      case ProvisioningPasswordMode::fixed88888888:
+        std::memcpy(password_, kFixedProvisioningPassword,
+                    kFixedProvisioningPasswordLength + 1U);
+        active_ = true;
+        return true;
+    }
+    return false;
+  }
+
+  // Keep the pre-policy call site contract for host users and old tests. It
+  // has the same behavior as the legacy/random mode.
+  bool begin(ProvisioningRandomFill fill, void *context) {
+    return begin(ProvisioningPasswordMode::legacy, fill, context);
   }
 
   void close() {

@@ -94,8 +94,7 @@ public final class RecordingService extends Service {
 
     private void beginRecording() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
-                || checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                != PackageManager.PERMISSION_GRANTED) {
+                || !LibraryStorageAccess.has(this)) {
             fail("请先授予麦克风和存储权限");
             return;
         }

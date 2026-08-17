@@ -1,5 +1,7 @@
 #include "WirelessSyncService.h"
 
+#include "WirelessLinkPollTurn.h"
+
 #include "AudioCaptureRouter.h"
 #include "AudioCaptureRuntime.h"
 #include "AudioCaptureDispatcher.h"
@@ -9,6 +11,7 @@
 #include "CapsuleLibrary.h"
 #include "Dashboard.h"
 #include "DeviceConfig.h"
+#include "DeviceRebootCoordinator.h"
 #include "ProvisioningDiagnostics.h"
 #include "PowerDiagnostics.h"
 #include "RuntimePowerManager.h"
@@ -29,7 +32,8 @@ bool WirelessSyncService::begin(
     ProvisioningDiagnostics &provisioningDiagnostics,
     PowerDiagnostics &powerDiagnostics,
     RuntimePowerManager &power, WirelessSyncIdentity &identity,
-    LinkServiceCoordinator &coordinator, Print &log,
+    LinkServiceCoordinator &coordinator,
+    DeviceRebootCoordinator &rebootCoordinator, Print &log,
     AudioCaptureRuntime *captureRuntime,
     AudioCaptureDispatcher *captureDispatcher,
     const CapabilityRegistry *capabilities) {
@@ -42,7 +46,8 @@ bool WirelessSyncService::begin(
                        &coordinator,
                        LinkTransport::wifi, nullptr,
                        &window_.transferGate(), nullptr, &tls_,
-                       captureRuntime, captureDispatcher, capabilities);
+                       captureRuntime, captureDispatcher, capabilities,
+                       &rebootCoordinator);
   observedMaintenanceStartRevision_ = link_.maintenanceStartRevision();
   observedMaintenanceCompletionRevision_ =
       link_.maintenanceCompletionRevision();
@@ -104,10 +109,11 @@ void WirelessSyncService::enforceDeadline(uint32_t nowMs) {
 
 void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
   if (!begun_) return;
+  WirelessLinkPollTurn<PokePodLinkService> linkTurn(link_);
   // A hard-deadline or peer disconnect closes TLS immediately. Read-only SD
   // handles may still need the physical I/O lease before they can be closed;
-  // service that cleanup without admitting any unauthenticated Link frames.
-  link_.pollDeferredCleanup();
+  // the turn guard services cleanup on every path that cannot call full poll.
+  // An authenticated path consumes the same turn with one full Link poll.
   networkConnected_ = networkConnected;
   enforceDeadline(nowMs);
   if (!window_.opened()) return;
@@ -179,7 +185,7 @@ void WirelessSyncService::poll(uint32_t nowMs, bool networkConnected) {
         log_->println("{\"event\":\"wifi_sync_session\",\"authenticated\":true}");
       }
     }
-    link_.poll(nowMs);
+    linkTurn.pollAuthenticated(nowMs);
     const uint32_t startRevision = link_.maintenanceStartRevision();
     if (startRevision != observedMaintenanceStartRevision_) {
       observedMaintenanceStartRevision_ = startRevision;

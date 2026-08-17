@@ -16,6 +16,8 @@ fi
 rg -q 'class UsbLinkBridge' "$SCRIPT_DIR/PokePodAmoled/UsbLinkBridge.h"
 rg -q 'class BleVoiceService' "$SCRIPT_DIR/PokePodAmoled/BleVoiceService.h"
 rg -q 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1' "$SCRIPT_DIR/build.sh"
+rg -q 'CONFIG_BT_CTRL_BLE_LLCP_CONN_UPDATE=y' "$SCRIPT_DIR/build.sh"
+rg -Fq 'enableLoopWDT();' "$SCRIPT_DIR/PokePodAmoled/PokePodApp.cpp"
 rg -q 'requires a single NimBLE controller connection' \
   "$SCRIPT_DIR/PokePodAmoled/BleVoiceService.h"
 printf 'PASS wireless_voice_deletion_contract\n'

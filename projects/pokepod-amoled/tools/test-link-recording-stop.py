@@ -11,6 +11,7 @@ HEADER = (FIRMWARE / "PokePodLinkService.h").read_text()
 LINK_DISPATCHER = (FIRMWARE / "LinkCommandDispatcher.cpp").read_text()
 SESSION_H = (FIRMWARE / "LinkRecordingSession.h").read_text()
 SESSION = (FIRMWARE / "LinkRecordingSession.cpp").read_text()
+APP = (FIRMWARE / "PokePodApp.cpp").read_text()
 STATE = (FIRMWARE / "LinkRecordingStop.h").read_text()
 CAPTURE_DISPATCHER = (FIRMWARE / "AudioCaptureDispatcher.h").read_text()
 
@@ -42,7 +43,7 @@ assert "transactionGate.cancel()" in session_disconnect
 
 advance = SESSION[SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStop("):
                   SESSION.index("LinkRecordingEvent LinkRecordingSession::poll(")]
-assert "captureRuntime_->pollFinalize" in advance
+assert "captureRuntime_->pollFinalize" not in advance
 assert "captureRuntime_->running()" in advance
 assert advance.index("captureRuntime_->running()") < advance.index(
     "captureRouter_->release")
@@ -54,20 +55,29 @@ assert "transport == LinkTransport::wifi || !sessionActive || quiesceRequested" 
 assert advance.index("recorder_->takeTerminalResult(outcome)") < advance.index(
     "captureRouter_->release")
 assert "recorder_->pollCleanup" not in advance
-assert "operation.releaseResource(LinkOperationResource::router)" in advance
-assert "operation.releaseResource(LinkOperationResource::transaction)" in advance
+assert "operation.releaseResource(LinkOperationResource::recordingSession)" in advance
+assert "stopOperationTracksSession_" in advance
 assert "rememberCompleted" not in advance
 assert "releaseRequestLease" not in advance
 final_drain = advance.index("captureDispatcher_->drain(")
 final_snapshot = advance.index("captureRuntime_->frontEndSnapshot()", final_drain)
 final_observe = advance.index("recorder_->observeAudioMetrics(", final_snapshot)
-recorder_stop = advance.index("recorder_->stop(*log_", final_observe)
-recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_observe)
-assert final_drain < final_snapshot < final_observe < recorder_stop
-assert final_observe < recorder_abort
+final_telemetry = advance.index("recorder_->observeCaptureTelemetry(", final_observe)
+recorder_stop = advance.index("recorder_->stop(*log_", final_telemetry)
+recorder_abort = advance.index("recorder_->abortCapture(*log_)", final_telemetry)
+assert final_drain < final_snapshot < final_observe < final_telemetry < recorder_stop
+assert final_telemetry < recorder_abort
 assert "!recorder_->captureFailureLatched()" in advance
 assert "drainLinkCapture" not in IMPLEMENTATION + SESSION
 assert "while (source.pop(frame))" in CAPTURE_DISPATCHER
+request_stop = SESSION[SESSION.index("bool LinkRecordingSession::requestStop("):
+                       SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStart(")]
+assert "captureRuntime_->stop(*log_)" not in request_stop
+stop_outside = SESSION[SESSION.index("void LinkRecordingSession::stopCaptureOutsideLinkPoll()"):
+                       SESSION.index("bool LinkRecordingSession::requestStop(")]
+assert "captureRuntime_->stop(*log_)" in stop_outside
+assert "stopCaptureOutsideLinkPoll()" in APP
+assert "stopHardware" not in SESSION
 
 assert "awaitCaptureFinalize" in STATE
 assert "awaitRecorderTerminal" in STATE
@@ -83,21 +93,37 @@ assert "recorder_->requestStart" not in start_dispatch
 request_start = SESSION[SESSION.index("LinkRecordingRequestResult LinkRecordingSession::requestStart("):
                         SESSION.index("bool LinkRecordingSession::requestStop(")]
 assert "transactionGate.beginOperation(transferGate)" in request_start
-assert "recorder_->requestStart" in request_start
+assert "recorder_->requestStart" not in request_start
 assert "captureRouter_->available()" in request_start
 assert "captureRouter_->acquire(AudioCaptureOwner::localCapsule)" in request_start
 
 start_advance = SESSION[SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStart("):
                         SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStop(")]
 assert "recorder_->pollStart" in start_advance
+assert "captureRuntime_->prepare(*audio_, *log_)" not in start_advance
+assert "recorder_->requestStart" in start_advance
+prepare_outside = SESSION[SESSION.index("void LinkRecordingSession::prepareCaptureOutsideLinkPoll()"):
+                          SESSION.index("bool LinkRecordingSession::requestStop(")]
+assert "captureRuntime_->prepare(*audio_, *log_)" in prepare_outside
+assert "capturePrepareAttempted_ = true" in prepare_outside
+assert "capturePrepared_" in start_advance
+assert "prepareDeadlineReached" in start_advance
+assert "link_recording_start_timeout" in start_advance
+assert "prepareCaptureOutsideLinkPoll()" in APP
+assert APP.index("wifi.loop(") < APP.index("prepareCaptureOutsideLinkPoll()")
+assert start_advance.index("recorder_->requestStart") < start_advance.index(
+    "recorder_->pollStart"
+)
 assert "RecorderStartPollResult::pending" in start_advance
 assert "RecorderStartPollResult::started" in start_advance
 assert "linkTransferPermitted" in start_advance
 assert start_advance.index("RecorderStartPollResult::started") < start_advance.index(
-    "captureRuntime_->start")
+    "captureRuntime_->startPrepared")
+assert "captureRuntime_->start(" not in start_advance
 assert "LinkRecordingEventKind::startReady" in start_advance
-assert "operation.releaseResource(LinkOperationResource::router)" in start_advance
-assert "operation.releaseResource(LinkOperationResource::transaction)" in start_advance
+assert "operation.transferResourcesToRecordingSession()" in start_advance
+assert "routerOwned_ = true" in start_advance
+assert "transactionOwned_ = true" in start_advance
 
 process = LINK_DISPATCHER[LINK_DISPATCHER.index("void PokePodLinkService::processRequest("): ]
 assert "recordingSession_.ownsRequest(requestId)" in process
@@ -107,8 +133,8 @@ assert process.index("admitLinkOperation(requestId)") < process.index("cJSON_Par
 assert process.index("handleImmediate(requestId, root)") < process.rindex(
     "recordingSession_.ownsRequest(requestId)")
 
-poll = TRANSPORT[TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()"):
-                 TRANSPORT.index("void PokePodLinkService::poll(uint32_t nowMs)")]
+poll = TRANSPORT[TRANSPORT.index("bool PokePodLinkService::pollDeferredCleanup("):
+                 TRANSPORT.index("void PokePodLinkService::pollDeferredCleanup()")]
 assert "recordingSession_.poll(" in poll
 assert "handleLinkRecordingEvent" in poll
 
