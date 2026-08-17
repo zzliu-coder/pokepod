@@ -54,7 +54,8 @@ class LinkLivenessProbe {
     }
     if (receivePartial) return LinkLivenessStall::receive;
     if (transmitPending || queuedFrames != 0) {
-      return LinkLivenessStall::transmit;
+      return operationRecoverable ? LinkLivenessStall::transmit
+                                  : LinkLivenessStall::none;
     }
     if (requestId != 0 && operationRecoverable) {
       return LinkLivenessStall::operation;

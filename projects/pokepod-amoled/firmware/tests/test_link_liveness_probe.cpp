@@ -14,6 +14,8 @@ int main() {
          LinkLivenessStall::none);
   assert(probe.observe(5100, true, 9, 1, false, true, true) ==
          LinkLivenessStall::transmit);
+  assert(probe.observe(5100, true, 9, 1, false, true, false) ==
+         LinkLivenessStall::none);
   probe.recovered(LinkLivenessStall::transmit, 5100);
   assert(probe.snapshot().recoveryCount == 1);
   assert(probe.snapshot().lastRecoveryMs == 5100);

@@ -75,6 +75,9 @@ poll = TRANSPORT[poll_start:poll_end]
 assert poll.index("LinkPollBudget budget(") < poll.index(
     "pollDeferredCleanup(gate)"
 )
+assert poll.index("if (txStepper_.active() && sessionActive_") < poll.index(
+    "pollDeferredCleanup(gate)"
+), "queued transport frames must run before cooperative cleanup can exhaust the poll budget"
 assert poll.index("pollDeferredCleanup(gate)") < poll.index(
     "recoverStalledLink(nowMs)"
 )

@@ -303,6 +303,16 @@ void PokePodLinkService::poll(uint32_t nowMs) {
   const uint64_t startedUs = linkPollNowUs(nullptr);
   LinkPollBudget budget(kLinkPollBudgetBytes, kLinkPollBudgetUs, startedUs);
   LinkPollPhaseGate gate(budget, linkPollNowUs);
+  // A response queued by the previous turn must not sit behind storage or
+  // recording maintenance. Those cooperative phases may consume the whole
+  // 2 ms slice; serving transport first prevents a valid record OK (and any
+  // other terminal frame) from being starved until liveness recovery tears
+  // down its still-active owner.
+  if (txStepper_.active() && sessionActive_ && !quiesceRequested_ &&
+      startupReady_ && transferPermitted()) {
+    (void)gate.run([&]() { advanceTransmit(nowMs); });
+    return;
+  }
   if (!pollDeferredCleanup(gate)) return;
   if (recoverStalledLink(nowMs)) return;
   if (quiesceRequested_) return;
