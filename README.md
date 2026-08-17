@@ -1,5 +1,15 @@
 # PokePod firmware
 
+> **Current device-validation blocker (2026-08-17):** the exact firmware cut
+> `9f0847aa` passes host/build and ROM write/readback identity checks, but USB
+> Link still becomes permanently unresponsive after repeated independent CDC
+> open/close sessions. Recording, SoftAP provisioning and Mac BLE voice remain
+> unclosed device lanes. See
+> [`docs/device-validation-handoff-2026-08-17.md`](docs/device-validation-handoff-2026-08-17.md)
+> for the exact evidence, resolved items, remaining failures and review
+> questions. Do not treat the current branch as a Release or device-accepted
+> candidate.
+
 This repository contains the native PokeCapsule/PokePod history and the
 audit-remediation integration for the Waveshare
 ESP32-S3-Touch-AMOLED-1.8 firmware.
