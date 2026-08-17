@@ -10,6 +10,20 @@ enum class UsbLinkSessionAction : uint8_t {
   disconnectRetainingNewBytes,
 };
 
+// The DTR epoch can advance after App sampled it but before Link consumes the
+// next PPV2 magic.  In that window the parser itself is the first component
+// that can prove a new physical host session.  It must retire the old logical
+// owner before admitting bytes from the new epoch.
+inline bool usbLinkMagicRequiresEpochReset(
+    bool sessionActive, uint32_t linkGeneration,
+    uint32_t boundUsbGeneration, uint32_t observedUsbGeneration) {
+  if (observedUsbGeneration == 0) return false;
+  if (!sessionActive && linkGeneration == 0 && boundUsbGeneration == 0) {
+    return false;
+  }
+  return boundUsbGeneration != observedUsbGeneration;
+}
+
 // A new PPV2 request may arrive after App sampled DTR but before Link::poll().
 // If Link already bound that request to the new DTR epoch, the next loop must
 // not tear it down merely because App is observing the generation one turn

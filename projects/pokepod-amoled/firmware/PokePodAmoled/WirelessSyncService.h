@@ -63,6 +63,16 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
     return link_.receivingBinary() || link_.maintenanceActive();
   }
   bool receivingBinary() const { return link_.receivingBinary(); }
+  bool capturePreparePending() const {
+    return link_.capturePreparePending();
+  }
+  void prepareCaptureOutsideLinkPoll() {
+    link_.prepareCaptureOutsideLinkPoll();
+  }
+  bool captureStopPending() const { return link_.captureStopPending(); }
+  void stopCaptureOutsideLinkPoll() {
+    link_.stopCaptureOutsideLinkPoll();
+  }
   bool deviceLifecycleRestartReady() const {
     return link_.deviceLifecycleRestartReady();
   }

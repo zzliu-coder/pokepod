@@ -68,6 +68,17 @@ class LinkRecordingSession {
                    bool operationOwnsRequest, LinkOperation &operation,
                    LinkCapsuleTransactionGate &transactionGate);
 
+  // Audio hardware allocation is intentionally driven by the App loop, never
+  // from the Link 2 ms poll budget.  The Link poll only observes this result
+  // and advances the asynchronous recorder state machine.
+  bool capturePreparePending() const;
+  bool capturePrepareAttempted() const { return capturePrepareAttempted_; }
+  bool capturePrepared() const { return capturePrepared_; }
+  void prepareCaptureOutsideLinkPoll();
+  bool captureStopPending() const;
+  bool captureStopIssued() const { return captureStopIssued_; }
+  void stopCaptureOutsideLinkPoll();
+
   LinkRecordingEvent poll(LinkOperation &operation,
                           LinkCapsuleTransactionGate &transactionGate,
                           LinkTransport transport,
@@ -115,6 +126,9 @@ class LinkRecordingSession {
   bool routerOwned_ = false;
   bool transactionOwned_ = false;
   bool stopOperationTracksSession_ = false;
+  bool capturePrepareAttempted_ = false;
+  bool capturePrepared_ = false;
+  bool captureStopIssued_ = false;
   LinkRecordingStart start_;
   String capsuleId_;
   String createdAt_;

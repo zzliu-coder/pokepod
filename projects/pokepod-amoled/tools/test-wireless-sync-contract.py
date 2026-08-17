@@ -116,8 +116,13 @@ assert "RecordingSpaceSnapshot" not in link_surface
 assert "RecorderOperationOwner::linkWifi" in dispatcher
 assert "RecorderOperationOwner::linkUsb" in dispatcher
 assert "recorder_->pollStart" in link_recording
-assert "captureRuntime_->start(*audio_, captureSessionId, *log_)" in link_recording
-assert "captureRuntime_->prepare(*audio_, *log_)" in link_recording
+assert "captureRuntime_->startPrepared(*audio_, captureSessionId, *log_)" in link_recording
+advance_start = link_recording[
+    link_recording.index("LinkRecordingEvent LinkRecordingSession::advanceStart("):
+    link_recording.index("LinkRecordingEvent LinkRecordingSession::advanceStop(")
+]
+assert "captureRuntime_->prepare(*audio_, *log_)" not in advance_start
+assert "prepareCaptureOutsideLinkPoll" in link_recording
 assert "recorder_->start(*log_, id, board_->utcNow())" not in link_surface
 assert "audio_->startCapture(*log_)" not in link_surface
 assert "captureRuntime_->stop(*log_)" in link_recording

@@ -11,6 +11,7 @@ HEADER = (FIRMWARE / "PokePodLinkService.h").read_text()
 LINK_DISPATCHER = (FIRMWARE / "LinkCommandDispatcher.cpp").read_text()
 SESSION_H = (FIRMWARE / "LinkRecordingSession.h").read_text()
 SESSION = (FIRMWARE / "LinkRecordingSession.cpp").read_text()
+APP = (FIRMWARE / "PokePodApp.cpp").read_text()
 STATE = (FIRMWARE / "LinkRecordingStop.h").read_text()
 CAPTURE_DISPATCHER = (FIRMWARE / "AudioCaptureDispatcher.h").read_text()
 
@@ -42,7 +43,7 @@ assert "transactionGate.cancel()" in session_disconnect
 
 advance = SESSION[SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStop("):
                   SESSION.index("LinkRecordingEvent LinkRecordingSession::poll(")]
-assert "captureRuntime_->pollFinalize" in advance
+assert "captureRuntime_->pollFinalize" not in advance
 assert "captureRuntime_->running()" in advance
 assert advance.index("captureRuntime_->running()") < advance.index(
     "captureRouter_->release")
@@ -69,6 +70,14 @@ assert final_telemetry < recorder_abort
 assert "!recorder_->captureFailureLatched()" in advance
 assert "drainLinkCapture" not in IMPLEMENTATION + SESSION
 assert "while (source.pop(frame))" in CAPTURE_DISPATCHER
+request_stop = SESSION[SESSION.index("bool LinkRecordingSession::requestStop("):
+                       SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStart(")]
+assert "captureRuntime_->stop(*log_)" not in request_stop
+stop_outside = SESSION[SESSION.index("void LinkRecordingSession::stopCaptureOutsideLinkPoll()"):
+                       SESSION.index("bool LinkRecordingSession::requestStop(")]
+assert "captureRuntime_->stop(*log_)" in stop_outside
+assert "stopCaptureOutsideLinkPoll()" in APP
+assert "stopHardware" not in SESSION
 
 assert "awaitCaptureFinalize" in STATE
 assert "awaitRecorderTerminal" in STATE
@@ -91,11 +100,15 @@ assert "captureRouter_->acquire(AudioCaptureOwner::localCapsule)" in request_sta
 start_advance = SESSION[SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStart("):
                         SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStop(")]
 assert "recorder_->pollStart" in start_advance
-assert "captureRuntime_->prepare(*audio_, *log_)" in start_advance
+assert "captureRuntime_->prepare(*audio_, *log_)" not in start_advance
 assert "recorder_->requestStart" in start_advance
-assert start_advance.index("captureRuntime_->prepare(*audio_, *log_)") < start_advance.index(
-    "recorder_->requestStart"
-)
+prepare_outside = SESSION[SESSION.index("void LinkRecordingSession::prepareCaptureOutsideLinkPoll()"):
+                          SESSION.index("bool LinkRecordingSession::requestStop(")]
+assert "captureRuntime_->prepare(*audio_, *log_)" in prepare_outside
+assert "capturePrepareAttempted_ = true" in prepare_outside
+assert "capturePrepared_" in start_advance
+assert "prepareCaptureOutsideLinkPoll()" in APP
+assert APP.index("wifi.loop(") < APP.index("prepareCaptureOutsideLinkPoll()")
 assert start_advance.index("recorder_->requestStart") < start_advance.index(
     "recorder_->pollStart"
 )
@@ -103,7 +116,8 @@ assert "RecorderStartPollResult::pending" in start_advance
 assert "RecorderStartPollResult::started" in start_advance
 assert "linkTransferPermitted" in start_advance
 assert start_advance.index("RecorderStartPollResult::started") < start_advance.index(
-    "captureRuntime_->start")
+    "captureRuntime_->startPrepared")
+assert "captureRuntime_->start(" not in start_advance
 assert "LinkRecordingEventKind::startReady" in start_advance
 assert "operation.transferResourcesToRecordingSession()" in start_advance
 assert "routerOwned_ = true" in start_advance

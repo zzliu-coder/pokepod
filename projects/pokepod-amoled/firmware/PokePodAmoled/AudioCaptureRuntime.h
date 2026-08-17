@@ -31,6 +31,9 @@ class AudioCaptureRuntime {
   bool begin(BoardVariant variant, Print &log);
   bool prepare(AudioPipeline &audio, Print &log);
   bool start(AudioPipeline &audio, uint32_t sessionId, Print &log);
+  // Starts only an already-prepared realtime session. It never initializes or
+  // tears down audio hardware and is therefore safe for a bounded Link phase.
+  bool startPrepared(AudioPipeline &audio, uint32_t sessionId, Print &log);
   bool stop(Print &log);
   bool pollFinalize(Print &log);
   bool pop(AudioCaptureFrame &frame) { return service_.pop(frame); }

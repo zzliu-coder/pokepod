@@ -53,9 +53,21 @@ for fact in (
     "txFrameBytes_ == 0",
     "pendingControlBytes_ == 0",
     "operation_.queuedFrameCount() == 0",
-    "!operation_.active()",
+    "cleanupDrained()",
 ):
     assert fact in restart_ready
+cleanup = transport[
+    transport.index("bool PokePodLinkService::cleanupDrained() const"):
+    transport.index("bool PokePodLinkService::deviceLifecycleRestartReady() const")
+]
+for fact in (
+    "!operation_.active()",
+    "deferredCommandFiles_.empty()",
+    "deferredTreeCleanupStack_.empty()",
+    "recordingSession_.quiesced()",
+):
+    assert fact in cleanup
+assert "quiesceRequested_" not in restart_ready
 loop = app[app.index("void loop()"):] 
 assert loop.index("if (deviceReboot.pending())") < loop.index(
     "pollDeferredServiceCleanup()")

@@ -53,21 +53,28 @@ bool AudioCaptureRuntime::begin(BoardVariant variant, Print &log) {
 bool AudioCaptureRuntime::start(AudioPipeline &audio, uint32_t sessionId,
                                 Print &log) {
   if (!ready_ || running() || sessionId == 0) return false;
-  while (xSemaphoreTake(stopped_, 0) == pdTRUE) {}
   if (!prepare(audio, log)) return false;
+  if (startPrepared(audio, sessionId, log)) return true;
+  audio.stopHardware(log);
+  return false;
+}
+
+bool AudioCaptureRuntime::startPrepared(AudioPipeline &audio,
+                                        uint32_t sessionId, Print &log) {
+  (void)log;
+  if (!ready_ || running() || sessionId == 0 || !audio.active()) return false;
+  while (xSemaphoreTake(stopped_, 0) == pdTRUE) {}
   audio_ = &audio;
   source_.bind(audio_);
   if (!service_.startSession(sessionId, source_)) {
     source_.bind(nullptr);
     audio_ = nullptr;
-    audio.stopHardware(log);
     return false;
   }
   if (!sessionState_.begin()) {
     service_.stopSession();
     source_.bind(nullptr);
     audio_ = nullptr;
-    audio.stopHardware(log);
     return false;
   }
   incomplete_.store(false, std::memory_order_release);

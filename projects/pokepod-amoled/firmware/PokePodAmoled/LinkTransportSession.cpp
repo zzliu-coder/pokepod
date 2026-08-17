@@ -7,6 +7,7 @@
 #include "RuntimeDiagnostics.h"
 #include "TencentWorker.h"
 #include "UsbLinkBridge.h"
+#include "UsbLinkSessionReconcile.h"
 
 namespace pokepod {
 namespace {
@@ -50,10 +51,19 @@ String PokePodLinkService::linkProbeJson() const {
   String value = "\"linkSessionActive\":" +
       String(sessionActive_ ? "true" : "false") +
       ",\"linkGeneration\":" + String(connectionGeneration_) +
+      ",\"linkUsbHostGeneration\":" + String(usbHostSessionGeneration_) +
       ",\"linkRequestId\":" + String(operation_.requestId()) +
       ",\"linkOperationState\":" +
       String(static_cast<unsigned>(operation_.state())) +
       ",\"linkQueuedFrames\":" + String(operation_.queuedFrameCount()) +
+      ",\"linkCapturePreparePending\":" +
+      String(recordingSession_.capturePreparePending() ? "true" : "false") +
+      ",\"linkCapturePrepareAttempted\":" +
+      String(recordingSession_.capturePrepareAttempted() ? "true" : "false") +
+      ",\"linkCapturePrepared\":" +
+      String(recordingSession_.capturePrepared() ? "true" : "false") +
+      ",\"linkCaptureStopIssued\":" +
+      String(recordingSession_.captureStopIssued() ? "true" : "false") +
       ",\"linkLastProgressMs\":" + String(probe.lastProgressMs) +
       ",\"linkRecoveryCount\":" + String(probe.recoveryCount) +
       ",\"linkLastRecoveryMs\":" + String(probe.lastRecoveryMs) +
@@ -246,8 +256,11 @@ void PokePodLinkService::requestQuiesce() {
 }
 
 bool PokePodLinkService::quiesced() const {
-  return quiesceRequested_ && !sessionActive_ &&
-      commandLoadState_ == CommandLoadState::none &&
+  return quiesceRequested_ && !sessionActive_ && cleanupDrained();
+}
+
+bool PokePodLinkService::cleanupDrained() const {
+  return commandLoadState_ == CommandLoadState::none &&
       !firmwareUpdate_.active() && firmwareUpdateRequestId_ == 0 &&
       incomingKind_ == IncomingKind::none && !incomingCleanupPending_ &&
       fileTransfer_.quiesced() &&
@@ -265,10 +278,7 @@ bool PokePodLinkService::quiesced() const {
 bool PokePodLinkService::deviceLifecycleRestartReady() const {
   return !txStepper_.active() && txFrameBytes_ == 0 &&
       pendingControlBytes_ == 0 && operation_.queuedFrameCount() == 0 &&
-      !operation_.active() &&
-      !operation_.ownsResource(LinkOperationResource::coordinator) &&
-      incomingKind_ == IncomingKind::none && !firmwareUpdate_.active() &&
-      firmwareUpdateRequestId_ == 0 && !maintenanceActive();
+      cleanupDrained() && !maintenanceActive();
 }
 
 bool PokePodLinkService::pollDeferredCleanup(LinkPollPhaseGate &gate) {
@@ -414,11 +424,25 @@ void PokePodLinkService::consumeByte(uint8_t value, LinkPollPhaseGate *gate) {
     if (value == magic[magicMatched_]) {
       headerBytes_[magicMatched_++] = value;
       if (magicMatched_ == 4) {
-        activateConnectionGeneration();
+        uint32_t observedUsbGeneration = 0;
         if (transport_ == LinkTransport::usb && usb_ != nullptr) {
-          usbHostSessionGeneration_ =
-              usb_->hostSessionSnapshot().generation;
+          observedUsbGeneration = usb_->hostSessionSnapshot().generation;
+          if (usbLinkMagicRequiresEpochReset(
+                  sessionActive_, connectionGeneration_,
+                  usbHostSessionGeneration_, observedUsbGeneration)) {
+            // Retire the old logical owner without discarding bytes already
+            // delivered for the new DTR epoch. disconnect() also clears the
+            // old replay history and parser; the four magic bytes are restored
+            // immediately below as the first bytes of the new session.
+            disconnect();
+          }
         }
+        activateConnectionGeneration();
+        if (observedUsbGeneration != 0) {
+          usbHostSessionGeneration_ = observedUsbGeneration;
+        }
+        memcpy(headerBytes_, magic, sizeof(magic));
+        magicMatched_ = sizeof(magic);
         sessionActive_ = true;
         headerUsed_ = 4;
         receivePhase_ = ReceivePhase::header;

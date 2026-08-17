@@ -98,6 +98,18 @@ class PokePodLinkService : private LinkFileTransferHost {
     return incomingKind_ != IncomingKind::none || firmwareUpdate_.active();
   }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
+  bool capturePreparePending() const {
+    return recordingSession_.capturePreparePending();
+  }
+  void prepareCaptureOutsideLinkPoll() {
+    recordingSession_.prepareCaptureOutsideLinkPoll();
+  }
+  bool captureStopPending() const {
+    return recordingSession_.captureStopPending();
+  }
+  void stopCaptureOutsideLinkPoll() {
+    recordingSession_.stopCaptureOutsideLinkPoll();
+  }
   uint32_t usbHostSessionGeneration() const {
     return usbHostSessionGeneration_;
   }
@@ -177,6 +189,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   uint32_t activateConnectionGeneration();
   LinkOperationAdmission admitLinkOperation(uint32_t requestId);
   bool operationOwns(uint32_t requestId) const;
+  bool cleanupDrained() const;
   void cancelLinkOperation(LinkOperationCancelReason reason);
   void advanceLinkOperationSettlement();
   bool recoverStalledLink(uint32_t nowMs);

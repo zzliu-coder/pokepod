@@ -29,7 +29,14 @@ assert "linkService->usbHostSessionGeneration()" in app
 assert "UsbLinkSessionAction::disconnectAndDiscard" in app
 assert "UsbLinkSessionAction::disconnectRetainingNewBytes" in app
 assert "linkBoundUsbGeneration == currentUsbGeneration" in reconcile
+assert "usbLinkMagicRequiresEpochReset(" in reconcile
 assert "usb_->hostSessionSnapshot().generation" in link
+magic = link.split("void PokePodLinkService::consumeByte", 1)[1].split(
+    "if (receivePhase_ == ReceivePhase::header)", 1
+)[0]
+assert "usbLinkMagicRequiresEpochReset(" in magic
+assert magic.index("disconnect();") < magic.index("activateConnectionGeneration();")
+assert "memcpy(headerBytes_, magic, sizeof(magic));" in magic
 assert "usbHostSessionGeneration_ = 0;" in link
 assert "while (cdc_.available() > 0)" in bridge
 assert "tud_cdc_read_flush();" in bridge

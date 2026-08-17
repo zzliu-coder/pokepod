@@ -2385,6 +2385,21 @@ void loop() {
   wifi.loop(now, recorder.operationActive(), networkWork,
             board.status().charging, provisioningCoordinator.ownsWifi(),
             wirelessSync->wifiDemand(), audioCaptureExclusive);
+  // I2S/codec allocation may take longer than Link's 2 ms budget.  Advance it
+  // exactly once from the App cooperative loop after Wi-Fi has honored the
+  // capture router owner, for either USB or Wi-Fi Link recording.
+  if (bootUsbLinkStarted && linkService->capturePreparePending()) {
+    linkService->prepareCaptureOutsideLinkPoll();
+  }
+  if (bootWifiSyncStarted && wirelessSync->capturePreparePending()) {
+    wirelessSync->prepareCaptureOutsideLinkPoll();
+  }
+  if (bootUsbLinkStarted && linkService->captureStopPending()) {
+    linkService->stopCaptureOutsideLinkPoll();
+  }
+  if (bootWifiSyncStarted && wirelessSync->captureStopPending()) {
+    wirelessSync->stopCaptureOutsideLinkPoll();
+  }
   if (bootWifiSyncStarted && board.sdReady()) {
     wirelessSync->poll(now, wifi.connected());
   }
