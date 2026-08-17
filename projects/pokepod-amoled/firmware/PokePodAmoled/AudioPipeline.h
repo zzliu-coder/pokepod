@@ -41,6 +41,13 @@ class AudioPipeline {
   }
   void resetPeakWindow() { peakWindow_.reset(); }
   const char *lastPlaybackError() const { return lastPlaybackError_; }
+  const char *lastHardwareError() const { return lastHardwareError_; }
+  uint32_t captureHeapFreeBeforeStart() const {
+    return captureHeapFreeBeforeStart_;
+  }
+  uint32_t captureHeapLargestBeforeStart() const {
+    return captureHeapLargestBeforeStart_;
+  }
   uint32_t playbackStartFailures() const { return playbackStartFailures_; }
   uint32_t playbackHeapLargestBeforeStart() const {
     return playbackHeapLargestBeforeStart_;
@@ -62,6 +69,8 @@ class AudioPipeline {
   AudioBoardProfile boardProfile_;
   uint32_t hardwareSampleRate_ = 0;
   const char *lastHardwareError_ = "none";
+  uint32_t captureHeapFreeBeforeStart_ = 0;
+  uint32_t captureHeapLargestBeforeStart_ = 0;
   uint64_t bytesRead_ = 0;
   uint32_t readFailures_ = 0;
   PeakWindow peakWindow_;

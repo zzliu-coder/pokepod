@@ -24,17 +24,25 @@ class LinkRecordingStart {
   }
   uint32_t requestId() const { return requestId_; }
   uint32_t captureSessionId() const { return captureSessionId_; }
+  bool recorderRequested() const { return recorderRequested_; }
+  bool markRecorderRequested() {
+    if (!active_ || recorderRequested_) return false;
+    recorderRequested_ = true;
+    return true;
+  }
 
   void finish() {
     active_ = false;
     requestId_ = 0;
     captureSessionId_ = 0;
+    recorderRequested_ = false;
   }
 
  private:
   bool active_ = false;
   uint32_t requestId_ = 0;
   uint32_t captureSessionId_ = 0;
+  bool recorderRequested_ = false;
 };
 
 }  // namespace pokepod

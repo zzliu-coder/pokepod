@@ -54,7 +54,7 @@ bool AudioCaptureRuntime::start(AudioPipeline &audio, uint32_t sessionId,
                                 Print &log) {
   if (!ready_ || running() || sessionId == 0) return false;
   while (xSemaphoreTake(stopped_, 0) == pdTRUE) {}
-  if (!audio.startCapture(log)) return false;
+  if (!prepare(audio, log)) return false;
   audio_ = &audio;
   source_.bind(audio_);
   if (!service_.startSession(sessionId, source_)) {
@@ -73,6 +73,11 @@ bool AudioCaptureRuntime::start(AudioPipeline &audio, uint32_t sessionId,
   incomplete_.store(false, std::memory_order_release);
   xTaskNotifyGive(task_);
   return true;
+}
+
+bool AudioCaptureRuntime::prepare(AudioPipeline &audio, Print &log) {
+  if (!ready_ || running()) return false;
+  return audio.startCapture(log);
 }
 
 bool AudioCaptureRuntime::stop(Print &log) {

@@ -111,12 +111,13 @@ assert "char hex[65] = {}" in dispatcher
 assert link_surface.count("transferPermitted()") >= 12
 assert "AudioCaptureRuntime *captureRuntime" in read("PokePodLinkService.h")
 assert "recorder_->requestStart(" in link_recording
-assert "recorderOwner);" in link_recording
+assert "createdAt_, recorderOwner_)" in link_recording
 assert "RecordingSpaceSnapshot" not in link_surface
 assert "RecorderOperationOwner::linkWifi" in dispatcher
 assert "RecorderOperationOwner::linkUsb" in dispatcher
 assert "recorder_->pollStart" in link_recording
 assert "captureRuntime_->start(*audio_, captureSessionId, *log_)" in link_recording
+assert "captureRuntime_->prepare(*audio_, *log_)" in link_recording
 assert "recorder_->start(*log_, id, board_->utcNow())" not in link_surface
 assert "audio_->startCapture(*log_)" not in link_surface
 assert "captureRuntime_->stop(*log_)" in link_recording

@@ -38,8 +38,13 @@ bool WifiController::begin(DeviceConfig &config, Print &log) {
 
 void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
                           bool charging, bool provisioning,
-                          bool wirelessSync) {
+                          bool wirelessSync, bool audioCaptureExclusive) {
   if (config_ == nullptr) return;
+  if (audioCaptureExclusive && !provisioning) {
+    stopRadio();
+    previousDemand_ = false;
+    return;
+  }
   connected_ = WiFi.status() == WL_CONNECTED;
   timeSyncState_.noteConnected(connected_);
   if (connected_) manualWakeRequested_ = false;
@@ -109,6 +114,15 @@ void WifiController::loop(uint32_t nowMs, bool recording, bool pendingWork,
       static_cast<int32_t>(nowMs - retryAtMs_) >= 0)) {
     startConnection(nowMs);
   }
+}
+
+void WifiController::pauseForAudioCapture(Print &log) {
+  const bool wasActive = radioOn_ || WiFi.getMode() != WIFI_OFF;
+  stopRadio();
+  previousDemand_ = false;
+  log.printf(
+      "{\"event\":\"wifi_audio_capture_pause\",\"was_active\":%s}\n",
+      wasActive ? "true" : "false");
 }
 
 void WifiController::configurationChanged() {

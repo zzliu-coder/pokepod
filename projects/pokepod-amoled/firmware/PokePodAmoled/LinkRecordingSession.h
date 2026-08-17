@@ -35,6 +35,7 @@ struct LinkRecordingRequestResult {
 enum class LinkRecordingEventKind : uint8_t {
   none = 0,
   startReady,
+  startFailed,
   stopCommitted,
   stopCommittedIndexFailed,
   stopFailed,
@@ -116,6 +117,8 @@ class LinkRecordingSession {
   bool stopOperationTracksSession_ = false;
   LinkRecordingStart start_;
   String capsuleId_;
+  String createdAt_;
+  RecorderOperationOwner recorderOwner_ = RecorderOperationOwner::none;
   LinkRecordingStop stop_;
 };
 

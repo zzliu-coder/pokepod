@@ -84,13 +84,21 @@ assert "recorder_->requestStart" not in start_dispatch
 request_start = SESSION[SESSION.index("LinkRecordingRequestResult LinkRecordingSession::requestStart("):
                         SESSION.index("bool LinkRecordingSession::requestStop(")]
 assert "transactionGate.beginOperation(transferGate)" in request_start
-assert "recorder_->requestStart" in request_start
+assert "recorder_->requestStart" not in request_start
 assert "captureRouter_->available()" in request_start
 assert "captureRouter_->acquire(AudioCaptureOwner::localCapsule)" in request_start
 
 start_advance = SESSION[SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStart("):
                         SESSION.index("LinkRecordingEvent LinkRecordingSession::advanceStop(")]
 assert "recorder_->pollStart" in start_advance
+assert "captureRuntime_->prepare(*audio_, *log_)" in start_advance
+assert "recorder_->requestStart" in start_advance
+assert start_advance.index("captureRuntime_->prepare(*audio_, *log_)") < start_advance.index(
+    "recorder_->requestStart"
+)
+assert start_advance.index("recorder_->requestStart") < start_advance.index(
+    "recorder_->pollStart"
+)
 assert "RecorderStartPollResult::pending" in start_advance
 assert "RecorderStartPollResult::started" in start_advance
 assert "linkTransferPermitted" in start_advance

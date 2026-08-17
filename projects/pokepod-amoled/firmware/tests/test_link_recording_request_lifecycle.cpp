@@ -63,6 +63,15 @@ struct LifecycleHarness {
 }  // namespace
 
 int main() {
+  LinkRecordingStart staged;
+  assert(staged.begin(69, 690));
+  assert(!staged.recorderRequested());
+  assert(staged.markRecorderRequested());
+  assert(staged.recorderRequested());
+  assert(!staged.markRecorderRequested());
+  staged.finish();
+  assert(!staged.recorderRequested());
+
   // Dispatch acceptance is not completion. A duplicate frame is coalesced
   // into the same in-flight request and cannot start a second recorder.
   LifecycleHarness success;

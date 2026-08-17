@@ -29,6 +29,13 @@ cleanup = app[
 assert "recorder.requestStart(" in toggle
 assert "recorder.start(" not in toggle
 assert "captureRuntime.start(" not in toggle
+assert "captureRuntime.prepare(audio, usb.log())" in toggle
+assert toggle.index("wifi.pauseForAudioCapture(usb.log())") < toggle.index(
+    "captureRuntime.prepare(audio, usb.log())"
+)
+assert toggle.index("captureRuntime.prepare(audio, usb.log())") < toggle.index(
+    "recorder.requestStart("
+)
 assert "localRecordingStart.begin(captureSessionId)" in toggle
 assert "localRecordingStart.requestCancel()" in toggle
 assert "recorder.pollStart(" in advance

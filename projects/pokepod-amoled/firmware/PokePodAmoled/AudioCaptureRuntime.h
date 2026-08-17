@@ -29,6 +29,7 @@ class AudioCaptureRuntime {
   static constexpr uint32_t kStopTimeoutMs = kAudioCaptureStopTimeoutMs;
 
   bool begin(BoardVariant variant, Print &log);
+  bool prepare(AudioPipeline &audio, Print &log);
   bool start(AudioPipeline &audio, uint32_t sessionId, Print &log);
   bool stop(Print &log);
   bool pollFinalize(Print &log);

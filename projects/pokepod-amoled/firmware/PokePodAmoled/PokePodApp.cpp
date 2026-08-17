@@ -40,6 +40,7 @@
 #include "TencentWorker.h"
 #include "TlsExternalMemory.h"
 #include "UsbLinkBridge.h"
+#include "UsbLinkSessionReconcile.h"
 #include "UsbPhysicalConnectionPolicy.h"
 #include "WavRecorder.h"
 #include "WifiController.h"
@@ -712,7 +713,15 @@ bool startWirelessHold() {
     drawDashboard();
     return false;
   }
+  if (tencentWorker.working()) {
+    recordWirelessRuntime(RuntimeDiagnosticStage::wirelessFailure,
+                          RuntimeDiagnosticOutcome::failure, 6, readiness);
+    showMessage("当前胶囊正在转写", UiNoticeKind::warning);
+    drawDashboard();
+    return false;
+  }
   if (audio.playing()) audio.stopPlayback(usb.log());
+  wifi.pauseForAudioCapture(usb.log());
   recordWirelessRuntime(RuntimeDiagnosticStage::wirelessRouterAcquire,
                         RuntimeDiagnosticOutcome::started,
                         static_cast<uint32_t>(captureRouter.owner()), 0);
@@ -1182,7 +1191,10 @@ void toggleRecording() {
     captureTelemetryLastStackSampleMs = 0;
     captureTelemetryStackHighWaterWords = 0;
     captureTelemetryStackSampled = false;
-    const bool stateReady = acquired &&
+    if (acquired) wifi.pauseForAudioCapture(usb.log());
+    const bool capturePrepared = acquired &&
+        captureRuntime.prepare(audio, usb.log());
+    const bool stateReady = capturePrepared &&
         localRecordingStart.begin(captureSessionId);
     const bool requested = stateReady &&
         recorder.requestStart(usb.log(), recordingId(), board.utcNow(),
@@ -2149,7 +2161,10 @@ void loop() {
         captureRouter.owner() == AudioCaptureOwner::none &&
         !captureRuntime.running() && !recorder.operationActive() &&
         !localRecordingStart.active() && !linkService->receivingBinary() &&
-        !linkService->maintenanceActive() && !wirelessSync->linkBusy() &&
+        !linkService->maintenanceActive() &&
+        linkService->deviceLifecycleRestartReady() &&
+        wirelessSync->deviceLifecycleRestartReady() &&
+        !wirelessSync->linkBusy() &&
         !capsuleLibrary->scanActive() && !capsuleOperations->busy() &&
         !tencentWorker.working() && StorageCoordinator::instance().idle();
     if (restartSafe) {
@@ -2178,12 +2193,15 @@ void loop() {
       closedUsbSessionGeneration == usbSession.generation;
   const bool usbPhysicallyDisconnected =
       lastUsbHostConnected && !usbHostConnected;
-  if (bootUsbLinkStarted &&
-      (usbPhysicallyDisconnected || currentUsbSessionClosed)) {
+  const UsbLinkSessionAction usbSessionAction = usbLinkSessionAction(
+      bootUsbLinkStarted, usbPhysicallyDisconnected, currentUsbSessionClosed,
+      usbSessionAdvanced, usbSession.generation,
+      linkService->usbHostSessionGeneration(), lastUsbSessionGeneration);
+  if (usbSessionAction == UsbLinkSessionAction::disconnectAndDiscard) {
     usb.discardHostSessionBuffers();
     linkService->disconnect();
-  } else if (bootUsbLinkStarted && usbSessionAdvanced &&
-             lastUsbSessionGeneration != 0) {
+  } else if (usbSessionAction ==
+             UsbLinkSessionAction::disconnectRetainingNewBytes) {
     // A fast close/reopen can happen entirely between two loop turns. Reset
     // the old Link owner, but retain bytes already received for the new DTR
     // generation. A stale close event must never discard the new request.
@@ -2361,9 +2379,12 @@ void loop() {
   const bool networkWork = !lowBatteryShutdown.critical() &&
       capsuleLibrary->pendingCount() > 0 &&
       deviceConfig.hasTencent() && !tencentWorker.waitingForWake();
+  const bool audioCaptureExclusive =
+      captureRouter.owner() != AudioCaptureOwner::none &&
+      linkCoordinator.owner() != LinkTransport::wifi;
   wifi.loop(now, recorder.operationActive(), networkWork,
             board.status().charging, provisioningCoordinator.ownsWifi(),
-            wirelessSync->wifiDemand());
+            wirelessSync->wifiDemand(), audioCaptureExclusive);
   if (bootWifiSyncStarted && board.sdReady()) {
     wirelessSync->poll(now, wifi.connected());
   }

@@ -30,6 +30,12 @@ MAX_CONTROL = 4096
 MAX_DATA = 16384
 OUTGOING_CHUNK = 128
 OUTGOING_PACE_SECONDS = 0.001
+# Opening the native USB CDC endpoint raises DTR on Arduino's USB event task.
+# Give the firmware main loop one bounded turn to retire the previous session
+# generation before the first PPV2 byte arrives.  Without this guard a fast
+# open+write can race the stale close notification and lose a valid request or
+# its terminal response.
+LINK_OPEN_SETTLE_SECONDS = 0.025
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 APP_ELF_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -304,6 +310,7 @@ def query(port: str, operation: str, timeout: float,
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
         configure(fd)
+        time.sleep(LINK_OPEN_SETTLE_SECONDS)
         request_id = (time.monotonic_ns() & 0xFFFFFFFF) or 1
         request = dict(fields or {})
         request["operation"] = operation

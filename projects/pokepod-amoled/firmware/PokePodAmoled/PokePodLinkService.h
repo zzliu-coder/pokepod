@@ -98,6 +98,10 @@ class PokePodLinkService : private LinkFileTransferHost {
     return incomingKind_ != IncomingKind::none || firmwareUpdate_.active();
   }
   bool maintenanceActive() const { return !activeMaintenance_.isEmpty(); }
+  uint32_t usbHostSessionGeneration() const {
+    return usbHostSessionGeneration_;
+  }
+  bool deviceLifecycleRestartReady() const;
   uint32_t maintenanceStartRevision() const {
     return maintenanceCompletion_.startRevision();
   }
@@ -383,6 +387,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   LinkLivenessProbe liveness_;
   uint32_t connectionGeneration_ = 0;
   uint32_t nextConnectionGeneration_ = 0;
+  uint32_t usbHostSessionGeneration_ = 0;
   CapsuleTransaction transaction_;
   CapsuleTransactionRunner transactionRunner_;
   LinkCapsuleTransactionGate transactionGate_;

@@ -39,6 +39,17 @@ bool AudioPipeline::startHardware(HardwareMode mode, uint32_t sampleRate,
   lastHardwareError_ = "none";
   const AudioI2sRoute route = mode == HardwareMode::playback
       ? AudioI2sRoute::playback : AudioI2sRoute::capture;
+  if (mode == HardwareMode::capture) {
+    captureHeapFreeBeforeStart_ = heap_caps_get_free_size(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    captureHeapLargestBeforeStart_ = heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    log.printf(
+        "{\"event\":\"audio_capture_admission\",\"internal_free\":%lu,"
+        "\"internal_largest\":%lu}\n",
+        static_cast<unsigned long>(captureHeapFreeBeforeStart_),
+        static_cast<unsigned long>(captureHeapLargestBeforeStart_));
+  }
   const AudioI2sDataPins dataPins = audioI2sDataPins(
       route, static_cast<int8_t>(kI2sDataOut),
       static_cast<int8_t>(kI2sDataIn));

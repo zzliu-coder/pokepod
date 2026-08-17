@@ -63,6 +63,9 @@ class WirelessSyncService : public WirelessSyncPairingProvider {
     return link_.receivingBinary() || link_.maintenanceActive();
   }
   bool receivingBinary() const { return link_.receivingBinary(); }
+  bool deviceLifecycleRestartReady() const {
+    return link_.deviceLifecycleRestartReady();
+  }
   bool bonjourActive() const { return bonjour_.active(); }
   bool listenerActive() const { return listenerActive_; }
   bool secureReady() const;

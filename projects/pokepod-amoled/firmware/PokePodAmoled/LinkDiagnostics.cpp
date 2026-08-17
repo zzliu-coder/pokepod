@@ -223,6 +223,13 @@ String LinkDiagnostics::statusJson() const {
   appendJsonNumber(extra, "audio_read_bytes", audio_->bytesRead());
   appendJsonNumber(extra, "audio_read_failures", audio_->readFailures());
   appendJsonNumber(extra, "audio_peak", audio_->peakSample());
+  appendJsonString(extra, "audio_capture_last_hardware_error",
+                   utf8Prefix(audio_->lastHardwareError(),
+                              kStatusDiagnosticStringBytes));
+  appendJsonNumber(extra, "audio_capture_heap_free_before_start",
+                   audio_->captureHeapFreeBeforeStart());
+  appendJsonNumber(extra, "audio_capture_heap_largest_before_start",
+                   audio_->captureHeapLargestBeforeStart());
   appendJsonString(extra, "playback_last_error",
                    utf8Prefix(audio_->lastPlaybackError(),
                               kStatusDiagnosticStringBytes));

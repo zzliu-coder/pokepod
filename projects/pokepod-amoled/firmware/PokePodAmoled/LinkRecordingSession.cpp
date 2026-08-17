@@ -62,33 +62,18 @@ LinkRecordingRequestResult LinkRecordingSession::requestStart(
   }
 
   transactionGate.beginOperation(transferGate);
-  const bool accepted = recorder_->requestStart(
-      *log_, capsuleId, createdAt, recorderOwner);
-  if (!accepted) {
-    if (recorder_->ownedBy(recorderOwner) || recorder_->operationActive() ||
-        recorder_->terminalResult().pending()) {
-      owned_ = true;
-      (void)requestStop(requestId, false, true, true, operation,
-                        transactionGate);
-      return {LinkRecordingRequestStatus::cleanupPending,
-              "recording start cleanup pending"};
-    }
+  if (!start_.begin(requestId, captureSessionId)) {
     captureRouter_->release(AudioCaptureOwner::localCapsule);
     transactionGate.reset();
     return {LinkRecordingRequestStatus::failed, "recording start failed"};
   }
-
   owned_ = true;
   (void)operation.advance(LinkOperationState::processing);
   operation.ownResource(LinkOperationResource::router);
   operation.ownResource(LinkOperationResource::transaction);
-  if (!start_.begin(requestId, captureSessionId)) {
-    (void)requestStop(requestId, false, true, true, operation,
-                      transactionGate);
-    return {LinkRecordingRequestStatus::cleanupPending,
-            "recording start cleanup pending"};
-  }
   capsuleId_ = capsuleId;
+  createdAt_ = createdAt;
+  recorderOwner_ = recorderOwner;
   return {LinkRecordingRequestStatus::accepted, nullptr};
 }
 
@@ -135,18 +120,65 @@ LinkRecordingEvent LinkRecordingSession::advanceStart(
       transport == LinkTransport::wifi || !sessionActive || quiesceRequested
           ? &transactionGate
           : nullptr;
+  const uint32_t requestId = start_.requestId();
+  const uint32_t captureSessionId = start_.captureSessionId();
+  const bool transportAlive = sessionActive && !quiesceRequested &&
+      linkTransferPermitted(transferGate, millis());
+
+  if (!start_.recorderRequested()) {
+    // requestStart() only claims the router. App observes that owner later in
+    // the same turn and powers Wi-Fi down outside the 2 ms Link poll. This
+    // fresh turn can then allocate I2S before any recorder/SD admission work.
+    const bool prepared = transportAlive &&
+        captureRuntime_->prepare(*audio_, *log_);
+    const bool accepted = prepared && recorder_->requestStart(
+        *log_, capsuleId_, createdAt_, recorderOwner_);
+    if (accepted) {
+      (void)start_.markRecorderRequested();
+      return {};
+    }
+    if (recorder_->ownedBy(recorderOwner_) || recorder_->operationActive() ||
+        recorder_->terminalResult().pending()) {
+      (void)start_.markRecorderRequested();
+      start_.finish();
+      capsuleId_ = "";
+      createdAt_ = "";
+      recorderOwner_ = RecorderOperationOwner::none;
+      (void)requestStop(requestId, false, transportAlive, true, operation,
+                        transactionGate);
+      return {};
+    }
+    start_.finish();
+    capsuleId_ = "";
+    createdAt_ = "";
+    recorderOwner_ = RecorderOperationOwner::none;
+    captureRouter_->release(AudioCaptureOwner::localCapsule);
+    audio_->stopHardware(*log_);
+    transactionGate.reset();
+    owned_ = false;
+    operation.releaseResource(LinkOperationResource::router);
+    operation.releaseResource(LinkOperationResource::transaction);
+    if (!transportAlive && operation.active()) {
+      operation.cancel(quiesceRequested
+          ? LinkOperationCancelReason::quiesce
+          : LinkOperationCancelReason::deadline);
+    }
+    LinkRecordingEvent event;
+    event.kind = LinkRecordingEventKind::startFailed;
+    event.requestId = requestId;
+    event.respond = transportAlive;
+    return event;
+  }
   const RecorderStartPollResult result = recorder_->pollStart(
       *log_, millis(), gate);
   if (result == RecorderStartPollResult::pending) return {};
 
-  const uint32_t requestId = start_.requestId();
-  const uint32_t captureSessionId = start_.captureSessionId();
   const String capsuleId = capsuleId_;
   start_.finish();
   capsuleId_ = "";
+  createdAt_ = "";
+  recorderOwner_ = RecorderOperationOwner::none;
 
-  const bool transportAlive = sessionActive && !quiesceRequested &&
-      linkTransferPermitted(transferGate, millis());
   if (result == RecorderStartPollResult::started && transportAlive &&
       captureRuntime_->start(*audio_, captureSessionId, *log_)) {
     if (!operation.transferResourcesToRecordingSession()) {
@@ -301,6 +333,19 @@ void LinkRecordingSession::observeAutomaticStop(
 
 void LinkRecordingSession::disconnect(
     LinkOperation &operation, LinkCapsuleTransactionGate &transactionGate) {
+  if (owned_ && start_.active() && !start_.recorderRequested()) {
+    start_.finish();
+    capsuleId_ = "";
+    createdAt_ = "";
+    recorderOwner_ = RecorderOperationOwner::none;
+    captureRouter_->release(AudioCaptureOwner::localCapsule);
+    if (audio_ != nullptr && log_ != nullptr) audio_->stopHardware(*log_);
+    transactionGate.reset();
+    operation.releaseResource(LinkOperationResource::router);
+    operation.releaseResource(LinkOperationResource::transaction);
+    owned_ = false;
+    return;
+  }
   if (stop_.active()) {
     stop_.suppressResponseAndAbort();
   } else if (owned_) {

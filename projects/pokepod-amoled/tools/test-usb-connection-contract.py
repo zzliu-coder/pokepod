@@ -9,6 +9,10 @@ project = Path(__file__).parents[1]
 bridge = (project / "firmware/PokePodAmoled/UsbLinkBridge.cpp").read_text()
 bridge_header = (project / "firmware/PokePodAmoled/UsbLinkBridge.h").read_text()
 app = (project / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
+link = (project / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
+reconcile = (
+    project / "firmware/PokePodAmoled/UsbLinkSessionReconcile.h"
+).read_text()
 assert "return started_ && static_cast<bool>(USB);" in bridge
 assert "ARDUINO_USB_CDC_LINE_STATE_EVENT" in bridge
 assert "data->line_state.dtr" in bridge
@@ -20,16 +24,13 @@ assert "void discardHostSessionBuffers()" in bridge_header
 assert "usb.takeHostSessionClosed(closedUsbSessionGeneration)" in app
 assert "closedUsbSessionGeneration == usbSession.generation" in app
 assert "usbSession.generation != lastUsbSessionGeneration" in app
-close_guard = re.search(
-    r"if \(bootUsbLinkStarted &&\s*"
-    r"\(usbPhysicallyDisconnected \|\| currentUsbSessionClosed\)\) \{\s*"
-    r"usb\.discardHostSessionBuffers\(\);\s*"
-    r"linkService->disconnect\(\);",
-    app,
-)
-assert close_guard is not None
-assert "usbSessionAdvanced &&" in app
-assert "lastUsbSessionGeneration != 0" in app
+assert "usbLinkSessionAction(" in app
+assert "linkService->usbHostSessionGeneration()" in app
+assert "UsbLinkSessionAction::disconnectAndDiscard" in app
+assert "UsbLinkSessionAction::disconnectRetainingNewBytes" in app
+assert "linkBoundUsbGeneration == currentUsbGeneration" in reconcile
+assert "usb_->hostSessionSnapshot().generation" in link
+assert "usbHostSessionGeneration_ = 0;" in link
 assert "while (cdc_.available() > 0)" in bridge
 assert "tud_cdc_read_flush();" in bridge
 assert "tud_cdc_write_clear();" in bridge

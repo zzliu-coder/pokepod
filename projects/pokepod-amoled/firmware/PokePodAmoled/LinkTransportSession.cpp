@@ -219,6 +219,7 @@ void PokePodLinkService::disconnect() {
   abortManifest();
   fileTransfer_.abort();
   sessionActive_ = false;
+  usbHostSessionGeneration_ = 0;
   incomingCleanupRespond_ = false;
   if (incomingKind_ != IncomingKind::none || incomingCleanupPending_) {
     failIncoming("transport disconnected");
@@ -259,6 +260,15 @@ bool PokePodLinkService::quiesced() const {
       recordingSession_.quiesced() &&
       !operation_.active() &&
       !operation_.ownsResource(LinkOperationResource::coordinator);
+}
+
+bool PokePodLinkService::deviceLifecycleRestartReady() const {
+  return !txStepper_.active() && txFrameBytes_ == 0 &&
+      pendingControlBytes_ == 0 && operation_.queuedFrameCount() == 0 &&
+      !operation_.active() &&
+      !operation_.ownsResource(LinkOperationResource::coordinator) &&
+      incomingKind_ == IncomingKind::none && !firmwareUpdate_.active() &&
+      firmwareUpdateRequestId_ == 0 && !maintenanceActive();
 }
 
 bool PokePodLinkService::pollDeferredCleanup(LinkPollPhaseGate &gate) {
@@ -405,6 +415,10 @@ void PokePodLinkService::consumeByte(uint8_t value, LinkPollPhaseGate *gate) {
       headerBytes_[magicMatched_++] = value;
       if (magicMatched_ == 4) {
         activateConnectionGeneration();
+        if (transport_ == LinkTransport::usb && usb_ != nullptr) {
+          usbHostSessionGeneration_ =
+              usb_->hostSessionSnapshot().generation;
+        }
         sessionActive_ = true;
         headerUsed_ = 4;
         receivePhase_ = ReceivePhase::header;
@@ -806,6 +820,9 @@ void PokePodLinkService::handleLinkRecordingEvent(
       sendOk(event.requestId, extra.c_str());
       break;
     }
+    case LinkRecordingEventKind::startFailed:
+      sendError(event.requestId, "recording start failed");
+      break;
     case LinkRecordingEventKind::stopCommitted:
       sendOk(event.requestId,
              "\"recording\":false,\"queued\":true,"

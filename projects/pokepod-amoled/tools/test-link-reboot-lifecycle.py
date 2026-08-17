@@ -41,6 +41,21 @@ assert "deviceReboot.pending()" in app
 assert "deviceReboot.beginServiceQuiesce()" in app
 assert "deviceReboot.acknowledgeRestart()" in app
 assert "deviceReboot.defer(now)" in app
+assert "linkService->deviceLifecycleRestartReady()" in app
+assert "wirelessSync->deviceLifecycleRestartReady()" in app
+assert "bool deviceLifecycleRestartReady() const" in header
+restart_ready = transport[
+    transport.index("bool PokePodLinkService::deviceLifecycleRestartReady() const") :
+    transport.index("bool PokePodLinkService::pollDeferredCleanup(")
+]
+for fact in (
+    "!txStepper_.active()",
+    "txFrameBytes_ == 0",
+    "pendingControlBytes_ == 0",
+    "operation_.queuedFrameCount() == 0",
+    "!operation_.active()",
+):
+    assert fact in restart_ready
 loop = app[app.index("void loop()"):] 
 assert loop.index("if (deviceReboot.pending())") < loop.index(
     "pollDeferredServiceCleanup()")
