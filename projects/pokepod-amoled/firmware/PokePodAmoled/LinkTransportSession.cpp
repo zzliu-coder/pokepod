@@ -298,6 +298,10 @@ bool PokePodLinkService::deviceLifecycleRestartReady() const {
 }
 
 bool PokePodLinkService::pollDeferredCleanup(LinkPollPhaseGate &gate) {
+  if (!storageBacked_) {
+    if (!gate.run([&]() { advanceLinkOperationSettlement(); })) return false;
+    return gate.checkpoint();
+  }
   if (!gate.run([&]() { advanceCommandLoad(); })) return false;
   if (!gate.run([&]() { advanceBatchCommand(); })) return false;
   if (!gate.run([&]() { advanceTransactionRunner(); })) return false;

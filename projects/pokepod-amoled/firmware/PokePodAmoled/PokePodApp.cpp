@@ -1902,10 +1902,10 @@ bool advanceStorageBoot(uint32_t nowMs) {
       storageBootPhase = StorageBootPhase::usbLink;
       return false;
     case StorageBootPhase::usbLink:
-      // Link owns durable capsule storage. Do not start it against an
-      // unmounted SD card: a failed begin() leaves deferred cleanup state that
-      // would otherwise be polled ahead of touch/provisioning every turn.
-      bootUsbLinkStarted = board.sdReady() && linkService->begin(
+      // USB diagnostics and identity-bound OTA must remain reachable when SD
+      // mount fails. Link enters a capability-gated diagnostic-only mode and
+      // skips all durable cleanup until storage is available.
+      bootUsbLinkStarted = linkService->begin(
           usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
           dashboard, capsuleLibrary.get(), recorder, deviceConfig, wifi,
           tencentWorker, provisioningDiagnostics, powerDiagnostics,

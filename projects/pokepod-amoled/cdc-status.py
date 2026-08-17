@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import errno
+import fcntl
 import hashlib
 import glob
 import json
@@ -36,6 +38,13 @@ OUTGOING_PACE_SECONDS = 0.001
 # open+write can race the stale close notification and lose a valid request or
 # its terminal response.
 LINK_OPEN_SETTLE_SECONDS = 0.025
+# A Link request owns one explicit CDC DTR/RTS epoch.  macOS does not
+# guarantee that closing a descriptor configured with CLOCAL drops both modem
+# lines before a following process reopens it.  Retire the epoch while the
+# descriptor is still open and give the device main loop one bounded turn to
+# consume the close before another request can assert a new epoch.
+LINK_CLOSE_SETTLE_SECONDS = 0.050
+MODEM_LINE_MASK = termios.TIOCM_DTR | termios.TIOCM_RTS
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 APP_ELF_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -219,7 +228,9 @@ def configure(fd: int) -> None:
     attributes = termios.tcgetattr(fd)
     attributes[0] = 0
     attributes[1] = 0
-    attributes[2] = termios.CLOCAL | termios.CREAD | termios.CS8
+    attributes[2] = (
+        termios.CLOCAL | termios.CREAD | termios.CS8 | termios.HUPCL
+    )
     attributes[3] = 0
     attributes[4] = termios.B115200
     attributes[5] = termios.B115200
@@ -227,6 +238,32 @@ def configure(fd: int) -> None:
     attributes[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, attributes)
     termios.tcflush(fd, termios.TCIOFLUSH)
+    set_modem_lines(fd, True)
+
+
+def set_modem_lines(fd: int, asserted: bool) -> bool:
+    """Set the Link session's DTR/RTS pair as one explicit ownership fact."""
+    operation = termios.TIOCMBIS if asserted else termios.TIOCMBIC
+    try:
+        fcntl.ioctl(fd, operation, struct.pack("I", MODEM_LINE_MASK))
+    except OSError as error:
+        # Pseudo terminals used by the host behavior tests do not implement
+        # modem-control ioctls.  Real USB CDC failures remain fatal.
+        if error.errno == errno.ENOTTY:
+            return False
+        raise
+    return True
+
+
+def close_link_session(fd: int) -> None:
+    """Retire one CDC epoch before releasing the host descriptor."""
+    modem_lines_controlled = False
+    try:
+        modem_lines_controlled = set_modem_lines(fd, False)
+        if modem_lines_controlled:
+            time.sleep(LINK_CLOSE_SETTLE_SECONDS)
+    finally:
+        os.close(fd)
 
 
 def write_all(fd: int, value: bytes, timeout: float = 30.0) -> None:
@@ -423,7 +460,7 @@ def query(port: str, operation: str, timeout: float,
         raise TimeoutError("PokePod Link v2 response timed out")
     finally:
         if owns_fd:
-            os.close(fd)
+            close_link_session(fd)
 
 
 def record_cycle(port: str, timeout: float, hold_seconds: float):
@@ -455,7 +492,7 @@ def record_cycle(port: str, timeout: float, hold_seconds: float):
             "holdSeconds": hold_seconds,
         }
     finally:
-        os.close(fd)
+        close_link_session(fd)
 
 
 def main() -> int:

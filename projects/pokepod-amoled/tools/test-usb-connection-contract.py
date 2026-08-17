@@ -6,10 +6,15 @@ import re
 
 
 project = Path(__file__).parents[1]
+cdc = (project / "cdc-status.py").read_text()
 bridge = (project / "firmware/PokePodAmoled/UsbLinkBridge.cpp").read_text()
 bridge_header = (project / "firmware/PokePodAmoled/UsbLinkBridge.h").read_text()
 app = (project / "firmware/PokePodAmoled/PokePodApp.cpp").read_text()
 link = (project / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
+link_service = (
+    project / "firmware/PokePodAmoled/PokePodLinkService.cpp"
+).read_text()
+board = (project / "firmware/PokePodAmoled/BoardServices.cpp").read_text()
 reconcile = (
     project / "firmware/PokePodAmoled/UsbLinkSessionReconcile.h"
 ).read_text()
@@ -45,6 +50,24 @@ assert "tud_cdc_" not in bridge
 assert "cdc_.setTxTimeoutMs(kUsbLinkTxTimeoutMs);" in bridge
 assert "const size_t written = cdc_.write(data, wanted);" in bridge
 assert "cdc_.availableForWrite()" not in bridge
+assert "termios.TIOCMBIS if asserted else termios.TIOCMBIC" in cdc
+assert "termios.HUPCL" in cdc
+assert "set_modem_lines(fd, True)" in cdc
+assert "set_modem_lines(fd, False)" in cdc
+assert "time.sleep(LINK_CLOSE_SETTLE_SECONDS)" in cdc
+assert "close_link_session(fd)" in cdc
+assert "bootUsbLinkStarted = linkService->begin(" in app
+assert "bootUsbLinkStarted = board.sdReady() && linkService->begin(" not in app
+assert "storageBacked_ = board.sdReady();" in link_service
+assert '"mode\\\":\\\"diagnostic_only\\\"' in link_service
+diagnostic_poll = link.split(
+    "bool PokePodLinkService::pollDeferredCleanup(LinkPollPhaseGate &gate)", 1
+)[1].split("void PokePodLinkService::pollDeferredCleanup()", 1)[0]
+assert "if (!storageBacked_)" in diagnostic_poll
+assert "advanceLinkOperationSettlement();" in diagnostic_poll
+assert "constexpr uint8_t kMountAttempts = 3;" in board
+assert "SD_MMC.end();" in board
+assert "delay(100U * attempt);" in board
 usb_begin = app.split("LinkTransport::usb, &wirelessSync.get(),", 1)[1]
 assert "nullptr, &provisioningCoordinator, &usb," in usb_begin[:160]
 discard = app.split(

@@ -508,6 +508,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool frameProcessedThisPoll_ = false;
   bool sessionActive_ = false;
   bool quiesceRequested_ = false;
+  bool storageBacked_ = false;
   LinkRequestHistory completed_;
 
   IncomingKind incomingKind_ = IncomingKind::none;

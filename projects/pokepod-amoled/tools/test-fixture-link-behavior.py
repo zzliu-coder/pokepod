@@ -12,6 +12,7 @@ import select
 import sys
 import threading
 import time
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,6 +154,20 @@ def record_cycle_server(fd: int) -> None:
 
 
 def main() -> int:
+    # One owned query must assert the modem lines after configuring the port,
+    # then deassert them and wait for the firmware close epoch before closing.
+    with mock.patch.object(cdc.fcntl, "ioctl") as ioctl:
+        assert cdc.set_modem_lines(17, True)
+        assert ioctl.call_args.args[0:2] == (17, cdc.termios.TIOCMBIS)
+    with mock.patch.object(cdc, "set_modem_lines") as set_lines, \
+            mock.patch.object(cdc.time, "sleep") as sleep, \
+            mock.patch.object(cdc.os, "close") as close:
+        set_lines.return_value = True
+        cdc.close_link_session(17)
+        assert set_lines.call_args_list == [mock.call(17, False)]
+        sleep.assert_called_once_with(cdc.LINK_CLOSE_SETTLE_SECONDS)
+        close.assert_called_once_with(17)
+
     identity = run_case(identity_server, lambda port: cdc.query(port, "identity", 2.0))
     assert identity["deviceId"] == "pokepod-001122334455"
     noisy_identity = run_case(

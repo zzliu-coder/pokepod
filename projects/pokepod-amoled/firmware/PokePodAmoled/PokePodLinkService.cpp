@@ -106,17 +106,15 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   liveness_.reset();
   activeMaintenance_ = "";
   quiesceRequested_ = false;
-  if (!transaction_.begin(fs, log)) return false;
-  if (!transactionRunner_.begin(fs, log)) return false;
-  if (!batchJournalStore_.begin(fs)) return false;
+  storageBacked_ = board.sdReady();
   startupPartCleanupIndex_ = 0;
   startupPartCleanupFailures_ = 0;
   startupPartCleanupPending_ = false;
-  startupReady_ = false;
+  startupReady_ = !storageBacked_;
   startupRecoveryFailed_ = false;
   startupBatchCandidateInvalid_ = false;
   mutationRecoveryBlocked_ = false;
-  startupPurgePending_ = true;
+  startupPurgePending_ = storageBacked_;
   if (payload_ == nullptr) {
     payload_ = static_cast<uint8_t *>(heap_caps_calloc(
         kLinkMaxDataBytes, sizeof(uint8_t),
@@ -149,6 +147,20 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
       static_cast<unsigned>(kLinkMaxDataBytes + kLinkTxFrameBytes +
                             kLinkPendingControlBytes +
                             kLinkMetadataBufferBytes));
+  if (!storageBacked_) {
+    // Keep identity, status, persistent diagnostics, provisioning control,
+    // reboot and identity-bound OTA reachable when microSD mount fails.
+    // Capability gates reject every filesystem-backed operation before it can
+    // touch the unmounted FS. This recovery path explains the storage failure
+    // instead of presenting a lit but silent USB endpoint.
+    transactionPurpose_ = TransactionPurpose::none;
+    log_->println(
+        "{\"event\":\"link_storage\",\"available\":false,\"mode\":\"diagnostic_only\"}");
+    return true;
+  }
+  if (!transaction_.begin(fs, log)) return false;
+  if (!transactionRunner_.begin(fs, log)) return false;
+  if (!batchJournalStore_.begin(fs)) return false;
   if (!ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") ||
       !ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming") ||
       !ensureDirectoryTree(CapsuleBatchJournalStore::kDirectory)) {
