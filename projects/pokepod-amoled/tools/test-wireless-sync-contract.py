@@ -128,7 +128,11 @@ assert "audio_->startCapture(*log_)" not in link_surface
 assert "captureRuntime_->stop(*log_)" in link_recording
 
 main = read("PokePodApp.cpp")
-assert "LinkTransport::usb, &wirelessSync.get(),\n                    nullptr" in main
+normalized_main = " ".join(main.split())
+assert (
+    "LinkTransport::usb, &wirelessSync.get(), nullptr, "
+    "&provisioningCoordinator, &usb," in normalized_main
+)
 
 identity = read("WirelessSyncIdentity.cpp")
 assert "rotationPolicy_.shouldRotate(rotate" in identity

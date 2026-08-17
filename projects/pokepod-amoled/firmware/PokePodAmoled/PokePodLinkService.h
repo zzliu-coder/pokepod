@@ -81,7 +81,12 @@ class PokePodLinkService : private LinkFileTransferHost {
              DeviceRebootCoordinator *rebootCoordinator = nullptr,
              RuntimeDiagnostics *runtimeDiagnostics = nullptr,
              LinkDeviceExerciseAction wirelessVoiceStart = nullptr,
-             LinkDeviceExerciseAction wirelessVoiceStop = nullptr);
+             LinkDeviceExerciseAction wirelessVoiceStop = nullptr,
+             bool deferStorageStartup = false);
+  // Start the USB transport before durable capsule recovery, then attach the
+  // filesystem backend only after App-owned recovery reaches a terminal
+  // boundary. Identity, diagnostics and OTA remain reachable meanwhile.
+  bool attachStorage();
   void poll(uint32_t nowMs);
   // Finishes read-only handle cleanup after an immediate transport cancel.
   // This never reads frames or writes responses, so a Wi-Fi service can call
@@ -509,6 +514,7 @@ class PokePodLinkService : private LinkFileTransferHost {
   bool sessionActive_ = false;
   bool quiesceRequested_ = false;
   bool storageBacked_ = false;
+  bool storageAttachTerminal_ = false;
   LinkRequestHistory completed_;
 
   IncomingKind incomingKind_ = IncomingKind::none;

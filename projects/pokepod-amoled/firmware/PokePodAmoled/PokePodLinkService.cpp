@@ -68,7 +68,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
                                DeviceRebootCoordinator *rebootCoordinator,
                                RuntimeDiagnostics *runtimeDiagnostics,
                                LinkDeviceExerciseAction wirelessVoiceStart,
-                               LinkDeviceExerciseAction wirelessVoiceStop) {
+                               LinkDeviceExerciseAction wirelessVoiceStop,
+                               bool deferStorageStartup) {
   stream_ = &stream;
   fs_ = &fs;
   board_ = &board;
@@ -106,7 +107,8 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
   liveness_.reset();
   activeMaintenance_ = "";
   quiesceRequested_ = false;
-  storageBacked_ = board.sdReady();
+  storageBacked_ = board.sdReady() && !deferStorageStartup;
+  storageAttachTerminal_ = storageBacked_;
   startupPartCleanupIndex_ = 0;
   startupPartCleanupFailures_ = 0;
   startupPartCleanupPending_ = false;
@@ -154,8 +156,10 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
     // touch the unmounted FS. This recovery path explains the storage failure
     // instead of presenting a lit but silent USB endpoint.
     transactionPurpose_ = TransactionPurpose::none;
-    log_->println(
-        "{\"event\":\"link_storage\",\"available\":false,\"mode\":\"diagnostic_only\"}");
+    log_->printf(
+        "{\"event\":\"link_storage\",\"available\":false,"
+        "\"mode\":\"diagnostic_only\",\"deferred\":%s}\n",
+        deferStorageStartup ? "true" : "false");
     return true;
   }
   if (!transaction_.begin(fs, log)) return false;
@@ -174,6 +178,57 @@ bool PokePodLinkService::begin(Stream &stream, fs::FS &fs,
     return false;
   }
   transactionPurpose_ = TransactionPurpose::startupRecovery;
+  return true;
+}
+
+bool PokePodLinkService::attachStorage() {
+  if (storageBacked_) return true;
+  if (storageAttachTerminal_) return true;
+  if (fs_ == nullptr || board_ == nullptr || log_ == nullptr ||
+      !board_->sdReady()) {
+    return false;
+  }
+  // Never switch filesystem authority underneath an accepted request or an
+  // in-flight terminal response.
+  if (operation_.active() || firmwareUpdate_.active() || txStepper_.active()) {
+    return false;
+  }
+
+  storageAttachTerminal_ = true;
+  storageBacked_ = true;
+  startupReady_ = false;
+  startupRecoveryFailed_ = false;
+  startupBatchCandidateInvalid_ = false;
+  mutationRecoveryBlocked_ = false;
+  startupPartCleanupIndex_ = 0;
+  startupPartCleanupFailures_ = 0;
+  startupPartCleanupPending_ = false;
+  startupPurgePending_ = true;
+  transactionPurpose_ = TransactionPurpose::none;
+
+  const bool initialized = transaction_.begin(*fs_, *log_) &&
+      transactionRunner_.begin(*fs_, *log_) &&
+      batchJournalStore_.begin(*fs_) &&
+      ensureDirectoryTree(String(kCapsuleSystem) + "/commands/results") &&
+      ensureDirectoryTree(String(kCapsuleSystem) + "/commands/incoming") &&
+      ensureDirectoryTree(CapsuleBatchJournalStore::kDirectory) &&
+      transactionRunner_.startRecovery(StorageOwner::capsuleTransaction);
+  if (!initialized) {
+    // Preserve the diagnostic transport and reject all filesystem-backed
+    // operations if durable Link storage cannot be initialized.
+    storageBacked_ = false;
+    startupReady_ = true;
+    startupPurgePending_ = false;
+    transactionPurpose_ = TransactionPurpose::none;
+    log_->println(
+        "{\"event\":\"link_storage_attach\",\"ok\":false,"
+        "\"mode\":\"diagnostic_only\"}");
+    return true;
+  }
+  transactionPurpose_ = TransactionPurpose::startupRecovery;
+  log_->println(
+      "{\"event\":\"link_storage_attach\",\"ok\":true,"
+      "\"mode\":\"durable\"}");
   return true;
 }
 

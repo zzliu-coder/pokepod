@@ -182,8 +182,9 @@ void PokePodLinkService::processRequest(uint32_t requestId,
   }
 
   const uint16_t required = requiredCapabilitiesForLinkOperation(operation);
-  if (required != 0 && capabilities_ != nullptr &&
-      !capabilities_->allows(required)) {
+  if (required != 0 &&
+      (!storageBacked_ ||
+       (capabilities_ != nullptr && !capabilities_->allows(required)))) {
     cJSON_Delete(root);
     sendError(requestId, "required device capability is not ready");
     return;

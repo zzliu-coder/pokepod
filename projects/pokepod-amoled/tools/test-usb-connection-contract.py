@@ -14,6 +14,9 @@ link = (project / "firmware/PokePodAmoled/LinkTransportSession.cpp").read_text()
 link_service = (
     project / "firmware/PokePodAmoled/PokePodLinkService.cpp"
 ).read_text()
+dispatcher = (
+    project / "firmware/PokePodAmoled/LinkCommandDispatcher.cpp"
+).read_text()
 board = (project / "firmware/PokePodAmoled/BoardServices.cpp").read_text()
 reconcile = (
     project / "firmware/PokePodAmoled/UsbLinkSessionReconcile.h"
@@ -58,8 +61,13 @@ assert "time.sleep(LINK_CLOSE_SETTLE_SECONDS)" in cdc
 assert "close_link_session(fd)" in cdc
 assert "bootUsbLinkStarted = linkService->begin(" in app
 assert "bootUsbLinkStarted = board.sdReady() && linkService->begin(" not in app
-assert "storageBacked_ = board.sdReady();" in link_service
+assert "storageBacked_ = board.sdReady() && !deferStorageStartup;" in link_service
 assert '"mode\\\":\\\"diagnostic_only\\\"' in link_service
+assert "storageBootPhase = StorageBootPhase::usbLink;" in app
+assert "stopWirelessHold, true);" in app
+assert "if (bootUsbLinkStarted) linkService->poll(now);" in app
+assert "!linkService->attachStorage()) return false;" in app
+assert "(!storageBacked_ ||" in dispatcher
 diagnostic_poll = link.split(
     "bool PokePodLinkService::pollDeferredCleanup(LinkPollPhaseGate &gate)", 1
 )[1].split("void PokePodLinkService::pollDeferredCleanup()", 1)[0]

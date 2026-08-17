@@ -219,11 +219,12 @@ bool recorderRecoveryFailureReported = false;
 bool psramDegradedBoot = false;
 
 enum class StorageBootPhase : uint8_t {
+  usbLink,
   localRecovery,
   recorder,
   library,
   transcription,
-  usbLink,
+  storageAttach,
   wirelessLink,
   ready,
 };
@@ -1859,6 +1860,22 @@ void pollTouch() {
 
 bool advanceStorageBoot(uint32_t nowMs) {
   switch (storageBootPhase) {
+    case StorageBootPhase::usbLink:
+      // Bring up identity, diagnostics and identity-bound OTA before durable
+      // storage recovery. Filesystem-backed Link operations remain disabled
+      // until the later storageAttach phase succeeds.
+      bootUsbLinkStarted = linkService->begin(
+          usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
+          dashboard, capsuleLibrary.get(), recorder, deviceConfig, wifi,
+          tencentWorker, provisioningDiagnostics, powerDiagnostics,
+          runtimePower, usb.log(), &linkCoordinator,
+          LinkTransport::usb, &wirelessSync.get(),
+          nullptr, &provisioningCoordinator, &usb,
+          &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot,
+          &runtimeDiagnostics, startWirelessHold, stopWirelessHold, true);
+      storageBootPhase = storageBootAvailable
+          ? StorageBootPhase::localRecovery : StorageBootPhase::recorder;
+      return false;
     case StorageBootPhase::localRecovery:
       capsuleOperations->poll(nowMs);
       if (capsuleOperations->recoveryActive()) return false;
@@ -1899,21 +1916,12 @@ bool advanceStorageBoot(uint32_t nowMs) {
                               usb.log());
       capabilities.record(DeviceCapability::transcription,
                           bootTencentWorkerStarted);
-      storageBootPhase = StorageBootPhase::usbLink;
+      storageBootPhase = StorageBootPhase::storageAttach;
       return false;
-    case StorageBootPhase::usbLink:
-      // USB diagnostics and identity-bound OTA must remain reachable when SD
-      // mount fails. Link enters a capability-gated diagnostic-only mode and
-      // skips all durable cleanup until storage is available.
-      bootUsbLinkStarted = linkService->begin(
-          usb.stream(), SD_MMC, board, audio, captureRouter, usb, bleVoice,
-          dashboard, capsuleLibrary.get(), recorder, deviceConfig, wifi,
-          tencentWorker, provisioningDiagnostics, powerDiagnostics,
-          runtimePower, usb.log(), &linkCoordinator,
-          LinkTransport::usb, &wirelessSync.get(),
-                    nullptr, &provisioningCoordinator, &usb,
-          &captureRuntime, &captureDispatcher, &capabilities, &deviceReboot,
-          &runtimeDiagnostics, startWirelessHold, stopWirelessHold);
+    case StorageBootPhase::storageAttach:
+      // A failed attach leaves USB in diagnostic-only mode; storage requests
+      // remain fail-closed while identity, diagnostics and OTA stay usable.
+      if (board.sdReady() && !linkService->attachStorage()) return false;
       storageBootPhase = StorageBootPhase::wirelessLink;
       return false;
     case StorageBootPhase::wirelessLink:
@@ -2039,8 +2047,7 @@ void setup() {
   if (storageBootAvailable) {
     capsuleOperations->attachCatalog(capsuleLibrary.get());
   }
-  storageBootPhase = storageBootAvailable
-      ? StorageBootPhase::localRecovery : StorageBootPhase::recorder;
+  storageBootPhase = StorageBootPhase::usbLink;
   capabilities.record(DeviceCapability::capsuleLibrary, false);
   recorderHardwareReady = false;
   capabilities.record(DeviceCapability::recording, false);
@@ -2104,6 +2111,7 @@ void loop() {
     // Storage recovery owns its durable authority, but it must never own the
     // whole product loop. Keep BLE, touch and provisioning responsive while
     // the bounded recovery/scan advances one primitive per turn.
+    if (bootUsbLinkStarted) linkService->poll(now);
     bleVoice.poll(now);
     if (now - lastTouchMs >= 16) {
       lastTouchMs = now;
