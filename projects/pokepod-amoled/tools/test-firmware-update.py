@@ -112,6 +112,8 @@ def main() -> int:
     fixture = FIXTURE.read_text()
     assert "esp_ota_get_next_update_partition" in session
     assert "esp_ota_begin" in session and "esp_ota_write" in session
+    assert "esp_ota_begin(target_, OTA_WITH_SEQUENTIAL_WRITES, &handle_)" in session
+    assert "esp_ota_begin(target_, expectedBytes" not in session
     assert "esp_ota_end" in session and "esp_ota_set_boot_partition" in session
     assert "esp_ota_get_partition_description" in session
     assert "candidate app ELF SHA-256 mismatch" in session

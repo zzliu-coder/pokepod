@@ -153,7 +153,11 @@ bool FirmwareUpdateSession::begin(uint32_t expectedBytes,
     return fail("firmware digest start failed");
   }
   shaInitialized_ = true;
-  if (esp_ota_begin(target_, expectedBytes, &handle_) != ESP_OK) {
+  // The image arrives strictly in order. Let ESP-IDF erase sectors as each
+  // sequential write reaches them instead of synchronously bulk-erasing the
+  // full 3 MiB slot here. A bulk erase can hold Arduino's loop task beyond the
+  // five-second watchdog before the host receives its prepare ACK.
+  if (esp_ota_begin(target_, OTA_WITH_SEQUENTIAL_WRITES, &handle_) != ESP_OK) {
     mbedtls_sha256_free(&sha_);
     shaInitialized_ = false;
     target_ = nullptr;
